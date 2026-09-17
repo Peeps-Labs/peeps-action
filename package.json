@@ -1,0 +1,19 @@
+{
+  "name": "peeps-action",
+  "version": "0.1.0",
+  "description": "Runs your Playwright tests in your own CI and reports the results to Peeps.",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/index.js --log-level=warning && esbuild src/reporter.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/reporter.js --log-level=warning",
+    "test": "node --test --import tsx test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.0",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

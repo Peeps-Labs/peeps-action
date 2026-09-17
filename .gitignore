@@ -1,0 +1,4 @@
+node_modules/
+
+# Not ignored globally on every contributor's machine or on CI.
+.DS_Store

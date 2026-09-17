@@ -1,0 +1,23 @@
+name: "Peeps"
+description: "Runs your Playwright tests in your own CI and reports results to Peeps. Your repository stores no Peeps secret: the job authenticates with GitHub's OIDC token. See SECURITY.md for exactly what is sent to Peeps and what Peeps can do on your runner."
+author: "Peeps Labs"
+branding:
+  icon: "git-branch"
+  color: "green"
+inputs:
+  mode:
+    description: "inventory | run | report | agent | ci (default: decide from the event)"
+    required: false
+    default: "ci"
+  session-id:
+    description: "Session id Peeps passes to workflow_dispatch. Required by run and agent modes; unused by inventory and report"
+    required: false
+  config:
+    description: "Path to the Playwright config, relative to working-directory"
+    required: false
+  working-directory:
+    description: "Directory to run Playwright in, relative to the repository root (default: the repository root)"
+    required: false
+runs:
+  using: "node24"
+  main: "dist/index.js"
