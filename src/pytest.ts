@@ -51,6 +51,8 @@ export interface PytestItem {
 export interface PytestCollection {
   /** pytest's rootdir, absolute. Node ids are relative to it. */
   rootDir: string;
+  /** The config file collection read (`pytest.ini`, `pyproject.toml`…), absolute; null for none. */
+  iniPath?: string | null;
   /** Whether pytest-playwright is loaded, and so whether `--output` exists. */
   playwright: boolean;
   items: PytestItem[];
@@ -462,7 +464,18 @@ export async function executePytestAndReport(
   );
   await writeFile(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 0o600 });
 
-  const args = ["-p", PLUGIN, ...configArgs(env)];
+  // `--rootdir` pinned to what collection found: node ids are relative to it,
+  // and explicit node-id arguments under a nested pytest config would
+  // otherwise move it, renaming every test away from its plan entry.
+  // The config file too, for the same reason: a nested `pytest.ini` beside the
+  // selected modules would otherwise become the config, and stop pytest
+  // loading the conftest files above it.
+  const config = env.configPath
+    ? configArgs(env)
+    : input.collection.iniPath
+      ? ["-c", input.collection.iniPath]
+      : [];
+  const args = ["-p", PLUGIN, "--rootdir", input.collection.rootDir, ...config];
   // `--output` is pytest-playwright's option; plain pytest would refuse it.
   if (input.collection.playwright) args.push("--output", outputDir);
   if (input.nodeIds) {

@@ -1112,7 +1112,8 @@ async function executePytestAndReport(env, peeps, input2) {
     ])
   );
   await (0, import_promises4.writeFile)(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 384 });
-  const args = ["-p", PLUGIN, ...configArgs(env)];
+  const config = env.configPath ? configArgs(env) : input2.collection.iniPath ? ["-c", input2.collection.iniPath] : [];
+  const args = ["-p", PLUGIN, "--rootdir", input2.collection.rootDir, ...config];
   if (input2.collection.playwright) args.push("--output", outputDir);
   if (input2.nodeIds) {
     args.push(

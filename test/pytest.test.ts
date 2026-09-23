@@ -357,6 +357,9 @@ test("run mode executes exactly the planned node ids, from a working directory b
     const { root, suite } = workspace();
     // pytest runs from `e2e/tests` while its rootdir (pytest.ini) is `e2e`.
     mkdirSync(path.join(suite, "tests"), { recursive: true });
+    // A nested pytest config beside the selected module: given node ids under
+    // it, pytest would move its rootdir there and rename every test.
+    writeFileSync(path.join(suite, "tests", "shop", "pytest.ini"), "[pytest]\n");
     const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "e2e/tests", PEEPS_API_URL: peeps.url });
     const collection = await collectPytest(env);
     assert.equal(collection.rootDir, realpathSync(suite));

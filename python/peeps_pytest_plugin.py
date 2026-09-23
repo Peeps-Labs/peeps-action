@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -91,6 +93,7 @@ class _Collector:
             self.out,
             {
                 "rootDir": str(config.rootpath),
+                "iniPath": str(config.inipath) if config.inipath else None,
                 "playwright": config.pluginmanager.hasplugin("playwright"),
                 "items": items,
                 "errors": self.errors,
@@ -170,6 +173,11 @@ class _Streamer:
         self.phases: Dict[str, List[Dict[str, Any]]] = {}
         self.output_dirs: Dict[str, str] = {}
         self.statuses: Dict[str, str] = {}
+        # One delivery thread, in order; drained at session finish.
+        self.outbox: "queue.Queue[Any]" = queue.Queue()
+        threading.Thread(
+            target=self._deliver_forever, name="peeps-events", daemon=True
+        ).start()
         print(
             f"[peeps] reporting {len(self.runs)} planned run(s) to {self.peeps_url}",
             flush=True,
@@ -258,6 +266,9 @@ class _Streamer:
         for entry in self.runs.values():
             if self.queues.get(entry["runId"]):
                 self._flush(entry)
+        # Every event handed off is delivered (or given up on) before pytest
+        # exits and takes the daemon thread with it.
+        self.outbox.join()
         if self.results_out:
             _write_json(
                 self.results_out,
@@ -270,11 +281,28 @@ class _Streamer:
         self.queues.setdefault(run_id, []).append(event)
 
     def _flush(self, entry: Dict[str, Any]) -> None:
+        """Hand this run's queued events to the delivery thread.
+
+        Delivery is off the pytest hook: a slow or unreachable Peeps must not
+        hold the next test (or, under xdist, the controller) for its retries.
+        """
         run_id = entry["runId"]
         events = self.queues.get(run_id) or []
         if not events:
             return
         self.queues[run_id] = []
+        self.outbox.put((entry, events))
+
+    def _deliver_forever(self) -> None:
+        while True:
+            entry, events = self.outbox.get()
+            try:
+                self._post(entry, events)
+            finally:
+                self.outbox.task_done()
+
+    def _post(self, entry: Dict[str, Any], events: List[Dict[str, Any]]) -> None:
+        run_id = entry["runId"]
         credential = entry["credential"]
         request = urllib.request.Request(
             f"{self.peeps_url}/api/v1/runs/{run_id}/events",
@@ -305,7 +333,8 @@ class _Streamer:
             except Exception as error:  # network, timeout
                 if attempt == 2:
                     print(f"[peeps] events for {run_id} failed: {error}", flush=True)
-            time.sleep(attempt + 1)
+            if attempt < 2:
+                time.sleep(attempt + 1)
 
 
 def _now() -> int:
