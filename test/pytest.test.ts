@@ -500,3 +500,31 @@ test("a pytest that cannot start still closes its batches and fails the job", as
     peeps.close();
   }
 });
+
+test("the inventory lists tests -m deselected, while a run plans only the selected", needsPytest, async () => {
+  const previous = process.env.PYTEST_ADDOPTS;
+  process.env.PYTEST_ADDOPTS = '-m "not smoke"';
+  try {
+    const { root } = workspace();
+    const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "e2e" });
+    const collection = await collectPytest(env);
+    const opens = "tests/shop/test_cart.py::test_opens[chromium]";
+    assert.deepEqual(
+      collection.deselected?.map((item) => item.nodeId),
+      [opens],
+    );
+    assert.equal(collection.items.some((item) => item.nodeId === opens), false);
+    // Planned runs come from what this session runs...
+    assert.equal(
+      plannedPytestTests(collection, "e2e").some((t) => t.nodeId === opens),
+      false,
+    );
+    // ...and the inventory from everything the repository holds.
+    const request = await buildPytestInventoryRequest(env, collection);
+    assert.equal(request.items.length, 7);
+    assert.ok(request.items.some((item) => item.nodeId === opens));
+  } finally {
+    if (previous === undefined) delete process.env.PYTEST_ADDOPTS;
+    else process.env.PYTEST_ADDOPTS = previous;
+  }
+});

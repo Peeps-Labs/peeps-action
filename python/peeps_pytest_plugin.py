@@ -65,10 +65,27 @@ def _line_of(item: Any) -> Optional[int]:
     return line + 1 if isinstance(line, int) else None
 
 
+def _item_record(item: Any) -> Dict[str, Any]:
+    return {
+        "nodeId": item.nodeid,
+        "browser": _browser_of(item),
+        "line": _line_of(item),
+        "markers": [marker.name for marker in item.iter_markers()],
+    }
+
+
 class _Collector:
     def __init__(self, out: str) -> None:
         self.out = out
         self.errors: List[Dict[str, str]] = []
+        self.deselected: List[Dict[str, Any]] = []
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_deselected(self, items: Any) -> None:
+        # Tests `-m`/`-k` (often from addopts) left out of this session. They
+        # are still tests in the repository, so the inventory lists them;
+        # only a run leaves them out.
+        self.deselected.extend(_item_record(item) for item in items)
 
     @pytest.hookimpl(trylast=True)
     def pytest_collectreport(self, report: Any) -> None:
@@ -80,15 +97,7 @@ class _Collector:
     @pytest.hookimpl(trylast=True)
     def pytest_collection_finish(self, session: Any) -> None:
         config = session.config
-        items = [
-            {
-                "nodeId": item.nodeid,
-                "browser": _browser_of(item),
-                "line": _line_of(item),
-                "markers": [marker.name for marker in item.iter_markers()],
-            }
-            for item in session.items
-        ]
+        items = [_item_record(item) for item in session.items]
         _write_json(
             self.out,
             {
@@ -96,6 +105,7 @@ class _Collector:
                 "iniPath": str(config.inipath) if config.inipath else None,
                 "playwright": config.pluginmanager.hasplugin("playwright"),
                 "items": items,
+                "deselected": self.deselected,
                 "errors": self.errors,
             },
         )

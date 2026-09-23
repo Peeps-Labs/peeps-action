@@ -55,7 +55,13 @@ export interface PytestCollection {
   iniPath?: string | null;
   /** Whether pytest-playwright is loaded, and so whether `--output` exists. */
   playwright: boolean;
+  /** The tests this session runs. */
   items: PytestItem[];
+  /**
+   * Tests `-m`/`-k` deselected (often from the customer's addopts): in the
+   * repository, so in the inventory, but never planned or run.
+   */
+  deselected?: PytestItem[];
   /** Collectors that failed: a module that did not import, a bad parametrize. */
   errors: Array<{ nodeId: string; message: string }>;
 }
@@ -296,7 +302,9 @@ export function repoRootDir(env: RunnerEnv, collection: PytestCollection): strin
 
 /** Every module the collection names, as Peeps wants it: repo-relative path, blob sha, contents. */
 export async function moduleFilePayload(env: RunnerEnv, collection: PytestCollection) {
-  const modules = new Set(collection.items.map((item) => item.nodeId.split("::")[0]!));
+  const modules = new Set(
+    [...collection.items, ...(collection.deselected ?? [])].map((item) => item.nodeId.split("::")[0]!),
+  );
   const files = [];
   for (const file of [...modules].sort()) {
     const abs = path.join(collection.rootDir, file);
@@ -322,7 +330,9 @@ export async function buildPytestInventoryRequest(env: RunnerEnv, collection: Py
     framework: "pytest" as const,
     // Node ids are relative to pytest's rootdir; Peeps joins them onto this.
     rootDir: repoRootDir(env, collection),
-    items: collection.items,
+    // Deselected tests too: they exist, and Peeps must not read their absence
+    // from a module it received in full as their removal.
+    items: [...collection.items, ...(collection.deselected ?? [])],
     // A module that failed to collect is present but unread: Peeps must not
     // take its tests' absence from `items` as their deletion.
     collectionErrors: collection.errors.map((error) => error.nodeId),

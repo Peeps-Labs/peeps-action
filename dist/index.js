@@ -997,7 +997,9 @@ function repoRootDir(env, collection) {
   return repoRelative(env, collection.rootDir) || ".";
 }
 async function moduleFilePayload(env, collection) {
-  const modules = new Set(collection.items.map((item) => item.nodeId.split("::")[0]));
+  const modules = new Set(
+    [...collection.items, ...collection.deselected ?? []].map((item) => item.nodeId.split("::")[0])
+  );
   const files = [];
   for (const file of [...modules].sort()) {
     const abs = import_node_path6.default.join(collection.rootDir, file);
@@ -1017,7 +1019,9 @@ async function buildPytestInventoryRequest(env, collection) {
     framework: "pytest",
     // Node ids are relative to pytest's rootdir; Peeps joins them onto this.
     rootDir: repoRootDir(env, collection),
-    items: collection.items,
+    // Deselected tests too: they exist, and Peeps must not read their absence
+    // from a module it received in full as their removal.
+    items: [...collection.items, ...collection.deselected ?? []],
     // A module that failed to collect is present but unread: Peeps must not
     // take its tests' absence from `items` as their deletion.
     collectionErrors: collection.errors.map((error) => error.nodeId),
