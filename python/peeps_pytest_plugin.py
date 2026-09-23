@@ -36,6 +36,9 @@ import pytest
 
 USER_AGENT = "peeps-action/0.1"
 
+#: The user property a test's pytest-playwright output directory rides on.
+OUTPUT_DIR_PROPERTY = "peeps_output_dir"
+
 
 def _write_json(path: str, value: Any) -> None:
     with open(path, "w", encoding="utf-8") as handle:
@@ -133,6 +136,22 @@ def settle(phases: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"status": "failed", "error": "pytest recorded no result for this test"}
 
 
+def attempts(phases: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """The phases split into attempts, each starting at its setup.
+
+    pytest-rerunfailures reports a phase of an attempt it will retry as
+    ``rerun``. Version 16 wraps each attempt in its own logstart/logfinish; a
+    wrapper around the whole retry loop would hand all of them to one
+    logfinish. Splitting here reads both the same way.
+    """
+    split: List[List[Dict[str, Any]]] = []
+    for phase in phases:
+        if not split or (phase["when"] == "setup" and split[-1]):
+            split.append([])
+        split[-1].append(phase)
+    return split
+
+
 def _crash_message(report: Any) -> Optional[str]:
     crash = getattr(getattr(report, "longrepr", None), "reprcrash", None)
     message = getattr(crash, "message", None)
@@ -158,16 +177,6 @@ class _Streamer:
 
     # -- pytest hooks -------------------------------------------------------
 
-    @pytest.hookimpl(hookwrapper=True, trylast=True)
-    def pytest_runtest_setup(self, item: Any):
-        yield
-        # pytest-playwright's per-test artifact directory, when this test uses
-        # it; read after setup, while the fixture values still exist.
-        funcargs = getattr(item, "funcargs", None) or {}
-        output = funcargs.get("output_path")
-        if isinstance(output, str):
-            self.output_dirs[item.nodeid] = output
-
     def pytest_runtest_logstart(self, nodeid: str, location: Any) -> None:
         entry = self.runs.get(nodeid)
         self.phases[nodeid] = []
@@ -184,6 +193,9 @@ class _Streamer:
         )
 
     def pytest_runtest_logreport(self, report: Any) -> None:
+        for name, value in getattr(report, "user_properties", None) or []:
+            if name == OUTPUT_DIR_PROPERTY and isinstance(value, str):
+                self.output_dirs[report.nodeid] = value
         phases = self.phases.setdefault(report.nodeid, [])
         phases.append(
             {
@@ -192,44 +204,54 @@ class _Streamer:
                 "wasxfail": hasattr(report, "wasxfail"),
                 "duration": getattr(report, "duration", 0) or 0,
                 "message": _crash_message(report),
-                "longrepr": report.longreprtext if report.failed else None,
+                "longrepr": (
+                    report.longreprtext if report.outcome in ("failed", "rerun") else None
+                ),
             }
         )
 
     def pytest_runtest_logfinish(self, nodeid: str, location: Any) -> None:
-        phases = self.phases.pop(nodeid, [])
-        # pytest-rerunfailures reports an attempt it will retry as `rerun`:
-        # that attempt is not the result, and the next one follows.
-        retried = any(p["outcome"] == "rerun" for p in phases)
-        settled = (
-            {"status": "failed", "error": "failed; retrying"}
-            if retried
-            else settle(phases)
-        )
-        self.statuses[nodeid] = settled["status"]
         entry = self.runs.get(nodeid)
-        if entry is None:
-            print(
-                f"[peeps] not planned, not reported: {nodeid} ({settled['status']})",
-                flush=True,
+        # A logfinish with no reports at all (the test never reached setup)
+        # still owes the run its end.
+        for phases in attempts(self.phases.pop(nodeid, [])) or [[]]:
+            rerun = next((p for p in phases if p["outcome"] == "rerun"), None)
+            retried = rerun is not None
+            # A retried attempt failed, as the Playwright reporter sends a
+            # failed attempt Playwright will retry; only the final attempt
+            # closes the run.
+            settled = (
+                {
+                    "status": "failed",
+                    "error": rerun.get("message") or "failed; retried",
+                    "errorStack": rerun.get("longrepr"),
+                }
+                if rerun is not None
+                else settle(phases)
             )
-            return
-        run_id = entry["runId"]
-        event: Dict[str, Any] = {
-            "type": "test_end",
-            "timestamp": _now(),
-            "testName": _test_name(nodeid),
-            "status": settled["status"],
-            "duration": int(round(sum(p["duration"] for p in phases) * 1000)),
-        }
-        if settled.get("error"):
-            event["error"] = settled["error"][:4000]
-        if settled.get("errorStack"):
-            event["errorStack"] = settled["errorStack"][:8000]
-        self._enqueue(run_id, event)
-        if not retried:
-            self._enqueue(run_id, {"type": "run_end", "timestamp": _now()})
-            self._flush(entry)
+            self.statuses[nodeid] = settled["status"]
+            if entry is None:
+                if not retried:
+                    print(
+                        f"[peeps] not planned, not reported: {nodeid} ({settled['status']})",
+                        flush=True,
+                    )
+                continue
+            event: Dict[str, Any] = {
+                "type": "test_end",
+                "timestamp": _now(),
+                "testName": _test_name(nodeid),
+                "status": settled["status"],
+                "duration": int(round(sum(p["duration"] for p in phases) * 1000)),
+            }
+            if settled.get("error"):
+                event["error"] = settled["error"][:4000]
+            if settled.get("errorStack"):
+                event["errorStack"] = settled["errorStack"][:8000]
+            self._enqueue(entry["runId"], event)
+            if not retried:
+                self._enqueue(entry["runId"], {"type": "run_end", "timestamp": _now()})
+                self._flush(entry)
 
     def pytest_sessionfinish(self, session: Any) -> None:
         # A run interrupted mid-test still delivers what it queued.
@@ -300,12 +322,38 @@ def _test_name(nodeid: str) -> str:
     return nodeid[:open_at].split("::")[-1] + nodeid[open_at:]
 
 
+class _OutputDirRecorder:
+    """Carries pytest-playwright's per-test artifact directory on the test's
+    reports, where the streamer reads it. Registered in every process: under
+    pytest-xdist the fixtures live in the workers, and only the reports reach
+    the controller."""
+
+    @pytest.hookimpl(hookwrapper=True, trylast=True)
+    def pytest_runtest_setup(self, item: Any):
+        yield
+        # Read after setup, while the fixture values still exist.
+        funcargs = getattr(item, "funcargs", None) or {}
+        output = funcargs.get("output_path")
+        if isinstance(output, str):
+            item.user_properties.append((OUTPUT_DIR_PROPERTY, output))
+
+
+def _is_xdist_worker(config: Any) -> bool:
+    return hasattr(config, "workerinput")
+
+
 def pytest_configure(config: Any) -> None:
+    # Under pytest-xdist, only the controller reports: workers' runtest log
+    # hooks are forwarded to it, so a streamer in each worker as well would
+    # post every event twice.
+    worker = _is_xdist_worker(config)
     collect_out = os.environ.get("PEEPS_COLLECT_OUT")
-    if collect_out:
+    if collect_out and not worker:
         config.pluginmanager.register(_Collector(collect_out), "peeps-collector")
     plan = os.environ.get("PEEPS_PLAN_FILE")
     if plan:
-        config.pluginmanager.register(
-            _Streamer(plan, os.environ.get("PEEPS_RESULTS_OUT")), "peeps-streamer"
-        )
+        config.pluginmanager.register(_OutputDirRecorder(), "peeps-output-dirs")
+        if not worker:
+            config.pluginmanager.register(
+                _Streamer(plan, os.environ.get("PEEPS_RESULTS_OUT")), "peeps-streamer"
+            )

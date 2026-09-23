@@ -303,12 +303,17 @@ test("a run streams one test_start/test_end per planned node id, pytest's outcom
     const collection = await collectPytest(env);
     const { byNodeId } = planFor(collection, "e2e");
     await executePytestAndReport(env, new PeepsClient(env), {
-      collection,
+      // The fixture's conftest offers pytest-playwright's `--output`.
+      collection: { ...collection, playwright: true },
       byNodeId,
       batches: [{ batchId: "b-1", batchNumber: 1 }],
     });
     // A failing test fails the job, as it would without Peeps.
     assert.equal(process.exitCode, 1);
+    // Each test's output directory is uploaded under the run it belongs to.
+    const opens = byNodeId["tests/shop/test_cart.py::test_opens[chromium]"]!.runId;
+    assert.ok(peeps.received.artifacts.includes(`data/${opens}-trace.zip`), String(peeps.received.artifacts));
+    assert.equal(peeps.received.artifacts.length, 6); // all but the skip-marked test
 
     const statusOf = (nodeId: string) => {
       const events = peeps.received.events.get(byNodeId[nodeId]!.runId) ?? [];
@@ -375,4 +380,95 @@ test("run mode executes exactly the planned node ids, from a working directory b
     process.exitCode = exitCode;
     peeps.close();
   }
+});
+
+function hasPlugins(...modules: string[]): boolean {
+  if (!python) return false;
+  try {
+    execFileSync(python, ["-c", modules.map((m) => `import ${m}`).join("; ")], { stdio: "ignore" });
+    return true;
+  } catch {
+    if (process.env.PEEPS_REQUIRE_PYTEST) throw new Error(`PEEPS_REQUIRE_PYTEST is set but ${modules} missing`);
+    return false;
+  }
+}
+const needsPlugins = hasPlugins("xdist", "pytest_rerunfailures")
+  ? {}
+  : { skip: "pytest-xdist and pytest-rerunfailures not installed" };
+
+/** Run the whole fixture suite once, with extra pytest options, and return what Peeps received. */
+async function runSuiteWith(addopts: string, prepare?: (suite: string) => void) {
+  const peeps = await fakePeeps();
+  process.env.PEEPS_API_KEY = "test-key";
+  const exitCode = process.exitCode;
+  const previous = process.env.PYTEST_ADDOPTS;
+  process.env.PYTEST_ADDOPTS = addopts;
+  try {
+    const { root, suite } = workspace();
+    prepare?.(suite);
+    const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "e2e", PEEPS_API_URL: peeps.url });
+    const collection = await collectPytest(env);
+    const { byNodeId } = planFor(collection, "e2e");
+    await executePytestAndReport(env, new PeepsClient(env), {
+      collection: { ...collection, playwright: true },
+      byNodeId,
+      batches: [{ batchId: "b-3", batchNumber: 3 }],
+    });
+    return { received: peeps.received, byNodeId };
+  } finally {
+    process.exitCode = exitCode;
+    if (previous === undefined) delete process.env.PYTEST_ADDOPTS;
+    else process.env.PYTEST_ADDOPTS = previous;
+    peeps.close();
+  }
+}
+
+test("under pytest-xdist each run is reported once, with its artifacts", needsPlugins, async () => {
+  const { received, byNodeId } = await runSuiteWith("-n 2");
+  for (const [nodeId, run] of Object.entries(byNodeId)) {
+    assert.deepEqual(
+      (received.events.get(run.runId) ?? []).map((e) => e.type),
+      ["run_start", "test_start", "test_end", "run_end"],
+      nodeId,
+    );
+  }
+  // The output directories were recorded in the workers and still name runs.
+  const opens = byNodeId["tests/shop/test_cart.py::test_opens[chromium]"]!.runId;
+  assert.ok(received.artifacts.includes(`data/${opens}-trace.zip`), String(received.artifacts));
+});
+
+test("with pytest-rerunfailures each attempt is a test_end and only the final one closes the run", needsPlugins, async () => {
+  const { received, byNodeId } = await runSuiteWith("--reruns 1", (suite) => {
+    // Fails on its first attempt, passes on the retry.
+    writeFileSync(
+      path.join(suite, "tests", "shop", "test_flaky.py"),
+      [
+        "import os",
+        "def test_flaky(tmp_path_factory):",
+        "    marker = os.path.join(str(tmp_path_factory.getbasetemp()), 'tried')",
+        "    if not os.path.exists(marker):",
+        "        open(marker, 'w').close()",
+        "        assert False, 'first attempt'",
+        "",
+      ].join("\n"),
+    );
+  });
+  const flaky = received.events.get(byNodeId["tests/shop/test_flaky.py::test_flaky"]!.runId) ?? [];
+  // As the Playwright reporter sends a retried attempt: a failed test_end,
+  // then the retry, and run_end only after the attempt that decides.
+  assert.deepEqual(
+    flaky.map((e) => [e.type, e.status]),
+    [
+      ["run_start", undefined],
+      ["test_start", undefined],
+      ["test_end", "failed"],
+      ["test_start", undefined],
+      ["test_end", "passed"],
+      ["run_end", undefined],
+    ],
+  );
+  assert.match(String(flaky[2]!.error), /first attempt/);
+  // A test that fails every attempt still fails.
+  const wrong = received.events.get(byNodeId["tests/shop/test_cart.py::test_total_is_wrong"]!.runId) ?? [];
+  assert.equal(wrong[2]!.status, "failed");
 });
