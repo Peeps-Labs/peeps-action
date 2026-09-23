@@ -933,6 +933,7 @@ function pytestEnv(extra) {
   env.PYTHONPATH = process.env.PYTHONPATH ? `${PLUGIN_DIR}${import_node_path6.default.delimiter}${process.env.PYTHONPATH}` : PLUGIN_DIR;
   if (!("PEEPS_PLAN_FILE" in extra)) delete env.PEEPS_PLAN_FILE;
   if (!("PEEPS_COLLECT_OUT" in extra)) delete env.PEEPS_COLLECT_OUT;
+  if (!("PEEPS_SELECT_ONLY" in extra)) delete env.PEEPS_SELECT_ONLY;
   return env;
 }
 function spawnPytest(args, options) {
@@ -1127,7 +1128,12 @@ async function executePytestAndReport(env, peeps, input2) {
   }
   const code = await spawnPytest(args, {
     cwd: env.workingDirectory,
-    env: pytestEnv({ PEEPS_PLAN_FILE: planFile, PEEPS_RESULTS_OUT: resultsFile }),
+    env: pytestEnv({
+      PEEPS_PLAN_FILE: planFile,
+      PEEPS_RESULTS_OUT: resultsFile,
+      // Run mode executes the plan and nothing else, whatever addopts adds.
+      ...input2.nodeIds ? { PEEPS_SELECT_ONLY: "1" } : {}
+    }),
     capture: false
   }).then(
     (result) => result.code,

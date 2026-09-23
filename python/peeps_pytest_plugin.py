@@ -38,6 +38,9 @@ import pytest
 
 USER_AGENT = "peeps-action/0.1"
 
+#: How long the session's end waits for undelivered events.
+DELIVERY_DRAIN_SECONDS = 60
+
 #: The user property a test's pytest-playwright output directory rides on.
 OUTPUT_DIR_PROPERTY = "peeps_output_dir"
 
@@ -276,9 +279,19 @@ class _Streamer:
         for entry in self.runs.values():
             if self.queues.get(entry["runId"]):
                 self._flush(entry)
-        # Every event handed off is delivered (or given up on) before pytest
-        # exits and takes the daemon thread with it.
-        self.outbox.join()
+        # Every event handed off is delivered, or given up on, before pytest
+        # exits and takes the daemon thread with it — within a bound, so a
+        # Peeps outage costs the job at most that long, not a retry cycle per
+        # test.
+        deadline = time.monotonic() + DELIVERY_DRAIN_SECONDS
+        while self.outbox.unfinished_tasks and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if self.outbox.unfinished_tasks:
+            print(
+                f"[peeps] gave up delivering {self.outbox.unfinished_tasks} event batch(es) "
+                f"after {DELIVERY_DRAIN_SECONDS}s",
+                flush=True,
+            )
         if self.results_out:
             _write_json(
                 self.results_out,
@@ -377,6 +390,25 @@ class _OutputDirRecorder:
             item.user_properties.append((OUTPUT_DIR_PROPERTY, output))
 
 
+class _Selector:
+    """Runs only the planned node ids (``run`` mode): whatever else the
+    customer's ``addopts`` names — a ``tests/`` target, say — is deselected,
+    not executed. In every process, since xdist workers collect for
+    themselves."""
+
+    def __init__(self, plan_path: str) -> None:
+        with open(plan_path, encoding="utf-8") as handle:
+            self.planned = set(json.load(handle)["runs"])
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_modifyitems(self, config: Any, items: List[Any]) -> None:
+        keep = [item for item in items if item.nodeid in self.planned]
+        dropped = [item for item in items if item.nodeid not in self.planned]
+        if dropped:
+            config.hook.pytest_deselected(items=dropped)
+            items[:] = keep
+
+
 def _is_xdist_worker(config: Any) -> bool:
     return hasattr(config, "workerinput")
 
@@ -392,6 +424,8 @@ def pytest_configure(config: Any) -> None:
     plan = os.environ.get("PEEPS_PLAN_FILE")
     if plan:
         config.pluginmanager.register(_OutputDirRecorder(), "peeps-output-dirs")
+        if os.environ.get("PEEPS_SELECT_ONLY") == "1":
+            config.pluginmanager.register(_Selector(plan), "peeps-selector")
         if not worker:
             config.pluginmanager.register(
                 _Streamer(plan, os.environ.get("PEEPS_RESULTS_OUT")), "peeps-streamer"

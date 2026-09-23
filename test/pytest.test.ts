@@ -528,3 +528,32 @@ test("the inventory lists tests -m deselected, while a run plans only the select
     else process.env.PYTEST_ADDOPTS = previous;
   }
 });
+
+test("run mode executes only the plan even when addopts names a whole directory", needsPytest, async () => {
+  const peeps = await fakePeeps();
+  process.env.PEEPS_API_KEY = "test-key";
+  const exitCode = process.exitCode;
+  const previous = process.env.PYTEST_ADDOPTS;
+  try {
+    const { root } = workspace();
+    const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "e2e", PEEPS_API_URL: peeps.url });
+    const collection = await collectPytest(env);
+    const { byNodeId } = planFor(collection, "e2e", ["tests/shop/test_cart.py::test_skipped"]);
+    // pytest adds an addopts target to the node ids rather than replacing it.
+    process.env.PYTEST_ADDOPTS = "tests";
+    await executePytestAndReport(env, new PeepsClient(env), {
+      collection,
+      byNodeId,
+      batches: [{ batchId: "b-5", batchNumber: 5 }],
+      nodeIds: Object.keys(byNodeId),
+    });
+    // The failing and teardown-breaking tests in `tests/` never ran.
+    assert.equal(process.exitCode, undefined);
+    assert.equal(peeps.received.events.size, 1);
+  } finally {
+    process.exitCode = exitCode;
+    if (previous === undefined) delete process.env.PYTEST_ADDOPTS;
+    else process.env.PYTEST_ADDOPTS = previous;
+    peeps.close();
+  }
+});
