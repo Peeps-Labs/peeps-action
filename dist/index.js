@@ -1120,11 +1120,17 @@ async function executePytestAndReport(env, peeps, input2) {
       ...input2.nodeIds.map((id) => nodeIdArgument(id, input2.collection.rootDir, env.workingDirectory))
     );
   }
-  const { code } = await spawnPytest(args, {
+  const code = await spawnPytest(args, {
     cwd: env.workingDirectory,
     env: pytestEnv({ PEEPS_PLAN_FILE: planFile, PEEPS_RESULTS_OUT: resultsFile }),
     capture: false
-  });
+  }).then(
+    (result) => result.code,
+    (error) => {
+      console.log(`[peeps] ${String(error)}`);
+      return 1;
+    }
+  );
   const runIdByOutputDir = await readOutputDirs(resultsFile, input2.byNodeId);
   for (const b of input2.batches) {
     try {

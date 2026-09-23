@@ -472,3 +472,28 @@ test("with pytest-rerunfailures each attempt is a test_end and only the final on
   const wrong = received.events.get(byNodeId["tests/shop/test_cart.py::test_total_is_wrong"]!.runId) ?? [];
   assert.equal(wrong[2]!.status, "failed");
 });
+
+test("a pytest that cannot start still closes its batches and fails the job", async () => {
+  const peeps = await fakePeeps();
+  process.env.PEEPS_API_KEY = "test-key";
+  const exitCode = process.exitCode;
+  const previous = process.env.PEEPS_PYTHON;
+  process.env.PEEPS_PYTHON = "/nonexistent/python";
+  try {
+    const { root } = workspace();
+    const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "e2e", PEEPS_API_URL: peeps.url });
+    await executePytestAndReport(env, new PeepsClient(env), {
+      collection: { rootDir: root, playwright: false, items: [], errors: [] },
+      byNodeId: {},
+      batches: [{ batchId: "b-4", batchNumber: 4 }],
+      nodeIds: ["tests/shop/test_cart.py::test_skipped"],
+    });
+    assert.equal(process.exitCode, 1);
+    assert.deepEqual(peeps.received.completed, [{ batchId: "b-4", body: { reportUploaded: false } }]);
+  } finally {
+    process.exitCode = exitCode;
+    if (previous === undefined) delete process.env.PEEPS_PYTHON;
+    else process.env.PEEPS_PYTHON = previous;
+    peeps.close();
+  }
+});

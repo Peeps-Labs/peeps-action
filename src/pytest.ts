@@ -472,11 +472,19 @@ export async function executePytestAndReport(
       ...input.nodeIds.map((id) => nodeIdArgument(id, input.collection.rootDir, env.workingDirectory)),
     );
   }
-  const { code } = await spawnPytest(args, {
+  // A pytest that cannot even start still has its batches closed below, so no
+  // planned run is left waiting for a job that is already over.
+  const code = await spawnPytest(args, {
     cwd: env.workingDirectory,
     env: pytestEnv({ PEEPS_PLAN_FILE: planFile, PEEPS_RESULTS_OUT: resultsFile }),
     capture: false,
-  });
+  }).then(
+    (result) => result.code,
+    (error: unknown) => {
+      console.log(`[peeps] ${String(error)}`);
+      return 1;
+    },
+  );
 
   const runIdByOutputDir = await readOutputDirs(resultsFile, input.byNodeId);
   for (const b of input.batches) {
