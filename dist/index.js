@@ -65,6 +65,7 @@ function readRunnerEnv(env = process.env) {
     mode: input(env, "mode") ?? env.PEEPS_MODE ?? "ci",
     sessionId: input(env, "session-id") ?? env.PEEPS_SESSION_ID ?? null,
     configPath: input(env, "config") ?? env.PEEPS_PLAYWRIGHT_CONFIG ?? null,
+    framework: input(env, "framework") ?? env.PEEPS_FRAMEWORK ?? null,
     peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
     workingDirectory: workingDirectory ? import_node_path.default.resolve(workspace, workingDirectory) : workspace,
     repository: env.GITHUB_REPOSITORY ?? null,
@@ -210,11 +211,11 @@ var PeepsClient = class {
     );
   }
   /** Raw upload (artifacts). Retries transient failures a couple of times. */
-  async postBytes(path6, bytes) {
+  async postBytes(path7, bytes) {
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await fetch(`${this.env.peepsUrl}${path6}`, {
+        const response = await fetch(`${this.env.peepsUrl}${path7}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${await this.token()}`,
@@ -228,9 +229,9 @@ var PeepsClient = class {
         if (response.ok) return;
         const text = await response.text();
         if (response.status < 500 && response.status !== 408 && response.status !== 429) {
-          throw new Error(`Peeps ${path6} \u2192 ${response.status}: ${text.slice(0, 300)}`);
+          throw new Error(`Peeps ${path7} \u2192 ${response.status}: ${text.slice(0, 300)}`);
         }
-        lastError = new Error(`Peeps ${path6} \u2192 ${response.status}`);
+        lastError = new Error(`Peeps ${path7} \u2192 ${response.status}`);
       } catch (error) {
         lastError = error;
       }
@@ -239,8 +240,8 @@ var PeepsClient = class {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
   /** GET that treats 204 as "nothing" (long-poll idle) instead of an error. */
-  async getOrNull(path6) {
-    const response = await fetch(`${this.env.peepsUrl}${path6}`, {
+  async getOrNull(path7) {
+    const response = await fetch(`${this.env.peepsUrl}${path7}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -251,12 +252,12 @@ var PeepsClient = class {
     if (response.status === 204) return null;
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Peeps ${path6} \u2192 ${response.status}: ${text.slice(0, 500)}`);
+      throw new Error(`Peeps ${path7} \u2192 ${response.status}: ${text.slice(0, 500)}`);
     }
     return JSON.parse(text);
   }
-  async get(path6) {
-    const response = await fetch(`${this.env.peepsUrl}${path6}`, {
+  async get(path7) {
+    const response = await fetch(`${this.env.peepsUrl}${path7}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -265,12 +266,12 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Peeps ${path6} \u2192 ${response.status}: ${text.slice(0, 500)}`);
+      throw new Error(`Peeps ${path7} \u2192 ${response.status}: ${text.slice(0, 500)}`);
     }
     return JSON.parse(text);
   }
-  async post(path6, body) {
-    const response = await fetch(`${this.env.peepsUrl}${path6}`, {
+  async post(path7, body) {
+    const response = await fetch(`${this.env.peepsUrl}${path7}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${await this.token()}`,
@@ -282,7 +283,7 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Peeps ${path6} \u2192 ${response.status}: ${text.slice(0, 500)}`);
+      throw new Error(`Peeps ${path7} \u2192 ${response.status}: ${text.slice(0, 500)}`);
     }
     return text ? JSON.parse(text) : {};
   }
@@ -836,6 +837,368 @@ function summarizeArgs(args) {
   return Object.entries(args).filter(([k]) => k !== "token" && k !== "content" && k !== "patch").map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 60)}`).join(", ");
 }
 
+// src/pytest.ts
+var import_node_child_process4 = require("node:child_process");
+var import_node_crypto2 = require("node:crypto");
+var import_node_fs2 = require("node:fs");
+var import_promises4 = require("node:fs/promises");
+var import_node_os3 = require("node:os");
+var import_node_path6 = __toESM(require("node:path"));
+var PLUGIN_DIR = import_node_path6.default.join(__dirname, "..", "python");
+var PLUGIN = "peeps_pytest_plugin";
+var PLAYWRIGHT_CONFIG = /^playwright(\..+)?\.config\.[cm]?[jt]s$/;
+function resolveFramework(env) {
+  const declared = env.framework;
+  if (declared === "playwright" || declared === "pytest") return declared;
+  if (declared !== null && declared !== "auto") {
+    throw new Error(`unknown framework "${declared}": use playwright, pytest or auto`);
+  }
+  if (env.configPath) return "playwright";
+  let names;
+  try {
+    names = (0, import_node_fs2.readdirSync)(env.workingDirectory);
+  } catch {
+    return "playwright";
+  }
+  if (names.some((name) => PLAYWRIGHT_CONFIG.test(name))) return "playwright";
+  if (names.includes("pytest.ini") || names.includes("conftest.py")) return "pytest";
+  const pyproject = import_node_path6.default.join(env.workingDirectory, "pyproject.toml");
+  if ((0, import_node_fs2.existsSync)(pyproject) && /^\s*\[tool\.pytest(\.ini_options)?\]/m.test((0, import_node_fs2.readFileSync)(pyproject, "utf8"))) {
+    return "pytest";
+  }
+  return "playwright";
+}
+var TITLE_PATH_SEPARATOR = " \u203A ";
+function splitParameter(nodeId) {
+  const open = nodeId.indexOf("[", Math.max(0, nodeId.indexOf("::")));
+  if (open === -1 || !nodeId.endsWith("]")) return { head: nodeId, parameter: null };
+  return { head: nodeId.slice(0, open), parameter: nodeId.slice(open + 1, -1) };
+}
+function withoutBrowser(parameter, browser) {
+  if (parameter === browser) return null;
+  if (parameter.startsWith(`${browser}-`)) return parameter.slice(browser.length + 1);
+  if (parameter.endsWith(`-${browser}`)) return parameter.slice(0, -browser.length - 1);
+  return parameter;
+}
+function normalizeRoot(rootDir) {
+  const trimmed = rootDir.trim();
+  if (trimmed === "" || trimmed === "." || trimmed === "./") return "";
+  return trimmed.replace(/^\.\//, "").replace(/\/+$/, "");
+}
+function pytestNodeIdToTest(nodeId, options = {}) {
+  const { head, parameter } = splitParameter(nodeId);
+  const [file, ...scopes] = head.split("::");
+  if (!file || scopes.length === 0 || scopes.some((scope) => scope === "")) {
+    throw new Error(`not a pytest test node id: ${nodeId}`);
+  }
+  const kept = parameter !== null && options.browser ? withoutBrowser(parameter, options.browser) : parameter;
+  const root = normalizeRoot(options.rootDir ?? ".");
+  return {
+    path: root === "" ? file : `${root}/${file}`,
+    titlePath: scopes.join(TITLE_PATH_SEPARATOR) + (kept === null ? "" : `[${kept}]`)
+  };
+}
+function planKey(test) {
+  return `${test.pwProject} ${test.path} ${test.titlePath}`;
+}
+function plannedPytestTests(collection, rootDir) {
+  return collection.items.flatMap((item) => {
+    try {
+      return [
+        {
+          ...pytestNodeIdToTest(item.nodeId, { rootDir, browser: item.browser }),
+          pwProject: item.browser ?? "",
+          nodeId: item.nodeId
+        }
+      ];
+    } catch {
+      console.log(`[peeps] not a test node id, not reported: ${item.nodeId}`);
+      return [];
+    }
+  });
+}
+function nodeIdsForRuns(planned, runs) {
+  const nodeIdOf = new Map(planned.map((t) => [planKey(t), t.nodeId]));
+  const byNodeId = {};
+  const unmatched = [];
+  for (const run of runs) {
+    const nodeId = nodeIdOf.get(planKey(run));
+    if (nodeId === void 0) unmatched.push(run);
+    else byNodeId[nodeId] = run;
+  }
+  return { byNodeId, unmatched };
+}
+function pytestEnv(extra) {
+  const env = { ...process.env, CI: "1", ...extra };
+  env.PYTHONPATH = process.env.PYTHONPATH ? `${PLUGIN_DIR}${import_node_path6.default.delimiter}${process.env.PYTHONPATH}` : PLUGIN_DIR;
+  if (!("PEEPS_PLAN_FILE" in extra)) delete env.PEEPS_PLAN_FILE;
+  if (!("PEEPS_COLLECT_OUT" in extra)) delete env.PEEPS_COLLECT_OUT;
+  return env;
+}
+function spawnPytest(args, options) {
+  const candidates = process.env.PEEPS_PYTHON ? [process.env.PEEPS_PYTHON] : ["python", "python3"];
+  const attempt = (index) => new Promise((resolve, reject) => {
+    const child = (0, import_node_child_process4.spawn)(candidates[index], ["-m", "pytest", ...args], {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit"
+    });
+    let output = "";
+    const keep = (chunk) => {
+      output = (output + chunk.toString("utf8")).slice(-2e4);
+    };
+    child.stdout?.on("data", keep);
+    child.stderr?.on("data", keep);
+    child.on("error", (error) => {
+      if (error.code === "ENOENT" && index + 1 < candidates.length) {
+        resolve(attempt(index + 1));
+      } else {
+        reject(new Error(`could not start ${candidates[index]}: ${error.message}`));
+      }
+    });
+    child.on("close", (code) => resolve({ code: code ?? 1, output }));
+  });
+  return attempt(0);
+}
+function configArgs(env) {
+  return env.configPath ? ["-c", env.configPath] : [];
+}
+async function collectPytest(env) {
+  const scratch = await (0, import_promises4.mkdtemp)(import_node_path6.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-collect-"));
+  const out = import_node_path6.default.join(scratch, "collection.json");
+  const { code, output } = await spawnPytest(
+    ["--collect-only", "-q", "-p", PLUGIN, ...configArgs(env)],
+    { cwd: env.workingDirectory, env: pytestEnv({ PEEPS_COLLECT_OUT: out }), capture: true }
+  );
+  if (![0, 2, 5].includes(code) || !(0, import_node_fs2.existsSync)(out)) {
+    throw new Error(`pytest --collect-only exited with ${code}:
+${output.slice(-4e3)}`);
+  }
+  const collection = JSON.parse(await (0, import_promises4.readFile)(out, "utf8"));
+  for (const error of collection.errors) {
+    console.log(`[peeps] collection error in ${error.nodeId}:
+${error.message}`);
+  }
+  return collection;
+}
+function repoRelative(env, abs) {
+  let workspace = env.workspace;
+  try {
+    workspace = (0, import_node_fs2.realpathSync)(workspace);
+  } catch {
+  }
+  const rel = import_node_path6.default.relative(workspace, abs).split(import_node_path6.default.sep).join("/");
+  if (rel === ".." || rel.startsWith("../") || import_node_path6.default.isAbsolute(rel)) {
+    throw new Error(`${abs} is outside the repository (${env.workspace})`);
+  }
+  return rel;
+}
+function repoRootDir(env, collection) {
+  return repoRelative(env, collection.rootDir) || ".";
+}
+async function moduleFilePayload(env, collection) {
+  const modules = new Set(collection.items.map((item) => item.nodeId.split("::")[0]));
+  const files = [];
+  for (const file of [...modules].sort()) {
+    const abs = import_node_path6.default.join(collection.rootDir, file);
+    const bytes = await (0, import_promises4.readFile)(abs);
+    files.push({
+      path: repoRelative(env, abs),
+      blobSha: gitBlobSha(bytes),
+      content: bytes.toString("utf8")
+    });
+  }
+  return files;
+}
+async function buildPytestInventoryRequest(env, collection) {
+  if (!env.sha) throw new Error("GITHUB_SHA is not set");
+  return {
+    sha: env.sha,
+    framework: "pytest",
+    // Node ids are relative to pytest's rootdir; Peeps joins them onto this.
+    rootDir: repoRootDir(env, collection),
+    items: collection.items,
+    // A module that failed to collect is present but unread: Peeps must not
+    // take its tests' absence from `items` as their deletion.
+    collectionErrors: collection.errors.map((error) => error.nodeId),
+    files: await moduleFilePayload(env, collection)
+  };
+}
+async function runPytestInventory(env, peeps) {
+  const collection = await collectPytest(env);
+  const request = await buildPytestInventoryRequest(env, collection);
+  console.log(
+    `[peeps] inventory: ${collection.items.length} pytest items in ${request.files.length} modules at ${request.sha.slice(0, 7)}`
+  );
+  const result = await peeps.post("/api/v1/ci/inventory", request);
+  console.log(`[peeps] inventory accepted: ${JSON.stringify(result.results)}`);
+}
+async function runPytestReport(env, peeps) {
+  if (!env.sha) throw new Error("GITHUB_SHA is not set");
+  const collection = await collectPytest(env);
+  const rootDir = repoRootDir(env, collection);
+  const planned = plannedPytestTests(collection, rootDir);
+  console.log(`[peeps] report: ${planned.length} tests at ${env.sha.slice(0, 7)} (${env.ref ?? "?"})`);
+  const jobUrl = env.repository && env.runId ? `https://github.com/${env.repository}/actions/runs/${env.runId}` : null;
+  const response = await peeps.post("/api/v1/ci/batches", {
+    sha: env.sha,
+    jobUrl,
+    baseUrl: process.env.BASE_URL ?? null,
+    tests: planned.map(({ path: p, titlePath, pwProject }) => ({ path: p, titlePath, pwProject })),
+    files: await moduleFilePayload(env, collection)
+  });
+  const runs = response.batches.flatMap((b) => b.runs);
+  const unmatched = response.batches.flatMap((b) => b.unmatched);
+  console.log(
+    `[peeps] planned ${runs.length} run(s) in ${response.batches.length} batch(es); ${unmatched.length} test(s) unknown to Peeps`
+  );
+  for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} \u203A ${u.titlePath}`);
+  const { byNodeId } = nodeIdsForRuns(planned, runs);
+  await executePytestAndReport(env, peeps, {
+    collection,
+    byNodeId,
+    batches: response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }))
+  });
+}
+async function runPytestDispatched(env, peeps) {
+  if (!env.sessionId) throw new Error("`session-id` is required in run mode (Peeps passes it)");
+  const collection = await collectPytest(env);
+  const rootDir = repoRootDir(env, collection);
+  const planned = plannedPytestTests(collection, rootDir);
+  const plan = await peeps.post(`/api/v1/ci/batches/${env.sessionId}/plan`, {
+    tests: planned.map(({ path: p, titlePath, pwProject }) => ({ path: p, titlePath, pwProject })).slice(0, 2e3)
+  });
+  console.log(`[peeps] run: batch ${plan.batchNumber} holds ${plan.runs.length} run(s)`);
+  const { byNodeId, unmatched } = nodeIdsForRuns(planned, plan.runs);
+  for (const run of unmatched.slice(0, 10)) {
+    console.log(`[peeps]   not collected here, not run: ${run.path} \u203A ${run.titlePath}`);
+  }
+  const nodeIds = Object.keys(byNodeId);
+  if (nodeIds.length === 0) {
+    await peeps.post(`/api/v1/ci/batches/${plan.batchId}/complete`, { reportUploaded: false });
+    if (plan.runs.length > 0) {
+      throw new Error(`none of the ${plan.runs.length} planned test(s) were collected at this commit`);
+    }
+    return;
+  }
+  await executePytestAndReport(env, peeps, {
+    collection,
+    byNodeId,
+    batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
+    nodeIds
+  });
+}
+function nodeIdArgument(nodeId, rootDirAbs, cwd) {
+  const separator = nodeId.indexOf("::");
+  const file = separator === -1 ? nodeId : nodeId.slice(0, separator);
+  const rest = separator === -1 ? "" : nodeId.slice(separator);
+  let from = cwd;
+  try {
+    from = (0, import_node_fs2.realpathSync)(cwd);
+  } catch {
+  }
+  const relative = import_node_path6.default.relative(from, import_node_path6.default.join(rootDirAbs, file)).split(import_node_path6.default.sep).join("/");
+  return relative + rest;
+}
+async function executePytestAndReport(env, peeps, input2) {
+  const scratch = await (0, import_promises4.mkdtemp)(import_node_path6.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-"));
+  const planFile = import_node_path6.default.join(scratch, "plan.json");
+  const resultsFile = import_node_path6.default.join(scratch, "results.json");
+  const outputDir = import_node_path6.default.join(scratch, "output");
+  const runs = Object.fromEntries(
+    Object.entries(input2.byNodeId).map(([nodeId, run]) => [
+      nodeId,
+      { runId: run.runId, credential: run.credential }
+    ])
+  );
+  await (0, import_promises4.writeFile)(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 384 });
+  const args = ["-p", PLUGIN, ...configArgs(env)];
+  if (input2.collection.playwright) args.push("--output", outputDir);
+  if (input2.nodeIds) {
+    args.push(
+      "--",
+      ...input2.nodeIds.map((id) => nodeIdArgument(id, input2.collection.rootDir, env.workingDirectory))
+    );
+  }
+  const { code } = await spawnPytest(args, {
+    cwd: env.workingDirectory,
+    env: pytestEnv({ PEEPS_PLAN_FILE: planFile, PEEPS_RESULTS_OUT: resultsFile }),
+    capture: false
+  });
+  const runIdByOutputDir = await readOutputDirs(resultsFile, input2.byNodeId);
+  for (const b of input2.batches) {
+    try {
+      const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir);
+      console.log(`[peeps] uploaded ${uploaded} artifact file(s) for batch ${b.batchNumber}`);
+    } catch (error) {
+      console.log(`[peeps] artifact upload failed for batch ${b.batchId}: ${String(error)}`);
+    }
+    try {
+      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded: false });
+    } catch (error) {
+      console.log(`[peeps] could not complete batch ${b.batchId}: ${String(error)}`);
+    }
+  }
+  console.log(`[peeps] pytest exited with ${code}`);
+  if (code !== 0) process.exitCode = code;
+}
+async function readOutputDirs(resultsFile, byNodeId) {
+  const map = /* @__PURE__ */ new Map();
+  try {
+    const results = JSON.parse(await (0, import_promises4.readFile)(resultsFile, "utf8"));
+    for (const [nodeId, dir] of Object.entries(results.outputDirs ?? {})) {
+      const run = byNodeId[nodeId];
+      if (run) map.set(import_node_path6.default.basename(dir), run.runId);
+    }
+  } catch {
+  }
+  return map;
+}
+var MAX_UPLOAD_BYTES2 = 128 * 1024 * 1024;
+function artifactName(rel, runIdByOutputDir) {
+  const [dir, ...rest] = rel.split("/");
+  const runId = rest.length > 0 ? runIdByOutputDir.get(dir) : void 0;
+  const flat = (runId ? [runId, ...rest] : [dir, ...rest]).join("-").replace(/[^A-Za-z0-9._-]/g, "_");
+  if (flat.length <= 200) return `data/${flat}`;
+  const ext = import_node_path6.default.extname(flat);
+  return `data/${(0, import_node_crypto2.createHash)("sha1").update(rel).digest("hex")}${ext}`;
+}
+async function* walkOutput(dir, rel = "") {
+  let entries;
+  try {
+    entries = await (0, import_promises4.readdir)(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const abs = import_node_path6.default.join(dir, entry.name);
+    const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) yield* walkOutput(abs, relPath);
+    else if (entry.isFile()) yield { abs, rel: relPath };
+  }
+}
+async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
+  let uploaded = 0;
+  for await (const file of walkOutput(outputDir)) {
+    const info = await (0, import_promises4.stat)(file.abs);
+    if (info.size > MAX_UPLOAD_BYTES2) {
+      console.log(`[peeps] skipping ${file.rel}: ${info.size} bytes exceeds the upload limit`);
+      continue;
+    }
+    const name = artifactName(file.rel, runIdByOutputDir);
+    try {
+      await peeps.postBytes(
+        `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(name)}`,
+        await (0, import_promises4.readFile)(file.abs)
+      );
+      uploaded += 1;
+    } catch (error) {
+      console.log(`[peeps] skipped ${file.rel}: ${String(error).slice(0, 200)}`);
+    }
+  }
+  return uploaded;
+}
+
 // src/main.ts
 function onDefaultBranch(env) {
   if (env.defaultBranch) return env.ref === `refs/heads/${env.defaultBranch}`;
@@ -848,6 +1211,27 @@ async function main() {
   console.log(
     `[peeps] mode=${mode} repo=${env.repository ?? "?"} sha=${env.sha?.slice(0, 7) ?? "?"} ref=${env.ref ?? "?"} peeps=${env.peepsUrl}`
   );
+  if (mode !== "agent" && resolveFramework(env) === "pytest") {
+    console.log("[peeps] framework=pytest");
+    switch (mode) {
+      case "inventory":
+        await runPytestInventory(env, peeps);
+        return;
+      case "report":
+        if (onDefaultBranch(env)) {
+          await runPytestInventory(env, peeps).catch(
+            (error) => console.log(`[peeps] inventory skipped: ${String(error)}`)
+          );
+        }
+        await runPytestReport(env, peeps);
+        return;
+      case "run":
+        await runPytestDispatched(env, peeps);
+        return;
+      default:
+        throw new Error(`unknown mode ${mode}`);
+    }
+  }
   switch (mode) {
     case "inventory":
       await runInventory(env, peeps);

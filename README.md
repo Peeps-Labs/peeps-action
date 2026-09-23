@@ -44,6 +44,38 @@ jobs:
           session-id: ${{ inputs.sessionId }}
 ```
 
+**Python (pytest-playwright) suites** use the same workflow with Python in
+place of Node. The action finds pytest by itself when the working directory has
+a `pytest.ini`, a `conftest.py` or a `pyproject.toml` with
+`[tool.pytest.ini_options]` and no Playwright config; `framework: pytest` says
+so outright:
+
+```yaml
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with: { ref: "${{ inputs.ref || github.ref }}" }
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt   # or: pip install .
+      - run: python -m playwright install --with-deps
+      - uses: Peeps-Labs/peeps-action@v1
+        with:
+          framework: pytest
+          mode: ${{ inputs.mode }}
+          session-id: ${{ inputs.sessionId }}
+```
+
+For pytest, `inventory` is `pytest --collect-only`, `run` selects the tests
+Peeps asked for by node id, and results stream to Peeps from a small pytest
+plugin shipped in this repository (`python/peeps_pytest_plugin.py`). With
+pytest-playwright installed, its `--output` directory (traces, screenshots,
+videos) is uploaded in place of Playwright's HTML report; your own
+`--tracing`/`--screenshot`/`--video` options decide what is in it.
+`PEEPS_PYTHON` names the interpreter if it is not `python` or `python3` on the
+`PATH`.
+
 `contents: read` is all this needs. When Peeps opens a fix branch it pushes with
 its own installation token, supplied for that one call, not with your
 `GITHUB_TOKEN`.
@@ -56,14 +88,15 @@ Outside GitHub Actions there is no OIDC token, so set `PEEPS_API_KEY` instead.
 | --- | --- | --- |
 | `mode` | no, defaults to `ci` | `inventory`, `run`, `report`, `agent`, or `ci` |
 | `session-id` | for `run` and `agent` | The session id Peeps passes on dispatch. Unused by `inventory` and `report` |
-| `config` | no | Playwright config path, relative to `working-directory` |
-| `working-directory` | no | Where to run Playwright, relative to the repository root |
+| `config` | no | Playwright config path, relative to `working-directory` (pytest: the ini file, passed as `-c`) |
+| `working-directory` | no | Where to run Playwright or pytest, relative to the repository root |
+| `framework` | no, defaults to `auto` | `playwright`, `pytest`, or `auto` (see above) |
 
 ## Modes
 
 | Mode | What runs on your runner |
 | --- | --- |
-| `inventory` | `playwright test --list --reporter=json`, posted with the spec files |
+| `inventory` | `playwright test --list --reporter=json` (pytest: `pytest --collect-only`), posted with the spec files |
 | `run` | the tests Peeps asked for, reported live |
 | `report` | this workflow's own test run, reported live |
 | `agent` | a tool server for a Peeps agent session; every call is echoed to the job log |
@@ -125,6 +158,10 @@ npm run build        # dist/ is committed — the action runs from it
 `dist/` is the bundle `uses:` actually executes, so CI rebuilds it and fails if
 it does not match `src/`. If you change anything under `src/`, commit the
 rebuilt `dist/` with it.
+
+The pytest tests run real pytest against `test/fixtures/pytest-suite`. They
+skip when `python3` (or `PEEPS_PYTHON`) cannot import pytest; CI installs it
+and sets `PEEPS_REQUIRE_PYTEST=1`, so there they fail instead.
 
 ## License
 

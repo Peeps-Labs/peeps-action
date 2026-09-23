@@ -13,8 +13,12 @@ inputs:
     description: "Session id Peeps passes to workflow_dispatch. Required by run and agent modes; unused by inventory and report"
     required: false
   config:
-    description: "Path to the Playwright config, relative to working-directory"
+    description: "Path to the Playwright config (pytest: the ini file passed as -c), relative to working-directory"
     required: false
+  framework:
+    description: "playwright | pytest | auto (default: pytest when working-directory has pytest.ini, conftest.py or a pyproject.toml configuring pytest and no Playwright config; otherwise playwright)"
+    required: false
+    default: "auto"
   working-directory:
     description: "Directory to run Playwright in, relative to the repository root (default: the repository root)"
     required: false

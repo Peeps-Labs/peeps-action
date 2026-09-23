@@ -2,7 +2,8 @@
  * The Peeps action — the runner side of Peeps.
  *
  * Modes:
- *   inventory   post `playwright test --list` to Peeps (what the repo's tests are)
+ *   inventory   post `playwright test --list` (pytest: `pytest --collect-only`)
+ *               to Peeps (what the repo's tests are)
  *   run         run the tests Peeps asked for and report them
  *   report      run this workflow's own tests and report them
  *   agent       host tools for a Peeps agent session
@@ -17,6 +18,12 @@ import { PeepsClient } from "./peeps";
 import { runReport } from "./report";
 import { runDispatched } from "./run";
 import { runAgent } from "./agent";
+import {
+  resolveFramework,
+  runPytestDispatched,
+  runPytestInventory,
+  runPytestReport,
+} from "./pytest";
 
 /**
  * Whether this ref is the repository's default branch. Falls back to the old
@@ -37,6 +44,30 @@ async function main(): Promise<void> {
   console.log(
     `[peeps] mode=${mode} repo=${env.repository ?? "?"} sha=${env.sha?.slice(0, 7) ?? "?"} ref=${env.ref ?? "?"} peeps=${env.peepsUrl}`,
   );
+
+  // A pytest suite takes its own path through every mode that runs tests; a
+  // Playwright one falls through to the switch below, exactly as before.
+  if (mode !== "agent" && resolveFramework(env) === "pytest") {
+    console.log("[peeps] framework=pytest");
+    switch (mode) {
+      case "inventory":
+        await runPytestInventory(env, peeps);
+        return;
+      case "report":
+        if (onDefaultBranch(env)) {
+          await runPytestInventory(env, peeps).catch((error: unknown) =>
+            console.log(`[peeps] inventory skipped: ${String(error)}`),
+          );
+        }
+        await runPytestReport(env, peeps);
+        return;
+      case "run":
+        await runPytestDispatched(env, peeps);
+        return;
+      default:
+        throw new Error(`unknown mode ${mode}`);
+    }
+  }
 
   switch (mode) {
     case "inventory":
