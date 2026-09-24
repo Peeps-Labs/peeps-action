@@ -616,6 +616,8 @@ function assertCameraEvidence(received: Received, byNodeId: Record<string, PlanE
   assert.match(String(failure.traceback), /def test_sharpness/);
   assert.match(String(failure.traceback), /E\s+assert 0\.41 >= 0\.6/);
   assert.deepEqual(sharp.properties, [
+    // Recorded at collection, before the test ran.
+    { name: "rig", value: "bench-2" },
     { name: "sharpness", value: 0.41 },
     { name: "exposure_ms", value: 12 },
     { name: "lens", value: "wide" },
@@ -722,7 +724,11 @@ test("with pytest-rerunfailures only the final attempt's evidence is reported", 
   assert.equal(sharp.length, 3);
   assert.equal("failure" in sharp[1]!, false);
   assert.equal((sharp[2]!.failure as Record<string, unknown>).phase, "call");
-  assert.equal((sharp[2]!.properties as unknown[]).length, 5);
+  // The collection-time property once, and the final attempt's five.
+  assert.deepEqual(
+    (sharp[2]!.properties as Array<{ name: string }>).map((p) => p.name),
+    ["rig", "sharpness", "exposure_ms", "lens", "roi", "noise"],
+  );
 });
 
 test("only plain files the plugin staged for a run of this job are uploaded", async () => {

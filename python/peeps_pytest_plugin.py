@@ -352,79 +352,123 @@ def _walk_files(directory: str) -> Iterator[Tuple[str, str]]:
             yield abs_path, os.path.relpath(abs_path, directory).replace(os.sep, "/")
 
 
-class _AttachmentStager:
-    """Stages a test's files for upload, within the per-test and per-session
-    caps and inside the allowed roots: the repository, the action's artifacts
-    directory and pytest's temporary directory (``tmp_path`` lives there)."""
+def _allowed_roots(config: Any) -> List[str]:
+    """Where an attached file may come from: the repository and pytest's
+    temporary directory (``tmp_path`` lives there; under xdist, this worker's)."""
+    roots = []
+    workspace = os.environ.get("PEEPS_WORKSPACE")
+    if workspace:
+        roots.append(os.path.realpath(workspace))
+    try:
+        factory = getattr(config, "_tmp_path_factory", None)
+        if factory is not None:
+            roots.append(os.path.realpath(str(factory.getbasetemp())))
+    except Exception:
+        pass
+    return roots
 
-    def __init__(self, config: Any, base: str, workspace: Optional[str]) -> None:
-        self.config = config
-        self.base = base
-        self.upload_dir = os.path.join(base, "upload")
+
+def snapshot_attachments(item: Any, values: List[Any], base: str) -> List[Dict[str, Any]]:
+    """Copy the files a test attached into the artifacts directory, where the
+    test runs and before its fixtures are torn down: ``tmp_path`` may be
+    deleted at teardown (``tmp_path_retention_policy``), and a later test
+    may overwrite the same path. Each entry is ``{name, file}`` for a copy
+    or ``{name, reason}`` for a refusal; the jail is applied here, to the
+    path the test named."""
+    entries: List[Dict[str, Any]] = []
+    key = artifacts_key(item.nodeid)
+    snapshots = os.path.join(base, "attached", key)
+    own = os.path.realpath(base)
+    invocation = str(item.config.invocation_params.dir)
+    roots: Optional[List[str]] = None
+    for value in values:
+        index = item._peeps_attached_count
+        item._peeps_attached_count += 1
+        raw = os.fspath(value) if isinstance(value, (str, os.PathLike)) else None
+        if not raw:
+            entries.append({"name": str(value), "reason": "not a path"})
+            continue
+        name = os.path.basename(raw) or "file"
+        real = os.path.realpath(os.path.join(invocation, raw))
+        if _inside(real, [own]) is not None:
+            continue  # in peeps_artifacts_dir already: uploaded from there
+        roots = roots if roots is not None else _allowed_roots(item.config)
+        if _inside(real, roots) is None:
+            entries.append({"name": name, "reason": "outside the workspace"})
+            continue
+        try:
+            info = os.stat(real)
+        except OSError:
+            entries.append({"name": name, "reason": "missing"})
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            entries.append({"name": name, "reason": "not a regular file"})
+            continue
+        if info.st_size > MAX_ATTACHMENT_BYTES:
+            entries.append({"name": name, "reason": f"larger than {MAX_ATTACHMENT_BYTES} bytes"})
+            continue
+        if index >= MAX_ATTACHMENTS_PER_TEST:
+            entries.append({"name": name, "reason": f"more than {MAX_ATTACHMENTS_PER_TEST} files"})
+            continue
+        try:
+            os.makedirs(snapshots, exist_ok=True)
+            copy = os.path.join(snapshots, str(index))
+            shutil.copyfile(real, copy)
+        except OSError as error:
+            entries.append({"name": name, "reason": f"unreadable: {error.strerror}"})
+            continue
+        entries.append({"name": name, "file": copy})
+    return entries
+
+
+class _AttachmentStager:
+    """Stages a test's files for upload, in the controller, within the
+    per-test and per-session caps: what it saved in ``peeps_artifacts_dir``
+    and the copies ``snapshot_attachments`` made of what it attached. Both
+    live in the action's own directory; nothing else is read."""
+
+    def __init__(self, base: str) -> None:
+        self.base = os.path.realpath(base)
+        self.upload_dir = os.path.join(self.base, "upload")
         os.makedirs(self.upload_dir, exist_ok=True)
-        self.workspace = os.path.realpath(workspace) if workspace else None
         self.session_files = 0
         self.session_bytes = 0
-        self._basetemp: Optional[str] = None
-
-    def _roots(self) -> List[str]:
-        roots = [os.path.realpath(self.base)]
-        if self.workspace:
-            roots.append(self.workspace)
-        if self._basetemp is None:
-            try:
-                factory = getattr(self.config, "_tmp_path_factory", None)
-                self._basetemp = os.path.realpath(str(factory.getbasetemp())) if factory else ""
-            except Exception:
-                self._basetemp = ""
-        if self._basetemp:
-            roots.append(self._basetemp)
-        return roots
 
     def stage(
-        self, nodeid: str, run_id: str, attached: List[Any]
+        self, nodeid: str, run_id: str, attached: List[Dict[str, Any]]
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
         """(attachments, omitted): what was staged and what was not, and why."""
         staged: List[Dict[str, Any]] = []
         omitted: List[Dict[str, str]] = []
-        candidates: List[Tuple[str, str, str]] = []  # (source, name, origin)
-        test_dir = os.path.join(self.base, "tests", artifacts_key(nodeid))
+        candidates: List[Tuple[str, str]] = []  # (source, name)
+        key = artifacts_key(nodeid)
+        test_dir = os.path.join(self.base, "tests", key)
         if os.path.isdir(test_dir) and not os.path.islink(test_dir):
-            candidates.extend((abs_path, rel, "dir") for abs_path, rel in _walk_files(test_dir))
-        invocation = str(self.config.invocation_params.dir)
-        for value in attached:
-            raw = os.fspath(value) if isinstance(value, (str, os.PathLike)) else None
-            if not raw:
-                omitted.append({"name": str(value)[:200], "reason": "not a path"})
-                continue
-            abs_path = os.path.join(invocation, raw)
-            candidates.append((abs_path, os.path.basename(raw) or "file", "property"))
+            for abs_path, rel in _walk_files(test_dir):
+                # A symlink is not followed out, and a copied .git /
+                # node_modules / .env is refused here too.
+                if os.path.islink(abs_path):
+                    omitted.append({"name": rel, "reason": "symlink"})
+                elif any(_DENY_SEGMENT.match(segment) for segment in rel.split("/")):
+                    omitted.append({"name": rel, "reason": "refused name"})
+                else:
+                    candidates.append((abs_path, rel))
+        snapshots = os.path.join(self.base, "attached", key)
+        for entry in attached if isinstance(attached, list) else []:
+            name = str(entry.get("name") or "file")
+            source = entry.get("file")
+            if not isinstance(source, str):
+                omitted.append({"name": name, "reason": str(entry.get("reason") or "not uploaded")})
+            elif os.path.realpath(os.path.dirname(source)) != snapshots or os.path.islink(source):
+                omitted.append({"name": name, "reason": "not a snapshot"})
+            else:
+                candidates.append((source, name))
 
         taken: set = set()
         test_bytes = 0
-        seen: set = set()
-        roots = None
-        for source, name, origin in candidates:
-            real = os.path.realpath(source)
-            if real in seen:
-                continue  # attached and in the directory: once
-            seen.add(real)
-            if origin == "dir":
-                # Our own directory: a symlink in it is not followed out, and
-                # a copied .git / node_modules / .env is refused here too.
-                if os.path.islink(source):
-                    omitted.append({"name": name, "reason": "symlink"})
-                    continue
-                if any(_DENY_SEGMENT.match(segment) for segment in name.split("/")):
-                    omitted.append({"name": name, "reason": "refused name"})
-                    continue
-            else:
-                roots = roots or self._roots()
-                if _inside(real, roots) is None:
-                    omitted.append({"name": name, "reason": "outside the workspace"})
-                    continue
+        for source, name in candidates:
             try:
-                info = os.stat(real)
+                info = os.lstat(source)
             except OSError:
                 omitted.append({"name": name, "reason": "missing"})
                 continue
@@ -447,9 +491,9 @@ class _AttachmentStager:
                 continue
             staged_name = upload_name(run_id, name, taken)
             try:
-                # A copy, not a link: what the test saved when it ended, even
-                # if a later test overwrites the same path.
-                shutil.copyfile(real, os.path.join(self.upload_dir, staged_name))
+                # Moved out of the per-test directories, which are ours: the
+                # next attempt or test starts from empty ones anyway.
+                shutil.move(source, os.path.join(self.upload_dir, staged_name))
             except OSError as error:
                 omitted.append({"name": name, "reason": f"unreadable: {error.strerror}"})
                 continue
@@ -468,8 +512,8 @@ class _AttachmentStager:
 def evidence_fields(
     phases: List[Dict[str, Any]], status: str
 ) -> Tuple[Dict[str, Any], List[Any]]:
-    """The evidence fields of one attempt's ``test_end``, and the paths the
-    test attached (``peeps_attachment``) for the stager.
+    """The evidence fields of one attempt's ``test_end``, and the snapshots
+    of what the test attached (``peeps_attachment``) for the stager.
 
     Every field is optional and left out when empty::
 
@@ -514,7 +558,6 @@ def evidence_fields(
         if sections:
             fields["output"] = sections[-MAX_OUTPUT_SECTIONS:]
     properties: List[Dict[str, Any]] = []
-    attached: List[Any] = []
     omitted = 0
     for pair in last.get("properties") or []:
         try:
@@ -522,9 +565,7 @@ def evidence_fields(
         except (TypeError, ValueError):
             continue
         name = str(name)
-        if name == ATTACHMENT_PROPERTY:
-            attached.append(value)
-        elif name in INTERNAL_PROPERTIES:
+        if name in INTERNAL_PROPERTIES:
             continue
         elif len(properties) >= MAX_PROPERTIES:
             omitted += 1
@@ -534,6 +575,7 @@ def evidence_fields(
         fields["properties"] = properties
     if omitted:
         fields["propertiesOmitted"] = omitted
+    attached = next((p["attached"] for p in reversed(phases) if p.get("attached")), [])
     return fields, attached
 
 
@@ -624,8 +666,10 @@ class _Streamer:
         phases = self.phases.setdefault(report.nodeid, [])
         failed = report.outcome in ("failed", "rerun")
         evidence = getattr(report, EVIDENCE_ATTRIBUTE, None) or {}
+        properties_kept = evidence.get("propertiesKept", 0)
         properties_from = evidence.get("propertiesFrom", 0)
         sections_from = evidence.get("sectionsFrom", 0)
+        user_properties = list(getattr(report, "user_properties", None) or [])
         phases.append(
             {
                 "when": report.when,
@@ -639,9 +683,11 @@ class _Streamer:
                 "skipReason": (
                     skip_reason(report.longrepr) if report.outcome == "skipped" else None
                 ),
-                "properties": list(getattr(report, "user_properties", None) or [])[
-                    properties_from:
-                ],
+                # Set before the first attempt (at collection), then this
+                # attempt's own: never an earlier attempt's.
+                "properties": user_properties[:properties_kept]
+                + user_properties[properties_from:],
+                "attached": evidence.get("attached"),
                 "sections": list(getattr(report, "sections", None) or [])[sections_from:],
             }
         )
@@ -834,41 +880,76 @@ EVIDENCE_ATTRIBUTE = "peeps_evidence"
 
 class _EvidenceRecorder:
     """Marks each report with where this attempt's user properties and
-    captured sections start, and with the exception a failed phase raised.
+    captured sections start, with the exception a failed phase raised, and
+    with the snapshots of the files the attempt attached.
 
     pytest-rerunfailures reruns the same item, and ``item.user_properties`` and
     its captured sections keep growing across attempts; the offsets taken at
     each attempt's setup let the streamer read the final attempt's own, with
-    no duplicates. Runs where the test runs (an xdist worker included): the
-    exception object never reaches the controller, only the reports do."""
+    no duplicates (properties set before the first attempt, at collection,
+    belong to every attempt). Runs where the test runs, an xdist worker
+    included: the exception object and the test's files are there, and only
+    the reports reach the controller."""
 
     @pytest.hookimpl(hookwrapper=True, tryfirst=True)
     def pytest_runtest_setup(self, item: Any):
+        offsets = getattr(item, "_peeps_attempt_offsets", None)
+        properties = len(item.user_properties)
         item._peeps_attempt_offsets = (
-            len(item.user_properties),
+            offsets[0] if offsets else properties,
+            properties,
             len(getattr(item, "_report_sections", None) or []),
         )
-        # Each attempt starts with an empty artifacts directory, before any
+        item._peeps_attached = []
+        item._peeps_attached_count = 0
+        # Each attempt starts with empty artifacts directories, before any
         # fixture runs: an attempt that fails in setup, before it ever asks
         # for `peeps_artifacts_dir`, must not report the last attempt's files.
         base = os.environ.get("PEEPS_ARTIFACTS_DIR")
         if base:
-            directory = os.path.join(base, "tests", artifacts_key(item.nodeid))
-            if os.path.islink(directory):
-                os.unlink(directory)
-            elif os.path.lexists(directory):
-                shutil.rmtree(directory, ignore_errors=True)
+            key = artifacts_key(item.nodeid)
+            for directory in (os.path.join(base, "tests", key), os.path.join(base, "attached", key)):
+                if os.path.islink(directory):
+                    os.unlink(directory)
+                elif os.path.lexists(directory):
+                    shutil.rmtree(directory, ignore_errors=True)
         yield
+
+    def _snapshot(self, item: Any) -> None:
+        base = os.environ.get("PEEPS_ARTIFACTS_DIR")
+        offsets = getattr(item, "_peeps_attempt_offsets", None)
+        if not base or offsets is None:
+            return
+        values = [
+            value
+            for name, value in item.user_properties[offsets[1] :]
+            if name == ATTACHMENT_PROPERTY
+        ][item._peeps_attached_count :]
+        if values:
+            item._peeps_attached.extend(snapshot_attachments(item, values, base))
+
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_runtest_teardown(self, item: Any, nextitem: Any):
+        # Before the fixtures' teardown (tmp_path may go with it), and again
+        # after it for what a fixture attached while tearing down.
+        self._snapshot(item)
+        yield
+        self._snapshot(item)
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_makereport(self, item: Any, call: Any):
         outcome = yield
         report = outcome.get_result()
-        properties_from, sections_from = getattr(item, "_peeps_attempt_offsets", (0, 0))
+        kept, properties_from, sections_from = getattr(
+            item, "_peeps_attempt_offsets", (0, 0, 0)
+        )
         evidence: Dict[str, Any] = {
+            "propertiesKept": kept,
             "propertiesFrom": properties_from,
             "sectionsFrom": sections_from,
         }
+        if call.when == "teardown" and getattr(item, "_peeps_attached", None):
+            evidence["attached"] = list(item._peeps_attached)
         excinfo = getattr(call, "excinfo", None)
         if report.failed and excinfo is not None:
             try:
@@ -938,11 +1019,7 @@ def pytest_configure(config: Any) -> None:
             config.pluginmanager.register(_Selector(plan), "peeps-selector")
         if not worker:
             artifacts = os.environ.get("PEEPS_ARTIFACTS_DIR")
-            stager = (
-                _AttachmentStager(config, artifacts, os.environ.get("PEEPS_WORKSPACE"))
-                if artifacts
-                else None
-            )
+            stager = _AttachmentStager(artifacts) if artifacts else None
             config.pluginmanager.register(
                 _Streamer(plan, os.environ.get("PEEPS_RESULTS_OUT"), stager),
                 "peeps-streamer",
