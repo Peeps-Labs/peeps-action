@@ -955,6 +955,8 @@ function pytestEnv(extra) {
   if (!("PEEPS_PLAN_FILE" in extra)) delete env.PEEPS_PLAN_FILE;
   if (!("PEEPS_COLLECT_OUT" in extra)) delete env.PEEPS_COLLECT_OUT;
   if (!("PEEPS_SELECT_ONLY" in extra)) delete env.PEEPS_SELECT_ONLY;
+  if (!("PEEPS_ARTIFACTS_DIR" in extra)) delete env.PEEPS_ARTIFACTS_DIR;
+  if (!("PEEPS_WORKSPACE" in extra)) delete env.PEEPS_WORKSPACE;
   return env;
 }
 function spawnPytest(args, options) {
@@ -1083,7 +1085,11 @@ async function runPytestReport(env, peeps) {
   await executePytestAndReport(env, peeps, {
     collection,
     byNodeId,
-    batches: response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }))
+    batches: response.batches.map((b) => ({
+      batchId: b.batchId,
+      batchNumber: b.batchNumber,
+      runIds: b.runs.map((r) => r.runId)
+    }))
   });
 }
 async function runPytestDispatched(env, peeps) {
@@ -1131,6 +1137,8 @@ async function executePytestAndReport(env, peeps, input2) {
   const planFile = import_node_path6.default.join(scratch, "plan.json");
   const resultsFile = import_node_path6.default.join(scratch, "results.json");
   const outputDir = import_node_path6.default.join(scratch, "output");
+  const artifactsDir = import_node_path6.default.join(scratch, "evidence");
+  await (0, import_promises4.mkdir)(artifactsDir);
   const runs = Object.fromEntries(
     Object.entries(input2.byNodeId).map(([nodeId, run]) => [
       nodeId,
@@ -1152,6 +1160,9 @@ async function executePytestAndReport(env, peeps, input2) {
     env: pytestEnv({
       PEEPS_PLAN_FILE: planFile,
       PEEPS_RESULTS_OUT: resultsFile,
+      PEEPS_ARTIFACTS_DIR: artifactsDir,
+      // Attachments are refused outside the repository (and pytest's temp).
+      PEEPS_WORKSPACE: env.workspace,
       // Run mode executes the plan and nothing else, whatever addopts adds.
       ...input2.nodeIds ? { PEEPS_SELECT_ONLY: "1" } : {}
     }),
@@ -1164,12 +1175,20 @@ async function executePytestAndReport(env, peeps, input2) {
     }
   );
   const runIdByOutputDir = await readOutputDirs(resultsFile, input2.byNodeId);
+  const evidence = await stagedEvidence(import_node_path6.default.join(artifactsDir, "upload"), input2.byNodeId);
   for (const b of input2.batches) {
     try {
       const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir);
       console.log(`[peeps] uploaded ${uploaded} artifact file(s) for batch ${b.batchNumber}`);
     } catch (error) {
       console.log(`[peeps] artifact upload failed for batch ${b.batchId}: ${String(error)}`);
+    }
+    const mine = evidence.filter(
+      (file) => input2.batches.length === 1 || (b.runIds ?? []).includes(file.runId)
+    );
+    if (mine.length > 0) {
+      const uploaded = await uploadEvidence(peeps, b.batchId, mine);
+      console.log(`[peeps] uploaded ${uploaded} test attachment(s) for batch ${b.batchNumber}`);
     }
     try {
       await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded: false });
@@ -1214,6 +1233,47 @@ async function* walkOutput(dir, rel = "") {
     if (entry.isDirectory()) yield* walkOutput(abs, relPath);
     else if (entry.isFile()) yield { abs, rel: relPath };
   }
+}
+var MAX_EVIDENCE_BYTES = 25 * 1024 * 1024;
+async function stagedEvidence(uploadDir, byNodeId) {
+  try {
+    if (!(await (0, import_promises4.lstat)(uploadDir)).isDirectory()) return [];
+  } catch {
+    return [];
+  }
+  const runIds = Object.values(byNodeId).map((run) => run.runId);
+  const staged = [];
+  for (const entry of await (0, import_promises4.readdir)(uploadDir, { withFileTypes: true })) {
+    const name = entry.name;
+    if (!entry.isFile() || !/^[A-Za-z0-9._-]{1,200}$/.test(name)) {
+      console.log(`[peeps] not uploading ${JSON.stringify(name)}: not a staged attachment`);
+      continue;
+    }
+    const runId = runIds.find((id) => name.startsWith(`${id}-evidence-`));
+    if (runId === void 0) continue;
+    staged.push({ abs: import_node_path6.default.join(uploadDir, name), name, runId });
+  }
+  return staged.sort((a, b) => a.name.localeCompare(b.name));
+}
+async function uploadEvidence(peeps, batchId, files) {
+  let uploaded = 0;
+  for (const file of files) {
+    try {
+      const info = await (0, import_promises4.lstat)(file.abs);
+      if (!info.isFile() || info.size > MAX_EVIDENCE_BYTES) {
+        console.log(`[peeps] skipping attachment ${file.name}: not a file within ${MAX_EVIDENCE_BYTES} bytes`);
+        continue;
+      }
+      await peeps.postBytes(
+        `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(`data/${file.name}`)}`,
+        await (0, import_promises4.readFile)(file.abs)
+      );
+      uploaded += 1;
+    } catch (error) {
+      console.log(`[peeps] skipped attachment ${file.name}: ${String(error).slice(0, 200)}`);
+    }
+  }
+  return uploaded;
 }
 async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
   let uploaded = 0;

@@ -25,7 +25,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { RunnerEnv } from "./env";
@@ -215,6 +215,8 @@ function pytestEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   if (!("PEEPS_PLAN_FILE" in extra)) delete env.PEEPS_PLAN_FILE;
   if (!("PEEPS_COLLECT_OUT" in extra)) delete env.PEEPS_COLLECT_OUT;
   if (!("PEEPS_SELECT_ONLY" in extra)) delete env.PEEPS_SELECT_ONLY;
+  if (!("PEEPS_ARTIFACTS_DIR" in extra)) delete env.PEEPS_ARTIFACTS_DIR;
+  if (!("PEEPS_WORKSPACE" in extra)) delete env.PEEPS_WORKSPACE;
   return env;
 }
 
@@ -386,7 +388,11 @@ export async function runPytestReport(env: RunnerEnv, peeps: PeepsClient): Promi
   await executePytestAndReport(env, peeps, {
     collection,
     byNodeId,
-    batches: response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber })),
+    batches: response.batches.map((b) => ({
+      batchId: b.batchId,
+      batchNumber: b.batchNumber,
+      runIds: b.runs.map((r) => r.runId),
+    })),
   });
 }
 
@@ -458,7 +464,11 @@ export async function executePytestAndReport(
   input: {
     collection: PytestCollection;
     byNodeId: Record<string, PlanEntry>;
-    batches: Array<{ batchId: string; batchNumber: number }>;
+    /**
+     * `runIds`: the runs a batch holds, so each test's evidence goes to its
+     * own batch. Omitted with a single batch, which then holds every run.
+     */
+    batches: Array<{ batchId: string; batchNumber: number; runIds?: string[] }>;
     /** Run only these (run mode); omitted runs the whole suite (report mode). */
     nodeIds?: string[];
   },
@@ -467,6 +477,10 @@ export async function executePytestAndReport(
   const planFile = path.join(scratch, "plan.json");
   const resultsFile = path.join(scratch, "results.json");
   const outputDir = path.join(scratch, "output");
+  // `peeps_artifacts_dir` directories and the files the plugin staged from
+  // them (and from `peeps_attachment` properties) for upload.
+  const artifactsDir = path.join(scratch, "evidence");
+  await mkdir(artifactsDir);
   const runs = Object.fromEntries(
     Object.entries(input.byNodeId).map(([nodeId, run]) => [
       nodeId,
@@ -503,6 +517,9 @@ export async function executePytestAndReport(
     env: pytestEnv({
       PEEPS_PLAN_FILE: planFile,
       PEEPS_RESULTS_OUT: resultsFile,
+      PEEPS_ARTIFACTS_DIR: artifactsDir,
+      // Attachments are refused outside the repository (and pytest's temp).
+      PEEPS_WORKSPACE: env.workspace,
       // Run mode executes the plan and nothing else, whatever addopts adds.
       ...(input.nodeIds ? { PEEPS_SELECT_ONLY: "1" } : {}),
     }),
@@ -516,12 +533,20 @@ export async function executePytestAndReport(
   );
 
   const runIdByOutputDir = await readOutputDirs(resultsFile, input.byNodeId);
+  const evidence = await stagedEvidence(path.join(artifactsDir, "upload"), input.byNodeId);
   for (const b of input.batches) {
     try {
       const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir);
       console.log(`[peeps] uploaded ${uploaded} artifact file(s) for batch ${b.batchNumber}`);
     } catch (error) {
       console.log(`[peeps] artifact upload failed for batch ${b.batchId}: ${String(error)}`);
+    }
+    const mine = evidence.filter(
+      (file) => input.batches.length === 1 || (b.runIds ?? []).includes(file.runId),
+    );
+    if (mine.length > 0) {
+      const uploaded = await uploadEvidence(peeps, b.batchId, mine);
+      console.log(`[peeps] uploaded ${uploaded} test attachment(s) for batch ${b.batchNumber}`);
     }
     try {
       // `reportUploaded` stamps the batch's Playwright HTML report
@@ -590,6 +615,109 @@ async function* walkOutput(dir: string, rel = ""): AsyncGenerator<{ abs: string;
     if (entry.isDirectory()) yield* walkOutput(abs, relPath);
     else if (entry.isFile()) yield { abs, rel: relPath };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Test evidence: the extra fields of a pytest test_end, and its attachments
+// ---------------------------------------------------------------------------
+
+/**
+ * The fields the plugin adds to a pytest test's FINAL `test_end` event (a
+ * retried attempt's test_end carries none), on top of the fields every
+ * test_end has (`testName`, `status`, `duration`, `error`, `errorStack`).
+ * Every field is optional and absent when empty, and a server that does not
+ * know them strips them. `python/peeps_pytest_plugin.py` builds them; this
+ * type is their documentation.
+ */
+export interface PytestTestEndEvidence {
+  /** Status `skipped`: the reason given to `pytest.skip()`, a skip or skipif marker (≤ 1,000 chars). */
+  skipReason?: string;
+  /** Status `failed`: the first phase that failed. */
+  failure?: {
+    phase: "setup" | "call" | "teardown";
+    /** `AssertionError`, or module-qualified: `camera.errors.Timeout`. Null when no exception was raised (a strict xpass). */
+    exceptionType: string | null;
+    /** `str(exception)`, the assertion rewrite included: `sharpness\nassert 0.41 >= 0.6` (≤ 4,000 chars). */
+    message: string;
+    /** pytest's rendered report (`longreprtext`), the middle trimmed past ~12,000 chars. */
+    traceback: string;
+  };
+  /** `record_property(name, value)` pairs, in order: at most 50; values JSON scalars, anything else as text (≤ 1,000 chars). */
+  properties?: Array<{ name: string; value: string | number | boolean | null }>;
+  /** How many properties past the first 50 were left out. */
+  propertiesOmitted?: number;
+  /** Status `failed`: captured sections, as pytest titles them (`Captured stdout call`, `Captured log setup`…), each trimmed to its last 8,000 chars; at most 10. */
+  output?: Array<{ name: string; text: string }>;
+  /**
+   * Files the test saved in `peeps_artifacts_dir` or attached with
+   * `record_property("peeps_attachment", path)`. `path` is the batch-relative
+   * name the action uploads it under after pytest exits
+   * (`data/<runId>-evidence-<name>`, `.dat` appended to a type Peeps' `data/`
+   * refuses); `name` is the file's own name (relative path inside the
+   * directory). At most 20 per test, 25 MB each, 100 MB per test.
+   */
+  attachments?: Array<{ name: string; path: string; size: number }>;
+  /** Files not uploaded, and why (outside the workspace, over a cap…); at most 20 listed. */
+  attachmentsOmitted?: Array<{ name: string; reason: string }>;
+}
+
+/** The plugin caps an attachment at this; anything larger was not staged by it. */
+const MAX_EVIDENCE_BYTES = 25 * 1024 * 1024;
+
+/**
+ * The files the plugin staged, each with the run it belongs to (its name
+ * starts `<runId>-evidence-`). Only plain files directly in the staging
+ * directory, named as the plugin names them, for a run of this job: the
+ * plugin already refused paths outside the workspace, and this refuses
+ * anything else that turned up there, a symlink included.
+ */
+export async function stagedEvidence(
+  uploadDir: string,
+  byNodeId: Record<string, PlanEntry>,
+): Promise<Array<{ abs: string; name: string; runId: string }>> {
+  try {
+    if (!(await lstat(uploadDir)).isDirectory()) return [];
+  } catch {
+    return [];
+  }
+  const runIds = Object.values(byNodeId).map((run) => run.runId);
+  const staged = [];
+  for (const entry of await readdir(uploadDir, { withFileTypes: true })) {
+    const name = entry.name;
+    if (!entry.isFile() || !/^[A-Za-z0-9._-]{1,200}$/.test(name)) {
+      console.log(`[peeps] not uploading ${JSON.stringify(name)}: not a staged attachment`);
+      continue;
+    }
+    const runId = runIds.find((id) => name.startsWith(`${id}-evidence-`));
+    if (runId === undefined) continue;
+    staged.push({ abs: path.join(uploadDir, name), name, runId });
+  }
+  return staged.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function uploadEvidence(
+  peeps: PeepsClient,
+  batchId: string,
+  files: Array<{ abs: string; name: string }>,
+): Promise<number> {
+  let uploaded = 0;
+  for (const file of files) {
+    try {
+      const info = await lstat(file.abs);
+      if (!info.isFile() || info.size > MAX_EVIDENCE_BYTES) {
+        console.log(`[peeps] skipping attachment ${file.name}: not a file within ${MAX_EVIDENCE_BYTES} bytes`);
+        continue;
+      }
+      await peeps.postBytes(
+        `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(`data/${file.name}`)}`,
+        await readFile(file.abs),
+      );
+      uploaded += 1;
+    } catch (error) {
+      console.log(`[peeps] skipped attachment ${file.name}: ${String(error).slice(0, 200)}`);
+    }
+  }
+  return uploaded;
 }
 
 async function uploadOutput(

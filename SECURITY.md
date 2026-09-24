@@ -41,6 +41,7 @@ This is more than "test results". Concretely:
 | The Playwright test list: files, titles, projects, tags (pytest: node ids, browsers, lines, markers) | `inventory`, `report`, `run` |
 | Test results, timings, errors and stack traces | `report`, `run` |
 | The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run` |
+| pytest only: skip reasons, `record_property` values, a failed test's captured stdout/stderr/log output, and the files a test saves in `peeps_artifacts_dir` or attaches with `record_property("peeps_attachment", path)` (only from inside the repository or pytest's temporary directory) | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
 | Tool results in an agent session: file contents, diffs, test output | `agent` |
@@ -136,4 +137,7 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
 - For a pytest suite it also loads `python/peeps_pytest_plugin.py` from this
   repository into pytest (`-p peeps_pytest_plugin`). It uses the Python
   standard library only, imports nothing from your repository, and reads the
-  plan file and writes the result files the action names.
+  plan file and writes the result files the action names. It copies a test's
+  attachments into the action's own temporary directory for upload, and
+  refuses any path outside the repository, that directory and pytest's
+  temporary directory, as well as `.git`, `node_modules` and `.env*`.

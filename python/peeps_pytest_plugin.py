@@ -20,19 +20,41 @@ sets, and nothing at all when neither is set:
     pytest-playwright wrote that test's traces, screenshots and videos to, so
     the action can upload them under the run they belong to.
 
+Evidence on ``test_end``
+    The final attempt's ``test_end`` also carries what a non-browser test
+    leaves behind, each field optional and absent when empty (see
+    ``evidence_fields`` for the exact shape and caps; README "What a pytest
+    test reports" documents it for the server):
+
+    - ``skipReason``: the reason of a ``pytest.skip()`` / skip / skipif;
+    - ``failure``: the failing phase, exception type and message, and
+      pytest's rendered traceback, assertion rewrite included;
+    - ``properties``: ``record_property`` name/value pairs (measurements);
+    - ``output``: captured stdout / stderr / log sections of a failed test;
+    - ``attachments``: files the test saved in ``peeps_artifacts_dir`` or
+      named with ``record_property("peeps_attachment", path)``, staged under
+      ``PEEPS_ARTIFACTS_DIR/upload`` for the action to upload as
+      ``data/<runId>-evidence-<name>``.
+
 Standard library only: this runs inside the customer's Python, whatever it has.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import queue
+import re
+import shutil
+import stat
 import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pytest
 
@@ -43,6 +65,41 @@ DELIVERY_DRAIN_SECONDS = 60
 
 #: The user property a test's pytest-playwright output directory rides on.
 OUTPUT_DIR_PROPERTY = "peeps_output_dir"
+
+#: ``record_property(ATTACHMENT_PROPERTY, path)`` attaches a file to the test.
+ATTACHMENT_PROPERTY = "peeps_attachment"
+
+#: Our own user properties: never reported as measurements.
+INTERNAL_PROPERTIES = {OUTPUT_DIR_PROPERTY, ATTACHMENT_PROPERTY}
+
+# Evidence caps. An events request is capped at 1 MB by Peeps and a run's
+# events travel together, so every text field is bounded.
+MAX_MESSAGE_CHARS = 4000
+MAX_TRACEBACK_HEAD_CHARS = 2000
+MAX_TRACEBACK_TAIL_CHARS = 10000
+MAX_SKIP_REASON_CHARS = 1000
+MAX_PROPERTIES = 50
+MAX_PROPERTY_NAME_CHARS = 200
+MAX_PROPERTY_VALUE_CHARS = 1000
+MAX_OUTPUT_SECTIONS = 10
+MAX_OUTPUT_SECTION_CHARS = 8000
+MAX_ATTACHMENTS_PER_TEST = 20
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+MAX_ATTACHMENT_BYTES_PER_TEST = 100 * 1024 * 1024
+MAX_ATTACHMENTS_PER_SESSION = 1000
+MAX_ATTACHMENT_BYTES_PER_SESSION = 1024 * 1024 * 1024
+MAX_OMITTED_LISTED = 20
+
+#: The extensions Peeps accepts under a batch's ``data/`` (mirrors
+#: ``DATA_ATTACHMENT_EXTENSIONS`` in Peeps' artifacts route). Any other file
+#: is uploaded with ``.dat`` appended, so it is stored rather than refused.
+DATA_EXTENSIONS = {
+    "dat", "png", "jpg", "jpeg", "gif", "webp", "webm", "mp4", "zip",
+    "md", "txt", "log", "json", "csv", "har", "pdf",
+}  # fmt: skip
+
+#: Path segments never uploaded, as the action's agent tools refuse them.
+_DENY_SEGMENT = re.compile(r"^(\.git|node_modules|\.env(\..*)?)$")
 
 
 def _write_json(path: str, value: Any) -> None:
@@ -174,13 +231,314 @@ def _crash_message(report: Any) -> Optional[str]:
     return message if isinstance(message, str) and message else None
 
 
+# ---------------------------------------------------------------------------
+# Evidence: what a test leaves behind, for its final test_end
+# ---------------------------------------------------------------------------
+
+
+def _trim_middle(text: str, head: int, tail: int) -> str:
+    """Keep both ends: a traceback's cause is at its end, its entry at the top."""
+    if len(text) <= head + tail:
+        return text
+    cut = len(text) - head - tail
+    return f"{text[:head]}\n... {cut} characters trimmed ...\n{text[-tail:]}"
+
+
+def _trim_tail(text: str, keep: int) -> str:
+    if len(text) <= keep:
+        return text
+    return f"... {len(text) - keep} characters trimmed ...\n{text[-keep:]}"
+
+
+def skip_reason(longrepr: Any) -> Optional[str]:
+    """The reason of a skip report: ``(path, line, "Skipped: <reason>")``, a
+    list once it has crossed from an xdist worker."""
+    if isinstance(longrepr, (tuple, list)) and len(longrepr) == 3:
+        reason = longrepr[2]
+    else:
+        reason = getattr(longrepr, "reprcrash", None) and longrepr.reprcrash.message
+    if not isinstance(reason, str) or not reason:
+        return None
+    if reason.startswith("Skipped: "):
+        reason = reason[len("Skipped: ") :]
+    return reason[:MAX_SKIP_REASON_CHARS]
+
+
+def json_safe(value: Any) -> Any:
+    """A measurement as JSON Peeps can store: a string, finite number, bool or
+    null as is (a numpy scalar through ``.item()``), anything else as text."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) <= 2**53 else str(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, str):
+        return value[:MAX_PROPERTY_VALUE_CHARS]
+    item = getattr(value, "item", None)
+    if callable(item) and type(value).__module__.startswith("numpy"):
+        try:
+            scalar = item()
+        except Exception:
+            scalar = value
+        if scalar is not value and not hasattr(scalar, "item"):
+            return json_safe(scalar)
+    try:
+        text = json.dumps(value, allow_nan=False, default=str)
+    except Exception:
+        try:
+            text = str(value)
+        except Exception:
+            text = f"<unprintable {type(value).__name__}>"
+    return text[:MAX_PROPERTY_VALUE_CHARS]
+
+
+def _exception_type(excinfo: Any) -> str:
+    kind = excinfo.type
+    module = getattr(kind, "__module__", "builtins")
+    name = getattr(kind, "__qualname__", None) or excinfo.typename
+    return name if module == "builtins" else f"{module}.{name}"
+
+
+def artifacts_key(nodeid: str) -> str:
+    """A test's directory under ``PEEPS_ARTIFACTS_DIR/tests``: stable across
+    processes, so an xdist worker and the controller name the same one."""
+    return hashlib.sha1(nodeid.encode("utf-8")).hexdigest()[:16]
+
+
+def upload_name(run_id: str, name: str, taken: set) -> str:
+    """The file name one attachment is staged and uploaded under (the batch
+    path is ``data/`` + this): the run, ``-evidence-``, then the file's own
+    name flattened; an extension Peeps' ``data/`` refuses gets ``.dat``
+    appended; a name another attachment of the test took gets a counter."""
+    flat = re.sub(r"[^A-Za-z0-9._-]", "_", name.replace("/", "-")).lstrip(".") or "file"
+    if len(flat) > 120:
+        ext = os.path.splitext(flat)[1][:12]
+        flat = hashlib.sha1(name.encode("utf-8")).hexdigest() + ext
+    ext = os.path.splitext(flat)[1][1:].lower()
+    if ext not in DATA_EXTENSIONS:
+        flat = f"{flat}.dat"
+    candidate = f"{run_id}-evidence-{flat}"
+    counter = 2
+    while candidate in taken:
+        candidate = f"{run_id}-evidence-{counter}-{flat}"
+        counter += 1
+    taken.add(candidate)
+    return candidate
+
+
+def _inside(path: str, roots: List[str]) -> Optional[str]:
+    """The root ``path`` (real) lies under, with no refused segment on the way."""
+    for root in roots:
+        rel = os.path.relpath(path, root)
+        if rel == os.curdir or rel.startswith(os.pardir) or os.path.isabs(rel):
+            continue
+        if any(_DENY_SEGMENT.match(segment) for segment in rel.split(os.sep)):
+            return None
+        return root
+    return None
+
+
+def _walk_files(directory: str) -> Iterator[Tuple[str, str]]:
+    """Regular files under ``directory``, sorted, symlinks not followed."""
+    for current, dirs, files in os.walk(directory):
+        dirs.sort()
+        for name in sorted(files):
+            abs_path = os.path.join(current, name)
+            yield abs_path, os.path.relpath(abs_path, directory).replace(os.sep, "/")
+
+
+class _AttachmentStager:
+    """Stages a test's files for upload, within the per-test and per-session
+    caps and inside the allowed roots: the repository, the action's artifacts
+    directory and pytest's temporary directory (``tmp_path`` lives there)."""
+
+    def __init__(self, config: Any, base: str, workspace: Optional[str]) -> None:
+        self.config = config
+        self.base = base
+        self.upload_dir = os.path.join(base, "upload")
+        os.makedirs(self.upload_dir, exist_ok=True)
+        self.workspace = os.path.realpath(workspace) if workspace else None
+        self.session_files = 0
+        self.session_bytes = 0
+        self._basetemp: Optional[str] = None
+
+    def _roots(self) -> List[str]:
+        roots = [os.path.realpath(self.base)]
+        if self.workspace:
+            roots.append(self.workspace)
+        if self._basetemp is None:
+            try:
+                factory = getattr(self.config, "_tmp_path_factory", None)
+                self._basetemp = os.path.realpath(str(factory.getbasetemp())) if factory else ""
+            except Exception:
+                self._basetemp = ""
+        if self._basetemp:
+            roots.append(self._basetemp)
+        return roots
+
+    def stage(
+        self, nodeid: str, run_id: str, attached: List[Any]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+        """(attachments, omitted): what was staged and what was not, and why."""
+        staged: List[Dict[str, Any]] = []
+        omitted: List[Dict[str, str]] = []
+        candidates: List[Tuple[str, str, str]] = []  # (source, name, origin)
+        test_dir = os.path.join(self.base, "tests", artifacts_key(nodeid))
+        if os.path.isdir(test_dir):
+            candidates.extend((abs_path, rel, "dir") for abs_path, rel in _walk_files(test_dir))
+        invocation = str(self.config.invocation_params.dir)
+        for value in attached:
+            raw = os.fspath(value) if isinstance(value, (str, os.PathLike)) else None
+            if not raw:
+                omitted.append({"name": str(value)[:200], "reason": "not a path"})
+                continue
+            abs_path = os.path.join(invocation, raw)
+            candidates.append((abs_path, os.path.basename(raw) or "file", "property"))
+
+        taken: set = set()
+        test_bytes = 0
+        seen: set = set()
+        roots = None
+        for source, name, origin in candidates:
+            real = os.path.realpath(source)
+            if real in seen:
+                continue  # attached and in the directory: once
+            seen.add(real)
+            if origin == "dir":
+                # Our own directory: a symlink in it is not followed out.
+                if os.path.islink(source):
+                    omitted.append({"name": name, "reason": "symlink"})
+                    continue
+            else:
+                roots = roots or self._roots()
+                if _inside(real, roots) is None:
+                    omitted.append({"name": name, "reason": "outside the workspace"})
+                    continue
+            try:
+                info = os.stat(real)
+            except OSError:
+                omitted.append({"name": name, "reason": "missing"})
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                omitted.append({"name": name, "reason": "not a regular file"})
+                continue
+            reason = None
+            if len(staged) >= MAX_ATTACHMENTS_PER_TEST:
+                reason = f"more than {MAX_ATTACHMENTS_PER_TEST} files"
+            elif info.st_size > MAX_ATTACHMENT_BYTES:
+                reason = f"larger than {MAX_ATTACHMENT_BYTES} bytes"
+            elif test_bytes + info.st_size > MAX_ATTACHMENT_BYTES_PER_TEST:
+                reason = f"test total over {MAX_ATTACHMENT_BYTES_PER_TEST} bytes"
+            elif self.session_files >= MAX_ATTACHMENTS_PER_SESSION:
+                reason = f"session over {MAX_ATTACHMENTS_PER_SESSION} files"
+            elif self.session_bytes + info.st_size > MAX_ATTACHMENT_BYTES_PER_SESSION:
+                reason = f"session total over {MAX_ATTACHMENT_BYTES_PER_SESSION} bytes"
+            if reason:
+                omitted.append({"name": name, "reason": reason})
+                continue
+            staged_name = upload_name(run_id, name, taken)
+            try:
+                # A copy, not a link: what the test saved when it ended, even
+                # if a later test overwrites the same path.
+                shutil.copyfile(real, os.path.join(self.upload_dir, staged_name))
+            except OSError as error:
+                omitted.append({"name": name, "reason": f"unreadable: {error.strerror}"})
+                continue
+            test_bytes += info.st_size
+            self.session_files += 1
+            self.session_bytes += info.st_size
+            staged.append({"name": name, "path": f"data/{staged_name}", "size": info.st_size})
+        for entry in omitted:
+            print(f"[peeps] attachment of {nodeid} not uploaded: {entry['name']} ({entry['reason']})", flush=True)
+        return staged, omitted[:MAX_OMITTED_LISTED]
+
+
+def evidence_fields(
+    phases: List[Dict[str, Any]], status: str
+) -> Tuple[Dict[str, Any], List[Any]]:
+    """The evidence fields of one attempt's ``test_end``, and the paths the
+    test attached (``peeps_attachment``) for the stager.
+
+    Every field is optional and left out when empty::
+
+        skipReason: str                  # status "skipped"
+        failure: {                       # status "failed", from the first failed phase
+            phase: "setup" | "call" | "teardown",
+            exceptionType: str | None,   # "AssertionError", "mypkg.CameraError"
+            message: str,                # str(exception), assertion rewrite included
+            traceback: str,              # pytest's longreprtext, middle trimmed
+        }
+        properties: [{name: str, value: str | number | bool | None}]
+        propertiesOmitted: int           # over MAX_PROPERTIES
+        output: [{name: str, text: str}] # status "failed": "Captured stdout call"...
+    """
+    fields: Dict[str, Any] = {}
+    last = phases[-1] if phases else {}
+    if status == "skipped":
+        reason = next((p["skipReason"] for p in phases if p.get("skipReason")), None)
+        if reason:
+            fields["skipReason"] = reason
+    if status == "failed":
+        failed = next((p for p in phases if p["outcome"] in ("failed", "rerun")), None)
+        if failed is not None:
+            exception = failed.get("exception") or {}
+            fields["failure"] = {
+                "phase": failed["when"],
+                "exceptionType": exception.get("type"),
+                "message": (exception.get("message") or failed.get("message") or "")[
+                    :MAX_MESSAGE_CHARS
+                ],
+                "traceback": _trim_middle(
+                    failed.get("longrepr") or "",
+                    MAX_TRACEBACK_HEAD_CHARS,
+                    MAX_TRACEBACK_TAIL_CHARS,
+                ),
+            }
+        sections = [
+            {"name": str(title)[:200], "text": _trim_tail(str(text), MAX_OUTPUT_SECTION_CHARS)}
+            for title, text in last.get("sections") or []
+            if str(title).startswith("Captured ") and text
+        ]
+        if sections:
+            fields["output"] = sections[-MAX_OUTPUT_SECTIONS:]
+    properties: List[Dict[str, Any]] = []
+    attached: List[Any] = []
+    omitted = 0
+    for pair in last.get("properties") or []:
+        try:
+            name, value = pair
+        except (TypeError, ValueError):
+            continue
+        name = str(name)
+        if name == ATTACHMENT_PROPERTY:
+            attached.append(value)
+        elif name in INTERNAL_PROPERTIES:
+            continue
+        elif len(properties) >= MAX_PROPERTIES:
+            omitted += 1
+        else:
+            properties.append({"name": name[:MAX_PROPERTY_NAME_CHARS], "value": json_safe(value)})
+    if properties:
+        fields["properties"] = properties
+    if omitted:
+        fields["propertiesOmitted"] = omitted
+    return fields, attached
+
+
 class _Streamer:
-    def __init__(self, plan_path: str, results_out: Optional[str]) -> None:
+    def __init__(
+        self,
+        plan_path: str,
+        results_out: Optional[str],
+        stager: Optional[_AttachmentStager] = None,
+    ) -> None:
         with open(plan_path, encoding="utf-8") as handle:
             plan = json.load(handle)
         self.peeps_url: str = plan["peepsUrl"]
         self.runs: Dict[str, Dict[str, Any]] = plan["runs"]
         self.results_out = results_out
+        self.stager = stager
         self.started: set = set()
         self.queues: Dict[str, List[Dict[str, Any]]] = {}
         self.phases: Dict[str, List[Dict[str, Any]]] = {}
@@ -218,6 +576,10 @@ class _Streamer:
             if name == OUTPUT_DIR_PROPERTY and isinstance(value, str):
                 self.output_dirs[report.nodeid] = value
         phases = self.phases.setdefault(report.nodeid, [])
+        failed = report.outcome in ("failed", "rerun")
+        evidence = getattr(report, EVIDENCE_ATTRIBUTE, None) or {}
+        properties_from = evidence.get("propertiesFrom", 0)
+        sections_from = evidence.get("sectionsFrom", 0)
         phases.append(
             {
                 "when": report.when,
@@ -225,9 +587,16 @@ class _Streamer:
                 "wasxfail": hasattr(report, "wasxfail"),
                 "duration": getattr(report, "duration", 0) or 0,
                 "message": _crash_message(report),
-                "longrepr": (
-                    report.longreprtext if report.outcome in ("failed", "rerun") else None
+                "longrepr": report.longreprtext if failed else None,
+                # The rest is evidence for the final attempt's test_end.
+                "exception": evidence.get("exception"),
+                "skipReason": (
+                    skip_reason(report.longrepr) if report.outcome == "skipped" else None
                 ),
+                "properties": list(getattr(report, "user_properties", None) or [])[
+                    properties_from:
+                ],
+                "sections": list(getattr(report, "sections", None) or [])[sections_from:],
             }
         )
 
@@ -269,10 +638,32 @@ class _Streamer:
                 event["error"] = settled["error"][:4000]
             if settled.get("errorStack"):
                 event["errorStack"] = settled["errorStack"][:8000]
+            if not retried:
+                # Evidence of the final attempt only: a retried attempt's
+                # test_end stays as it was, so nothing is reported twice.
+                event.update(self._evidence(nodeid, entry, phases, settled["status"]))
             self._enqueue(entry["runId"], event)
             if not retried:
                 self._enqueue(entry["runId"], {"type": "run_end", "timestamp": _now()})
                 self._flush(entry)
+
+    def _evidence(
+        self, nodeid: str, entry: Dict[str, Any], phases: List[Dict[str, Any]], status: str
+    ) -> Dict[str, Any]:
+        # Evidence is a bonus on top of the result: a bug here must never cost
+        # the test_end itself.
+        try:
+            fields, attached = evidence_fields(phases, status)
+            if self.stager is not None:
+                staged, omitted = self.stager.stage(nodeid, entry["runId"], attached)
+                if staged:
+                    fields["attachments"] = staged
+                if omitted:
+                    fields["attachmentsOmitted"] = omitted
+            return fields
+        except Exception as error:  # pragma: no cover - defensive
+            print(f"[peeps] evidence for {nodeid} not reported: {error!r}", flush=True)
+            return {}
 
     def pytest_sessionfinish(self, session: Any) -> None:
         # A run interrupted mid-test still delivers what it queued.
@@ -390,6 +781,68 @@ class _OutputDirRecorder:
             item.user_properties.append((OUTPUT_DIR_PROPERTY, output))
 
 
+#: The report attribute the recorder below leaves for the streamer. A plain
+#: dict of builtins, so it survives pytest-xdist's report serialization.
+EVIDENCE_ATTRIBUTE = "peeps_evidence"
+
+
+class _EvidenceRecorder:
+    """Marks each report with where this attempt's user properties and
+    captured sections start, and with the exception a failed phase raised.
+
+    pytest-rerunfailures reruns the same item, and ``item.user_properties`` and
+    its captured sections keep growing across attempts; the offsets taken at
+    each attempt's setup let the streamer read the final attempt's own, with
+    no duplicates. Runs where the test runs (an xdist worker included): the
+    exception object never reaches the controller, only the reports do."""
+
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_runtest_setup(self, item: Any):
+        item._peeps_attempt_offsets = (
+            len(item.user_properties),
+            len(getattr(item, "_report_sections", None) or []),
+        )
+        yield
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_makereport(self, item: Any, call: Any):
+        outcome = yield
+        report = outcome.get_result()
+        properties_from, sections_from = getattr(item, "_peeps_attempt_offsets", (0, 0))
+        evidence: Dict[str, Any] = {
+            "propertiesFrom": properties_from,
+            "sectionsFrom": sections_from,
+        }
+        excinfo = getattr(call, "excinfo", None)
+        if report.failed and excinfo is not None:
+            try:
+                message = str(excinfo.value)
+            except Exception:
+                message = ""
+            evidence["exception"] = {
+                "type": _exception_type(excinfo),
+                "message": message[:MAX_MESSAGE_CHARS],
+            }
+        setattr(report, EVIDENCE_ATTRIBUTE, evidence)
+
+
+@pytest.fixture
+def peeps_artifacts_dir(request: Any, tmp_path_factory: Any) -> Path:
+    """A directory for this test's files: whatever the test saves here (a
+    camera frame, a log) is uploaded to Peeps with the test's result.
+
+    Emptied at the start of each attempt, so a retried test reports only its
+    final attempt's files. Outside the action (no ``PEEPS_ARTIFACTS_DIR``) it
+    is an ordinary temporary directory and nothing is uploaded."""
+    base = os.environ.get("PEEPS_ARTIFACTS_DIR")
+    if not base:
+        return tmp_path_factory.mktemp("peeps-artifacts")
+    directory = Path(base) / "tests" / artifacts_key(request.node.nodeid)
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
 class _Selector:
     """Runs only the planned node ids (``run`` mode): whatever else the
     customer's ``addopts`` names — a ``tests/`` target, say — is deselected,
@@ -424,9 +877,17 @@ def pytest_configure(config: Any) -> None:
     plan = os.environ.get("PEEPS_PLAN_FILE")
     if plan:
         config.pluginmanager.register(_OutputDirRecorder(), "peeps-output-dirs")
+        config.pluginmanager.register(_EvidenceRecorder(), "peeps-evidence")
         if os.environ.get("PEEPS_SELECT_ONLY") == "1":
             config.pluginmanager.register(_Selector(plan), "peeps-selector")
         if not worker:
+            artifacts = os.environ.get("PEEPS_ARTIFACTS_DIR")
+            stager = (
+                _AttachmentStager(config, artifacts, os.environ.get("PEEPS_WORKSPACE"))
+                if artifacts
+                else None
+            )
             config.pluginmanager.register(
-                _Streamer(plan, os.environ.get("PEEPS_RESULTS_OUT")), "peeps-streamer"
+                _Streamer(plan, os.environ.get("PEEPS_RESULTS_OUT"), stager),
+                "peeps-streamer",
             )
