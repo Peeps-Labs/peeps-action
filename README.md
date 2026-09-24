@@ -76,6 +76,67 @@ videos) is uploaded in place of Playwright's HTML report; your own
 `PEEPS_PYTHON` names the interpreter if it is not `python` or `python3` on the
 `PATH`.
 
+### What a pytest test reports
+
+pytest suites that are not browser flows (hardware checks, say) report what
+they leave behind. Nothing needs changing for the first three:
+
+- **Skip reasons**: `pytest.skip("not supported on model X")` and skip/skipif
+  reasons.
+- **Failures**: the phase that failed (setup, call or teardown), the exception
+  type and message, and the traceback as pytest prints it, assertion detail
+  such as `assert 0.41 >= 0.6` included, plus the failed test's captured
+  stdout, stderr and log output.
+- **Measurements**: `record_property("sharpness", 0.41)`.
+- **Files** the test saves, in either of two ways:
+
+  ```python
+  def test_focus(peeps_artifacts_dir, record_property, tmp_path):
+      # 1. Anything written to this per-test directory is uploaded.
+      (peeps_artifacts_dir / "frame.png").write_bytes(frame)
+      # 2. Or attach a file you saved elsewhere (inside the repository or
+      #    pytest's tmp_path). Plain pytest: works with or without Peeps.
+      record_property("peeps_attachment", str(tmp_path / "histogram.csv"))
+  ```
+
+  `peeps_artifacts_dir` exists only when the action runs pytest. For a suite
+  that also runs elsewhere, fall back in your own fixture:
+  `request.getfixturevalue("peeps_artifacts_dir")` inside
+  `try`/`except pytest.FixtureLookupError`, returning `tmp_path` instead.
+  At most 20 files and 100 MB per test, 25 MB per file; files elsewhere, or
+  under `.git`, `node_modules` or `.env*`, are refused and listed as omitted.
+
+Under pytest-rerunfailures only the final attempt's evidence is reported;
+under pytest-xdist it is reported once, by the controller.
+
+**For Peeps' server**: this is optional fields on the test's final `test_end`
+event (`POST /api/v1/runs/{id}/events`), each absent when empty. The
+authoritative type is `PytestTestEndEvidence` in `src/pytest.ts`:
+
+```jsonc
+{
+  "type": "test_end", "testName": "test_focus", "status": "failed", "duration": 812,
+  "error": "...", "errorStack": "...",             // as before
+  "skipReason": "not supported on model X",        // status "skipped"
+  "failure": {                                     // status "failed"
+    "phase": "call",                               // "setup" | "call" | "teardown"
+    "exceptionType": "AssertionError",             // module-qualified unless builtin; null if none
+    "message": "focus too soft\nassert 0.41 >= 0.6",
+    "traceback": "def test_focus(...):\n>       assert ..."   // longreprtext, middle trimmed
+  },
+  "properties": [{ "name": "sharpness", "value": 0.41 }],     // ≤ 50; scalars, else text
+  "propertiesOmitted": 3,
+  "output": [{ "name": "Captured stdout call", "text": "..." }], // status "failed"
+  "attachments": [{ "name": "frame.png", "path": "data/<runId>-evidence-frame.png", "size": 12345 }],
+  "attachmentsOmitted": [{ "name": "hosts", "reason": "outside the workspace" }],
+  "evidenceTrimmed": true                          // only when cut to its 256 KB budget
+}
+```
+
+`attachments[].path` is batch-relative, in the same `data/` shape as the
+pytest-playwright output files, and is uploaded after pytest exits, so it may
+arrive a little after the event (or not at all, if the upload fails).
+
 `contents: read` is all this needs. When Peeps opens a fix branch it pushes with
 its own installation token, supplied for that one call, not with your
 `GITHUB_TOKEN`.
