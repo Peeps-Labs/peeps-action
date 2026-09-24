@@ -678,9 +678,12 @@ test("under pytest-xdist the evidence arrives once, attachments from the workers
   assertCameraEvidence(received, byNodeId);
 });
 
-test("with pytest-rerunfailures only the final attempt's evidence is reported", needsPlugins, async () => {
+// Also under xdist, where a worker may start the next attempt before the
+// controller has read the last one.
+for (const addopts of ["--reruns 2", "-n 2 --reruns 2"])
+test(`with pytest-rerunfailures only the final attempt's evidence is reported (${addopts})`, needsPlugins, async () => {
   const { received, byNodeId } = await runSuiteWith(
-    "--reruns 2",
+    addopts,
     (suite) => {
       // Fails twice, passes the third time; records and saves per attempt.
       writeFileSync(

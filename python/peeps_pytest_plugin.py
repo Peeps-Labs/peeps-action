@@ -756,7 +756,9 @@ class _Streamer:
             if not retried:
                 self._enqueue(entry["runId"], {"type": "run_end", "timestamp": _now()})
                 self._flush(entry)
-        if self.stager is not None:
+        # Only once the test is over: under xdist a worker may already be in
+        # the next attempt, whose setup clears the directories itself.
+        if self.stager is not None and not retried:
             self.stager.discard(nodeid)
 
     def _evidence(
