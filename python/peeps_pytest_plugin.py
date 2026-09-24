@@ -410,6 +410,13 @@ def snapshot_attachments(item: Any, values: List[Any], base: str) -> List[Dict[s
         if index >= MAX_ATTACHMENTS_PER_TEST:
             entries.append({"name": name, "reason": f"more than {MAX_ATTACHMENTS_PER_TEST} files"})
             continue
+        # The per-test budget before copying, so a suite that attaches too
+        # much never fills the runner's disk with copies nobody uploads.
+        if item._peeps_attached_bytes + info.st_size > MAX_ATTACHMENT_BYTES_PER_TEST:
+            entries.append(
+                {"name": name, "reason": f"test total over {MAX_ATTACHMENT_BYTES_PER_TEST} bytes"}
+            )
+            continue
         try:
             os.makedirs(snapshots, exist_ok=True)
             copy = os.path.join(snapshots, str(index))
@@ -417,6 +424,7 @@ def snapshot_attachments(item: Any, values: List[Any], base: str) -> List[Dict[s
         except OSError as error:
             entries.append({"name": name, "reason": f"unreadable: {error.strerror}"})
             continue
+        item._peeps_attached_bytes += info.st_size
         entries.append({"name": name, "file": copy})
     return entries
 
@@ -507,6 +515,16 @@ class _AttachmentStager:
         for entry in staged + omitted:
             entry["name"] = entry["name"][:MAX_PROPERTY_NAME_CHARS]
         return staged, omitted
+
+    def discard(self, nodeid: str) -> None:
+        """Remove what is left of a finished test's files: whatever was not
+        staged (over a cap, refused, or a test Peeps did not plan)."""
+        key = artifacts_key(nodeid)
+        for directory in (os.path.join(self.base, "tests", key), os.path.join(self.base, "attached", key)):
+            if os.path.islink(directory):
+                os.unlink(directory)
+            elif os.path.lexists(directory):
+                shutil.rmtree(directory, ignore_errors=True)
 
 
 def evidence_fields(
@@ -738,6 +756,8 @@ class _Streamer:
             if not retried:
                 self._enqueue(entry["runId"], {"type": "run_end", "timestamp": _now()})
                 self._flush(entry)
+        if self.stager is not None:
+            self.stager.discard(nodeid)
 
     def _evidence(
         self, nodeid: str, entry: Dict[str, Any], phases: List[Dict[str, Any]], status: str
@@ -902,6 +922,7 @@ class _EvidenceRecorder:
         )
         item._peeps_attached = []
         item._peeps_attached_count = 0
+        item._peeps_attached_bytes = 0
         # Each attempt starts with empty artifacts directories, before any
         # fixture runs: an attempt that fails in setup, before it ever asks
         # for `peeps_artifacts_dir`, must not report the last attempt's files.

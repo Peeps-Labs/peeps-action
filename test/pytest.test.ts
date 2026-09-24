@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -769,4 +769,27 @@ test("evidence stays within its byte budget however its text is encoded", needsP
   assert.ok(out.size <= 256 * 1024, String(out.size));
   assert.deepEqual(out.keys, ["evidenceTrimmed", "failure", "properties", "propertiesOmitted"]);
   assert.equal(out.properties + out.omitted, 50);
+});
+
+test("nothing a finished test saved is left in the scratch but what was uploaded", needsPytest, async () => {
+  const previous = process.env.RUNNER_TEMP;
+  const scratch = mkdtempSync(path.join(tmpdir(), "peeps-scratch-"));
+  process.env.RUNNER_TEMP = scratch;
+  try {
+    await runSuiteWith("", undefined, CAMERA);
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_TEMP;
+    else process.env.RUNNER_TEMP = previous;
+  }
+  const left = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? left(path.join(dir, e.name)) : [path.relative(scratch, path.join(dir, e.name))],
+    );
+  const evidence = left(scratch).filter((f) => f.includes(`${path.sep}evidence${path.sep}`));
+  // The refused `.env` and every snapshot are gone; only staged uploads remain.
+  assert.ok(evidence.length > 0);
+  assert.deepEqual(
+    evidence.filter((f) => !f.includes(`${path.sep}evidence${path.sep}upload${path.sep}`)),
+    [],
+  );
 });
