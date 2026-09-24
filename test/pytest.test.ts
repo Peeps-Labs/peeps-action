@@ -648,6 +648,8 @@ function assertCameraEvidence(received: Received, byNodeId: Record<string, PlanE
     // `.npy` is not a type Peeps' data/ accepts, so it travels as `.dat`.
     { name: "raw/frame.npy", path: `data/${runId}-evidence-raw-frame.npy.dat`, size: 11 },
     { name: "histogram.csv", path: `data/${runId}-evidence-histogram.csv`, size: 14 },
+    // Attached by a fixture's teardown, just before its tmp_path was deleted.
+    { name: "session.log", path: `data/${runId}-evidence-session.log`, size: 7 },
   ]);
   assert.deepEqual(frame.attachmentsOmitted, [
     { name: ".env", reason: "refused name" },

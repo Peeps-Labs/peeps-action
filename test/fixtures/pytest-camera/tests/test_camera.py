@@ -28,7 +28,7 @@ def test_sharpness(record_property):
     assert sharpness >= 0.6
 
 
-def test_saves_frame(peeps_artifacts_dir, record_property, tmp_path):
+def test_saves_frame(peeps_artifacts_dir, record_property, tmp_path, session_log):
     (peeps_artifacts_dir / "frame.png").write_bytes(b"\x89PNG\r\n\x1a\n fake frame")
     (peeps_artifacts_dir / "raw").mkdir()
     (peeps_artifacts_dir / "raw" / "frame.npy").write_bytes(b"\x93NUMPY fake")

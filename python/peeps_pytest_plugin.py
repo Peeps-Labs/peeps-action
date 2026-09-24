@@ -957,6 +957,13 @@ class _EvidenceRecorder:
         yield
         self._snapshot(item)
 
+    def pytest_fixture_post_finalizer(self, fixturedef: Any, request: Any) -> None:
+        # After each fixture's own teardown, before the fixtures it depends
+        # on (tmp_path among them) tear down: what it attached still exists.
+        item = getattr(request, "node", None)
+        if getattr(item, "_peeps_attempt_offsets", None) is not None:
+            self._snapshot(item)
+
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_makereport(self, item: Any, call: Any):
         outcome = yield

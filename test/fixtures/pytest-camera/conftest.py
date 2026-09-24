@@ -18,3 +18,12 @@ def pytest_collection_modifyitems(items):
     for item in items:
         if item.name == "test_sharpness":
             item.user_properties.append(("rig", "bench-2"))
+
+
+@pytest.fixture
+def session_log(tmp_path, record_property):
+    # Attached while tearing down, into a tmp_path that is deleted right after.
+    yield
+    log = tmp_path / "session.log"
+    log.write_text("closed\n")
+    record_property("peeps_attachment", str(log))
