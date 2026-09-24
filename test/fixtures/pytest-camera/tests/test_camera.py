@@ -32,6 +32,8 @@ def test_saves_frame(peeps_artifacts_dir, record_property, tmp_path):
     (peeps_artifacts_dir / "frame.png").write_bytes(b"\x89PNG\r\n\x1a\n fake frame")
     (peeps_artifacts_dir / "raw").mkdir()
     (peeps_artifacts_dir / "raw" / "frame.npy").write_bytes(b"\x93NUMPY fake")
+    # Refused even in the artifacts directory, as the agent tools refuse it.
+    (peeps_artifacts_dir / ".env").write_text("CAMERA_TOKEN=secret\n")
     histogram = tmp_path / "histogram.csv"
     histogram.write_text("bin,count\n0,1\n")
     record_property("peeps_attachment", str(histogram))

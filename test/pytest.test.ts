@@ -647,7 +647,10 @@ function assertCameraEvidence(received: Received, byNodeId: Record<string, PlanE
     { name: "raw/frame.npy", path: `data/${runId}-evidence-raw-frame.npy.dat`, size: 11 },
     { name: "histogram.csv", path: `data/${runId}-evidence-histogram.csv`, size: 14 },
   ]);
-  assert.deepEqual(frame.attachmentsOmitted, [{ name: "hosts", reason: "outside the workspace" }]);
+  assert.deepEqual(frame.attachmentsOmitted, [
+    { name: ".env", reason: "refused name" },
+    { name: "hosts", reason: "outside the workspace" },
+  ]);
   assert.deepEqual(frame.properties, [{ name: "frames", value: 2 }]);
   // A passing test sends no output, and no evidence it does not have.
   assert.deepEqual(evidenceOf(frame), ["properties", "attachments", "attachmentsOmitted"]);
@@ -736,4 +739,28 @@ test("only plain files the plugin staged for a run of this job are uploaded", as
     [["run-7-evidence-frame.png", "run-7"]],
   );
   assert.deepEqual(await stagedEvidence(path.join(dir, "missing"), { "a.py::t": run }), []);
+});
+
+test("evidence stays within its byte budget however its text is encoded", needsPytest, () => {
+  // Every character cap met, yet non-ASCII text escapes to ~12 bytes a
+  // character: without a byte budget this is a 1.4 MB request, refused.
+  const script = [
+    "import json, peeps_pytest_plugin as p",
+    "phase = {'outcome': 'failed', 'when': 'call', 'longrepr': 'E' * 20000,",
+    "  'sections': [('Captured stdout call', '\\U0001F600' * 8000)] * 9,",
+    "  'properties': [('p%d' % i, '\\U0001F600' * 1000) for i in range(50)]}",
+    "fields, _ = p.evidence_fields([phase], 'failed')",
+    "bounded = p.bound_evidence(fields)",
+    "print(json.dumps({'size': len(json.dumps(bounded)), 'keys': sorted(bounded),",
+    "  'properties': len(bounded.get('properties', [])), 'omitted': bounded.get('propertiesOmitted')}))",
+  ].join("\n");
+  const out = JSON.parse(
+    execFileSync(python!, ["-c", script], {
+      env: { ...process.env, PYTHONPATH: path.join(__dirname, "..", "python") },
+      encoding: "utf8",
+    }),
+  ) as { size: number; keys: string[]; properties: number; omitted: number };
+  assert.ok(out.size <= 256 * 1024, String(out.size));
+  assert.deepEqual(out.keys, ["evidenceTrimmed", "failure", "properties", "propertiesOmitted"]);
+  assert.equal(out.properties + out.omitted, 50);
 });

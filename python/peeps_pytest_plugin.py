@@ -89,6 +89,10 @@ MAX_ATTACHMENT_BYTES_PER_TEST = 100 * 1024 * 1024
 MAX_ATTACHMENTS_PER_SESSION = 1000
 MAX_ATTACHMENT_BYTES_PER_SESSION = 1024 * 1024 * 1024
 MAX_OMITTED_LISTED = 20
+#: The serialized evidence of one test_end, as ``_post`` encodes it (ASCII
+#: escapes included). The caps above bound characters, not bytes: a
+#: non-ASCII property or output can be 12 bytes a character once escaped.
+MAX_EVIDENCE_BYTES = 256 * 1024
 
 #: The extensions Peeps accepts under a batch's ``data/`` (mirrors
 #: ``DATA_ATTACHMENT_EXTENSIONS`` in Peeps' artifacts route). Any other file
@@ -385,7 +389,7 @@ class _AttachmentStager:
         omitted: List[Dict[str, str]] = []
         candidates: List[Tuple[str, str, str]] = []  # (source, name, origin)
         test_dir = os.path.join(self.base, "tests", artifacts_key(nodeid))
-        if os.path.isdir(test_dir):
+        if os.path.isdir(test_dir) and not os.path.islink(test_dir):
             candidates.extend((abs_path, rel, "dir") for abs_path, rel in _walk_files(test_dir))
         invocation = str(self.config.invocation_params.dir)
         for value in attached:
@@ -406,9 +410,13 @@ class _AttachmentStager:
                 continue  # attached and in the directory: once
             seen.add(real)
             if origin == "dir":
-                # Our own directory: a symlink in it is not followed out.
+                # Our own directory: a symlink in it is not followed out, and
+                # a copied .git / node_modules / .env is refused here too.
                 if os.path.islink(source):
                     omitted.append({"name": name, "reason": "symlink"})
+                    continue
+                if any(_DENY_SEGMENT.match(segment) for segment in name.split("/")):
+                    omitted.append({"name": name, "reason": "refused name"})
                     continue
             else:
                 roots = roots or self._roots()
@@ -451,7 +459,10 @@ class _AttachmentStager:
             staged.append({"name": name, "path": f"data/{staged_name}", "size": info.st_size})
         for entry in omitted:
             print(f"[peeps] attachment of {nodeid} not uploaded: {entry['name']} ({entry['reason']})", flush=True)
-        return staged, omitted[:MAX_OMITTED_LISTED]
+        omitted = omitted[:MAX_OMITTED_LISTED]
+        for entry in staged + omitted:
+            entry["name"] = entry["name"][:MAX_PROPERTY_NAME_CHARS]
+        return staged, omitted
 
 
 def evidence_fields(
@@ -524,6 +535,41 @@ def evidence_fields(
     if omitted:
         fields["propertiesOmitted"] = omitted
     return fields, attached
+
+
+def _encoded_size(value: Any) -> int:
+    return len(json.dumps(value).encode("utf-8"))
+
+
+def bound_evidence(fields: Dict[str, Any], budget: int = MAX_EVIDENCE_BYTES) -> Dict[str, Any]:
+    """``fields`` within ``budget`` bytes as ``_post`` sends them, so evidence
+    can never push a run's events request past Peeps' 1 MB cap (a 413 is
+    permanent, and would lose the result with the evidence). Gives up the
+    least useful first: output, then measurements from the end, then most of
+    the traceback; marks the event ``evidenceTrimmed``."""
+    if _encoded_size(fields) <= budget:
+        return fields
+    fields["evidenceTrimmed"] = True
+    output = fields.get("output")
+    if output:
+        for section in output:
+            section["text"] = _trim_tail(section["text"], 1000)
+        if _encoded_size(fields) > budget:
+            del fields["output"]
+    properties = fields.get("properties")
+    while properties and _encoded_size(fields) > budget:
+        properties.pop()
+        fields["propertiesOmitted"] = fields.get("propertiesOmitted", 0) + 1
+    if properties == []:
+        del fields["properties"]
+    failure = fields.get("failure")
+    if failure and _encoded_size(fields) > budget:
+        failure["message"] = failure["message"][:500]
+        failure["traceback"] = _trim_middle(failure["traceback"], 500, 2000)
+    if _encoded_size(fields) > budget:
+        # Only the file names are left, and they are bounded; never expected.
+        return {"evidenceTrimmed": True}
+    return fields
 
 
 class _Streamer:
@@ -660,7 +706,7 @@ class _Streamer:
                     fields["attachments"] = staged
                 if omitted:
                     fields["attachmentsOmitted"] = omitted
-            return fields
+            return bound_evidence(fields)
         except Exception as error:  # pragma: no cover - defensive
             print(f"[peeps] evidence for {nodeid} not reported: {error!r}", flush=True)
             return {}
@@ -802,6 +848,16 @@ class _EvidenceRecorder:
             len(item.user_properties),
             len(getattr(item, "_report_sections", None) or []),
         )
+        # Each attempt starts with an empty artifacts directory, before any
+        # fixture runs: an attempt that fails in setup, before it ever asks
+        # for `peeps_artifacts_dir`, must not report the last attempt's files.
+        base = os.environ.get("PEEPS_ARTIFACTS_DIR")
+        if base:
+            directory = os.path.join(base, "tests", artifacts_key(item.nodeid))
+            if os.path.islink(directory):
+                os.unlink(directory)
+            elif os.path.lexists(directory):
+                shutil.rmtree(directory, ignore_errors=True)
         yield
 
     @pytest.hookimpl(hookwrapper=True)
@@ -831,14 +887,14 @@ def peeps_artifacts_dir(request: Any, tmp_path_factory: Any) -> Path:
     """A directory for this test's files: whatever the test saves here (a
     camera frame, a log) is uploaded to Peeps with the test's result.
 
-    Emptied at the start of each attempt, so a retried test reports only its
-    final attempt's files. Outside the action (no ``PEEPS_ARTIFACTS_DIR``) it
-    is an ordinary temporary directory and nothing is uploaded."""
+    Emptied at the start of each attempt (by ``_EvidenceRecorder``), so a
+    retried test reports only its final attempt's files. Outside the action
+    (no ``PEEPS_ARTIFACTS_DIR``) it is an ordinary temporary directory and
+    nothing is uploaded."""
     base = os.environ.get("PEEPS_ARTIFACTS_DIR")
     if not base:
         return tmp_path_factory.mktemp("peeps-artifacts")
     directory = Path(base) / "tests" / artifacts_key(request.node.nodeid)
-    shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 

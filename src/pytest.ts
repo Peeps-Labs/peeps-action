@@ -16,7 +16,7 @@
  *
  * pytest-playwright's `--output` directory (traces, screenshots, videos) is
  * uploaded to the batch afterwards, each file named after the run it belongs
- * to.
+ * to, and so are the files tests saved as evidence (`PytestTestEndEvidence`).
  *
  * Collection imports the customer's test modules and conftest files, as any
  * pytest collection does; the plugin itself imports nothing of theirs.
@@ -659,6 +659,12 @@ export interface PytestTestEndEvidence {
   attachments?: Array<{ name: string; path: string; size: number }>;
   /** Files not uploaded, and why (outside the workspace, over a cap…); at most 20 listed. */
   attachmentsOmitted?: Array<{ name: string; reason: string }>;
+  /**
+   * Set when the evidence exceeded its 256 KB budget (as sent, JSON-escaped)
+   * and was cut: output first, then properties from the end, then most of
+   * the traceback.
+   */
+  evidenceTrimmed?: true;
 }
 
 /** The plugin caps an attachment at this; anything larger was not staged by it. */

@@ -128,7 +128,8 @@ authoritative type is `PytestTestEndEvidence` in `src/pytest.ts`:
   "propertiesOmitted": 3,
   "output": [{ "name": "Captured stdout call", "text": "..." }], // status "failed"
   "attachments": [{ "name": "frame.png", "path": "data/<runId>-evidence-frame.png", "size": 12345 }],
-  "attachmentsOmitted": [{ "name": "hosts", "reason": "outside the workspace" }]
+  "attachmentsOmitted": [{ "name": "hosts", "reason": "outside the workspace" }],
+  "evidenceTrimmed": true                          // only when cut to its 256 KB budget
 }
 ```
 
