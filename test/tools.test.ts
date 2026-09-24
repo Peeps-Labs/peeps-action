@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { jail, jailForWrite, makeRedactor, patchPaths } from "../src/tools";
+import { ensureParentDirInside, jail, jailForWrite, makeRedactor, patchPaths } from "../src/tools";
 
 const WS = "/workspace";
 
@@ -160,4 +160,49 @@ test("a patch touching a denied path is refused by the same jail as write_file",
     Promise.resolve({ stdout: "1\t0\t.env.local\n" });
   const touched = await patchPaths(runGit, "p.patch");
   assert.throws(() => touched.forEach((p) => jailForWrite(WS, p)), /off limits/);
+});
+
+test("write_file's parent directories are created for a spec in a new folder (PQA-1838)", async () => {
+  const { mkdtemp, stat } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const ws = await mkdtemp(path.join(tmpdir(), "peeps-ws-"));
+  const abs = jailForWrite(ws, "e2e/auth/nested/sign-in.spec.ts");
+  await ensureParentDirInside(ws, abs);
+  assert.ok((await stat(path.join(ws, "e2e/auth/nested"))).isDirectory());
+  // An existing parent is a no-op.
+  await ensureParentDirInside(ws, abs);
+});
+
+test("a new folder under a symlink that leaves the workspace is refused and nothing is created outside", async () => {
+  const { mkdtemp, symlink, stat } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const ws = await mkdtemp(path.join(tmpdir(), "peeps-ws-"));
+  const outside = await mkdtemp(path.join(tmpdir(), "peeps-outside-"));
+  await symlink(outside, path.join(ws, "escape"));
+  const abs = jailForWrite(ws, "escape/new/dir/x.spec.ts");
+  await assert.rejects(ensureParentDirInside(ws, abs), /escapes the workspace/);
+  await assert.rejects(stat(path.join(outside, "new")), { code: "ENOENT" });
+});
+
+test("an existing parent that is a symlink out of the workspace is refused too", async () => {
+  const { mkdtemp, symlink } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const ws = await mkdtemp(path.join(tmpdir(), "peeps-ws-"));
+  const outside = await mkdtemp(path.join(tmpdir(), "peeps-outside-"));
+  await symlink(outside, path.join(ws, "escape"));
+  await assert.rejects(ensureParentDirInside(ws, jailForWrite(ws, "escape/x.spec.ts")), /escapes the workspace/);
+});
+
+test("a symlinked folder that stays inside the workspace is allowed", async () => {
+  const { mkdtemp, mkdir, symlink, stat } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const ws = await mkdtemp(path.join(tmpdir(), "peeps-ws-"));
+  await mkdir(path.join(ws, "real"));
+  await symlink(path.join(ws, "real"), path.join(ws, "alias"));
+  await ensureParentDirInside(ws, jailForWrite(ws, "alias/sub/x.spec.ts"));
+  assert.ok((await stat(path.join(ws, "real/sub"))).isDirectory());
 });

@@ -11,6 +11,8 @@ export interface RunnerEnv {
   mode: string;
   sessionId: string | null;
   configPath: string | null;
+  /** `playwright`, `pytest` or `auto`; null when not given (auto). */
+  framework: string | null;
   peepsUrl: string;
   /** Absolute: resolved against the workspace, never left relative. */
   workingDirectory: string;
@@ -102,6 +104,7 @@ export function readRunnerEnv(env: NodeJS.ProcessEnv = process.env): RunnerEnv {
     mode: input(env, "mode") ?? env.PEEPS_MODE ?? "ci",
     sessionId: input(env, "session-id") ?? env.PEEPS_SESSION_ID ?? null,
     configPath: input(env, "config") ?? env.PEEPS_PLAYWRIGHT_CONFIG ?? null,
+    framework: input(env, "framework") ?? env.PEEPS_FRAMEWORK ?? null,
     peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
     workingDirectory: workingDirectory
       ? path.resolve(workspace, workingDirectory)

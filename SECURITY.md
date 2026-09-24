@@ -37,10 +37,10 @@ This is more than "test results". Concretely:
 
 | Sent to Peeps | When |
 | --- | --- |
-| The **full source of every spec file** Playwright lists | `inventory`, and every `report`/`run` |
-| The Playwright test list: files, titles, projects, tags | `inventory`, `report`, `run` |
+| The **full source of every spec file** Playwright lists (pytest: every test module it collects) | `inventory`, and every `report`/`run` |
+| The Playwright test list: files, titles, projects, tags (pytest: node ids, browsers, lines, markers) | `inventory`, `report`, `run` |
 | Test results, timings, errors and stack traces | `report`, `run` |
-| The **entire Playwright HTML report directory**, file by file | `report`, `run` |
+| The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
 | Tool results in an agent session: file contents, diffs, test output | `agent` |
@@ -131,5 +131,9 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
   exactly what you run: `uses: Peeps-Labs/peeps-action@<sha>`. A tag such as
   `@v1` is repointed at new releases.
 - The action has no runtime dependencies. It bundles to one file and calls only
-  `git` and `npx playwright`, always with an argument array and never through a
-  shell.
+  `git`, `npx playwright` and, for a pytest suite, `python -m pytest`, always
+  with an argument array and never through a shell.
+- For a pytest suite it also loads `python/peeps_pytest_plugin.py` from this
+  repository into pytest (`-p peeps_pytest_plugin`). It uses the Python
+  standard library only, imports nothing from your repository, and reads the
+  plan file and writes the result files the action names.

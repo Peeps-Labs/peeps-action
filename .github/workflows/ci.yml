@@ -22,7 +22,17 @@ jobs:
 
       - run: npm run typecheck
 
+      # The pytest path's tests run real pytest. Without this they would skip,
+      # so PEEPS_REQUIRE_PYTEST turns a missing pytest into a failure.
+      # (The runner's system Python refuses pip installs: PEP 668.)
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install "pytest==9.1.1" "pytest-xdist==3.8.0" "pytest-rerunfailures==16.7"
+
       - run: npm test
+        env:
+          PEEPS_REQUIRE_PYTEST: "1"
 
       # `uses: Peeps-Labs/peeps-action@<ref>` runs the COMMITTED dist/, not
       # src/. Anyone reading this repository to decide whether to trust it reads

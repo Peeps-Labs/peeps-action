@@ -2,3 +2,7 @@ node_modules/
 
 # Not ignored globally on every contributor's machine or on CI.
 .DS_Store
+
+# The pytest fixture suite, when run in place.
+__pycache__/
+.pytest_cache/
