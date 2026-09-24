@@ -32,7 +32,7 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -100,6 +100,41 @@ export function jailForWrite(workspace: string, relative: string): string {
     throw new ToolError(`workflow files are not writable by Peeps: ${relative}`);
   }
   return abs;
+}
+
+/**
+ * Create the missing parent directories of `abs` (already jailed), refusing if
+ * the nearest EXISTING ancestor resolves outside the workspace.
+ *
+ * `jail` is lexical, so a directory inside the checkout that is a symlink to
+ * somewhere else would let a recursive mkdir create directories outside the
+ * workspace. Resolving the deepest ancestor that exists and checking it against
+ * the resolved workspace closes that: every directory mkdir then creates is a
+ * real new directory beneath a checked one.
+ *
+ * Without this, `write_file` on a spec in a new directory (e2e/auth/x.spec.ts)
+ * failed with ENOENT although its description promises "Creates the file if
+ * missing", and generation gave up (PQA-1838).
+ */
+export async function ensureParentDirInside(workspace: string, abs: string): Promise<void> {
+  const parent = path.dirname(abs);
+  let existing = parent;
+  for (;;) {
+    try {
+      await stat(existing);
+      break;
+    } catch {
+      const up = path.dirname(existing);
+      if (up === existing) break;
+      existing = up;
+    }
+  }
+  const [realWorkspace, realExisting] = await Promise.all([realpath(workspace), realpath(existing)]);
+  const rel = path.relative(realWorkspace, realExisting);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new ToolError(`path escapes the workspace: ${path.relative(workspace, abs)}`);
+  }
+  if (existing !== parent) await mkdir(parent, { recursive: true });
 }
 
 /**
@@ -299,6 +334,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       const abs = jailForWrite(workspace, rel);
       const content = str(args, "content");
       if (content.length > MAX_FILE_BYTES) throw new ToolError("content too large");
+      await ensureParentDirInside(workspace, abs);
       await writeFile(abs, content, "utf8");
       return { path: rel, bytes: Buffer.byteLength(content) };
     },

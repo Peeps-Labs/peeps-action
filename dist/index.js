@@ -503,6 +503,26 @@ function jailForWrite(workspace, relative) {
   }
   return abs;
 }
+async function ensureParentDirInside(workspace, abs) {
+  const parent = import_node_path5.default.dirname(abs);
+  let existing = parent;
+  for (; ; ) {
+    try {
+      await (0, import_promises3.stat)(existing);
+      break;
+    } catch {
+      const up = import_node_path5.default.dirname(existing);
+      if (up === existing) break;
+      existing = up;
+    }
+  }
+  const [realWorkspace, realExisting] = await Promise.all([(0, import_promises3.realpath)(workspace), (0, import_promises3.realpath)(existing)]);
+  const rel = import_node_path5.default.relative(realWorkspace, realExisting);
+  if (rel.startsWith("..") || import_node_path5.default.isAbsolute(rel)) {
+    throw new ToolError(`path escapes the workspace: ${import_node_path5.default.relative(workspace, abs)}`);
+  }
+  if (existing !== parent) await (0, import_promises3.mkdir)(parent, { recursive: true });
+}
 async function patchPaths(runGit, patchFile) {
   let stdout;
   try {
@@ -625,6 +645,7 @@ function createToolServer(env) {
       const abs = jailForWrite(workspace, rel);
       const content = str(args, "content");
       if (content.length > MAX_FILE_BYTES) throw new ToolError("content too large");
+      await ensureParentDirInside(workspace, abs);
       await (0, import_promises3.writeFile)(abs, content, "utf8");
       return { path: rel, bytes: Buffer.byteLength(content) };
     },
