@@ -1,13 +1,24 @@
 /**
  * Everything the action learns from its environment: action inputs (GitHub
- * passes `with:` values as `INPUT_<NAME>`), the GitHub Actions context, and the
- * OIDC request endpoint a job with `id-token: write` gets.
+ * passes `with:` values as `INPUT_<NAME>`), the CI context, and how the job
+ * proves who it is to Peeps.
+ *
+ * Two CI systems, one shape. On GitHub Actions the context is `GITHUB_*` and
+ * the identity is an OIDC token requested from the endpoint a job with
+ * `id-token: write` gets. On GitLab CI/CD (`GITLAB_CI=true`) the context is
+ * `CI_*`, the inputs are the `PEEPS_*` variables (GitLab variable names cannot
+ * hold a hyphen, and Peeps starts pipelines with `PEEPS_MODE` and
+ * `PEEPS_SESSION_ID`), and the identity is the ID token the job's `id_tokens:`
+ * block puts in `PEEPS_ID_TOKEN`. Nothing after `readRunnerEnv` knows which.
  */
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
+export type CiPlatform = "github" | "gitlab";
+
 export interface RunnerEnv {
+  platform: CiPlatform;
   mode: string;
   sessionId: string | null;
   configPath: string | null;
@@ -24,8 +35,15 @@ export interface RunnerEnv {
   /** The repository's real default branch, from the event payload. */
   defaultBranch: string | null;
   runId: string | null;
+  /** The run's page on the CI system: a workflow run, or a GitLab pipeline. */
+  runUrl: string | null;
+  /** The git host's origin, e.g. https://github.com or https://gitlab.example.com. */
+  serverUrl: string;
   workspace: string;
+  /** GitHub: where to request an OIDC token. */
   oidc: { requestUrl: string; requestToken: string } | null;
+  /** GitLab: the ID token the job was issued for Peeps' audience. */
+  idToken: string | null;
 }
 
 /**
@@ -90,7 +108,73 @@ export function resolvePeepsUrl(raw: string): string {
   return trimmed;
 }
 
+/** GitLab's pipeline source as the GitHub event name Peeps reasons in. */
+export function eventNameForPipelineSource(source: string | undefined): string | null {
+  switch (source) {
+    case undefined:
+    case "":
+      return null;
+    case "push":
+      return "push";
+    case "merge_request_event":
+      return "pull_request";
+    case "schedule":
+      return "schedule";
+    case "api":
+    case "trigger":
+    case "web":
+    case "pipeline":
+    case "parent_pipeline":
+      return "workflow_dispatch";
+    default:
+      return source;
+  }
+}
+
+/** A non-empty variable, trimmed; null otherwise. */
+function variable(env: NodeJS.ProcessEnv, name: string): string | null {
+  const value = env[name];
+  return value && value.trim() !== "" ? value.trim() : null;
+}
+
+/** The runner environment inside a GitLab CI/CD job. */
+export function readGitLabRunnerEnv(env: NodeJS.ProcessEnv): RunnerEnv {
+  const workspace = env.CI_PROJECT_DIR ?? process.cwd();
+  const workingDirectory = variable(env, "PEEPS_WORKING_DIRECTORY");
+  // A merge request pipeline has no CI_COMMIT_BRANCH; its ref name is the
+  // source branch. A tag pipeline has neither and is named by its tag.
+  const branch = env.CI_COMMIT_BRANCH ?? env.CI_MERGE_REQUEST_SOURCE_BRANCH_NAME;
+  const ref = branch
+    ? `refs/heads/${branch}`
+    : env.CI_COMMIT_TAG
+      ? `refs/tags/${env.CI_COMMIT_TAG}`
+      : null;
+  return {
+    platform: "gitlab",
+    mode: variable(env, "PEEPS_MODE") ?? "ci",
+    sessionId: variable(env, "PEEPS_SESSION_ID"),
+    configPath: variable(env, "PEEPS_PLAYWRIGHT_CONFIG"),
+    framework: variable(env, "PEEPS_FRAMEWORK"),
+    peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
+    workingDirectory: workingDirectory
+      ? path.resolve(workspace, workingDirectory)
+      : workspace,
+    repository: env.CI_PROJECT_PATH ?? null,
+    sha: env.CI_COMMIT_SHA ?? null,
+    ref,
+    eventName: eventNameForPipelineSource(env.CI_PIPELINE_SOURCE),
+    defaultBranch: variable(env, "CI_DEFAULT_BRANCH"),
+    runId: env.CI_PIPELINE_ID ?? null,
+    runUrl: env.CI_PIPELINE_URL ?? null,
+    serverUrl: (env.CI_SERVER_URL ?? "https://gitlab.com").replace(/\/+$/, ""),
+    workspace,
+    oidc: null,
+    idToken: variable(env, "PEEPS_ID_TOKEN"),
+  };
+}
+
 export function readRunnerEnv(env: NodeJS.ProcessEnv = process.env): RunnerEnv {
+  if (env.GITLAB_CI === "true") return readGitLabRunnerEnv(env);
   const requestUrl = env.ACTIONS_ID_TOKEN_REQUEST_URL;
   const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   const workspace = env.GITHUB_WORKSPACE ?? process.cwd();
@@ -99,8 +183,13 @@ export function readRunnerEnv(env: NodeJS.ProcessEnv = process.env): RunnerEnv {
   // hand, and leaving it relative only works while the runner's cwd happens to
   // be the workspace. When it isn't, Playwright is handed paths outside its
   // rootDir, runs nothing, and the job still goes green.
-  const workingDirectory = input(env, "working-directory");
+  const workingDirectory =
+    input(env, "working-directory") ?? variable(env, "PEEPS_WORKING_DIRECTORY");
+  const serverUrl = (env.GITHUB_SERVER_URL ?? "https://github.com").replace(/\/+$/, "");
+  const repository = env.GITHUB_REPOSITORY ?? null;
+  const runId = env.GITHUB_RUN_ID ?? null;
   return {
+    platform: "github",
     mode: input(env, "mode") ?? env.PEEPS_MODE ?? "ci",
     sessionId: input(env, "session-id") ?? env.PEEPS_SESSION_ID ?? null,
     configPath: input(env, "config") ?? env.PEEPS_PLAYWRIGHT_CONFIG ?? null,
@@ -109,13 +198,16 @@ export function readRunnerEnv(env: NodeJS.ProcessEnv = process.env): RunnerEnv {
     workingDirectory: workingDirectory
       ? path.resolve(workspace, workingDirectory)
       : workspace,
-    repository: env.GITHUB_REPOSITORY ?? null,
+    repository,
     sha: env.GITHUB_SHA ?? null,
     ref: env.GITHUB_REF ?? null,
     eventName: env.GITHUB_EVENT_NAME ?? null,
     defaultBranch: readDefaultBranch(env),
-    runId: env.GITHUB_RUN_ID ?? null,
+    runId,
+    runUrl: repository && runId ? `${serverUrl}/${repository}/actions/runs/${runId}` : null,
+    serverUrl,
     workspace,
     oidc: requestUrl && requestToken ? { requestUrl, requestToken } : null,
+    idToken: null,
   };
 }

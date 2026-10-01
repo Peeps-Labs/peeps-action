@@ -327,7 +327,7 @@ export async function moduleFilePayload(env: RunnerEnv, collection: PytestCollec
 
 /** The body of `POST /api/v1/ci/inventory` for a pytest suite. */
 export async function buildPytestInventoryRequest(env: RunnerEnv, collection: PytestCollection) {
-  if (!env.sha) throw new Error("GITHUB_SHA is not set");
+  if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   return {
     sha: env.sha,
     framework: "pytest" as const,
@@ -364,13 +364,13 @@ interface BatchResponse {
 
 /** `report`: run this workflow's whole suite and report every planned test. */
 export async function runPytestReport(env: RunnerEnv, peeps: PeepsClient): Promise<void> {
-  if (!env.sha) throw new Error("GITHUB_SHA is not set");
+  if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const collection = await collectPytest(env);
   const rootDir = repoRootDir(env, collection);
   const planned = plannedPytestTests(collection, rootDir);
   console.log(`[peeps] report: ${planned.length} tests at ${env.sha.slice(0, 7)} (${env.ref ?? "?"})`);
   const jobUrl =
-    env.repository && env.runId ? `https://github.com/${env.repository}/actions/runs/${env.runId}` : null;
+    env.runUrl;
   const response = await peeps.post<BatchResponse>("/api/v1/ci/batches", {
     sha: env.sha,
     jobUrl,

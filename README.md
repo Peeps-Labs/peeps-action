@@ -207,6 +207,45 @@ there and the job fails. If you take fork contributions, filter the trigger:
 gh workflow run peeps.yml -f mode=inventory
 ```
 
+## GitLab CI/CD
+
+The same action runs in a GitLab job. GitLab has no `uses:`, so the job fetches
+the released bundle and runs it with Node, and the inputs are variables:
+
+```yaml
+# .gitlab-ci.yml
+peeps:
+  image: mcr.microsoft.com/playwright:v1.59.1-jammy
+  timeout: 60m
+  id_tokens:
+    PEEPS_ID_TOKEN:
+      aud: https://peepsai.com   # GitLab ID token -> Peeps; no Peeps secret needed
+  rules:
+    - if: $PEEPS_MODE                                   # started by Peeps
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"  # reports the MR's run
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH       # the branch Peeps mirrors
+  script:
+    - npm ci
+    - git clone --depth 1 --branch v1 https://github.com/Peeps-Labs/peeps-action.git /tmp/peeps-action
+    - node /tmp/peeps-action/dist/index.js
+```
+
+The Repository page in Peeps shows this job filled in for your project. The
+action detects GitLab from `GITLAB_CI` and reads:
+
+| Variable | What it is |
+| --- | --- |
+| `PEEPS_MODE` | Set by Peeps when it starts the pipeline: `inventory`, `run` or `agent`. Absent means `report` |
+| `PEEPS_SESSION_ID` | Set by Peeps with `PEEPS_MODE` |
+| `PEEPS_WORKING_DIRECTORY` | Where to run, relative to the repository root |
+| `PEEPS_PLAYWRIGHT_CONFIG` | The Playwright config, relative to the working directory |
+| `PEEPS_FRAMEWORK` | `playwright`, `pytest` or `auto` |
+| `PEEPS_ID_TOKEN` | The ID token from `id_tokens:`; the job's identity |
+
+Peeps starts pipelines with variables, so the project's **minimum role to use
+pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
+access token Peeps was given (Maintainer).
+
 ## Development
 
 ```bash

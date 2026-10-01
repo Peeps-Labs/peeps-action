@@ -28,8 +28,16 @@ Consequences worth knowing:
   VPN-only or firewalled staging environment works without exposing it.
 - No token is ever placed in a URL. All Peeps requests use an `Authorization`
   header.
-- Outside GitHub Actions there is no OIDC token, so `PEEPS_API_KEY` is used
-  instead. That is a stored credential, with the usual consequences.
+- On GitLab CI/CD the job's identity is the ID token its `id_tokens:` block
+  issues for audience `https://peepsai.com`, verified against your GitLab
+  instance's public keys. It is sent only to Peeps. GitLab's job token
+  (`CI_JOB_TOKEN`) is never sent anywhere and is masked in everything an agent
+  session returns, as are the other `CI_` credentials.
+- When Peeps pushes a fix branch on GitLab it uses the access token you gave
+  Peeps, supplied for that one push, not the job token.
+- Outside GitHub Actions and GitLab CI/CD there is no OIDC token, so
+  `PEEPS_API_KEY` is used instead. That is a stored credential, with the usual
+  consequences.
 
 ## What leaves your runner
 
