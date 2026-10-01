@@ -65,17 +65,14 @@ interface BatchResponse {
 }
 
 export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<void> {
-  if (!env.sha) throw new Error("GITHUB_SHA is not set");
+  if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const list = await listTests(env);
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
   const rootDir = path.relative(env.workspace, rootDirAbs).split(path.sep).join("/") || ".";
   const tests = plannedTestsOf(list, rootDir);
   console.log(`[peeps] report: ${tests.length} tests at ${env.sha.slice(0, 7)} (${env.ref ?? "?"})`);
 
-  const jobUrl =
-    env.repository && env.runId
-      ? `https://github.com/${env.repository}/actions/runs/${env.runId}`
-      : null;
+  const jobUrl = env.runUrl;
   // The spec sources travel with the plan request so a run on a branch pins
   // the blob that executes here, not the default branch's mirror.
   const files = await specFilePayload(env, list);

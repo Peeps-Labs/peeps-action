@@ -80,7 +80,7 @@ export async function specFilePayload(env: RunnerEnv, list: PlaywrightList) {
 }
 
 export async function buildInventoryRequest(env: RunnerEnv, list: PlaywrightList) {
-  if (!env.sha) throw new Error("GITHUB_SHA is not set");
+  if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
   // Playwright reports files relative to rootDir; Peeps wants them relative to
   // the repository root, so it can match the tree at this commit.

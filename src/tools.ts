@@ -96,10 +96,47 @@ export function jail(workspace: string, relative: string): string {
 export function jailForWrite(workspace: string, relative: string): string {
   const abs = jail(workspace, relative);
   const rel = path.relative(workspace, abs).split(path.sep).join("/");
-  if (rel === ".github/workflows" || rel.startsWith(".github/workflows/")) {
+  if (isCiConfiguration(rel)) {
     throw new ToolError(`workflow files are not writable by Peeps: ${relative}`);
   }
   return abs;
+}
+
+/**
+ * GitHub's workflows, and GitLab's CI configuration: `.gitlab-ci.yml`, any
+ * file named like one, and the `.gitlab/` directory where included
+ * configuration conventionally lives. The project can point GitLab at
+ * another path; `PEEPS_CI_CONFIG_PATH` names it so it is refused too.
+ */
+function isCiConfiguration(rel: string): boolean {
+  if (rel === ".github/workflows" || rel.startsWith(".github/workflows/")) return true;
+  if (rel === ".gitlab" || rel.startsWith(".gitlab/")) return true;
+  const base = rel.split("/").pop() ?? "";
+  if (base === ".gitlab-ci.yml" || base.endsWith(".gitlab-ci.yml")) return true;
+  const configured = process.env.PEEPS_CI_CONFIG_PATH?.replace(/^\.?\/+/, "");
+  return !!configured && rel === configured;
+}
+
+/**
+ * The remote to push a `peeps/*` branch to, with Peeps' token in it in
+ * place of whatever credentials the checkout used. GitHub takes an
+ * installation token as `x-access-token`; GitLab takes an access token as
+ * `oauth2`. The host and path stay the checkout's own.
+ */
+export function authenticatedPushUrl(
+  remote: string,
+  token: string,
+  platform: "github" | "gitlab",
+): string {
+  const match = /^https:\/\/(?:[^@/]+@)?(.+)$/.exec(remote.trim());
+  if (!match) throw new ToolError("the checkout's origin is not an https remote");
+  const user = platform === "gitlab" ? "oauth2" : "x-access-token";
+  return `https://${user}:${token}@${match[1]}`;
+}
+
+/** Any credentials in an https URL, masked: for git's error output. */
+export function maskUrlCredentials(text: string): string {
+  return text.replace(/https:\/\/[^@\s/]+@/g, "https://***@");
 }
 
 /**
@@ -208,7 +245,7 @@ export function makeRedactor(env: NodeJS.ProcessEnv): (text: string) => string {
 function isSecretish(key: string): boolean {
   if (ALWAYS_MASK_KEYS.has(key)) return true;
   if (SAFE_ENV_KEYS.has(key)) return false;
-  return !/^(GITHUB|RUNNER|ACTIONS|INPUT)_/.test(key);
+  return !/^(GITHUB|RUNNER|ACTIONS|INPUT|CI)_/.test(key);
 }
 
 /**
@@ -232,6 +269,17 @@ const ALWAYS_MASK_KEYS = new Set([
   "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
   "ACTIONS_RUNTIME_TOKEN",
   "GITHUB_TOKEN",
+  // GitLab's `CI_` variables are exempt by prefix like GitHub's, except the
+  // ones that are credentials: the job token (and the clone URL it is in),
+  // the legacy job JWTs, and the registry, deploy and proxy passwords.
+  "CI_JOB_TOKEN",
+  "CI_REPOSITORY_URL",
+  "CI_JOB_JWT",
+  "CI_JOB_JWT_V1",
+  "CI_JOB_JWT_V2",
+  "CI_REGISTRY_PASSWORD",
+  "CI_DEPLOY_PASSWORD",
+  "CI_DEPENDENCY_PROXY_PASSWORD",
 ]);
 const SAFE_ENV_KEYS = new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
 
@@ -419,13 +467,17 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       const token = str(args, "token");
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
       const remote = await runGit(["remote", "get-url", "origin"]);
-      const url = remote.stdout.trim().replace(/^https:\/\/(?:[^@]+@)?github\.com\//, `https://x-access-token:${token}@github.com/`);
+      const url = authenticatedPushUrl(remote.stdout, token, env.platform);
       // Via `runGit`, so these carry `-c safe.directory` like every other git
       // call: inside the Playwright container the checkout is owned by another
       // uid and git refuses to touch it without that.
       const git = (...a: string[]) => runGit(a);
       await git("config", "user.name", "peeps[bot]");
-      await git("config", "user.email", "peeps[bot]@users.noreply.github.com");
+      await git(
+        "config",
+        "user.email",
+        env.platform === "gitlab" ? "peeps-bot@noreply.peepsai.com" : "peeps[bot]@users.noreply.github.com",
+      );
       await git("checkout", "-B", branch);
       await git("add", "-A");
       const commit = await git("commit", "-m", message).catch((e: { stderr?: string }) => {
@@ -444,7 +496,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         "push", "--force", url, `HEAD:refs/heads/${branch}`,
       ).catch((e: { stderr?: string; message?: string }) => {
         // Never echo the URL: it carries the token.
-        const stderr = (e.stderr ?? e.message ?? "").replaceAll(token, "***").replace(/https:\/\/x-access-token:[^@\s]+@/g, "https://***@");
+        const stderr = maskUrlCredentials((e.stderr ?? e.message ?? "").replaceAll(token, "***"));
         throw new ToolError(`git push refused: ${stderr.slice(-600)}`);
       });
       const sha = (await git("rev-parse", "HEAD")).stdout.trim();
@@ -461,7 +513,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "run_tests", description: "Run one Playwright spec file with the repository's own config; optionally filter by --grep or project. Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
-    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the GitHub token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("Installation token Peeps minted for this push") }, ["branch", "message", "token"]) },
+    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) },
   ];
 
   return { specs, handlers };

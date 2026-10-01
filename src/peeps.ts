@@ -1,7 +1,8 @@
 /**
- * The runner's client for Peeps cloud. Authenticates with the job's GitHub
- * OIDC token (audience fixed to https://peepsai.com, the same for every Peeps
- * environment) or, outside GitHub Actions, with PEEPS_API_KEY.
+ * The runner's client for Peeps cloud. Authenticates with the job's OIDC
+ * token (audience fixed to https://peepsai.com, the same for every Peeps
+ * environment): requested from GitHub Actions, or the ID token GitLab CI/CD
+ * issued the job. Outside either, with PEEPS_API_KEY.
  */
 
 import type { RunnerEnv } from "./env";
@@ -44,6 +45,9 @@ export class PeepsClient {
     // OIDC first, and `PEEPS_API_KEY` only as the off-GitHub fallback. The key
     // used to be read at the top of this function, which read as though it
     // were being preferred.
+    // GitLab issues the job's ID token up front, for the job's lifetime, so
+    // there is nothing to request (and nothing to re-mint).
+    if (this.env.idToken) return this.env.idToken;
     if (this.env.oidc) {
       const url = new URL(this.env.oidc.requestUrl);
       url.searchParams.set("audience", PEEPS_OIDC_AUDIENCE);
@@ -73,7 +77,9 @@ export class PeepsClient {
     const apiKey = process.env.PEEPS_API_KEY;
     if (apiKey) return apiKey;
     throw new Error(
-      "No credentials: run inside GitHub Actions with `id-token: write`, or set PEEPS_API_KEY.",
+      this.env.platform === "gitlab"
+        ? "No credentials: give the Peeps job `id_tokens: { PEEPS_ID_TOKEN: { aud: https://peepsai.com } }`, or set PEEPS_API_KEY."
+        : "No credentials: run inside GitHub Actions with `id-token: write`, or set PEEPS_API_KEY.",
     );
   }
 

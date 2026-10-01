@@ -56,26 +56,85 @@ function resolvePeepsUrl(raw) {
   }
   return trimmed;
 }
+function eventNameForPipelineSource(source) {
+  switch (source) {
+    case void 0:
+    case "":
+      return null;
+    case "push":
+      return "push";
+    case "merge_request_event":
+      return "pull_request";
+    case "schedule":
+      return "schedule";
+    case "api":
+    case "trigger":
+    case "web":
+    case "pipeline":
+    case "parent_pipeline":
+      return "workflow_dispatch";
+    default:
+      return source;
+  }
+}
+function variable(env, name) {
+  const value = env[name];
+  return value && value.trim() !== "" ? value.trim() : null;
+}
+function readGitLabRunnerEnv(env) {
+  const workspace = env.CI_PROJECT_DIR ?? process.cwd();
+  const workingDirectory = variable(env, "PEEPS_WORKING_DIRECTORY");
+  const branch = env.CI_COMMIT_BRANCH ?? env.CI_MERGE_REQUEST_SOURCE_BRANCH_NAME;
+  const ref = branch ? `refs/heads/${branch}` : env.CI_COMMIT_TAG ? `refs/tags/${env.CI_COMMIT_TAG}` : null;
+  return {
+    platform: "gitlab",
+    mode: variable(env, "PEEPS_MODE") ?? "ci",
+    sessionId: variable(env, "PEEPS_SESSION_ID"),
+    configPath: variable(env, "PEEPS_PLAYWRIGHT_CONFIG"),
+    framework: variable(env, "PEEPS_FRAMEWORK"),
+    peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
+    workingDirectory: workingDirectory ? import_node_path.default.resolve(workspace, workingDirectory) : workspace,
+    repository: env.CI_PROJECT_PATH ?? null,
+    sha: env.CI_COMMIT_SHA ?? null,
+    ref,
+    eventName: eventNameForPipelineSource(env.CI_PIPELINE_SOURCE),
+    defaultBranch: variable(env, "CI_DEFAULT_BRANCH"),
+    runId: env.CI_PIPELINE_ID ?? null,
+    runUrl: env.CI_PIPELINE_URL ?? null,
+    serverUrl: (env.CI_SERVER_URL ?? "https://gitlab.com").replace(/\/+$/, ""),
+    workspace,
+    oidc: null,
+    idToken: variable(env, "PEEPS_ID_TOKEN")
+  };
+}
 function readRunnerEnv(env = process.env) {
+  if (env.GITLAB_CI === "true") return readGitLabRunnerEnv(env);
   const requestUrl = env.ACTIONS_ID_TOKEN_REQUEST_URL;
   const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   const workspace = env.GITHUB_WORKSPACE ?? process.cwd();
-  const workingDirectory = input(env, "working-directory");
+  const workingDirectory = input(env, "working-directory") ?? variable(env, "PEEPS_WORKING_DIRECTORY");
+  const serverUrl = (env.GITHUB_SERVER_URL ?? "https://github.com").replace(/\/+$/, "");
+  const repository = env.GITHUB_REPOSITORY ?? null;
+  const runId = env.GITHUB_RUN_ID ?? null;
   return {
+    platform: "github",
     mode: input(env, "mode") ?? env.PEEPS_MODE ?? "ci",
     sessionId: input(env, "session-id") ?? env.PEEPS_SESSION_ID ?? null,
     configPath: input(env, "config") ?? env.PEEPS_PLAYWRIGHT_CONFIG ?? null,
     framework: input(env, "framework") ?? env.PEEPS_FRAMEWORK ?? null,
     peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
     workingDirectory: workingDirectory ? import_node_path.default.resolve(workspace, workingDirectory) : workspace,
-    repository: env.GITHUB_REPOSITORY ?? null,
+    repository,
     sha: env.GITHUB_SHA ?? null,
     ref: env.GITHUB_REF ?? null,
     eventName: env.GITHUB_EVENT_NAME ?? null,
     defaultBranch: readDefaultBranch(env),
-    runId: env.GITHUB_RUN_ID ?? null,
+    runId,
+    runUrl: repository && runId ? `${serverUrl}/${repository}/actions/runs/${runId}` : null,
+    serverUrl,
     workspace,
-    oidc: requestUrl && requestToken ? { requestUrl, requestToken } : null
+    oidc: requestUrl && requestToken ? { requestUrl, requestToken } : null,
+    idToken: null
   };
 }
 
@@ -123,7 +182,7 @@ async function specFilePayload(env, list) {
   return files;
 }
 async function buildInventoryRequest(env, list) {
-  if (!env.sha) throw new Error("GITHUB_SHA is not set");
+  if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
   const rootDir = import_node_path2.default.relative(env.workspace, rootDirAbs).split(import_node_path2.default.sep).join("/") || ".";
   const files = await specFilePayload(env, list);
@@ -180,6 +239,7 @@ var PeepsClient = class {
     return this.tokenPromise;
   }
   async mintToken() {
+    if (this.env.idToken) return this.env.idToken;
     if (this.env.oidc) {
       const url = new URL(this.env.oidc.requestUrl);
       url.searchParams.set("audience", PEEPS_OIDC_AUDIENCE);
@@ -207,7 +267,7 @@ var PeepsClient = class {
     const apiKey = process.env.PEEPS_API_KEY;
     if (apiKey) return apiKey;
     throw new Error(
-      "No credentials: run inside GitHub Actions with `id-token: write`, or set PEEPS_API_KEY."
+      this.env.platform === "gitlab" ? "No credentials: give the Peeps job `id_tokens: { PEEPS_ID_TOKEN: { aud: https://peepsai.com } }`, or set PEEPS_API_KEY." : "No credentials: run inside GitHub Actions with `id-token: write`, or set PEEPS_API_KEY."
     );
   }
   /** Raw upload (artifacts). Retries transient failures a couple of times. */
@@ -317,13 +377,13 @@ function plannedTestsOf(list, rootDir) {
   return out;
 }
 async function runReport(env, peeps) {
-  if (!env.sha) throw new Error("GITHUB_SHA is not set");
+  if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const list = await listTests(env);
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
   const rootDir = import_node_path3.default.relative(env.workspace, rootDirAbs).split(import_node_path3.default.sep).join("/") || ".";
   const tests = plannedTestsOf(list, rootDir);
   console.log(`[peeps] report: ${tests.length} tests at ${env.sha.slice(0, 7)} (${env.ref ?? "?"})`);
-  const jobUrl = env.repository && env.runId ? `https://github.com/${env.repository}/actions/runs/${env.runId}` : null;
+  const jobUrl = env.runUrl;
   const files = await specFilePayload(env, list);
   const response = await peeps.post("/api/v1/ci/batches", {
     sha: env.sha,
@@ -498,10 +558,27 @@ function jail(workspace, relative) {
 function jailForWrite(workspace, relative) {
   const abs = jail(workspace, relative);
   const rel = import_node_path5.default.relative(workspace, abs).split(import_node_path5.default.sep).join("/");
-  if (rel === ".github/workflows" || rel.startsWith(".github/workflows/")) {
+  if (isCiConfiguration(rel)) {
     throw new ToolError(`workflow files are not writable by Peeps: ${relative}`);
   }
   return abs;
+}
+function isCiConfiguration(rel) {
+  if (rel === ".github/workflows" || rel.startsWith(".github/workflows/")) return true;
+  if (rel === ".gitlab" || rel.startsWith(".gitlab/")) return true;
+  const base = rel.split("/").pop() ?? "";
+  if (base === ".gitlab-ci.yml" || base.endsWith(".gitlab-ci.yml")) return true;
+  const configured = process.env.PEEPS_CI_CONFIG_PATH?.replace(/^\.?\/+/, "");
+  return !!configured && rel === configured;
+}
+function authenticatedPushUrl(remote, token, platform) {
+  const match = /^https:\/\/(?:[^@/]+@)?(.+)$/.exec(remote.trim());
+  if (!match) throw new ToolError("the checkout's origin is not an https remote");
+  const user = platform === "gitlab" ? "oauth2" : "x-access-token";
+  return `https://${user}:${token}@${match[1]}`;
+}
+function maskUrlCredentials(text) {
+  return text.replace(/https:\/\/[^@\s/]+@/g, "https://***@");
 }
 async function ensureParentDirInside(workspace, abs) {
   const parent = import_node_path5.default.dirname(abs);
@@ -564,12 +641,23 @@ function makeRedactor(env) {
 function isSecretish(key) {
   if (ALWAYS_MASK_KEYS.has(key)) return true;
   if (SAFE_ENV_KEYS.has(key)) return false;
-  return !/^(GITHUB|RUNNER|ACTIONS|INPUT)_/.test(key);
+  return !/^(GITHUB|RUNNER|ACTIONS|INPUT|CI)_/.test(key);
 }
 var ALWAYS_MASK_KEYS = /* @__PURE__ */ new Set([
   "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
   "ACTIONS_RUNTIME_TOKEN",
-  "GITHUB_TOKEN"
+  "GITHUB_TOKEN",
+  // GitLab's `CI_` variables are exempt by prefix like GitHub's, except the
+  // ones that are credentials: the job token (and the clone URL it is in),
+  // the legacy job JWTs, and the registry, deploy and proxy passwords.
+  "CI_JOB_TOKEN",
+  "CI_REPOSITORY_URL",
+  "CI_JOB_JWT",
+  "CI_JOB_JWT_V1",
+  "CI_JOB_JWT_V2",
+  "CI_REGISTRY_PASSWORD",
+  "CI_DEPLOY_PASSWORD",
+  "CI_DEPENDENCY_PROXY_PASSWORD"
 ]);
 var SAFE_ENV_KEYS = /* @__PURE__ */ new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
 function createToolServer(env) {
@@ -707,10 +795,14 @@ function createToolServer(env) {
       const token = str(args, "token");
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
       const remote = await runGit(["remote", "get-url", "origin"]);
-      const url = remote.stdout.trim().replace(/^https:\/\/(?:[^@]+@)?github\.com\//, `https://x-access-token:${token}@github.com/`);
+      const url = authenticatedPushUrl(remote.stdout, token, env.platform);
       const git = (...a) => runGit(a);
       await git("config", "user.name", "peeps[bot]");
-      await git("config", "user.email", "peeps[bot]@users.noreply.github.com");
+      await git(
+        "config",
+        "user.email",
+        env.platform === "gitlab" ? "peeps-bot@noreply.peepsai.com" : "peeps[bot]@users.noreply.github.com"
+      );
       await git("checkout", "-B", branch);
       await git("add", "-A");
       const commit = await git("commit", "-m", message).catch((e) => {
@@ -726,7 +818,7 @@ function createToolServer(env) {
         url,
         `HEAD:refs/heads/${branch}`
       ).catch((e) => {
-        const stderr = (e.stderr ?? e.message ?? "").replaceAll(token, "***").replace(/https:\/\/x-access-token:[^@\s]+@/g, "https://***@");
+        const stderr = maskUrlCredentials((e.stderr ?? e.message ?? "").replaceAll(token, "***"));
         throw new ToolError(`git push refused: ${stderr.slice(-600)}`);
       });
       const sha = (await git("rev-parse", "HEAD")).stdout.trim();
@@ -742,7 +834,7 @@ function createToolServer(env) {
     { name: "run_tests", description: "Run one Playwright spec file with the repository's own config; optionally filter by --grep or project. Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
-    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the GitHub token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("Installation token Peeps minted for this push") }, ["branch", "message", "token"]) }
+    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) }
   ];
   return { specs, handlers };
 }
@@ -1037,7 +1129,7 @@ async function moduleFilePayload(env, collection) {
   return files;
 }
 async function buildPytestInventoryRequest(env, collection) {
-  if (!env.sha) throw new Error("GITHUB_SHA is not set");
+  if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   return {
     sha: env.sha,
     framework: "pytest",
@@ -1062,12 +1154,12 @@ async function runPytestInventory(env, peeps) {
   console.log(`[peeps] inventory accepted: ${JSON.stringify(result.results)}`);
 }
 async function runPytestReport(env, peeps) {
-  if (!env.sha) throw new Error("GITHUB_SHA is not set");
+  if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const collection = await collectPytest(env);
   const rootDir = repoRootDir(env, collection);
   const planned = plannedPytestTests(collection, rootDir);
   console.log(`[peeps] report: ${planned.length} tests at ${env.sha.slice(0, 7)} (${env.ref ?? "?"})`);
-  const jobUrl = env.repository && env.runId ? `https://github.com/${env.repository}/actions/runs/${env.runId}` : null;
+  const jobUrl = env.runUrl;
   const response = await peeps.post("/api/v1/ci/batches", {
     sha: env.sha,
     jobUrl,
