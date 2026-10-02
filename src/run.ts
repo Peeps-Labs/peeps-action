@@ -8,6 +8,7 @@ import path from "node:path";
 import type { RunnerEnv } from "./env";
 import { listTests } from "./inventory";
 import type { PeepsClient } from "./peeps";
+import { requestPlan } from "./plan";
 import type { PlanFile } from "./reporter";
 import { executeAndReport, plannedTestsOf } from "./report";
 
@@ -46,9 +47,10 @@ export async function runDispatched(env: RunnerEnv, peeps: PeepsClient): Promise
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
   const rootDir = path.relative(env.workspace, rootDirAbs).split(path.sep).join("/") || ".";
   // Peeps accepts at most 2000 entries in one plan request.
-  const plan = await peeps.post<Plan>(`/api/v1/ci/batches/${env.sessionId}/plan`, {
+  const plan = await requestPlan<Plan>(peeps, env.sessionId, {
     tests: plannedTestsOf(list, rootDir).slice(0, 2000),
   });
+  if (!plan) return;
   console.log(`[peeps] run: batch ${plan.batchNumber} holds ${plan.runs.length} run(s)`);
   if (plan.runs.length === 0) {
     await peeps.post(`/api/v1/ci/batches/${plan.batchId}/complete`, { reportUploaded: false });
