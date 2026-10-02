@@ -31,6 +31,7 @@ import path from "node:path";
 import type { RunnerEnv } from "./env";
 import { gitBlobSha } from "./inventory";
 import type { PeepsClient } from "./peeps";
+import { requestPlan } from "./plan";
 import type { PlanEntry } from "./reporter";
 import type { PlannedTest } from "./report";
 
@@ -410,9 +411,10 @@ export async function runPytestDispatched(env: RunnerEnv, peeps: PeepsClient): P
   const planned = plannedPytestTests(collection, rootDir);
   // The collected tests go with the plan request, as the Playwright path's
   // list does: Peeps expands its plan to one run per browser really run here.
-  const plan = await peeps.post<Plan>(`/api/v1/ci/batches/${env.sessionId}/plan`, {
+  const plan = await requestPlan<Plan>(peeps, env.sessionId, {
     tests: planned.map(({ path: p, titlePath, pwProject }) => ({ path: p, titlePath, pwProject })).slice(0, 2000),
   });
+  if (!plan) return;
   console.log(`[peeps] run: batch ${plan.batchNumber} holds ${plan.runs.length} run(s)`);
   const { byNodeId, unmatched } = nodeIdsForRuns(planned, plan.runs);
   for (const run of unmatched.slice(0, 10)) {

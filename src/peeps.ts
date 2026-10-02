@@ -21,6 +21,28 @@ function expiryOf(token: string): number {
   }
 }
 
+/** A non-2xx answer from Peeps, with what it said, so a caller can tell answers apart. */
+export class PeepsHttpError extends Error {
+  constructor(
+    readonly path: string,
+    readonly status: number,
+    readonly body: string,
+  ) {
+    super(`Peeps ${path} → ${status}: ${body.slice(0, 500)}`);
+    this.name = "PeepsHttpError";
+  }
+
+  /** The `error` code of a JSON body, e.g. `batch_closed`; null otherwise. */
+  get code(): string | null {
+    try {
+      const parsed = JSON.parse(this.body) as { error?: unknown };
+      return typeof parsed.error === "string" ? parsed.error : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
 export class PeepsClient {
   private tokenPromise: Promise<string> | null = null;
   private tokenExpiresAt = 0;
@@ -126,7 +148,7 @@ export class PeepsClient {
     if (response.status === 204) return null;
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Peeps ${path} → ${response.status}: ${text.slice(0, 500)}`);
+      throw new PeepsHttpError(path, response.status, text);
     }
     return JSON.parse(text) as T;
   }
@@ -141,7 +163,7 @@ export class PeepsClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Peeps ${path} → ${response.status}: ${text.slice(0, 500)}`);
+      throw new PeepsHttpError(path, response.status, text);
     }
     return JSON.parse(text) as T;
   }
@@ -159,7 +181,7 @@ export class PeepsClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Peeps ${path} → ${response.status}: ${text.slice(0, 500)}`);
+      throw new PeepsHttpError(path, response.status, text);
     }
     return (text ? JSON.parse(text) : {}) as T;
   }

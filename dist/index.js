@@ -219,6 +219,24 @@ function expiryOf(token) {
     return Number.MAX_SAFE_INTEGER;
   }
 }
+var PeepsHttpError = class extends Error {
+  constructor(path7, status, body) {
+    super(`Peeps ${path7} \u2192 ${status}: ${body.slice(0, 500)}`);
+    this.path = path7;
+    this.status = status;
+    this.body = body;
+    this.name = "PeepsHttpError";
+  }
+  /** The `error` code of a JSON body, e.g. `batch_closed`; null otherwise. */
+  get code() {
+    try {
+      const parsed = JSON.parse(this.body);
+      return typeof parsed.error === "string" ? parsed.error : null;
+    } catch {
+      return null;
+    }
+  }
+};
 var PeepsClient = class {
   constructor(env) {
     this.env = env;
@@ -312,7 +330,7 @@ var PeepsClient = class {
     if (response.status === 204) return null;
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Peeps ${path7} \u2192 ${response.status}: ${text.slice(0, 500)}`);
+      throw new PeepsHttpError(path7, response.status, text);
     }
     return JSON.parse(text);
   }
@@ -326,7 +344,7 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Peeps ${path7} \u2192 ${response.status}: ${text.slice(0, 500)}`);
+      throw new PeepsHttpError(path7, response.status, text);
     }
     return JSON.parse(text);
   }
@@ -343,7 +361,7 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Peeps ${path7} \u2192 ${response.status}: ${text.slice(0, 500)}`);
+      throw new PeepsHttpError(path7, response.status, text);
     }
     return text ? JSON.parse(text) : {};
   }
@@ -489,6 +507,23 @@ async function uploadReport(peeps, batchId, reportDir) {
 
 // src/run.ts
 var import_node_path4 = __toESM(require("node:path"));
+
+// src/plan.ts
+async function requestPlan(peeps, sessionId, body) {
+  try {
+    return await peeps.post(`/api/v1/ci/batches/${sessionId}/plan`, body);
+  } catch (error) {
+    if (error instanceof PeepsHttpError && error.status === 409 && error.code === "batch_closed") {
+      console.log(
+        "[peeps] Peeps closed this batch before the job started (it was cancelled, or Peeps stopped waiting for the job); nothing to run."
+      );
+      return null;
+    }
+    throw error;
+  }
+}
+
+// src/run.ts
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -503,9 +538,10 @@ async function runDispatched(env, peeps) {
   const list = await listTests(env);
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
   const rootDir = import_node_path4.default.relative(env.workspace, rootDirAbs).split(import_node_path4.default.sep).join("/") || ".";
-  const plan = await peeps.post(`/api/v1/ci/batches/${env.sessionId}/plan`, {
+  const plan = await requestPlan(peeps, env.sessionId, {
     tests: plannedTestsOf(list, rootDir).slice(0, 2e3)
   });
+  if (!plan) return;
   console.log(`[peeps] run: batch ${plan.batchNumber} holds ${plan.runs.length} run(s)`);
   if (plan.runs.length === 0) {
     await peeps.post(`/api/v1/ci/batches/${plan.batchId}/complete`, { reportUploaded: false });
@@ -1189,9 +1225,10 @@ async function runPytestDispatched(env, peeps) {
   const collection = await collectPytest(env);
   const rootDir = repoRootDir(env, collection);
   const planned = plannedPytestTests(collection, rootDir);
-  const plan = await peeps.post(`/api/v1/ci/batches/${env.sessionId}/plan`, {
+  const plan = await requestPlan(peeps, env.sessionId, {
     tests: planned.map(({ path: p, titlePath, pwProject }) => ({ path: p, titlePath, pwProject })).slice(0, 2e3)
   });
+  if (!plan) return;
   console.log(`[peeps] run: batch ${plan.batchNumber} holds ${plan.runs.length} run(s)`);
   const { byNodeId, unmatched } = nodeIdsForRuns(planned, plan.runs);
   for (const run of unmatched.slice(0, 10)) {
