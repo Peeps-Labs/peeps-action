@@ -10,6 +10,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { prepareCaptureConfig } from "./capture-config";
 import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -139,7 +140,7 @@ export async function executeAndReport(
   if (exitCode !== 0) process.exitCode = exitCode;
 }
 
-function runPlaywright(
+async function runPlaywright(
   env: RunnerEnv,
   planFile: string,
   reportDir: string,
@@ -147,7 +148,14 @@ function runPlaywright(
 ): Promise<number> {
   const reporterPath = path.join(__dirname, "reporter.js");
   const args = ["playwright", "test", `--reporter=${reporterPath},list,html`];
-  if (env.configPath) args.push("--config", env.configPath);
+  let capture: Awaited<ReturnType<typeof prepareCaptureConfig>> | undefined;
+  try {
+    capture = await prepareCaptureConfig(env);
+  } catch (error) {
+    console.warn(`[peeps] screenshot/video defaults could not be applied; using the original config: ${String(error)}`);
+  }
+  const configPath = capture?.configPath ?? env.configPath;
+  if (configPath) args.push("--config", configPath);
   if (selection) {
     // `--grep` before `--`, then the file list. The paths come from Peeps'
     // plan, so without the separator an entry like `--config=whatever.ts`
@@ -155,20 +163,30 @@ function runPlaywright(
     // rather than a file. Everything after `--` is a positional argument.
     args.push("--grep", selection.grep, "--", ...selection.files);
   }
-  return new Promise((resolve) => {
-    const child = spawn("npx", args, {
-      cwd: env.workingDirectory,
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        CI: "1",
-        PEEPS_PLAN_FILE: planFile,
-        PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,
-        PLAYWRIGHT_HTML_OPEN: "never",
-      },
+  try {
+    return await new Promise((resolve) => {
+      const child = spawn("npx", args, {
+        cwd: env.workingDirectory,
+        stdio: "inherit",
+        env: {
+          ...process.env,
+          CI: "1",
+          PEEPS_PLAN_FILE: planFile,
+          PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,
+          PLAYWRIGHT_HTML_OPEN: "never",
+        },
+      });
+      child.on("error", (error) => {
+        console.error(`[peeps] could not start Playwright: ${String(error)}`);
+        resolve(1);
+      });
+      child.on("close", (code) => resolve(code ?? 1));
     });
-    child.on("close", (code) => resolve(code ?? 1));
-  });
+  } finally {
+    await capture?.cleanup().catch((error: unknown) => {
+      console.warn(`[peeps] could not remove temporary capture config: ${String(error)}`);
+    });
+  }
 }
 
 async function* walk(dir: string, rel = ""): AsyncGenerator<{ abs: string; rel: string }> {

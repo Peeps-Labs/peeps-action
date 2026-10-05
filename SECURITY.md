@@ -61,8 +61,12 @@ Peeps can analyse and heal the tests. Test code is code. If your specs embed
 fixtures, internal URLs, or credentials, those go too.
 
 **The HTML report can contain credentials for your own application.** If your
-Playwright config enables tracing, screenshots or video, the report includes
-them, and a trace records HTTP requests and responses, which means headers,
+Playwright config enables tracing, the report includes it. In Playwright
+`report`/`run` modes this action also enables failure screenshots and retained
+failure video when those settings are unset and its FFmpeg encoder is available. Explicit capture settings,
+including `"off"` at repository, project or test level, are respected; trace
+recording is never enabled by this action. Screenshots and video show page
+content. A trace records HTTP requests and responses, which means headers,
 cookies and bearer tokens your tests obtained against your app. Nothing
 redacts the report before upload. If that is not acceptable, turn tracing off
 for the Peeps job, or do not run `report`/`run` modes.
