@@ -220,9 +220,9 @@ function expiryOf(token) {
   }
 }
 var PeepsHttpError = class extends Error {
-  constructor(path7, status, body) {
-    super(`Peeps ${path7} \u2192 ${status}: ${body.slice(0, 500)}`);
-    this.path = path7;
+  constructor(path8, status, body) {
+    super(`Peeps ${path8} \u2192 ${status}: ${body.slice(0, 500)}`);
+    this.path = path8;
     this.status = status;
     this.body = body;
     this.name = "PeepsHttpError";
@@ -289,11 +289,11 @@ var PeepsClient = class {
     );
   }
   /** Raw upload (artifacts). Retries transient failures a couple of times. */
-  async postBytes(path7, bytes) {
+  async postBytes(path8, bytes) {
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await fetch(`${this.env.peepsUrl}${path7}`, {
+        const response = await fetch(`${this.env.peepsUrl}${path8}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${await this.token()}`,
@@ -307,9 +307,9 @@ var PeepsClient = class {
         if (response.ok) return;
         const text = await response.text();
         if (response.status < 500 && response.status !== 408 && response.status !== 429) {
-          throw new Error(`Peeps ${path7} \u2192 ${response.status}: ${text.slice(0, 300)}`);
+          throw new Error(`Peeps ${path8} \u2192 ${response.status}: ${text.slice(0, 300)}`);
         }
-        lastError = new Error(`Peeps ${path7} \u2192 ${response.status}`);
+        lastError = new Error(`Peeps ${path8} \u2192 ${response.status}`);
       } catch (error) {
         lastError = error;
       }
@@ -318,8 +318,8 @@ var PeepsClient = class {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
   /** GET that treats 204 as "nothing" (long-poll idle) instead of an error. */
-  async getOrNull(path7) {
-    const response = await fetch(`${this.env.peepsUrl}${path7}`, {
+  async getOrNull(path8) {
+    const response = await fetch(`${this.env.peepsUrl}${path8}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -330,12 +330,12 @@ var PeepsClient = class {
     if (response.status === 204) return null;
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path7, response.status, text);
+      throw new PeepsHttpError(path8, response.status, text);
     }
     return JSON.parse(text);
   }
-  async get(path7) {
-    const response = await fetch(`${this.env.peepsUrl}${path7}`, {
+  async get(path8) {
+    const response = await fetch(`${this.env.peepsUrl}${path8}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -344,12 +344,12 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path7, response.status, text);
+      throw new PeepsHttpError(path8, response.status, text);
     }
     return JSON.parse(text);
   }
-  async post(path7, body) {
-    const response = await fetch(`${this.env.peepsUrl}${path7}`, {
+  async post(path8, body) {
+    const response = await fetch(`${this.env.peepsUrl}${path8}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${await this.token()}`,
@@ -361,7 +361,7 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path7, response.status, text);
+      throw new PeepsHttpError(path8, response.status, text);
     }
     return text ? JSON.parse(text) : {};
   }
@@ -369,9 +369,117 @@ var PeepsClient = class {
 
 // src/report.ts
 var import_node_child_process2 = require("node:child_process");
+
+// src/capture-config.ts
+var import_node_crypto2 = require("node:crypto");
 var import_promises2 = require("node:fs/promises");
-var import_node_os = require("node:os");
 var import_node_path3 = __toESM(require("node:path"));
+var import_node_url = require("node:url");
+var CONFIG_EXTENSIONS = [".ts", ".js", ".mts", ".mjs", ".cts", ".cjs"];
+async function configLocation(env) {
+  const cwd = await (0, import_promises2.realpath)(env.workingDirectory);
+  const selected = env.configPath ? import_node_path3.default.resolve(cwd, env.configPath) : cwd;
+  if (!(await (0, import_promises2.stat)(selected)).isDirectory()) return { dir: import_node_path3.default.dirname(selected), file: selected };
+  for (const ext of CONFIG_EXTENSIONS) {
+    const file = import_node_path3.default.join(selected, `playwright.config${ext}`);
+    try {
+      await (0, import_promises2.stat)(file);
+      return { dir: selected, file };
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  return { dir: selected };
+}
+async function isModule(file) {
+  if (/\.(mjs|mts)$/.test(file)) return true;
+  if (/\.(cjs|cts)$/.test(file)) return false;
+  let dir = import_node_path3.default.dirname(file);
+  for (; ; ) {
+    try {
+      const text = await (0, import_promises2.readFile)(import_node_path3.default.join(dir, "package.json"), "utf8");
+      try {
+        return JSON.parse(text).type === "module";
+      } catch {
+        return false;
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    const parent = import_node_path3.default.dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
+}
+async function prepareCaptureConfig(env) {
+  const { dir, file } = await configLocation(env);
+  const esm = file ? await isModule(file) : false;
+  const configPath = import_node_path3.default.join(dir, `.peeps-capture-${(0, import_node_crypto2.randomUUID)()}.config.${esm ? "mjs" : "cjs"}`);
+  const load = !file ? "const loaded = {};" : esm ? `import * as loaded from ${JSON.stringify((0, import_node_url.pathToFileURL)(file).href)};` : `const loaded = await require(${JSON.stringify(file)});`;
+  const body = `
+const config = await (loaded && typeof loaded === "object" && "default" in loaded ? loaded.default : loaded);
+if (!config || typeof config !== "object") throw new Error("Playwright config must export a single object");
+if (config.use !== undefined && (!config.use || typeof config.use !== "object"))
+  throw new Error("Playwright config.use must be an object");
+let defaultVideo = "retain-on-failure";
+if (config.use?.video === undefined) {
+  // A system browser may exist without Playwright's video encoder. Use its
+  // own registry to resolve the encoder, including host revision overrides.
+  try {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const createRequire = require("node:module").createRequire;
+    const fromCli = createRequire(fs.realpathSync(process.argv[1]));
+    const fromPlaywright = createRequire(fromCli.resolve("playwright/package.json"));
+    const coreDir = path.dirname(fromPlaywright.resolve("playwright-core/package.json"));
+    // Playwright moved its registry into coreBundle in newer releases.
+    // Resolve from the CLI's core, not an unrelated hoisted dependency.
+    const bundledRegistry = path.join(coreDir, "lib", "coreBundle.js");
+    const registry = fs.existsSync(bundledRegistry)
+      ? require(bundledRegistry).registry.registry
+      : require(path.join(coreDir, "lib", "server", "registry", "index.js")).registry;
+    const encoderPath = registry.findExecutable("ffmpeg").executablePath();
+    if (!fs.statSync(encoderPath).isFile()) throw new Error("Encoder is not a file");
+    fs.accessSync(encoderPath, fs.constants.X_OK);
+  } catch {
+    defaultVideo = "off";
+    console.warn("[peeps] default video disabled: Playwright FFmpeg unavailable or unverifiable; run npx playwright install ffmpeg to enable failure video. Screenshot defaults still apply.");
+  }
+}
+const withEvidence = {
+  ...config,
+  use: {
+    ...config.use,
+    screenshot: config.use?.screenshot === undefined ? "only-on-failure" : config.use.screenshot,
+    video: config.use?.video === undefined ? defaultVideo : config.use.video,
+  },
+};
+`;
+  const source = esm ? `import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+${load}
+${body}
+export default withEvidence;
+` : `module.exports = (async () => {
+${load}
+${body}
+return { default: withEvidence };
+})();
+`;
+  try {
+    await (0, import_promises2.writeFile)(configPath, source, { flag: "wx", mode: 384 });
+  } catch (error) {
+    if (error.code !== "EEXIST") await (0, import_promises2.unlink)(configPath).catch(() => {
+    });
+    throw error;
+  }
+  return { configPath, cleanup: () => (0, import_promises2.unlink)(configPath) };
+}
+
+// src/report.ts
+var import_promises3 = require("node:fs/promises");
+var import_node_os = require("node:os");
+var import_node_path4 = __toESM(require("node:path"));
 var MAX_UPLOAD_BYTES = 128 * 1024 * 1024;
 function plannedTestsOf(list, rootDir) {
   const out = [];
@@ -398,7 +506,7 @@ async function runReport(env, peeps) {
   if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const list = await listTests(env);
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
-  const rootDir = import_node_path3.default.relative(env.workspace, rootDirAbs).split(import_node_path3.default.sep).join("/") || ".";
+  const rootDir = import_node_path4.default.relative(env.workspace, rootDirAbs).split(import_node_path4.default.sep).join("/") || ".";
   const tests = plannedTestsOf(list, rootDir);
   console.log(`[peeps] report: ${tests.length} tests at ${env.sha.slice(0, 7)} (${env.ref ?? "?"})`);
   const jobUrl = env.runUrl;
@@ -423,11 +531,11 @@ async function runReport(env, peeps) {
   });
 }
 async function executeAndReport(env, peeps, input2) {
-  const scratch = await (0, import_promises2.mkdtemp)(import_node_path3.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os.tmpdir)(), "peeps-"));
-  const planFile = import_node_path3.default.join(scratch, "plan.json");
-  const reportDir = import_node_path3.default.join(scratch, "report");
+  const scratch = await (0, import_promises3.mkdtemp)(import_node_path4.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os.tmpdir)(), "peeps-"));
+  const planFile = import_node_path4.default.join(scratch, "plan.json");
+  const reportDir = import_node_path4.default.join(scratch, "report");
   const plan = { peepsUrl: env.peepsUrl, rootDir: input2.rootDir, runs: input2.runs };
-  await (0, import_promises2.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
+  await (0, import_promises3.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
   const exitCode = await runPlaywright(env, planFile, reportDir, input2.selection);
   let reportUploaded = false;
   for (const b of input2.batches) {
@@ -447,37 +555,54 @@ async function executeAndReport(env, peeps, input2) {
   console.log(`[peeps] playwright exited with ${exitCode}`);
   if (exitCode !== 0) process.exitCode = exitCode;
 }
-function runPlaywright(env, planFile, reportDir, selection) {
-  const reporterPath = import_node_path3.default.join(__dirname, "reporter.js");
+async function runPlaywright(env, planFile, reportDir, selection) {
+  const reporterPath = import_node_path4.default.join(__dirname, "reporter.js");
   const args = ["playwright", "test", `--reporter=${reporterPath},list,html`];
-  if (env.configPath) args.push("--config", env.configPath);
+  let capture;
+  try {
+    capture = await prepareCaptureConfig(env);
+  } catch (error) {
+    console.warn(`[peeps] screenshot/video defaults could not be applied; using the original config: ${String(error)}`);
+  }
+  const configPath = capture?.configPath ?? env.configPath;
+  if (configPath) args.push("--config", configPath);
   if (selection) {
     args.push("--grep", selection.grep, "--", ...selection.files);
   }
-  return new Promise((resolve) => {
-    const child = (0, import_node_child_process2.spawn)("npx", args, {
-      cwd: env.workingDirectory,
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        CI: "1",
-        PEEPS_PLAN_FILE: planFile,
-        PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,
-        PLAYWRIGHT_HTML_OPEN: "never"
-      }
+  try {
+    return await new Promise((resolve) => {
+      const child = (0, import_node_child_process2.spawn)("npx", args, {
+        cwd: env.workingDirectory,
+        stdio: "inherit",
+        env: {
+          ...process.env,
+          CI: "1",
+          PEEPS_PLAN_FILE: planFile,
+          PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,
+          PLAYWRIGHT_HTML_OPEN: "never"
+        }
+      });
+      child.on("error", (error) => {
+        console.error(`[peeps] could not start Playwright: ${String(error)}`);
+        resolve(1);
+      });
+      child.on("close", (code) => resolve(code ?? 1));
     });
-    child.on("close", (code) => resolve(code ?? 1));
-  });
+  } finally {
+    await capture?.cleanup().catch((error) => {
+      console.warn(`[peeps] could not remove temporary capture config: ${String(error)}`);
+    });
+  }
 }
 async function* walk(dir, rel = "") {
   let entries;
   try {
-    entries = await (0, import_promises2.readdir)(dir, { withFileTypes: true });
+    entries = await (0, import_promises3.readdir)(dir, { withFileTypes: true });
   } catch {
     return;
   }
   for (const entry of entries) {
-    const abs = import_node_path3.default.join(dir, entry.name);
+    const abs = import_node_path4.default.join(dir, entry.name);
     const relPath = rel ? `${rel}/${entry.name}` : entry.name;
     if (entry.isDirectory()) yield* walk(abs, relPath);
     else if (entry.isFile()) yield { abs, rel: relPath };
@@ -486,12 +611,12 @@ async function* walk(dir, rel = "") {
 async function uploadReport(peeps, batchId, reportDir) {
   let uploaded = 0;
   for await (const file of walk(reportDir)) {
-    const info = await (0, import_promises2.stat)(file.abs);
+    const info = await (0, import_promises3.stat)(file.abs);
     if (info.size > MAX_UPLOAD_BYTES) {
       console.log(`[peeps] skipping ${file.rel}: ${info.size} bytes exceeds the upload limit`);
       continue;
     }
-    const bytes = await (0, import_promises2.readFile)(file.abs);
+    const bytes = await (0, import_promises3.readFile)(file.abs);
     try {
       await peeps.postBytes(
         `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(file.rel)}`,
@@ -506,7 +631,7 @@ async function uploadReport(peeps, batchId, reportDir) {
 }
 
 // src/run.ts
-var import_node_path4 = __toESM(require("node:path"));
+var import_node_path5 = __toESM(require("node:path"));
 
 // src/plan.ts
 async function requestPlan(peeps, sessionId, body) {
@@ -537,7 +662,7 @@ async function runDispatched(env, peeps) {
   if (!env.sessionId) throw new Error("`session-id` is required in run mode (Peeps passes it)");
   const list = await listTests(env);
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
-  const rootDir = import_node_path4.default.relative(env.workspace, rootDirAbs).split(import_node_path4.default.sep).join("/") || ".";
+  const rootDir = import_node_path5.default.relative(env.workspace, rootDirAbs).split(import_node_path5.default.sep).join("/") || ".";
   const plan = await requestPlan(peeps, env.sessionId, {
     tests: plannedTestsOf(list, rootDir).slice(0, 2e3)
   });
@@ -548,7 +673,7 @@ async function runDispatched(env, peeps) {
     return;
   }
   const files = [...new Set(plan.runs.map((r) => r.path))].map(
-    (p) => import_node_path4.default.relative(env.workingDirectory, import_node_path4.default.join(env.workspace, p)).split(import_node_path4.default.sep).join("/")
+    (p) => import_node_path5.default.relative(env.workingDirectory, import_node_path5.default.join(env.workspace, p)).split(import_node_path5.default.sep).join("/")
   );
   await executeAndReport(env, peeps, {
     rootDir,
@@ -560,9 +685,9 @@ async function runDispatched(env, peeps) {
 
 // src/tools.ts
 var import_node_child_process3 = require("node:child_process");
-var import_promises3 = require("node:fs/promises");
+var import_promises4 = require("node:fs/promises");
 var import_node_os2 = require("node:os");
-var import_node_path5 = __toESM(require("node:path"));
+var import_node_path6 = __toESM(require("node:path"));
 var import_node_util2 = require("node:util");
 var execFileAsync2 = (0, import_node_util2.promisify)(import_node_child_process3.execFile);
 var MAX_FILE_BYTES = 512 * 1024;
@@ -580,12 +705,12 @@ function str(args, key, required = true) {
 }
 function jail(workspace, relative) {
   const cleaned = relative.replace(/\\/g, "/").replace(/^\/+/, "");
-  const abs = import_node_path5.default.resolve(workspace, cleaned);
-  const rel = import_node_path5.default.relative(workspace, abs);
-  if (rel.startsWith("..") || import_node_path5.default.isAbsolute(rel)) {
+  const abs = import_node_path6.default.resolve(workspace, cleaned);
+  const rel = import_node_path6.default.relative(workspace, abs);
+  if (rel.startsWith("..") || import_node_path6.default.isAbsolute(rel)) {
     throw new ToolError(`path escapes the workspace: ${relative}`);
   }
-  for (const seg of rel.split(import_node_path5.default.sep)) {
+  for (const seg of rel.split(import_node_path6.default.sep)) {
     if (DENY_SEGMENTS.has(seg)) throw new ToolError(`path is off limits: ${relative}`);
     if (/^\.env(\..*)?$/.test(seg)) throw new ToolError(`path is off limits: ${relative}`);
   }
@@ -593,7 +718,7 @@ function jail(workspace, relative) {
 }
 function jailForWrite(workspace, relative) {
   const abs = jail(workspace, relative);
-  const rel = import_node_path5.default.relative(workspace, abs).split(import_node_path5.default.sep).join("/");
+  const rel = import_node_path6.default.relative(workspace, abs).split(import_node_path6.default.sep).join("/");
   if (isCiConfiguration(rel)) {
     throw new ToolError(`workflow files are not writable by Peeps: ${relative}`);
   }
@@ -617,24 +742,24 @@ function maskUrlCredentials(text) {
   return text.replace(/https:\/\/[^@\s/]+@/g, "https://***@");
 }
 async function ensureParentDirInside(workspace, abs) {
-  const parent = import_node_path5.default.dirname(abs);
+  const parent = import_node_path6.default.dirname(abs);
   let existing = parent;
   for (; ; ) {
     try {
-      await (0, import_promises3.stat)(existing);
+      await (0, import_promises4.stat)(existing);
       break;
     } catch {
-      const up = import_node_path5.default.dirname(existing);
+      const up = import_node_path6.default.dirname(existing);
       if (up === existing) break;
       existing = up;
     }
   }
-  const [realWorkspace, realExisting] = await Promise.all([(0, import_promises3.realpath)(workspace), (0, import_promises3.realpath)(existing)]);
-  const rel = import_node_path5.default.relative(realWorkspace, realExisting);
-  if (rel.startsWith("..") || import_node_path5.default.isAbsolute(rel)) {
-    throw new ToolError(`path escapes the workspace: ${import_node_path5.default.relative(workspace, abs)}`);
+  const [realWorkspace, realExisting] = await Promise.all([(0, import_promises4.realpath)(workspace), (0, import_promises4.realpath)(existing)]);
+  const rel = import_node_path6.default.relative(realWorkspace, realExisting);
+  if (rel.startsWith("..") || import_node_path6.default.isAbsolute(rel)) {
+    throw new ToolError(`path escapes the workspace: ${import_node_path6.default.relative(workspace, abs)}`);
   }
-  if (existing !== parent) await (0, import_promises3.mkdir)(parent, { recursive: true });
+  if (existing !== parent) await (0, import_promises4.mkdir)(parent, { recursive: true });
 }
 async function patchPaths(runGit, patchFile) {
   let stdout;
@@ -706,10 +831,10 @@ function createToolServer(env) {
   const handlers = {
     async read_file(args) {
       const abs = jail(workspace, str(args, "path"));
-      const info = await (0, import_promises3.stat)(abs);
+      const info = await (0, import_promises4.stat)(abs);
       if (!info.isFile()) throw new ToolError("not a file");
       if (info.size > MAX_FILE_BYTES) throw new ToolError(`file is ${info.size} bytes; limit ${MAX_FILE_BYTES}`);
-      return { path: str(args, "path"), content: redact(await (0, import_promises3.readFile)(abs, "utf8")) };
+      return { path: str(args, "path"), content: redact(await (0, import_promises4.readFile)(abs, "utf8")) };
     },
     async list_files(args) {
       const dir = jail(workspace, str(args, "path", false) || ".");
@@ -718,14 +843,14 @@ function createToolServer(env) {
         if (out.length >= MAX_LIST || depth > 12) return;
         let entries;
         try {
-          entries = await (0, import_promises3.readdir)(d, { withFileTypes: true });
+          entries = await (0, import_promises4.readdir)(d, { withFileTypes: true });
         } catch {
           return;
         }
         for (const e of entries) {
           if (DENY_SEGMENTS.has(e.name) || e.name.startsWith(".env")) continue;
           const r = rel ? `${rel}/${e.name}` : e.name;
-          if (e.isDirectory()) await walk2(import_node_path5.default.join(d, e.name), r, depth + 1);
+          if (e.isDirectory()) await walk2(import_node_path6.default.join(d, e.name), r, depth + 1);
           else if (e.isFile()) {
             out.push(r);
             if (out.length >= MAX_LIST) return;
@@ -753,7 +878,7 @@ function createToolServer(env) {
         if (!/\.(ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml)$/.test(rel)) continue;
         let text;
         try {
-          text = await (0, import_promises3.readFile)(jail(workspace, rel), "utf8");
+          text = await (0, import_promises4.readFile)(jail(workspace, rel), "utf8");
         } catch {
           continue;
         }
@@ -770,14 +895,14 @@ function createToolServer(env) {
       const content = str(args, "content");
       if (content.length > MAX_FILE_BYTES) throw new ToolError("content too large");
       await ensureParentDirInside(workspace, abs);
-      await (0, import_promises3.writeFile)(abs, content, "utf8");
+      await (0, import_promises4.writeFile)(abs, content, "utf8");
       return { path: rel, bytes: Buffer.byteLength(content) };
     },
     async apply_patch(args) {
       const patch = str(args, "patch");
-      const dir = await (0, import_promises3.mkdtemp)(import_node_path5.default.join((0, import_node_os2.tmpdir)(), "peeps-patch-"));
-      const file = import_node_path5.default.join(dir, "change.patch");
-      await (0, import_promises3.writeFile)(file, patch, "utf8");
+      const dir = await (0, import_promises4.mkdtemp)(import_node_path6.default.join((0, import_node_os2.tmpdir)(), "peeps-patch-"));
+      const file = import_node_path6.default.join(dir, "change.patch");
+      await (0, import_promises4.writeFile)(file, patch, "utf8");
       for (const touched of await patchPaths(runGit, file)) {
         jailForWrite(workspace, touched);
       }
@@ -796,7 +921,7 @@ function createToolServer(env) {
     async run_tests(args) {
       const file = str(args, "file");
       const abs = jail(workspace, file);
-      const rel = import_node_path5.default.relative(env.workingDirectory, abs).split(import_node_path5.default.sep).join("/");
+      const rel = import_node_path6.default.relative(env.workingDirectory, abs).split(import_node_path6.default.sep).join("/");
       const cmd = ["playwright", "test", "--reporter=json"];
       if (typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
       if (typeof args.project === "string" && args.project) cmd.push("--project", args.project);
@@ -988,12 +1113,12 @@ function summarizeArgs(args) {
 
 // src/pytest.ts
 var import_node_child_process4 = require("node:child_process");
-var import_node_crypto2 = require("node:crypto");
+var import_node_crypto3 = require("node:crypto");
 var import_node_fs2 = require("node:fs");
-var import_promises4 = require("node:fs/promises");
+var import_promises5 = require("node:fs/promises");
 var import_node_os3 = require("node:os");
-var import_node_path6 = __toESM(require("node:path"));
-var PLUGIN_DIR = import_node_path6.default.join(__dirname, "..", "python");
+var import_node_path7 = __toESM(require("node:path"));
+var PLUGIN_DIR = import_node_path7.default.join(__dirname, "..", "python");
 var PLUGIN = "peeps_pytest_plugin";
 var PLAYWRIGHT_CONFIG = /^playwright(\..+)?\.config\.[cm]?[jt]s$/;
 function resolveFramework(env) {
@@ -1011,7 +1136,7 @@ function resolveFramework(env) {
   }
   if (names.some((name) => PLAYWRIGHT_CONFIG.test(name))) return "playwright";
   if (names.includes("pytest.ini") || names.includes("conftest.py")) return "pytest";
-  const pyproject = import_node_path6.default.join(env.workingDirectory, "pyproject.toml");
+  const pyproject = import_node_path7.default.join(env.workingDirectory, "pyproject.toml");
   if ((0, import_node_fs2.existsSync)(pyproject) && /^\s*\[tool\.pytest(\.ini_options)?\]/m.test((0, import_node_fs2.readFileSync)(pyproject, "utf8"))) {
     return "pytest";
   }
@@ -1079,7 +1204,7 @@ function nodeIdsForRuns(planned, runs) {
 }
 function pytestEnv(extra) {
   const env = { ...process.env, CI: "1", ...extra };
-  env.PYTHONPATH = process.env.PYTHONPATH ? `${PLUGIN_DIR}${import_node_path6.default.delimiter}${process.env.PYTHONPATH}` : PLUGIN_DIR;
+  env.PYTHONPATH = process.env.PYTHONPATH ? `${PLUGIN_DIR}${import_node_path7.default.delimiter}${process.env.PYTHONPATH}` : PLUGIN_DIR;
   if (!("PEEPS_PLAN_FILE" in extra)) delete env.PEEPS_PLAN_FILE;
   if (!("PEEPS_COLLECT_OUT" in extra)) delete env.PEEPS_COLLECT_OUT;
   if (!("PEEPS_SELECT_ONLY" in extra)) delete env.PEEPS_SELECT_ONLY;
@@ -1116,8 +1241,8 @@ function configArgs(env) {
   return env.configPath ? ["-c", env.configPath] : [];
 }
 async function collectPytest(env) {
-  const scratch = await (0, import_promises4.mkdtemp)(import_node_path6.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-collect-"));
-  const out = import_node_path6.default.join(scratch, "collection.json");
+  const scratch = await (0, import_promises5.mkdtemp)(import_node_path7.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-collect-"));
+  const out = import_node_path7.default.join(scratch, "collection.json");
   const { code, output } = await spawnPytest(
     ["--collect-only", "-q", "-p", PLUGIN, ...configArgs(env)],
     { cwd: env.workingDirectory, env: pytestEnv({ PEEPS_COLLECT_OUT: out }), capture: true }
@@ -1126,7 +1251,7 @@ async function collectPytest(env) {
     throw new Error(`pytest --collect-only exited with ${code}:
 ${output.slice(-4e3)}`);
   }
-  const collection = JSON.parse(await (0, import_promises4.readFile)(out, "utf8"));
+  const collection = JSON.parse(await (0, import_promises5.readFile)(out, "utf8"));
   for (const error of collection.errors) {
     console.log(`[peeps] collection error in ${error.nodeId}:
 ${error.message}`);
@@ -1139,8 +1264,8 @@ function repoRelative(env, abs) {
     workspace = (0, import_node_fs2.realpathSync)(workspace);
   } catch {
   }
-  const rel = import_node_path6.default.relative(workspace, abs).split(import_node_path6.default.sep).join("/");
-  if (rel === ".." || rel.startsWith("../") || import_node_path6.default.isAbsolute(rel)) {
+  const rel = import_node_path7.default.relative(workspace, abs).split(import_node_path7.default.sep).join("/");
+  if (rel === ".." || rel.startsWith("../") || import_node_path7.default.isAbsolute(rel)) {
     throw new Error(`${abs} is outside the repository (${env.workspace})`);
   }
   return rel;
@@ -1154,8 +1279,8 @@ async function moduleFilePayload(env, collection) {
   );
   const files = [];
   for (const file of [...modules].sort()) {
-    const abs = import_node_path6.default.join(collection.rootDir, file);
-    const bytes = await (0, import_promises4.readFile)(abs);
+    const abs = import_node_path7.default.join(collection.rootDir, file);
+    const bytes = await (0, import_promises5.readFile)(abs);
     files.push({
       path: repoRelative(env, abs),
       blobSha: gitBlobSha(bytes),
@@ -1258,23 +1383,23 @@ function nodeIdArgument(nodeId, rootDirAbs, cwd) {
     from = (0, import_node_fs2.realpathSync)(cwd);
   } catch {
   }
-  const relative = import_node_path6.default.relative(from, import_node_path6.default.join(rootDirAbs, file)).split(import_node_path6.default.sep).join("/");
+  const relative = import_node_path7.default.relative(from, import_node_path7.default.join(rootDirAbs, file)).split(import_node_path7.default.sep).join("/");
   return relative + rest;
 }
 async function executePytestAndReport(env, peeps, input2) {
-  const scratch = await (0, import_promises4.mkdtemp)(import_node_path6.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-"));
-  const planFile = import_node_path6.default.join(scratch, "plan.json");
-  const resultsFile = import_node_path6.default.join(scratch, "results.json");
-  const outputDir = import_node_path6.default.join(scratch, "output");
-  const artifactsDir = import_node_path6.default.join(scratch, "evidence");
-  await (0, import_promises4.mkdir)(artifactsDir);
+  const scratch = await (0, import_promises5.mkdtemp)(import_node_path7.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-"));
+  const planFile = import_node_path7.default.join(scratch, "plan.json");
+  const resultsFile = import_node_path7.default.join(scratch, "results.json");
+  const outputDir = import_node_path7.default.join(scratch, "output");
+  const artifactsDir = import_node_path7.default.join(scratch, "evidence");
+  await (0, import_promises5.mkdir)(artifactsDir);
   const runs = Object.fromEntries(
     Object.entries(input2.byNodeId).map(([nodeId, run]) => [
       nodeId,
       { runId: run.runId, credential: run.credential }
     ])
   );
-  await (0, import_promises4.writeFile)(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 384 });
+  await (0, import_promises5.writeFile)(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 384 });
   const config = env.configPath ? configArgs(env) : input2.collection.iniPath ? ["-c", input2.collection.iniPath] : [];
   const args = ["-p", PLUGIN, "--rootdir", input2.collection.rootDir, ...config];
   if (input2.collection.playwright) args.push("--output", outputDir);
@@ -1304,7 +1429,7 @@ async function executePytestAndReport(env, peeps, input2) {
     }
   );
   const runIdByOutputDir = await readOutputDirs(resultsFile, input2.byNodeId);
-  const evidence = await stagedEvidence(import_node_path6.default.join(artifactsDir, "upload"), input2.byNodeId);
+  const evidence = await stagedEvidence(import_node_path7.default.join(artifactsDir, "upload"), input2.byNodeId);
   for (const b of input2.batches) {
     try {
       const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir);
@@ -1331,10 +1456,10 @@ async function executePytestAndReport(env, peeps, input2) {
 async function readOutputDirs(resultsFile, byNodeId) {
   const map = /* @__PURE__ */ new Map();
   try {
-    const results = JSON.parse(await (0, import_promises4.readFile)(resultsFile, "utf8"));
+    const results = JSON.parse(await (0, import_promises5.readFile)(resultsFile, "utf8"));
     for (const [nodeId, dir] of Object.entries(results.outputDirs ?? {})) {
       const run = byNodeId[nodeId];
-      if (run) map.set(import_node_path6.default.basename(dir), run.runId);
+      if (run) map.set(import_node_path7.default.basename(dir), run.runId);
     }
   } catch {
   }
@@ -1346,18 +1471,18 @@ function artifactName(rel, runIdByOutputDir) {
   const runId = rest.length > 0 ? runIdByOutputDir.get(dir) : void 0;
   const flat = (runId ? [runId, ...rest] : [dir, ...rest]).join("-").replace(/[^A-Za-z0-9._-]/g, "_");
   if (flat.length <= 200) return `data/${flat}`;
-  const ext = import_node_path6.default.extname(flat);
-  return `data/${(0, import_node_crypto2.createHash)("sha1").update(rel).digest("hex")}${ext}`;
+  const ext = import_node_path7.default.extname(flat);
+  return `data/${(0, import_node_crypto3.createHash)("sha1").update(rel).digest("hex")}${ext}`;
 }
 async function* walkOutput(dir, rel = "") {
   let entries;
   try {
-    entries = await (0, import_promises4.readdir)(dir, { withFileTypes: true });
+    entries = await (0, import_promises5.readdir)(dir, { withFileTypes: true });
   } catch {
     return;
   }
   for (const entry of entries) {
-    const abs = import_node_path6.default.join(dir, entry.name);
+    const abs = import_node_path7.default.join(dir, entry.name);
     const relPath = rel ? `${rel}/${entry.name}` : entry.name;
     if (entry.isDirectory()) yield* walkOutput(abs, relPath);
     else if (entry.isFile()) yield { abs, rel: relPath };
@@ -1366,13 +1491,13 @@ async function* walkOutput(dir, rel = "") {
 var MAX_EVIDENCE_BYTES = 25 * 1024 * 1024;
 async function stagedEvidence(uploadDir, byNodeId) {
   try {
-    if (!(await (0, import_promises4.lstat)(uploadDir)).isDirectory()) return [];
+    if (!(await (0, import_promises5.lstat)(uploadDir)).isDirectory()) return [];
   } catch {
     return [];
   }
   const runIds = Object.values(byNodeId).map((run) => run.runId);
   const staged = [];
-  for (const entry of await (0, import_promises4.readdir)(uploadDir, { withFileTypes: true })) {
+  for (const entry of await (0, import_promises5.readdir)(uploadDir, { withFileTypes: true })) {
     const name = entry.name;
     if (!entry.isFile() || !/^[A-Za-z0-9._-]{1,200}$/.test(name)) {
       console.log(`[peeps] not uploading ${JSON.stringify(name)}: not a staged attachment`);
@@ -1380,7 +1505,7 @@ async function stagedEvidence(uploadDir, byNodeId) {
     }
     const runId = runIds.find((id) => name.startsWith(`${id}-evidence-`));
     if (runId === void 0) continue;
-    staged.push({ abs: import_node_path6.default.join(uploadDir, name), name, runId });
+    staged.push({ abs: import_node_path7.default.join(uploadDir, name), name, runId });
   }
   return staged.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -1388,14 +1513,14 @@ async function uploadEvidence(peeps, batchId, files) {
   let uploaded = 0;
   for (const file of files) {
     try {
-      const info = await (0, import_promises4.lstat)(file.abs);
+      const info = await (0, import_promises5.lstat)(file.abs);
       if (!info.isFile() || info.size > MAX_EVIDENCE_BYTES) {
         console.log(`[peeps] skipping attachment ${file.name}: not a file within ${MAX_EVIDENCE_BYTES} bytes`);
         continue;
       }
       await peeps.postBytes(
         `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(`data/${file.name}`)}`,
-        await (0, import_promises4.readFile)(file.abs)
+        await (0, import_promises5.readFile)(file.abs)
       );
       uploaded += 1;
     } catch (error) {
@@ -1407,7 +1532,7 @@ async function uploadEvidence(peeps, batchId, files) {
 async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
   let uploaded = 0;
   for await (const file of walkOutput(outputDir)) {
-    const info = await (0, import_promises4.stat)(file.abs);
+    const info = await (0, import_promises5.stat)(file.abs);
     if (info.size > MAX_UPLOAD_BYTES2) {
       console.log(`[peeps] skipping ${file.rel}: ${info.size} bytes exceeds the upload limit`);
       continue;
@@ -1416,7 +1541,7 @@ async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
     try {
       await peeps.postBytes(
         `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(name)}`,
-        await (0, import_promises4.readFile)(file.abs)
+        await (0, import_promises5.readFile)(file.abs)
       );
       uploaded += 1;
     } catch (error) {

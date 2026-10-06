@@ -20,6 +20,9 @@ jobs:
       # the Node the action itself runs on, which `action.yml` decides.
       - run: npm ci
 
+      # Capture regressions execute the committed action with real Chromium.
+      - run: npx playwright install --with-deps chromium
+
       - run: npm run typecheck
 
       # The pytest path's tests run real pytest. Without this they would skip,

@@ -143,6 +143,29 @@ its own installation token, supplied for that one call, not with your
 
 Outside GitHub Actions there is no OIDC token, so set `PEEPS_API_KEY` instead.
 
+## Failure evidence
+
+In Playwright `report` and `run` modes, Peeps defaults an unset `use.screenshot`
+to `"only-on-failure"` and, when Playwright’s FFmpeg is installed, an unset
+`use.video` to `"retain-on-failure"`. If the encoder is missing, Peeps warns
+to run `npx playwright install ffmpeg` and leaves implicit video off so a
+system-browser suite keeps working. Explicit video settings still win. Failed
+attempts get evidence even without retries. Explicit repository, project and
+`test.use` settings still win, including `"off"` and options with a `mode`.
+Trace settings, viewport and device scale are unchanged. Inventory, agent-mode
+`run_tests`, and pytest do not use these Playwright defaults.
+
+The action loads your config through a temporary wrapper beside it, preserving
+config-relative paths without changing the original file. `config.configFile`
+during execution names that wrapper. It is removed on ordinary exit, including
+a failed run. If the directory is not writable, the action warns that defaults
+could not be applied and runs your original config instead; set the capture
+options in your config to enable evidence in that case.
+
+Video records throughout each test and is discarded for passing attempts, so it
+adds recording work. Kept screenshots and video are included in the uploaded
+HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
+
 ## Inputs
 
 | Input | Required | What it is |
@@ -249,10 +272,11 @@ access token Peeps was given (Maintainer).
 ## Development
 
 ```bash
-npm install
+npm ci
+npx playwright install chromium
 npm run typecheck
+npm run build
 npm test
-npm run build        # dist/ is committed — the action runs from it
 ```
 
 `dist/` is the bundle `uses:` actually executes, so CI rebuilds it and fails if
@@ -262,6 +286,9 @@ rebuilt `dist/` with it.
 The pytest tests run real pytest against `test/fixtures/pytest-suite`. They
 skip when `python3` (or `PEEPS_PYTHON`) cannot import pytest; CI installs it
 and sets `PEEPS_REQUIRE_PYTEST=1`, so there they fail instead.
+
+The Playwright capture regressions execute the committed `dist/index.js` with
+real Chromium and a local fake Peeps service. Rebuild before testing source changes.
 
 ## License
 
