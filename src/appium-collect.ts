@@ -22,7 +22,7 @@
  * the inventory payload.
  */
 
-import { existsSync, globSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import fs, { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -218,6 +218,9 @@ function glob(patterns: unknown, rootDir: string): string[] {
   const list = flatten(Array.isArray(patterns) ? patterns : typeof patterns === "string" ? [patterns] : []);
   return list.flatMap((pattern) => {
     if (pattern.startsWith("file://")) return [fileURLToPath(pattern)];
+    // Node 22+; read off the module so an older Node fails here, with a reason, not at load.
+    const globSync = (fs as { globSync?: (p: string, o: { cwd: string }) => string[] }).globSync;
+    if (!globSync) throw new Error(`globbing specs without @wdio/config needs Node 22 or later (this is ${process.version})`);
     return globSync(pattern.replace(/\\/g, "/"), { cwd: rootDir }).map((match) => path.resolve(rootDir, match));
   });
 }
