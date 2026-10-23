@@ -77,6 +77,9 @@ function eventNameForPipelineSource(source) {
       return source;
   }
 }
+function flag(value) {
+  return /^(true|1|yes)$/i.test((value ?? "").trim());
+}
 function variable(env, name) {
   const value = env[name];
   return value && value.trim() !== "" ? value.trim() : null;
@@ -92,6 +95,7 @@ function readGitLabRunnerEnv(env) {
     sessionId: variable(env, "PEEPS_SESSION_ID"),
     configPath: variable(env, "PEEPS_PLAYWRIGHT_CONFIG"),
     framework: variable(env, "PEEPS_FRAMEWORK"),
+    deviceTools: flag(env.PEEPS_DEVICE_TOOLS),
     peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
     workingDirectory: workingDirectory ? import_node_path.default.resolve(workspace, workingDirectory) : workspace,
     repository: env.CI_PROJECT_PATH ?? null,
@@ -122,6 +126,7 @@ function readRunnerEnv(env = process.env) {
     sessionId: input(env, "session-id") ?? env.PEEPS_SESSION_ID ?? null,
     configPath: input(env, "config") ?? env.PEEPS_PLAYWRIGHT_CONFIG ?? null,
     framework: input(env, "framework") ?? env.PEEPS_FRAMEWORK ?? null,
+    deviceTools: flag(input(env, "device-tools") ?? env.PEEPS_DEVICE_TOOLS),
     peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
     workingDirectory: workingDirectory ? import_node_path.default.resolve(workspace, workingDirectory) : workspace,
     repository,
@@ -220,9 +225,9 @@ function expiryOf(token) {
   }
 }
 var PeepsHttpError = class extends Error {
-  constructor(path10, status, body) {
-    super(`Peeps ${path10} \u2192 ${status}: ${body.slice(0, 500)}`);
-    this.path = path10;
+  constructor(path11, status, body) {
+    super(`Peeps ${path11} \u2192 ${status}: ${body.slice(0, 500)}`);
+    this.path = path11;
     this.status = status;
     this.body = body;
     this.name = "PeepsHttpError";
@@ -289,11 +294,11 @@ var PeepsClient = class {
     );
   }
   /** Raw upload (artifacts). Retries transient failures a couple of times. */
-  async postBytes(path10, bytes) {
+  async postBytes(path11, bytes) {
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await fetch(`${this.env.peepsUrl}${path10}`, {
+        const response = await fetch(`${this.env.peepsUrl}${path11}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${await this.token()}`,
@@ -305,11 +310,11 @@ var PeepsClient = class {
           signal: AbortSignal.timeout(12e4)
         });
         if (response.ok) return;
-        const text = await response.text();
+        const text2 = await response.text();
         if (response.status < 500 && response.status !== 408 && response.status !== 429) {
-          throw new Error(`Peeps ${path10} \u2192 ${response.status}: ${text.slice(0, 300)}`);
+          throw new Error(`Peeps ${path11} \u2192 ${response.status}: ${text2.slice(0, 300)}`);
         }
-        lastError = new Error(`Peeps ${path10} \u2192 ${response.status}`);
+        lastError = new Error(`Peeps ${path11} \u2192 ${response.status}`);
       } catch (error) {
         lastError = error;
       }
@@ -318,8 +323,8 @@ var PeepsClient = class {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
   /** GET that treats 204 as "nothing" (long-poll idle) instead of an error. */
-  async getOrNull(path10) {
-    const response = await fetch(`${this.env.peepsUrl}${path10}`, {
+  async getOrNull(path11) {
+    const response = await fetch(`${this.env.peepsUrl}${path11}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -328,28 +333,28 @@ var PeepsClient = class {
       signal: AbortSignal.timeout(4e4)
     });
     if (response.status === 204) return null;
-    const text = await response.text();
+    const text2 = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path10, response.status, text);
+      throw new PeepsHttpError(path11, response.status, text2);
     }
-    return JSON.parse(text);
+    return JSON.parse(text2);
   }
-  async get(path10) {
-    const response = await fetch(`${this.env.peepsUrl}${path10}`, {
+  async get(path11) {
+    const response = await fetch(`${this.env.peepsUrl}${path11}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
         "User-Agent": "peeps-action/0.1"
       }
     });
-    const text = await response.text();
+    const text2 = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path10, response.status, text);
+      throw new PeepsHttpError(path11, response.status, text2);
     }
-    return JSON.parse(text);
+    return JSON.parse(text2);
   }
-  async post(path10, body) {
-    const response = await fetch(`${this.env.peepsUrl}${path10}`, {
+  async post(path11, body) {
+    const response = await fetch(`${this.env.peepsUrl}${path11}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${await this.token()}`,
@@ -359,11 +364,11 @@ var PeepsClient = class {
       },
       body: JSON.stringify(body)
     });
-    const text = await response.text();
+    const text2 = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path10, response.status, text);
+      throw new PeepsHttpError(path11, response.status, text2);
     }
-    return text ? JSON.parse(text) : {};
+    return text2 ? JSON.parse(text2) : {};
   }
 };
 
@@ -397,9 +402,9 @@ async function isModule(file) {
   let dir = import_node_path3.default.dirname(file);
   for (; ; ) {
     try {
-      const text = await (0, import_promises2.readFile)(import_node_path3.default.join(dir, "package.json"), "utf8");
+      const text2 = await (0, import_promises2.readFile)(import_node_path3.default.join(dir, "package.json"), "utf8");
       try {
-        return JSON.parse(text).type === "module";
+        return JSON.parse(text2).type === "module";
       } catch {
         return false;
       }
@@ -683,12 +688,13 @@ async function runDispatched(env, peeps) {
   });
 }
 
-// src/tools.ts
+// src/device-tools.ts
 var import_node_child_process5 = require("node:child_process");
+var import_node_fs5 = require("node:fs");
 var import_promises6 = require("node:fs/promises");
+var import_node_net = require("node:net");
 var import_node_os4 = require("node:os");
 var import_node_path9 = __toESM(require("node:path"));
-var import_node_util2 = require("node:util");
 
 // src/appium.ts
 var import_node_child_process4 = require("node:child_process");
@@ -717,6 +723,13 @@ function repoRelative(workspace, abs) {
   }
 }
 var MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+function pageSourceExtension(source, context) {
+  if (context && /^(WEBVIEW|CHROMIUM)/i.test(context)) return "html";
+  const head = source.trimStart().slice(0, 512);
+  if (/^<\?xml|^<hierarchy[\s>]|^<AppiumAUT[\s>]/i.test(head)) return "xml";
+  if (/^<!doctype html|<html[\s>]/i.test(head)) return "html";
+  return context && /^NATIVE/i.test(context) ? "xml" : "html";
+}
 
 // src/pytest.ts
 var import_node_child_process3 = require("node:child_process");
@@ -1165,6 +1178,11 @@ var COLLECTOR = import_node_path8.default.join(__dirname, "..", "dist", "appium-
 var APPIUM_REPORTER = import_node_path8.default.join(__dirname, "..", "dist", "appium-reporter.js");
 var DEFAULT_CONFIGS = ["ts", "mts", "js", "mjs", "cjs", "cts"].map((ext) => `wdio.conf.${ext}`);
 var COLLECT_TIMEOUT_MS = 10 * 60 * 1e3;
+async function readAppiumCapabilities(env, configPath = wdioConfigPath(env)) {
+  const read = await runCollector(env, ["--capabilities", configPath], "reading the WebdriverIO capabilities");
+  for (const note of read.notes) console.log(`[peeps] ${note}`);
+  return read;
+}
 var MAX_UPLOAD_BYTES3 = 128 * 1024 * 1024;
 function wdioConfigPath(env) {
   if (env.configPath) return import_node_path8.default.resolve(env.workingDirectory, env.configPath);
@@ -1182,11 +1200,11 @@ function wdioConfigPath(env) {
     names.length > 1 ? `several WebdriverIO configs in ${env.workingDirectory} (${names.join(", ")}): set \`config\` to the one this job runs` : `no wdio.conf.ts (or .js, .mjs, .cjs) in ${env.workingDirectory}: set \`config\` to your WebdriverIO config`
   );
 }
-async function collectAppium(env, configPath = wdioConfigPath(env)) {
+async function runCollector(env, args, what) {
   const scratch = await (0, import_promises5.mkdtemp)(import_node_path8.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-collect-"));
   const out = import_node_path8.default.join(scratch, "collection.json");
   const { code, output } = await new Promise((resolve, reject) => {
-    const child = (0, import_node_child_process4.spawn)(process.execPath, [COLLECTOR, configPath, out], {
+    const child = (0, import_node_child_process4.spawn)(process.execPath, [COLLECTOR, ...args, out], {
       cwd: env.workingDirectory,
       env: { ...process.env, CI: "1" },
       stdio: ["ignore", "pipe", "pipe"]
@@ -1199,7 +1217,7 @@ async function collectAppium(env, configPath = wdioConfigPath(env)) {
     child.stderr.on("data", keep);
     const timer = setTimeout(() => {
       output2 += `
-[peeps] collection did not finish in ${COLLECT_TIMEOUT_MS / 1e3}s`;
+[peeps] ${what} did not finish in ${COLLECT_TIMEOUT_MS / 1e3}s`;
       child.kill("SIGKILL");
     }, COLLECT_TIMEOUT_MS);
     child.on("error", (error) => {
@@ -1212,10 +1230,13 @@ async function collectAppium(env, configPath = wdioConfigPath(env)) {
     });
   });
   if (code !== 0 || !(0, import_node_fs4.existsSync)(out)) {
-    throw new Error(`collecting the WebdriverIO suite failed (${code}):
+    throw new Error(`${what} failed (${code}):
 ${output.slice(-4e3)}`);
   }
-  const collection = JSON.parse(await (0, import_promises5.readFile)(out, "utf8"));
+  return JSON.parse(await (0, import_promises5.readFile)(out, "utf8"));
+}
+async function collectAppium(env, configPath = wdioConfigPath(env)) {
+  const collection = await runCollector(env, [configPath], "collecting the WebdriverIO suite");
   for (const note of collection.notes) console.log(`[peeps] ${note}`);
   for (const error of collection.errors) {
     console.log(`[peeps] collection error in ${error.file}:
@@ -1589,7 +1610,7 @@ async function readLocalResults(resultsDir) {
   return [...byRunId.values()];
 }
 async function runAppiumTests(env, input2, options = {}) {
-  const redact = options.redact ?? ((text) => text);
+  const redact = options.redact ?? ((text2) => text2);
   const configPath = wdioConfigPath(env);
   const scratch = await (0, import_promises5.mkdtemp)(import_node_path8.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-agent-run-"));
   const planFile = import_node_path8.default.join(scratch, "plan.json");
@@ -1644,11 +1665,11 @@ async function runAppiumTests(env, input2, options = {}) {
       }));
       const pageSource = result.evidence.find((e) => e.name.startsWith("page-source"));
       if (pageSource && inlined < AGENT_PAGE_SOURCE_TESTS) {
-        const text = await (0, import_promises5.readFile)(pageSource.path, "utf8").catch(() => null);
-        if (text !== null) {
+        const text2 = await (0, import_promises5.readFile)(pageSource.path, "utf8").catch(() => null);
+        if (text2 !== null) {
           inlined += 1;
-          result.pageSource = redact(text.slice(0, AGENT_PAGE_SOURCE_CHARS));
-          if (text.length > AGENT_PAGE_SOURCE_CHARS) result.pageSourceTruncated = true;
+          result.pageSource = redact(text2.slice(0, AGENT_PAGE_SOURCE_CHARS));
+          if (text2.length > AGENT_PAGE_SOURCE_CHARS) result.pageSourceTruncated = true;
         }
       }
     }
@@ -1664,8 +1685,640 @@ async function runAppiumTests(env, input2, options = {}) {
   return outcome;
 }
 
+// src/device-tools.ts
+var DEFAULT_DEVICE_LIMITS = {
+  readyWaitMs: 6e4,
+  callMs: 5e4,
+  requestMs: 3e4,
+  sessionCreateMs: 6 * 6e4,
+  closeMs: 1e4
+};
+var PAGE_SOURCE_DEFAULT_CHARS = 6e4;
+var PAGE_SOURCE_MAX_CHARS = 15e4;
+var SCREENSHOT_INLINE_BASE64 = 18e4;
+var SESSION_IDLE_SECONDS = 1800;
+var ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
+var W3C_CAPABILITIES = /* @__PURE__ */ new Set([
+  "browserName",
+  "browserVersion",
+  "platformName",
+  "acceptInsecureCerts",
+  "pageLoadStrategy",
+  "proxy",
+  "setWindowRect",
+  "timeouts",
+  "strictFileInteractability",
+  "unhandledPromptBehavior",
+  "webSocketUrl"
+]);
+var DEVICE_STRATEGIES = [
+  "accessibility id",
+  "id",
+  "xpath",
+  "class name",
+  "-android uiautomator",
+  "-ios predicate string",
+  "-ios class chain",
+  "css selector"
+];
+var DIRECTIONS = ["up", "down", "left", "right"];
+function sessionCapabilities(raw) {
+  const caps = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (key.startsWith("wdio:")) continue;
+    caps[W3C_CAPABILITIES.has(key) || key.includes(":") ? key : `appium:${key}`] = value;
+  }
+  const idle = Number(caps["appium:newCommandTimeout"]);
+  if (idle !== 0 && !(idle >= SESSION_IDLE_SECONDS)) caps["appium:newCommandTimeout"] = SESSION_IDLE_SECONDS;
+  return caps;
+}
+function pngSize(bytes) {
+  if (bytes.length < 24 || bytes.readUInt32BE(0) !== 2303741511 || bytes.toString("ascii", 12, 16) !== "IHDR") return null;
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+var DeviceError = class extends Error {
+  constructor(message, code = null) {
+    super(message);
+    this.code = code;
+  }
+};
+var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var duration = (ms) => ms >= 1e3 ? `${Math.round(ms / 1e3)} s` : `${ms} ms`;
+function withTimeout(promise, ms, message) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new DeviceError(message)), ms);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+async function webdriver(url, method, body, timeoutMs) {
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: body === void 0 ? {} : { "Content-Type": "application/json; charset=utf-8" },
+      body: body === void 0 ? void 0 : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } catch (error) {
+    const name = error.name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      throw new DeviceError(`Appium did not answer ${method} ${new URL(url).pathname} within ${duration(timeoutMs)}`);
+    }
+    throw new DeviceError(`could not reach Appium: ${error.message}`);
+  }
+  const text2 = await response.text();
+  let json = null;
+  try {
+    json = JSON.parse(text2);
+  } catch {
+  }
+  const value = json?.value;
+  if (!response.ok || value && typeof value === "object" && typeof value.error === "string") {
+    const code = typeof value?.error === "string" ? value.error : `HTTP ${response.status}`;
+    const message = String(value?.message ?? text2).split("\n")[0].slice(0, 500);
+    throw new DeviceError(`${code}: ${message}`, code);
+  }
+  return { value: json?.value ?? null, sessionId: json?.sessionId };
+}
+function elementIdOf(value) {
+  if (!value || typeof value !== "object") return null;
+  const record = value;
+  const id = record[ELEMENT_KEY] ?? record.ELEMENT;
+  return typeof id === "string" ? id : null;
+}
+function stringArg(args, key, required) {
+  const value = args[key];
+  if (typeof value === "string" && value.length > 0) return value;
+  if (value === void 0 && !required) return null;
+  throw new DeviceError(`argument "${key}" must be a non-empty string`);
+}
+function numberArg(args, key, min, max, fallback) {
+  const value = args[key];
+  if (value === void 0) return fallback;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
+    throw new DeviceError(`argument "${key}" must be a number from ${min} to ${max}`);
+  }
+  return value;
+}
+function enumArg(args, key, allowed, fallback) {
+  const value = args[key];
+  if (value === void 0 && fallback !== null) return fallback;
+  if (value === void 0) return null;
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    throw new DeviceError(`argument "${key}" must be one of: ${allowed.join(", ")}`);
+  }
+  return value;
+}
+function obj(properties, required = []) {
+  return { type: "object", properties, required, additionalProperties: false };
+}
+var str = (description) => ({ type: "string", description });
+var strategy = { type: "string", enum: [...DEVICE_STRATEGIES], description: "Locator strategy. Prefer accessibility id; css selector only in a WEBVIEW context" };
+var direction = (description) => ({ type: "string", enum: [...DIRECTIONS], description });
+var DEVICE_TOOL_SPECS = [
+  {
+    name: "device_page_source",
+    description: "The current screen's page source: the native view hierarchy as XML, or the page's HTML in a WEBVIEW context. Truncated to maxChars.",
+    inputSchema: obj({ maxChars: { type: "integer", minimum: 1e3, maximum: PAGE_SOURCE_MAX_CHARS, description: `Default ${PAGE_SOURCE_DEFAULT_CHARS}` } })
+  },
+  {
+    name: "device_screenshot",
+    description: "A PNG screenshot of the device screen, returned as an image when it is small enough; always saved on the runner.",
+    inputSchema: obj({})
+  },
+  {
+    name: "device_find",
+    description: "Find elements on the current screen. Returns each element's id (for device_tap / device_type), text, rect and whether it is displayed.",
+    inputSchema: obj({ strategy, selector: str("The selector for that strategy, e.g. `signIn` for accessibility id"), limit: { type: "integer", minimum: 1, maximum: 50, description: "Most elements described; default 10" } }, ["strategy", "selector"])
+  },
+  {
+    name: "device_tap",
+    description: "Tap an element (elementId from device_find), or a point on the screen (x, y in screen pixels).",
+    inputSchema: obj({ elementId: str("An element id from device_find"), x: { type: "number", minimum: 0 }, y: { type: "number", minimum: 0 } })
+  },
+  {
+    name: "device_type",
+    description: "Type text into an element (elementId from device_find), optionally clearing it first. The text is never echoed; a value typed into a secure field is masked in later results.",
+    inputSchema: obj({ elementId: str("An element id from device_find"), text: str("The text to type"), clear: { type: "boolean", description: "Clear the field first" } }, ["elementId", "text"])
+  },
+  {
+    name: "device_swipe",
+    description: "Swipe a finger across the screen, or across one element, in a direction (the direction the finger moves).",
+    inputSchema: obj({ direction: direction("The way the finger moves"), elementId: str("Swipe within this element instead of the whole screen"), distance: { type: "number", minimum: 0.1, maximum: 0.95, description: "Fraction of the area to travel; default 0.6" } }, ["direction"])
+  },
+  {
+    name: "device_scroll",
+    description: "Scroll the screen to reveal content in a direction (down reveals what is below), optionally until an element is displayed.",
+    inputSchema: obj({ direction: direction("The content to reveal: down scrolls toward the end"), strategy, selector: str("Stop when an element matching this is displayed"), maxSwipes: { type: "integer", minimum: 1, maximum: 10, description: "Default 5" } }, ["direction"])
+  },
+  { name: "device_back", description: "Press the system back button (Android), or navigate back.", inputSchema: obj({}) },
+  { name: "device_contexts", description: "The available contexts (NATIVE_APP, WEBVIEW_\u2026) and the current one.", inputSchema: obj({}) },
+  {
+    name: "device_switch_context",
+    description: "Switch to a context from device_contexts: a WEBVIEW_\u2026 one to use css selectors and read the page's HTML, NATIVE_APP to return.",
+    inputSchema: obj({ name: str("The context name") }, ["name"])
+  },
+  {
+    name: "device_launch_app",
+    description: "Bring an app to the foreground, launching it if needed. Defaults to the app under test (appium:appPackage / appium:bundleId).",
+    inputSchema: obj({ appId: str("Android package or iOS bundle id; default the app under test") })
+  },
+  {
+    name: "device_terminate_app",
+    description: "Stop an app. Defaults to the app under test (appium:appPackage / appium:bundleId).",
+    inputSchema: obj({ appId: str("Android package or iOS bundle id; default the app under test") })
+  },
+  {
+    name: "device_logs",
+    description: "The device log since the last read: logcat on Android, syslog on iOS, by default. The last maxLines entries.",
+    inputSchema: obj({ type: str("Log type, e.g. logcat, syslog, crashlog, server"), maxLines: { type: "integer", minimum: 1, maximum: 1e3, description: "Default 200" } })
+  }
+];
+function text(value) {
+  return { content: [{ type: "text", text: value }] };
+}
+function failure(message) {
+  return { content: [{ type: "text", text: message }], isError: true };
+}
+function createDeviceTools(env, options = {}) {
+  const limits = { ...DEFAULT_DEVICE_LIMITS, ...options.limits };
+  const redact = options.redact ?? ((t) => t);
+  const deps = {
+    readCapabilities: options.deps?.readCapabilities ?? (() => defaultReadCapabilities(env)),
+    startAppium: options.deps?.startAppium ?? ((signal) => startAppiumServer(env, signal))
+  };
+  let ready = null;
+  let startError = null;
+  let appium = null;
+  let sessionId = null;
+  let caps = {};
+  let closing = null;
+  const stopping = new AbortController();
+  const typedSecrets = /* @__PURE__ */ new Set();
+  let screenshots = 0;
+  const mask = (value) => {
+    let out = redact(value);
+    for (const secret of [...typedSecrets].sort((a, b) => b.length - a.length)) out = out.split(secret).join("[redacted]");
+    return out;
+  };
+  const platform = () => String(caps.platformName ?? "").toLowerCase();
+  async function startup() {
+    const raw = await deps.readCapabilities();
+    if (!raw) throw new DeviceError("the WebdriverIO config names no capabilities to open a device session with");
+    caps = sessionCapabilities(raw);
+    if (stopping.signal.aborted) return;
+    appium = await deps.startAppium(stopping.signal);
+    if (stopping.signal.aborted) {
+      await appium.stop();
+      return;
+    }
+    const created = await webdriver(
+      `${appium.url}/session`,
+      "POST",
+      { capabilities: { alwaysMatch: caps, firstMatch: [{}] } },
+      limits.sessionCreateMs
+    );
+    const value = created.value;
+    sessionId = value?.sessionId ?? created.sessionId ?? null;
+    if (!sessionId) throw new DeviceError("Appium answered the new session without a session id");
+    console.log(
+      `[peeps] device session ${sessionId} open (${String(caps.platformName ?? "?")}, ${String(caps["appium:automationName"] ?? "?")}); Appium log: ${appium.logFile}`
+    );
+  }
+  function start() {
+    if (ready) return;
+    console.log("[peeps] device tools: reading capabilities, starting Appium and a device session");
+    ready = startup().catch(async (error) => {
+      startError = error instanceof Error ? error : new Error(String(error));
+      if (!stopping.signal.aborted) console.log(`[peeps] device session could not start: ${startError.message.slice(0, 2e3)}`);
+      await appium?.stop().catch(() => void 0);
+    });
+  }
+  async function session() {
+    if (stopping.signal.aborted) throw new DeviceError("the device session has ended");
+    if (!ready) start();
+    await withTimeout(
+      ready,
+      limits.readyWaitMs,
+      "the device session is still starting (Appium and the app launch can take a few minutes); call again shortly"
+    );
+    if (startError) throw new DeviceError(`the device session could not start: ${startError.message.slice(0, 1500)}`);
+    if (stopping.signal.aborted || !appium || !sessionId) throw new DeviceError("the device session has ended");
+    return { url: `${appium.url}/session/${sessionId}` };
+  }
+  async function wd(method, route, body, timeoutMs = limits.requestMs) {
+    const { url } = await session();
+    return (await webdriver(`${url}${route}`, method, body, timeoutMs)).value;
+  }
+  async function currentContext() {
+    const value = await wd("GET", "/context").catch(() => null);
+    return typeof value === "string" ? value : null;
+  }
+  async function findElements(using, value) {
+    const found = await wd("POST", "/elements", { using, value });
+    return (Array.isArray(found) ? found : []).map(elementIdOf).filter((id) => id !== null);
+  }
+  async function describe(id) {
+    const quick = Math.min(limits.requestMs, 1e4);
+    const [elementText, rect, displayed] = await Promise.all([
+      wd("GET", `/element/${encodeURIComponent(id)}/text`, void 0, quick).catch(() => null),
+      wd("GET", `/element/${encodeURIComponent(id)}/rect`, void 0, quick).catch(() => null),
+      wd("GET", `/element/${encodeURIComponent(id)}/displayed`, void 0, quick).catch(() => null)
+    ]);
+    return {
+      elementId: id,
+      text: typeof elementText === "string" ? mask(elementText).slice(0, 500) : null,
+      rect: rect && typeof rect === "object" ? rect : null,
+      displayed: typeof displayed === "boolean" ? displayed : null
+    };
+  }
+  async function performTouch(points, moveMs) {
+    const [first, ...rest] = points;
+    const actions = [
+      { type: "pointerMove", duration: 0, x: Math.round(first.x), y: Math.round(first.y), origin: "viewport" },
+      { type: "pointerDown", button: 0 },
+      { type: "pause", duration: 100 },
+      ...rest.map((p) => ({ type: "pointerMove", duration: moveMs, x: Math.round(p.x), y: Math.round(p.y), origin: "viewport" })),
+      { type: "pointerUp", button: 0 }
+    ];
+    await wd("POST", "/actions", {
+      actions: [{ type: "pointer", id: "finger1", parameters: { pointerType: "touch" }, actions }]
+    });
+    await wd("DELETE", "/actions").catch(() => void 0);
+  }
+  async function areaOf(elementId) {
+    const rect = await wd("GET", elementId ? `/element/${encodeURIComponent(elementId)}/rect` : "/window/rect");
+    const n = (key) => typeof rect?.[key] === "number" ? rect[key] : 0;
+    if (!(n("width") > 0 && n("height") > 0)) throw new DeviceError("could not read the size of the area to swipe");
+    return { x: n("x"), y: n("y"), width: n("width"), height: n("height") };
+  }
+  async function swipe(area, finger, distance) {
+    const cx = area.x + area.width / 2;
+    const cy = area.y + area.height / 2;
+    const dx = area.width * distance / 2;
+    const dy = area.height * distance / 2;
+    const from = { up: { x: cx, y: cy + dy }, down: { x: cx, y: cy - dy }, left: { x: cx + dx, y: cy }, right: { x: cx - dx, y: cy } }[finger];
+    const to = { up: { x: cx, y: cy - dy }, down: { x: cx, y: cy + dy }, left: { x: cx - dx, y: cy }, right: { x: cx + dx, y: cy } }[finger];
+    await performTouch([from, to], 500);
+    return { from: { x: Math.round(from.x), y: Math.round(from.y) }, to: { x: Math.round(to.x), y: Math.round(to.y) } };
+  }
+  function appIdFor(args) {
+    const ios = platform() === "ios";
+    const id = stringArg(args, "appId", false) ?? String(caps[ios ? "appium:bundleId" : "appium:appPackage"] ?? "");
+    if (!id) {
+      throw new DeviceError(
+        `pass appId: the capabilities name no ${ios ? "appium:bundleId" : "appium:appPackage"} for the app under test`
+      );
+    }
+    return { key: ios ? "bundleId" : "appId", id };
+  }
+  async function readLogs(type) {
+    try {
+      return await wd("POST", "/se/log", { type });
+    } catch (error) {
+      const code = error.code ?? "";
+      if (!/unknown (command|method)|HTTP 404/.test(code)) throw error;
+      return wd("POST", "/log", { type });
+    }
+  }
+  const tools = {
+    async device_page_source(args) {
+      const maxChars = numberArg(args, "maxChars", 1e3, PAGE_SOURCE_MAX_CHARS, PAGE_SOURCE_DEFAULT_CHARS);
+      const [source, context] = await Promise.all([wd("GET", "/source"), currentContext()]);
+      const masked = mask(String(source ?? ""));
+      const kind = pageSourceExtension(masked, context);
+      const cut = masked.length > maxChars;
+      return text(
+        `Page source (${kind}, context ${context ?? "unknown"}, ${masked.length} characters${cut ? `; the first ${maxChars} follow` : ""}):
+${masked.slice(0, maxChars)}`
+      );
+    },
+    async device_screenshot() {
+      const data = String(await wd("GET", "/screenshot") ?? "");
+      const bytes = Buffer.from(data, "base64");
+      const size = pngSize(bytes);
+      const dir = import_node_path9.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os4.tmpdir)(), "peeps-device");
+      await (0, import_promises6.mkdir)(dir, { recursive: true });
+      screenshots += 1;
+      const file = import_node_path9.default.join(dir, `screenshot-${screenshots}.png`);
+      await (0, import_promises6.writeFile)(file, bytes);
+      const inline = data.length <= SCREENSHOT_INLINE_BASE64;
+      const info = {
+        width: size?.width ?? null,
+        height: size?.height ?? null,
+        bytes: bytes.length,
+        savedOnRunner: file,
+        returned: inline,
+        ...inline ? {} : { note: `larger than ${SCREENSHOT_INLINE_BASE64} base64 characters, so not returned; read the screen with device_page_source` }
+      };
+      const parts = [{ type: "text", text: JSON.stringify(info) }];
+      if (inline) parts.unshift({ type: "image", data, mimeType: "image/png" });
+      return { content: parts };
+    },
+    async device_find(args) {
+      const using = enumArg(args, "strategy", DEVICE_STRATEGIES, null);
+      if (!using) throw new DeviceError('argument "strategy" is required');
+      const selector = stringArg(args, "selector", true);
+      const limit = numberArg(args, "limit", 1, 50, 10);
+      const ids = await findElements(using, selector);
+      const elements = await Promise.all(ids.slice(0, limit).map(describe));
+      return text(JSON.stringify({ strategy: using, selector: mask(selector), count: ids.length, truncated: ids.length > limit, elements }));
+    },
+    async device_tap(args) {
+      const elementId = stringArg(args, "elementId", false);
+      if (elementId) {
+        await wd("POST", `/element/${encodeURIComponent(elementId)}/click`, {});
+        return text(`Tapped element ${elementId}.`);
+      }
+      const x = numberArg(args, "x", 0, 1e5, null);
+      const y = numberArg(args, "y", 0, 1e5, null);
+      if (x === null || y === null) throw new DeviceError("pass elementId, or both x and y");
+      await performTouch([{ x, y }], 0);
+      return text(`Tapped at (${Math.round(x)}, ${Math.round(y)}).`);
+    },
+    async device_type(args) {
+      const elementId = stringArg(args, "elementId", true);
+      const value = args.text;
+      if (typeof value !== "string") throw new DeviceError('argument "text" must be a string');
+      if (value.length > 1e4) throw new DeviceError('argument "text" is longer than 10000 characters');
+      const element = `/element/${encodeURIComponent(elementId)}`;
+      const quick = Math.min(limits.requestMs, 1e4);
+      const [password, type] = await Promise.all([
+        wd("GET", `${element}/attribute/password`, void 0, quick).catch(() => null),
+        wd("GET", `${element}/attribute/type`, void 0, quick).catch(() => null)
+      ]);
+      const secure = String(password) === "true" || /SecureTextField|^password$/i.test(String(type ?? ""));
+      if (secure && value.length >= 3) typedSecrets.add(value);
+      if (args.clear === true) await wd("POST", `${element}/clear`, {});
+      await wd("POST", `${element}/value`, { text: value, value: Array.from(value) });
+      return text(
+        `Typed ${Array.from(value).length} characters into element ${elementId}${secure ? " (a secure field: the value is masked in later results)" : ""}.`
+      );
+    },
+    async device_swipe(args) {
+      const finger = enumArg(args, "direction", DIRECTIONS, null);
+      if (!finger) throw new DeviceError('argument "direction" is required');
+      const distance = numberArg(args, "distance", 0.1, 0.95, 0.6);
+      const elementId = stringArg(args, "elementId", false);
+      const moved = await swipe(await areaOf(elementId), finger, distance);
+      return text(`Swiped ${finger} ${elementId ? `within element ${elementId}` : "across the screen"}, from (${moved.from.x}, ${moved.from.y}) to (${moved.to.x}, ${moved.to.y}).`);
+    },
+    async device_scroll(args) {
+      const reveal = enumArg(args, "direction", DIRECTIONS, null);
+      if (!reveal) throw new DeviceError('argument "direction" is required');
+      const using = enumArg(args, "strategy", DEVICE_STRATEGIES, null);
+      const selector = stringArg(args, "selector", false);
+      if (using === null !== (selector === null)) throw new DeviceError("pass strategy and selector together, or neither");
+      const maxSwipes = numberArg(args, "maxSwipes", 1, 10, 5);
+      const finger = { down: "up", up: "down", right: "left", left: "right" }[reveal];
+      const visible = async () => {
+        if (!using || !selector) return [];
+        const shown = [];
+        for (const id of (await findElements(using, selector)).slice(0, 10)) {
+          const element = await describe(id);
+          if (element.displayed !== false) shown.push(element);
+        }
+        return shown;
+      };
+      const area = await areaOf(null);
+      for (let swipes = 0; ; swipes++) {
+        const shown = await visible();
+        if (shown.length > 0) return text(JSON.stringify({ found: true, swipes, elements: shown }));
+        if (swipes >= maxSwipes) break;
+        await swipe(area, finger, 0.5);
+      }
+      return text(JSON.stringify(using ? { found: false, swipes: maxSwipes } : { scrolled: reveal, swipes: maxSwipes }));
+    },
+    async device_back() {
+      await wd("POST", "/back", {});
+      return text("Pressed back.");
+    },
+    async device_contexts() {
+      const [contexts, current] = await Promise.all([wd("GET", "/contexts"), currentContext()]);
+      const names = (Array.isArray(contexts) ? contexts : []).map((c) => typeof c === "string" ? c : String(c?.id ?? c));
+      return text(JSON.stringify({ current, contexts: names }));
+    },
+    async device_switch_context(args) {
+      const name = stringArg(args, "name", true);
+      await wd("POST", "/context", { name });
+      return text(`Switched to context ${name}.`);
+    },
+    async device_launch_app(args) {
+      const { key, id } = appIdFor(args);
+      await wd("POST", "/execute/sync", { script: "mobile: activateApp", args: [{ [key]: id }] });
+      return text(`Brought ${id} to the foreground.`);
+    },
+    async device_terminate_app(args) {
+      const { key, id } = appIdFor(args);
+      const stopped = await wd("POST", "/execute/sync", { script: "mobile: terminateApp", args: [{ [key]: id }] });
+      return text(stopped === false ? `${id} was not running.` : `Stopped ${id}.`);
+    },
+    async device_logs(args) {
+      const type = stringArg(args, "type", false) ?? (platform() === "ios" ? "syslog" : "logcat");
+      const maxLines = numberArg(args, "maxLines", 1, 1e3, 200);
+      const entries = await readLogs(type);
+      const list = Array.isArray(entries) ? entries : [];
+      const lines = list.slice(-maxLines).map((entry) => {
+        const at = typeof entry.timestamp === "number" ? new Date(entry.timestamp).toISOString() : "";
+        return `${at} ${String(entry.level ?? "")} ${mask(String(entry.message ?? "")).slice(0, 500)}`.trim();
+      });
+      return text(`${type}: ${list.length} entr${list.length === 1 ? "y" : "ies"} since the last read${list.length > maxLines ? `, the last ${maxLines} follow` : ""}:
+${lines.join("\n")}`);
+    }
+  };
+  const handlers = {};
+  for (const [name, tool] of Object.entries(tools)) {
+    handlers[name] = async (args) => {
+      try {
+        await session();
+        return await withTimeout(tool(args ?? {}), limits.callMs, `${name} did not finish within ${duration(limits.callMs)}`);
+      } catch (error) {
+        return failure(mask(error instanceof Error ? error.message : String(error)));
+      }
+    };
+  }
+  async function close(reason) {
+    if (closing) return closing;
+    closing = (async () => {
+      stopping.abort();
+      const live = appium && sessionId ? `${appium.url}/session/${sessionId}` : null;
+      if (live) {
+        await webdriver(live, "DELETE", void 0, limits.closeMs).catch((error) => {
+          console.log(`[peeps] could not delete the device session: ${String(error).slice(0, 200)}`);
+        });
+      }
+      if (ready) await withTimeout(ready, limits.closeMs, "startup did not stop").catch(() => void 0);
+      await appium?.stop().catch(() => void 0);
+      if (ready) console.log(`[peeps] device session closed (${reason})`);
+    })();
+    return closing;
+  }
+  return {
+    specs: DEVICE_TOOL_SPECS,
+    handlers,
+    start,
+    close,
+    info: () => ({ tools: DEVICE_TOOL_SPECS.map((t) => t.name) })
+  };
+}
+async function defaultReadCapabilities(env) {
+  return (await readAppiumCapabilities(env)).capabilities;
+}
+function resolveAppiumBinary(from, pathEnv = process.env.PATH ?? "") {
+  for (let dir = import_node_path9.default.resolve(from); ; dir = import_node_path9.default.dirname(dir)) {
+    const candidate = import_node_path9.default.join(dir, "node_modules", ".bin", "appium");
+    if ((0, import_node_fs5.existsSync)(candidate)) return candidate;
+    if (import_node_path9.default.dirname(dir) === dir) break;
+  }
+  for (const dir of pathEnv.split(import_node_path9.default.delimiter)) {
+    if (!dir) continue;
+    const candidate = import_node_path9.default.join(dir, "appium");
+    if ((0, import_node_fs5.existsSync)(candidate)) return candidate;
+  }
+  return null;
+}
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = (0, import_node_net.createServer)();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close(() => resolve(port));
+    });
+  });
+}
+var APPIUM_START_MS = 12e4;
+async function startAppiumServer(env, signal, startMs = APPIUM_START_MS) {
+  const bin = resolveAppiumBinary(env.workingDirectory);
+  if (!bin) {
+    throw new Error(
+      "Appium is not installed where the job runs: add it to the working directory (npm i -D appium) and install your driver (npx appium driver install uiautomator2, or xcuitest) before the action runs"
+    );
+  }
+  const port = await freePort();
+  const logFile = import_node_path9.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os4.tmpdir)(), `peeps-appium-${port}.log`);
+  const child = (0, import_node_child_process5.spawn)(
+    bin,
+    ["--address", "127.0.0.1", "--port", String(port), "--base-path", "/", "--log", logFile, "--log-no-colors", "--log-timestamp"],
+    { cwd: env.workingDirectory, env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: true }
+  );
+  let output = "";
+  const keep = (chunk) => {
+    output = (output + chunk.toString("utf8")).slice(-4e3);
+  };
+  child.stdout?.on("data", keep);
+  child.stderr?.on("data", keep);
+  let exited = null;
+  const exitedPromise = new Promise((resolve) => {
+    child.on("exit", (code, sig) => {
+      exited = String(code ?? sig);
+      resolve();
+    });
+    child.on("error", (error) => {
+      exited = error.message;
+      resolve();
+    });
+  });
+  const kill = (sig) => {
+    try {
+      process.kill(-child.pid, sig);
+    } catch {
+      try {
+        child.kill(sig);
+      } catch {
+      }
+    }
+  };
+  let stopped = null;
+  const stop = () => {
+    stopped ??= (async () => {
+      if (exited !== null) return;
+      kill("SIGTERM");
+      await Promise.race([exitedPromise, sleep(5e3)]);
+      if (exited === null) {
+        kill("SIGKILL");
+        await Promise.race([exitedPromise, sleep(2e3)]);
+      }
+    })();
+    return stopped;
+  };
+  signal.addEventListener("abort", () => void stop(), { once: true });
+  const url = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + startMs;
+  for (; ; ) {
+    if (signal.aborted) {
+      await stop();
+      throw new Error("stopped while Appium was starting");
+    }
+    if (exited !== null) throw new Error(`Appium exited before it was ready (${exited}):
+${output.slice(-2e3)}`);
+    try {
+      const response = await fetch(`${url}/status`, { signal: AbortSignal.timeout(2e3) });
+      if (response.ok) break;
+    } catch {
+    }
+    if (Date.now() > deadline) {
+      await stop();
+      throw new Error(`Appium did not answer on port ${port} within ${Math.round(startMs / 1e3)} s:
+${output.slice(-2e3)}`);
+    }
+    await sleep(500);
+  }
+  console.log(`[peeps] Appium ${bin} listening on ${url}; log ${logFile}`);
+  return { url, logFile, stop };
+}
+
 // src/tools.ts
-var execFileAsync2 = (0, import_node_util2.promisify)(import_node_child_process5.execFile);
+var import_node_child_process6 = require("node:child_process");
+var import_promises7 = require("node:fs/promises");
+var import_node_os5 = require("node:os");
+var import_node_path10 = __toESM(require("node:path"));
+var import_node_util2 = require("node:util");
+var execFileAsync2 = (0, import_node_util2.promisify)(import_node_child_process6.execFile);
 var MAX_FILE_BYTES = 512 * 1024;
 var MAX_LIST = 2e3;
 var MAX_GREP_MATCHES = 500;
@@ -1673,7 +2326,7 @@ var MAX_PATTERN_CHARS = 500;
 var DENY_SEGMENTS = /* @__PURE__ */ new Set([".git", "node_modules"]);
 var ToolError = class extends Error {
 };
-function str(args, key, required = true) {
+function str2(args, key, required = true) {
   const v = args[key];
   if (typeof v === "string" && v.length > 0) return v;
   if (!required) return "";
@@ -1681,12 +2334,12 @@ function str(args, key, required = true) {
 }
 function jail(workspace, relative) {
   const cleaned = relative.replace(/\\/g, "/").replace(/^\/+/, "");
-  const abs = import_node_path9.default.resolve(workspace, cleaned);
-  const rel = import_node_path9.default.relative(workspace, abs);
-  if (rel.startsWith("..") || import_node_path9.default.isAbsolute(rel)) {
+  const abs = import_node_path10.default.resolve(workspace, cleaned);
+  const rel = import_node_path10.default.relative(workspace, abs);
+  if (rel.startsWith("..") || import_node_path10.default.isAbsolute(rel)) {
     throw new ToolError(`path escapes the workspace: ${relative}`);
   }
-  for (const seg of rel.split(import_node_path9.default.sep)) {
+  for (const seg of rel.split(import_node_path10.default.sep)) {
     if (DENY_SEGMENTS.has(seg)) throw new ToolError(`path is off limits: ${relative}`);
     if (/^\.env(\..*)?$/.test(seg)) throw new ToolError(`path is off limits: ${relative}`);
   }
@@ -1694,7 +2347,7 @@ function jail(workspace, relative) {
 }
 function jailForWrite(workspace, relative) {
   const abs = jail(workspace, relative);
-  const rel = import_node_path9.default.relative(workspace, abs).split(import_node_path9.default.sep).join("/");
+  const rel = import_node_path10.default.relative(workspace, abs).split(import_node_path10.default.sep).join("/");
   if (isCiConfiguration(rel)) {
     throw new ToolError(`workflow files are not writable by Peeps: ${relative}`);
   }
@@ -1714,28 +2367,28 @@ function authenticatedPushUrl(remote, token, platform) {
   const user = platform === "gitlab" ? "oauth2" : "x-access-token";
   return `https://${user}:${token}@${match[1]}`;
 }
-function maskUrlCredentials(text) {
-  return text.replace(/https:\/\/[^@\s/]+@/g, "https://***@");
+function maskUrlCredentials(text2) {
+  return text2.replace(/https:\/\/[^@\s/]+@/g, "https://***@");
 }
 async function ensureParentDirInside(workspace, abs) {
-  const parent = import_node_path9.default.dirname(abs);
+  const parent = import_node_path10.default.dirname(abs);
   let existing = parent;
   for (; ; ) {
     try {
-      await (0, import_promises6.stat)(existing);
+      await (0, import_promises7.stat)(existing);
       break;
     } catch {
-      const up = import_node_path9.default.dirname(existing);
+      const up = import_node_path10.default.dirname(existing);
       if (up === existing) break;
       existing = up;
     }
   }
-  const [realWorkspace, realExisting] = await Promise.all([(0, import_promises6.realpath)(workspace), (0, import_promises6.realpath)(existing)]);
-  const rel = import_node_path9.default.relative(realWorkspace, realExisting);
-  if (rel.startsWith("..") || import_node_path9.default.isAbsolute(rel)) {
-    throw new ToolError(`path escapes the workspace: ${import_node_path9.default.relative(workspace, abs)}`);
+  const [realWorkspace, realExisting] = await Promise.all([(0, import_promises7.realpath)(workspace), (0, import_promises7.realpath)(existing)]);
+  const rel = import_node_path10.default.relative(realWorkspace, realExisting);
+  if (rel.startsWith("..") || import_node_path10.default.isAbsolute(rel)) {
+    throw new ToolError(`path escapes the workspace: ${import_node_path10.default.relative(workspace, abs)}`);
   }
-  if (existing !== parent) await (0, import_promises6.mkdir)(parent, { recursive: true });
+  if (existing !== parent) await (0, import_promises7.mkdir)(parent, { recursive: true });
 }
 async function patchPaths(runGit, patchFile) {
   let stdout;
@@ -1773,7 +2426,7 @@ function makeRedactor(env) {
   const values = Object.entries(env).filter(([k, v]) => v && v.length >= 8 && isSecretish(k)).map(([, v]) => v).sort((a, b) => b.length - a.length);
   if (values.length === 0) return (t) => t;
   const pattern = new RegExp(values.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
-  return (text) => text.replace(pattern, "[redacted]");
+  return (text2) => text2.replace(pattern, "[redacted]");
 }
 function isSecretish(key) {
   if (ALWAYS_MASK_KEYS.has(key)) return true;
@@ -1806,38 +2459,38 @@ function createToolServer(env, deps = {}) {
   });
   const handlers = {
     async read_file(args) {
-      const abs = jail(workspace, str(args, "path"));
-      const info = await (0, import_promises6.stat)(abs);
+      const abs = jail(workspace, str2(args, "path"));
+      const info = await (0, import_promises7.stat)(abs);
       if (!info.isFile()) throw new ToolError("not a file");
       if (info.size > MAX_FILE_BYTES) throw new ToolError(`file is ${info.size} bytes; limit ${MAX_FILE_BYTES}`);
-      return { path: str(args, "path"), content: redact(await (0, import_promises6.readFile)(abs, "utf8")) };
+      return { path: str2(args, "path"), content: redact(await (0, import_promises7.readFile)(abs, "utf8")) };
     },
     async list_files(args) {
-      const dir = jail(workspace, str(args, "path", false) || ".");
+      const dir = jail(workspace, str2(args, "path", false) || ".");
       const out = [];
       const walk2 = async (d, rel, depth) => {
         if (out.length >= MAX_LIST || depth > 12) return;
         let entries;
         try {
-          entries = await (0, import_promises6.readdir)(d, { withFileTypes: true });
+          entries = await (0, import_promises7.readdir)(d, { withFileTypes: true });
         } catch {
           return;
         }
         for (const e of entries) {
           if (DENY_SEGMENTS.has(e.name) || e.name.startsWith(".env")) continue;
           const r = rel ? `${rel}/${e.name}` : e.name;
-          if (e.isDirectory()) await walk2(import_node_path9.default.join(d, e.name), r, depth + 1);
+          if (e.isDirectory()) await walk2(import_node_path10.default.join(d, e.name), r, depth + 1);
           else if (e.isFile()) {
             out.push(r);
             if (out.length >= MAX_LIST) return;
           }
         }
       };
-      await walk2(dir, str(args, "path", false).replace(/^\.\/?$/, ""), 0);
+      await walk2(dir, str2(args, "path", false).replace(/^\.\/?$/, ""), 0);
       return { files: out.sort(), truncated: out.length >= MAX_LIST };
     },
     async grep(args) {
-      const source = str(args, "pattern");
+      const source = str2(args, "pattern");
       if (source.length > MAX_PATTERN_CHARS) {
         throw new ToolError(`pattern is longer than ${MAX_PATTERN_CHARS} characters`);
       }
@@ -1848,17 +2501,17 @@ function createToolServer(env, deps = {}) {
         throw new ToolError(`pattern is not a valid regular expression: ${String(error).slice(0, 200)}`);
       }
       const matches = [];
-      const listed = await handlers.list_files({ path: str(args, "path", false) || "." });
+      const listed = await handlers.list_files({ path: str2(args, "path", false) || "." });
       for (const rel of listed.files) {
         if (matches.length >= MAX_GREP_MATCHES) break;
         if (!/\.(ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml)$/.test(rel)) continue;
-        let text;
+        let text2;
         try {
-          text = await (0, import_promises6.readFile)(jail(workspace, rel), "utf8");
+          text2 = await (0, import_promises7.readFile)(jail(workspace, rel), "utf8");
         } catch {
           continue;
         }
-        const lines = text.split("\n");
+        const lines = text2.split("\n");
         for (let i = 0; i < lines.length && matches.length < MAX_GREP_MATCHES; i++) {
           if (pattern.test(lines[i])) matches.push({ path: rel, line: i + 1, text: redact(lines[i].slice(0, 300)) });
         }
@@ -1866,19 +2519,19 @@ function createToolServer(env, deps = {}) {
       return { matches, truncated: matches.length >= MAX_GREP_MATCHES };
     },
     async write_file(args) {
-      const rel = str(args, "path");
+      const rel = str2(args, "path");
       const abs = jailForWrite(workspace, rel);
-      const content = str(args, "content");
+      const content = str2(args, "content");
       if (content.length > MAX_FILE_BYTES) throw new ToolError("content too large");
       await ensureParentDirInside(workspace, abs);
-      await (0, import_promises6.writeFile)(abs, content, "utf8");
+      await (0, import_promises7.writeFile)(abs, content, "utf8");
       return { path: rel, bytes: Buffer.byteLength(content) };
     },
     async apply_patch(args) {
-      const patch = str(args, "patch");
-      const dir = await (0, import_promises6.mkdtemp)(import_node_path9.default.join((0, import_node_os4.tmpdir)(), "peeps-patch-"));
-      const file = import_node_path9.default.join(dir, "change.patch");
-      await (0, import_promises6.writeFile)(file, patch, "utf8");
+      const patch = str2(args, "patch");
+      const dir = await (0, import_promises7.mkdtemp)(import_node_path10.default.join((0, import_node_os5.tmpdir)(), "peeps-patch-"));
+      const file = import_node_path10.default.join(dir, "change.patch");
+      await (0, import_promises7.writeFile)(file, patch, "utf8");
       for (const touched of await patchPaths(runGit, file)) {
         jailForWrite(workspace, touched);
       }
@@ -1895,7 +2548,7 @@ function createToolServer(env, deps = {}) {
       };
     },
     async run_tests(args) {
-      const file = str(args, "file");
+      const file = str2(args, "file");
       const abs = jail(workspace, file);
       if (resolveFramework(env) === "appium") {
         return runAppiumTests(
@@ -1904,7 +2557,7 @@ function createToolServer(env, deps = {}) {
           { redact, runner: deps.appiumRunner }
         );
       }
-      const rel = import_node_path9.default.relative(env.workingDirectory, abs).split(import_node_path9.default.sep).join("/");
+      const rel = import_node_path10.default.relative(env.workingDirectory, abs).split(import_node_path10.default.sep).join("/");
       const cmd = ["playwright", "test", "--reporter=json"];
       if (typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
       if (typeof args.project === "string" && args.project) cmd.push("--project", args.project);
@@ -1934,9 +2587,9 @@ function createToolServer(env, deps = {}) {
       return { diff: redact(stdout.slice(0, MAX_FILE_BYTES)) };
     },
     async git_commit_push(args) {
-      const branch = str(args, "branch");
-      const message = str(args, "message");
-      const token = str(args, "token");
+      const branch = str2(args, "branch");
+      const message = str2(args, "message");
+      const token = str2(args, "token");
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
       const remote = await runGit(["remote", "get-url", "origin"]);
       const url = authenticatedPushUrl(remote.stdout, token, env.platform);
@@ -1970,19 +2623,19 @@ function createToolServer(env, deps = {}) {
     }
   };
   const specs = [
-    { name: "read_file", description: "Read a file in the repository (repo-relative path). Up to 512 KB.", inputSchema: obj({ path: s("Repo-relative path") }, ["path"]) },
-    { name: "list_files", description: "List files under a repository directory, recursively.", inputSchema: obj({ path: s("Repo-relative directory; default the repository root") }, []) },
-    { name: "grep", description: "Search source files for a regular expression; returns matching lines.", inputSchema: obj({ pattern: s("JavaScript regular expression"), path: s("Repo-relative directory to search; default the root"), ignoreCase: { type: "boolean" } }, ["pattern"]) },
-    { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
-    { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
-    { name: "run_tests", description: "Run one spec file with the repository's own config (Playwright; WebdriverIO for an Appium suite); optionally filter by a grep regular expression over the test's full title, or by Playwright project. Returns per-test results and errors (Appium: plus a failure's evidence paths and page source).", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name (ignored for Appium)") }, ["file"]) },
-    { name: "git_status", description: "Files changed in the working tree.", inputSchema: obj({}, []) },
-    { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
-    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) }
+    { name: "read_file", description: "Read a file in the repository (repo-relative path). Up to 512 KB.", inputSchema: obj2({ path: s("Repo-relative path") }, ["path"]) },
+    { name: "list_files", description: "List files under a repository directory, recursively.", inputSchema: obj2({ path: s("Repo-relative directory; default the repository root") }, []) },
+    { name: "grep", description: "Search source files for a regular expression; returns matching lines.", inputSchema: obj2({ pattern: s("JavaScript regular expression"), path: s("Repo-relative directory to search; default the root"), ignoreCase: { type: "boolean" } }, ["pattern"]) },
+    { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj2({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
+    { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj2({ patch: s("Unified diff text") }, ["patch"]) },
+    { name: "run_tests", description: "Run one spec file with the repository's own config (Playwright; WebdriverIO for an Appium suite); optionally filter by a grep regular expression over the test's full title, or by Playwright project. Returns per-test results and errors (Appium: plus a failure's evidence paths and page source).", inputSchema: obj2({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name (ignored for Appium)") }, ["file"]) },
+    { name: "git_status", description: "Files changed in the working tree.", inputSchema: obj2({}, []) },
+    { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj2({}, []) },
+    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj2({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) }
   ];
   return { specs, handlers };
 }
-function obj(properties, required) {
+function obj2(properties, required) {
   return { type: "object", properties, required, additionalProperties: false };
 }
 function s(description) {
@@ -2011,7 +2664,7 @@ function summarizeReport(report) {
 }
 function runCapture(cmd, args, cwd, timeoutMs) {
   return new Promise((resolve) => {
-    const child = (0, import_node_child_process5.spawn)(cmd, args, { cwd, env: { ...process.env, CI: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = (0, import_node_child_process6.spawn)(cmd, args, { cwd, env: { ...process.env, CI: "1" }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
@@ -2025,24 +2678,67 @@ function runCapture(cmd, args, cwd, timeoutMs) {
 }
 
 // src/agent.ts
-async function runAgent(env, peeps) {
+function frameworkOf(env) {
+  try {
+    return resolveFramework(env);
+  } catch (error) {
+    return `unknown (${error instanceof Error ? error.message : String(error)})`;
+  }
+}
+async function runAgent(env, peeps, options = {}) {
   if (!env.sessionId) throw new Error("`session-id` is required in agent mode (Peeps passes it)");
   const server = createToolServer(env);
+  const framework = frameworkOf(env);
+  let device = null;
+  if (env.deviceTools) {
+    if (framework === "appium") {
+      device = createDeviceTools(env, { redact: makeRedactor(process.env), deps: options.deviceDeps });
+    } else {
+      console.log(`[peeps] device-tools is for Appium suites; this one is ${framework}, so no device tools are offered`);
+    }
+  }
+  const specs = [...server.specs, ...device?.specs ?? []];
+  const handlers = { ...server.handlers, ...device?.handlers ?? {} };
   const attach = await peeps.post(
     `/api/v1/bridge/sessions/${env.sessionId}/attach`,
     {
-      tools: server.specs,
+      tools: specs,
       runnerInfo: {
         workingDirectory: env.workingDirectory,
         configPath: env.configPath,
+        framework,
         node: process.version,
         sha: env.sha,
-        ref: env.ref
+        ref: env.ref,
+        ...device ? { deviceTools: device.info() } : {}
       }
     }
   );
   const expiresAt = new Date(attach.expiresAt).getTime();
-  console.log(`[peeps] agent session ${attach.sessionId} (${attach.kind}) attached; ${server.specs.length} tools; cap ${attach.expiresAt}`);
+  console.log(`[peeps] agent session ${attach.sessionId} (${attach.kind}) attached; ${specs.length} tools; cap ${attach.expiresAt}`);
+  if (!device) return serve(env, peeps, handlers, expiresAt);
+  const host = device;
+  const onSignal = (signal) => {
+    console.log(`[peeps] ${signal}: closing the device session`);
+    void host.close(signal).finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  };
+  const handleSignals = options.handleSignals !== false;
+  if (handleSignals) {
+    process.once("SIGTERM", onSignal);
+    process.once("SIGINT", onSignal);
+  }
+  host.start();
+  try {
+    await serve(env, peeps, handlers, expiresAt);
+  } finally {
+    if (handleSignals) {
+      process.off("SIGTERM", onSignal);
+      process.off("SIGINT", onSignal);
+    }
+    await host.close("agent session over");
+  }
+}
+async function serve(env, peeps, handlers, expiresAt) {
   let transportErrors = 0;
   let handled = 0;
   for (; ; ) {
@@ -2068,7 +2764,7 @@ async function runAgent(env, peeps) {
     }
     if (!call) continue;
     const started = Date.now();
-    const handler = server.handlers[call.tool];
+    const handler = handlers[call.tool];
     let outcome;
     if (!handler) {
       outcome = { ok: false, error: `unknown tool ${call.tool}` };
@@ -2081,7 +2777,7 @@ async function runAgent(env, peeps) {
     }
     handled += 1;
     console.log(
-      `[peeps] #${call.seq} ${call.tool}(${summarizeArgs(call.args)}) \u2192 ${outcome.ok ? "ok" : `error: ${outcome.error.slice(0, 120)}`} in ${Date.now() - started} ms`
+      `[peeps] #${call.seq} ${call.tool}(${summarizeArgs(call.args)}) \u2192 ${describeOutcome(outcome)} in ${Date.now() - started} ms`
     );
     try {
       await peeps.post(`/api/v1/bridge/sessions/${env.sessionId}/calls/${call.id}/result`, outcome);
@@ -2090,8 +2786,17 @@ async function runAgent(env, peeps) {
     }
   }
 }
+function describeOutcome(outcome) {
+  if (!outcome.ok) return `error: ${outcome.error.slice(0, 120)}`;
+  const result = outcome.result;
+  if (result?.isError === true) {
+    const first = result.content?.find((part) => part.type === "text")?.text;
+    return `error: ${String(first ?? "").slice(0, 120)}`;
+  }
+  return "ok";
+}
 function summarizeArgs(args) {
-  return Object.entries(args).filter(([k]) => k !== "token" && k !== "content" && k !== "patch").map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 60)}`).join(", ");
+  return Object.entries(args).filter(([k]) => k !== "token" && k !== "content" && k !== "patch" && k !== "text").map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 60)}`).join(", ");
 }
 
 // src/main.ts
@@ -2109,21 +2814,21 @@ async function main() {
   const framework = mode === "agent" ? "playwright" : resolveFramework(env);
   if (framework === "pytest" || framework === "appium") {
     console.log(`[peeps] framework=${framework}`);
-    const path10 = framework === "pytest" ? { inventory: runPytestInventory, report: runPytestReport, run: runPytestDispatched } : { inventory: runAppiumInventory, report: runAppiumReport, run: runAppiumDispatched };
+    const path11 = framework === "pytest" ? { inventory: runPytestInventory, report: runPytestReport, run: runPytestDispatched } : { inventory: runAppiumInventory, report: runAppiumReport, run: runAppiumDispatched };
     switch (mode) {
       case "inventory":
-        await path10.inventory(env, peeps);
+        await path11.inventory(env, peeps);
         return;
       case "report":
         if (onDefaultBranch(env)) {
-          await path10.inventory(env, peeps).catch(
+          await path11.inventory(env, peeps).catch(
             (error) => console.log(`[peeps] inventory skipped: ${String(error)}`)
           );
         }
-        await path10.report(env, peeps);
+        await path11.report(env, peeps);
         return;
       case "run":
-        await path10.run(env, peeps);
+        await path11.run(env, peeps);
         return;
       default:
         throw new Error(`unknown mode ${mode}`);

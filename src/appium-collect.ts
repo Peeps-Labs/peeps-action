@@ -318,8 +318,100 @@ export async function collect(configPath: string): Promise<AppiumCollection> {
   return { rootDir: list.rootDir, specs: list.specs, tests, errors, loader: tsx ? "tsx" : "node", specsFrom, notes };
 }
 
+/** What `--capabilities` writes: the capabilities the first WebdriverIO worker would get. */
+export interface CapabilitiesRead {
+  capabilities: Record<string, unknown> | null;
+  /** WebdriverIO's `rootDir`, absolute. */
+  rootDir: string;
+  from: "@wdio/config" | "config";
+  notes: string[];
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The first capability set of a config's `capabilities`: the first entry of
+ * the usual array; for multiremote (`{ name: { capabilities } }`, or an
+ * array of those) the first instance's.
+ */
+export function firstCapabilities(capabilities: unknown): Record<string, unknown> | null {
+  const first = Array.isArray(capabilities) ? capabilities[0] : capabilities;
+  if (!isPlainObject(first)) return null;
+  const looksLikeCaps = (o: Record<string, unknown>) =>
+    "platformName" in o || "browserName" in o || Object.keys(o).some((k) => k.includes(":"));
+  if (looksLikeCaps(first)) return first;
+  if (isPlainObject(first.capabilities)) return firstCapabilities(first.capabilities);
+  for (const value of Object.values(first)) {
+    if (isPlainObject(value) && isPlainObject(value.capabilities)) return firstCapabilities(value.capabilities);
+  }
+  return null;
+}
+
+/**
+ * The capabilities `wdio run` would open its first session with, read the
+ * way it reads them: WebdriverIO's own `ConfigParser`, in this process, with
+ * the job's environment, so `"appium:app": process.env.APP_PATH` resolves as
+ * it does under wdio. Without `@wdio/config`, the config's own export.
+ */
+export async function capabilitiesOf(configPath: string): Promise<CapabilitiesRead> {
+  const configDir = path.dirname(configPath);
+  const notes: string[] = [];
+  await registerTsx(configDir, notes);
+  installGlobalStubs();
+  const wdioConfig = locate("@wdio/config", configDir, ["@wdio/cli", "webdriverio"]);
+  try {
+    if (!wdioConfig) throw new Error("@wdio/config is not installed");
+    const { ConfigParser } = (await importFile(entryOf(wdioConfig, "./node"))) as {
+      ConfigParser: new (file: string) => {
+        initialize(): Promise<void>;
+        getConfig(): { rootDir?: string };
+        getCapabilities(): unknown;
+      };
+    };
+    const parser = new ConfigParser(configPath);
+    await parser.initialize();
+    return {
+      capabilities: firstCapabilities(parser.getCapabilities()),
+      rootDir: parser.getConfig().rootDir ?? configDir,
+      from: "@wdio/config",
+      notes,
+    };
+  } catch (error) {
+    notes.push(`capabilities from the config itself (${message(error).split("\n")[0]})`);
+  }
+  const loaded = await importFile(configPath);
+  const config = (loaded.config ?? (loaded.default as Record<string, unknown> | undefined)?.config) as
+    | { rootDir?: string; capabilities?: unknown }
+    | undefined;
+  if (!config || typeof config !== "object") throw new Error(`${configPath} exports no \`config\` object`);
+  return {
+    capabilities: firstCapabilities(config.capabilities),
+    rootDir: config.rootDir ? path.resolve(configDir, config.rootDir) : configDir,
+    from: "config",
+    notes,
+  };
+}
+
 const isMain = process.argv[1] && /appium-collect\.(mjs|ts)$/.test(process.argv[1]);
-if (isMain) {
+if (isMain && process.argv[2] === "--capabilities") {
+  const [configPath, out] = process.argv.slice(3);
+  if (!configPath || !out) {
+    console.error("usage: appium-collect --capabilities <wdio config> <out.json>");
+    process.exit(2);
+  }
+  capabilitiesOf(path.resolve(configPath)).then(
+    (read) => {
+      writeFileSync(out, JSON.stringify(read));
+      process.exit(0);
+    },
+    (error: unknown) => {
+      console.error(message(error));
+      process.exit(1);
+    },
+  );
+} else if (isMain) {
   const [configPath, out] = process.argv.slice(2);
   if (!configPath || !out) {
     console.error("usage: appium-collect <wdio config> <out.json>");

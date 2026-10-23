@@ -22,8 +22,10 @@ export interface RunnerEnv {
   mode: string;
   sessionId: string | null;
   configPath: string | null;
-  /** `playwright`, `pytest` or `auto`; null when not given (auto). */
+  /** `playwright`, `pytest`, `appium` or `auto`; null when not given (auto). */
   framework: string | null;
+  /** Agent mode, Appium suite: offer the `device_*` tools (`device-tools: true`). */
+  deviceTools: boolean;
   peepsUrl: string;
   /** Absolute: resolved against the workspace, never left relative. */
   workingDirectory: string;
@@ -131,6 +133,11 @@ export function eventNameForPipelineSource(source: string | undefined): string |
   }
 }
 
+/** `true`, `1` or `yes` (any case); anything else, or nothing, is false. */
+export function flag(value: string | null | undefined): boolean {
+  return /^(true|1|yes)$/i.test((value ?? "").trim());
+}
+
 /** A non-empty variable, trimmed; null otherwise. */
 function variable(env: NodeJS.ProcessEnv, name: string): string | null {
   const value = env[name];
@@ -155,6 +162,7 @@ export function readGitLabRunnerEnv(env: NodeJS.ProcessEnv): RunnerEnv {
     sessionId: variable(env, "PEEPS_SESSION_ID"),
     configPath: variable(env, "PEEPS_PLAYWRIGHT_CONFIG"),
     framework: variable(env, "PEEPS_FRAMEWORK"),
+    deviceTools: flag(env.PEEPS_DEVICE_TOOLS),
     peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
     workingDirectory: workingDirectory
       ? path.resolve(workspace, workingDirectory)
@@ -194,6 +202,7 @@ export function readRunnerEnv(env: NodeJS.ProcessEnv = process.env): RunnerEnv {
     sessionId: input(env, "session-id") ?? env.PEEPS_SESSION_ID ?? null,
     configPath: input(env, "config") ?? env.PEEPS_PLAYWRIGHT_CONFIG ?? null,
     framework: input(env, "framework") ?? env.PEEPS_FRAMEWORK ?? null,
+    deviceTools: flag(input(env, "device-tools") ?? env.PEEPS_DEVICE_TOOLS),
     peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
     workingDirectory: workingDirectory
       ? path.resolve(workspace, workingDirectory)

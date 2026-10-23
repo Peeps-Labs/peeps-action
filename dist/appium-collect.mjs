@@ -206,8 +206,68 @@ async function collect(configPath) {
   walk(mocha.suite);
   return { rootDir: list.rootDir, specs: list.specs, tests, errors, loader: tsx ? "tsx" : "node", specsFrom, notes };
 }
+function isPlainObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function firstCapabilities(capabilities) {
+  const first = Array.isArray(capabilities) ? capabilities[0] : capabilities;
+  if (!isPlainObject(first)) return null;
+  const looksLikeCaps = (o) => "platformName" in o || "browserName" in o || Object.keys(o).some((k) => k.includes(":"));
+  if (looksLikeCaps(first)) return first;
+  if (isPlainObject(first.capabilities)) return firstCapabilities(first.capabilities);
+  for (const value of Object.values(first)) {
+    if (isPlainObject(value) && isPlainObject(value.capabilities)) return firstCapabilities(value.capabilities);
+  }
+  return null;
+}
+async function capabilitiesOf(configPath) {
+  const configDir = path.dirname(configPath);
+  const notes = [];
+  await registerTsx(configDir, notes);
+  installGlobalStubs();
+  const wdioConfig = locate("@wdio/config", configDir, ["@wdio/cli", "webdriverio"]);
+  try {
+    if (!wdioConfig) throw new Error("@wdio/config is not installed");
+    const { ConfigParser } = await importFile(entryOf(wdioConfig, "./node"));
+    const parser = new ConfigParser(configPath);
+    await parser.initialize();
+    return {
+      capabilities: firstCapabilities(parser.getCapabilities()),
+      rootDir: parser.getConfig().rootDir ?? configDir,
+      from: "@wdio/config",
+      notes
+    };
+  } catch (error) {
+    notes.push(`capabilities from the config itself (${message(error).split("\n")[0]})`);
+  }
+  const loaded = await importFile(configPath);
+  const config = loaded.config ?? loaded.default?.config;
+  if (!config || typeof config !== "object") throw new Error(`${configPath} exports no \`config\` object`);
+  return {
+    capabilities: firstCapabilities(config.capabilities),
+    rootDir: config.rootDir ? path.resolve(configDir, config.rootDir) : configDir,
+    from: "config",
+    notes
+  };
+}
 var isMain = process.argv[1] && /appium-collect\.(mjs|ts)$/.test(process.argv[1]);
-if (isMain) {
+if (isMain && process.argv[2] === "--capabilities") {
+  const [configPath, out] = process.argv.slice(3);
+  if (!configPath || !out) {
+    console.error("usage: appium-collect --capabilities <wdio config> <out.json>");
+    process.exit(2);
+  }
+  capabilitiesOf(path.resolve(configPath)).then(
+    (read) => {
+      writeFileSync(out, JSON.stringify(read));
+      process.exit(0);
+    },
+    (error) => {
+      console.error(message(error));
+      process.exit(1);
+    }
+  );
+} else if (isMain) {
   const [configPath, out] = process.argv.slice(2);
   if (!configPath || !out) {
     console.error("usage: appium-collect <wdio config> <out.json>");
@@ -225,5 +285,7 @@ if (isMain) {
   );
 }
 export {
-  collect
+  capabilitiesOf,
+  collect,
+  firstCapabilities
 };

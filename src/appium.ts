@@ -25,7 +25,7 @@ import { mkdir, mkdtemp, readdir, readFile, stat, unlink, writeFile } from "node
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { AppiumCollection } from "./appium-collect";
+import type { AppiumCollection, CapabilitiesRead } from "./appium-collect";
 import {
   repoRelative,
   TITLE_PATH_SEPARATOR,
@@ -49,6 +49,13 @@ const DEFAULT_CONFIGS = ["ts", "mts", "js", "mjs", "cjs", "cts"].map((ext) => `w
 
 /** Collection imports the customer's specs; one that hangs at import must not hold the job. */
 const COLLECT_TIMEOUT_MS = 10 * 60 * 1000;
+/** The capabilities `wdio run` would open its first session with (`--capabilities`). */
+export async function readAppiumCapabilities(env: RunnerEnv, configPath = wdioConfigPath(env)): Promise<CapabilitiesRead> {
+  const read = await runCollector<CapabilitiesRead>(env, ["--capabilities", configPath], "reading the WebdriverIO capabilities");
+  for (const note of read.notes) console.log(`[peeps] ${note}`);
+  return read;
+}
+
 /** Files larger than this are skipped with a note, as the other paths do. */
 const MAX_UPLOAD_BYTES = 128 * 1024 * 1024;
 
@@ -80,12 +87,15 @@ export function wdioConfigPath(env: RunnerEnv): string {
 // Collection
 // ---------------------------------------------------------------------------
 
-/** What the suite holds, from `dist/appium-collect.mjs` in its own process. */
-export async function collectAppium(env: RunnerEnv, configPath = wdioConfigPath(env)): Promise<AppiumCollection> {
+/**
+ * Run `dist/appium-collect.mjs` in its own process, in the working
+ * directory, and read the JSON it writes. `what` names it in errors.
+ */
+async function runCollector<T>(env: RunnerEnv, args: string[], what: string): Promise<T> {
   const scratch = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-collect-"));
   const out = path.join(scratch, "collection.json");
   const { code, output } = await new Promise<{ code: number; output: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, [COLLECTOR, configPath, out], {
+    const child = spawn(process.execPath, [COLLECTOR, ...args, out], {
       cwd: env.workingDirectory,
       env: { ...process.env, CI: "1" },
       stdio: ["ignore", "pipe", "pipe"],
@@ -97,7 +107,7 @@ export async function collectAppium(env: RunnerEnv, configPath = wdioConfigPath(
     child.stdout.on("data", keep);
     child.stderr.on("data", keep);
     const timer = setTimeout(() => {
-      output += `\n[peeps] collection did not finish in ${COLLECT_TIMEOUT_MS / 1000}s`;
+      output += `\n[peeps] ${what} did not finish in ${COLLECT_TIMEOUT_MS / 1000}s`;
       child.kill("SIGKILL");
     }, COLLECT_TIMEOUT_MS);
     child.on("error", (error) => {
@@ -110,9 +120,14 @@ export async function collectAppium(env: RunnerEnv, configPath = wdioConfigPath(
     });
   });
   if (code !== 0 || !existsSync(out)) {
-    throw new Error(`collecting the WebdriverIO suite failed (${code}):\n${output.slice(-4000)}`);
+    throw new Error(`${what} failed (${code}):\n${output.slice(-4000)}`);
   }
-  const collection = JSON.parse(await readFile(out, "utf8")) as AppiumCollection;
+  return JSON.parse(await readFile(out, "utf8")) as T;
+}
+
+/** What the suite holds, from `dist/appium-collect.mjs` in its own process. */
+export async function collectAppium(env: RunnerEnv, configPath = wdioConfigPath(env)): Promise<AppiumCollection> {
+  const collection = await runCollector<AppiumCollection>(env, [configPath], "collecting the WebdriverIO suite");
   for (const note of collection.notes) console.log(`[peeps] ${note}`);
   for (const error of collection.errors) {
     console.log(`[peeps] collection error in ${error.file}:\n${error.message}`);

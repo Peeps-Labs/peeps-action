@@ -19,6 +19,10 @@ inputs:
     description: "playwright | pytest | appium | auto (default: appium when working-directory has a WebdriverIO config (wdio.conf.ts/.js/.mjs/.cjs, or wdio.<name>.conf.*) and no Playwright config; pytest when it has pytest.ini, conftest.py or a pyproject.toml configuring pytest and no Playwright config; otherwise playwright)"
     required: false
     default: "auto"
+  device-tools:
+    description: "agent mode, Appium suite only: start Appium and a device session and offer Peeps the device_* tools (page source, screenshot, find, tap, type, swipe, contexts, app, logs). Peeps passes it on dispatch when its agent explores the app (default: false)"
+    required: false
+    default: "false"
   working-directory:
     description: "Directory to run the tests in, relative to the repository root (default: the repository root)"
     required: false
