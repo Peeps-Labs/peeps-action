@@ -464,10 +464,89 @@ test("withPeeps appends the reporter and hooks to the customer's, and narrows on
   assert.equal(run.reporterSyncTimeout, 90_000);
   assert.deepEqual(run.specs, ["file:///w/a.spec.ts"]);
   assert.deepEqual(run.exclude, []);
-  // Capability-level specs would win over the planned files.
+  // Without per-capability lists (agent mode's one file), capability-level
+  // specs would win over the given files, so they are dropped.
   assert.deepEqual(run.capabilities, [{ platformName: "Android" }]);
   assert.deepEqual(run.mochaOpts, { ui: "bdd", timeout: 1000, grep: "^(?:A one)$", invert: false });
   assert.throws(() => withPeeps(undefined as never), /must export a `config` object/);
+});
+
+test("run mode keeps each capability to its own planned spec files, and leaves out a capability with none", () => {
+  const base = {
+    specs: ["./test/**/*.ts"],
+    exclude: ["./test/**/*.draft.ts"],
+    capabilities: [
+      { platformName: "Android", "wdio:specs": ["./android/**"], "wdio:exclude": ["./android/x.ts"] },
+      { platformName: "iOS", "wdio:specs": ["./ios/**"] },
+      { platformName: "Android", "appium:deviceName": "tablet" },
+    ],
+  };
+  const a = "file:///w/android/a.spec.ts";
+  const shared = "file:///w/test/shared.spec.ts";
+  const config = withPeeps(base, { specs: [a, shared], capabilitySpecs: [[a], [], [shared]], onlyPlanned: true });
+  assert.deepEqual(config.specs, [a, shared]);
+  assert.deepEqual(config.exclude, []);
+  // iOS has no planned spec: it is left out of the run, rather than running Android's.
+  assert.deepEqual(config.capabilities, [
+    { platformName: "Android", "wdio:specs": [a] },
+    { platformName: "Android", "appium:deviceName": "tablet", "wdio:specs": [shared] },
+  ]);
+  // Lists that do not line up with the config's capabilities are not trusted: the given files run on each.
+  const mismatched = withPeeps(base, { specs: [a], capabilitySpecs: [[a]] });
+  assert.equal((mismatched.capabilities as unknown[]).length, 3);
+  assert.equal((mismatched.capabilities as Array<Record<string, unknown>>).some((c) => "wdio:specs" in c), false);
+});
+
+test("collection records each capability's own spec files, as WebdriverIO resolves them", async () => {
+  const { root, suite } = workspace();
+  const config = readFileSync(path.join(suite, "wdio.conf.ts"), "utf8").replace(
+    "capabilities: [\n    {",
+    'capabilities: [\n    { platformName: "iOS", "wdio:specs": ["./test/specs/webview.spec.ts"] },\n    {',
+  );
+  assert.notEqual(config, readFileSync(path.join(suite, "wdio.conf.ts"), "utf8"));
+  writeFileSync(path.join(suite, "wdio.conf.ts"), config);
+  const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile" });
+  const collection = await collectAppium(env);
+  assert.deepEqual(
+    collection.capabilitySpecs?.map((list) => list.map((f) => path.relative(suite, f)).sort()),
+    [["test/specs/webview.spec.ts"], ["test/specs/login.spec.ts", "test/specs/webview.spec.ts"]],
+  );
+
+  // Run mode: each capability gets the planned files among its own.
+  const plan = [
+    run("r-login", "mobile/test/specs/login.spec.ts", "Login › signs in with a valid account @smoke"),
+    run("r-web", "mobile/test/specs/webview.spec.ts", "Checkout web view › pays with a card"),
+  ];
+  const { specs, capabilitySpecs, matched } = specsForRuns(env, collection, plan);
+  assert.deepEqual(matched.map((r) => r.runId), ["r-login", "r-web"]);
+  assert.deepEqual(specs.map((f) => path.relative(suite, f)), ["test/specs/login.spec.ts", "test/specs/webview.spec.ts"]);
+  assert.deepEqual(
+    capabilitySpecs?.map((list) => list.map((f) => path.relative(suite, f))),
+    [["test/specs/webview.spec.ts"], ["test/specs/login.spec.ts", "test/specs/webview.spec.ts"]],
+  );
+  // Only the login spec planned: iOS has nothing to run.
+  assert.deepEqual(specsForRuns(env, collection, [plan[0]!]).capabilitySpecs?.map((list) => list.length), [0, 1]);
+});
+
+test("a planned test no capability runs is not run", () => {
+  const env = envFor("/w");
+  const collection: AppiumCollection = {
+    rootDir: "/w/mobile",
+    specs: ["/w/mobile/a.spec.ts", "/w/mobile/orphan.spec.ts"],
+    capabilitySpecs: [["/w/mobile/a.spec.ts"]],
+    tests: [
+      { file: "/w/mobile/a.spec.ts", titlePath: ["A", "one"], pending: false },
+      { file: "/w/mobile/orphan.spec.ts", titlePath: ["O", "two"], pending: false },
+    ],
+    errors: [],
+    loader: "tsx",
+    specsFrom: "config",
+    notes: [],
+  };
+  const result = specsForRuns(env, collection, [run("r1", "mobile/a.spec.ts", "A › one"), run("r2", "mobile/orphan.spec.ts", "O › two")]);
+  assert.deepEqual(result.matched.map((r) => r.runId), ["r1"]);
+  assert.deepEqual(result.unmatched.map((r) => r.runId), ["r2"]);
+  assert.deepEqual(result.specs, ["/w/mobile/a.spec.ts"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -717,6 +796,127 @@ test("a capture that fails is listed as omitted, and never fails the test", asyn
     assert.deepEqual(readdirSync(path.join(dir, "evidence", "upload")), ["r-1-evidence-page-source.xml.dat"]);
   } finally {
     delete (globalThis as { browser?: unknown }).browser;
+    peeps.close();
+  }
+});
+
+test("each run is reported by one worker: a second capability's attempt is logged, not sent", async () => {
+  const peeps = await fakePeeps();
+  const workerId = process.env.WDIO_WORKER_ID;
+  const logs: string[] = [];
+  const log = console.log;
+  try {
+    const file = "/w/mobile/a.spec.ts";
+    usePlan(peeps.url, [run("r-1", "mobile/a.spec.ts", "A › one")]);
+    const worker = (cid: string, outcome: "test:pass" | "test:fail") => {
+      process.env.WDIO_WORKER_ID = cid;
+      const reporter = new PeepsAppiumReporter({});
+      reporter.emit("suite:start", { title: "A", file });
+      reporter.emit("test:start", { title: "one", file });
+      reporter.emit(outcome, { title: "one", file, error: { message: "on iOS" } });
+      reporter.emit("suite:end", { title: "A" });
+      reporter.emit("runner:end", {});
+      return reporter;
+    };
+    console.log = (...args: unknown[]) => void logs.push(args.join(" "));
+    const android = worker("0-0", "test:pass");
+    const ios = worker("1-0", "test:fail");
+    console.log = log;
+    await synchronised(android);
+    await synchronised(ios);
+    const sent = peeps.received.events.get("r-1")!;
+    assert.deepEqual(sent.map((e) => [e.type, e.status]), [["run_start", undefined], ["test_start", undefined], ["test_end", "passed"], ["run_end", undefined]]);
+    assert.ok(logs.some((l) => /A › one: reported by worker 0-0; this attempt \(worker 1-0\) is not sent/.test(l)), logs.join("\n"));
+  } finally {
+    console.log = log;
+    if (workerId === undefined) delete process.env.WDIO_WORKER_ID;
+    else process.env.WDIO_WORKER_ID = workerId;
+    peeps.close();
+  }
+});
+
+test("a specFileRetries retry on the same worker continues the run: the last attempt closes it, a test that passed is not re-sent", async () => {
+  const peeps = await fakePeeps();
+  const workerId = process.env.WDIO_WORKER_ID;
+  try {
+    const file = "/w/mobile/a.spec.ts";
+    const dir = usePlan(peeps.url, [run("r-flaky", "mobile/a.spec.ts", "A › flaky"), run("r-steady", "mobile/a.spec.ts", "A › steady")]);
+    // The worker loads the wrapper config, so withPeeps sees specFileRetries there.
+    withPeeps({ specFileRetries: 1 });
+    process.env.WDIO_WORKER_ID = "0-0";
+    const attempt = async (flaky: "test:pass" | "test:fail") => {
+      const reporter = new PeepsAppiumReporter({});
+      reporter.emit("suite:start", { title: "A", file });
+      reporter.emit("test:start", { title: "steady", file });
+      reporter.emit("test:pass", { title: "steady", file, duration: 5 });
+      reporter.emit("test:start", { title: "flaky", file });
+      if (flaky === "test:fail") {
+        (globalThis as { browser?: unknown }).browser = fakeBrowser();
+        await peepsAfterTest({}, { test: mochaTest(["A", "flaky"], file) }, { passed: false, error: new Error("flake") });
+        delete (globalThis as { browser?: unknown }).browser;
+      }
+      reporter.emit(flaky, { title: "flaky", file, duration: 7, error: { message: "flake" } });
+      reporter.emit("suite:end", { title: "A" });
+      reporter.emit("runner:end", {});
+      await synchronised(reporter);
+    };
+    // First attempt: the spec file fails, and WebdriverIO will retry it (same cid).
+    await attempt("test:fail");
+    // The failed attempt's capture is discarded, as a mocha retry's is.
+    assert.deepEqual(readdirSync(path.join(dir, "evidence", "upload")), []);
+    await attempt("test:pass");
+    const types = (runId: string) => (peeps.received.events.get(runId) ?? []).map((e) => [e.type, e.status]);
+    assert.deepEqual(types("r-flaky"), [
+      ["run_start", undefined],
+      ["test_start", undefined],
+      ["test_end", "failed"],
+      ["test_start", undefined],
+      ["test_end", "passed"],
+      ["run_end", undefined],
+    ]);
+    const retried = peeps.received.events.get("r-flaky")![2]!;
+    assert.equal("attachments" in retried, false);
+    assert.equal(retried.error, "flake");
+    // Passed in the first attempt: closed then, the retry's rerun is not sent.
+    assert.deepEqual(types("r-steady"), [["run_start", undefined], ["test_start", undefined], ["test_end", "passed"], ["run_end", undefined]]);
+  } finally {
+    delete (globalThis as { browser?: unknown }).browser;
+    if (workerId === undefined) delete process.env.WDIO_WORKER_ID;
+    else process.env.WDIO_WORKER_ID = workerId;
+    resetForTests();
+    peeps.close();
+  }
+});
+
+test("with specFileRetries, the last attempt's failure closes the run", async () => {
+  const peeps = await fakePeeps();
+  const workerId = process.env.WDIO_WORKER_ID;
+  try {
+    const file = "/w/mobile/a.spec.ts";
+    usePlan(peeps.url, [run("r-bad", "mobile/a.spec.ts", "A › bad")]);
+    withPeeps({ specFileRetries: 1 });
+    process.env.WDIO_WORKER_ID = "0-3";
+    for (let i = 0; i < 2; i++) {
+      const reporter = new PeepsAppiumReporter({});
+      reporter.emit("suite:start", { title: "A", file });
+      reporter.emit("test:start", { title: "bad", file });
+      reporter.emit("test:fail", { title: "bad", file, error: { message: `attempt ${i + 1}` } });
+      reporter.emit("runner:end", {});
+      await synchronised(reporter);
+    }
+    const sent = peeps.received.events.get("r-bad")!;
+    assert.deepEqual(sent.map((e) => [e.type, e.status, e.error]), [
+      ["run_start", undefined, undefined],
+      ["test_start", undefined, undefined],
+      ["test_end", "failed", "attempt 1"],
+      ["test_start", undefined, undefined],
+      ["test_end", "failed", "attempt 2"],
+      ["run_end", undefined, undefined],
+    ]);
+  } finally {
+    if (workerId === undefined) delete process.env.WDIO_WORKER_ID;
+    else process.env.WDIO_WORKER_ID = workerId;
+    resetForTests();
     peeps.close();
   }
 });

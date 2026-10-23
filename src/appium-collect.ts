@@ -37,6 +37,12 @@ export interface AppiumCollection {
   rootDir: string;
   /** Every spec file the config names, absolute. */
   specs: string[];
+  /**
+   * Each capability's own spec files (absolute), in the config's order, as
+   * WebdriverIO resolves them: its `wdio:specs` (else the config's `specs`)
+   * less its excludes. Null when `capabilities` is not a list (multiremote).
+   */
+  capabilitySpecs?: string[][] | null;
   tests: CollectedTest[];
   /** Spec files that did not load: present, but what they hold is unknown. */
   errors: Array<{ file: string; message: string }>;
@@ -174,6 +180,7 @@ function installGlobalStubs(): void {
 interface SpecList {
   rootDir: string;
   specs: string[];
+  capabilitySpecs: string[][] | null;
   mochaOpts: { ui?: string };
 }
 
@@ -200,16 +207,20 @@ async function specsFromWdio(configPath: string, wdioConfig: string): Promise<Sp
   const rootDir = config.rootDir ?? path.dirname(configPath);
   const lists = [parser.getSpecs()];
   const capabilities = parser.getCapabilities();
+  let capabilitySpecs: string[][] | null = null;
   if (Array.isArray(capabilities)) {
-    for (const cap of capabilities as Array<Record<string, unknown>>) {
-      if (cap && (cap["wdio:specs"] || cap["wdio:exclude"])) {
-        lists.push(parser.getSpecs(cap["wdio:specs"], cap["wdio:exclude"]));
-      }
-    }
+    // `getSpecs` with a capability's own `wdio:specs`/`wdio:exclude` is what
+    // WebdriverIO schedules on it (without them: the config's specs).
+    capabilitySpecs = (capabilities as Array<Record<string, unknown> | null>).map((cap) => {
+      const list = parser.getSpecs(cap?.["wdio:specs"], cap?.["wdio:exclude"]);
+      lists.push(list);
+      return [...new Set(flatten(list).map((s) => toPath(s, rootDir)))];
+    });
   }
   return {
     rootDir,
     specs: [...new Set(lists.flatMap((list) => flatten(list)).map((s) => toPath(s, rootDir)))],
+    capabilitySpecs,
     mochaOpts: config.mochaOpts ?? {},
   };
 }
@@ -233,16 +244,27 @@ async function specsFromConfig(configPath: string): Promise<SpecList> {
     | undefined;
   if (!config || typeof config !== "object") throw new Error(`${configPath} exports no \`config\` object`);
   const rootDir = config.rootDir ? path.resolve(path.dirname(configPath), config.rootDir) : path.dirname(configPath);
-  const specs = new Set(glob(config.specs, rootDir));
+  const globalSpecs = glob(config.specs, rootDir);
+  const globalExclude = glob(config.exclude, rootDir);
+  const isFile = (file: string) => statSync(file).isFile();
+  const specs = new Set(globalSpecs);
+  let capabilitySpecs: string[][] | null = null;
   if (Array.isArray(config.capabilities)) {
-    for (const cap of config.capabilities as Array<Record<string, unknown>>) {
-      for (const file of glob(cap?.["wdio:specs"], rootDir)) specs.add(file);
-    }
+    // WebdriverIO's rule: a capability's own specs replace the config's, and
+    // its own excludes apply only when the config sets none.
+    capabilitySpecs = (config.capabilities as Array<Record<string, unknown> | null>).map((cap) => {
+      const own = cap?.["wdio:specs"];
+      const mine = own ? glob(own, rootDir) : globalSpecs;
+      for (const file of mine) specs.add(file);
+      const excluded = new Set(globalExclude.length > 0 ? globalExclude : glob(cap?.["wdio:exclude"], rootDir));
+      return [...new Set(mine)].filter((file) => !excluded.has(file) && isFile(file));
+    });
   }
-  const excluded = new Set(glob(config.exclude, rootDir));
+  const excluded = new Set(globalExclude);
   return {
     rootDir,
-    specs: [...specs].filter((file) => !excluded.has(file) && statSync(file).isFile()),
+    specs: [...specs].filter((file) => !excluded.has(file) && isFile(file)),
+    capabilitySpecs,
     mochaOpts: config.mochaOpts ?? {},
   };
 }
@@ -324,7 +346,16 @@ export async function collect(configPath: string): Promise<AppiumCollection> {
     };
     walk(mocha.suite);
   }
-  return { rootDir: list.rootDir, specs: list.specs, tests, errors, loader: tsx ? "tsx" : "node", specsFrom, notes };
+  return {
+    rootDir: list.rootDir,
+    specs: list.specs,
+    capabilitySpecs: list.capabilitySpecs,
+    tests,
+    errors,
+    loader: tsx ? "tsx" : "node",
+    specsFrom,
+    notes,
+  };
 }
 
 /** What `--capabilities` writes: the capabilities the first WebdriverIO worker would get. */

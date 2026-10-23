@@ -32,7 +32,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PlanEntry } from "./reporter";
@@ -101,12 +101,79 @@ export function identityKey(test: { path: string; titlePath: string }): string {
   return `${test.path}\n${test.titlePath}`;
 }
 
+/** Who a worker is: WebdriverIO's cid (`<capability>-<n>`, kept by a specFileRetries retry), else its pid. */
+function workerId(): string {
+  return process.env.WDIO_WORKER_ID || `pid-${process.pid}`;
+}
+
+const fileSafe = (value: string) => value.replace(/[^A-Za-z0-9._-]/g, "_");
+
+/**
+ * Whether a worker may report a run: `new` (it claimed it: send `run_start`),
+ * `continue` (its earlier attempt claimed it and left it open), `ended` (its
+ * earlier attempt closed it) or `other` (another worker claimed it).
+ */
+export type RunClaim = { state: "new" | "continue" | "ended" } | { state: "other"; owner: string };
+
 class Plan {
   readonly entries = new Map<string, PlanEntry>();
-  constructor(readonly file: AppiumPlanFile) {
+  constructor(
+    readonly file: AppiumPlanFile,
+    /** Beside the plan file: one owner file per run, shared by every worker. */
+    readonly claimsDir: string | null = null,
+  ) {
     for (const run of file.runs) {
       const key = identityKey(run);
       if (!this.entries.has(key)) this.entries.set(key, run);
+    }
+  }
+
+  /**
+   * Claim `runId` for `worker` by creating its owner file exclusively, so
+   * exactly one worker reports each run however many capabilities run its
+   * test; a later attempt of the same worker (a specFileRetries retry keeps
+   * its cid) continues it. Without a usable claims directory, every worker
+   * reports, as before.
+   */
+  claim(runId: string, worker: string): RunClaim {
+    if (!this.claimsDir) return { state: "new" };
+    const owner = path.join(this.claimsDir, `${fileSafe(runId)}.owner`);
+    try {
+      mkdirSync(this.claimsDir, { recursive: true });
+      writeFileSync(owner, worker, { flag: "wx" });
+      return { state: "new" };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        console.log(`[peeps] could not claim ${runId}, reporting it anyway: ${String(error)}`);
+        return { state: "new" };
+      }
+    }
+    const holder = readFileSync(owner, "utf8");
+    if (holder !== worker) return { state: "other", owner: holder };
+    return { state: existsSync(path.join(this.claimsDir, `${fileSafe(runId)}.ended`)) ? "ended" : "continue" };
+  }
+
+  /** The run's `run_end` was sent: a later attempt of its worker must not reopen it. */
+  markEnded(runId: string): void {
+    if (!this.claimsDir) return;
+    try {
+      writeFileSync(path.join(this.claimsDir, `${fileSafe(runId)}.ended`), "");
+    } catch {
+      // A later attempt then sends a second close; Peeps keeps the first.
+    }
+  }
+
+  /** This worker's attempt number, 1 for its first (a specFileRetries retry keeps the cid). */
+  nextAttempt(worker: string): number {
+    if (!this.claimsDir) return 1;
+    const file = path.join(this.claimsDir, `attempts-${fileSafe(worker)}`);
+    try {
+      mkdirSync(this.claimsDir, { recursive: true });
+      const attempt = (Number(existsSync(file) ? readFileSync(file, "utf8") : "0") || 0) + 1;
+      writeFileSync(file, String(attempt));
+      return attempt;
+    } catch {
+      return 1;
     }
   }
 
@@ -143,14 +210,21 @@ function loadPlan(): Plan | null {
     cachedPlan = null;
     return null;
   }
-  cachedPlan = new Plan(JSON.parse(readFileSync(planPath, "utf8")) as AppiumPlanFile);
+  cachedPlan = new Plan(JSON.parse(readFileSync(planPath, "utf8")) as AppiumPlanFile, path.join(path.dirname(planPath), "claims"));
   return cachedPlan;
 }
 
-/** For tests: forget the plan and captured evidence this process holds. */
+/**
+ * The customer's `specFileRetries`, read by `withPeeps` when the worker
+ * loads the wrapper config (before WebdriverIO builds its reporters).
+ */
+let specFileRetries = 0;
+
+/** For tests: forget the plan, captured evidence and config this process holds. */
 export function resetForTests(): void {
   cachedPlan = undefined;
   captured.clear();
+  specFileRetries = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -481,12 +555,26 @@ export class PeepsAppiumReporter {
   private readonly started = new Set<string>();
   private readonly ended = new Set<string>();
   private readonly attemptStart = new Map<string, number>();
+  /** Runs another worker reports, or an earlier attempt closed: nothing is sent for them. */
+  private readonly suppressed = new Set<string>();
+  private readonly worker = workerId();
+  /**
+   * Whether WebdriverIO can still retry this worker's spec file
+   * (`specFileRetries`): it does whenever the file fails with retries left,
+   * so a failure here is a retried attempt, and the retry, keeping this
+   * worker's cid, continues the run.
+   */
+  private readonly retriable: boolean = false;
   private inflight = 0;
   private file: string | undefined;
 
   constructor(_options?: unknown) {
     this.plan = loadPlan();
-    if (!this.plan) console.log("[peeps] PEEPS_PLAN_FILE is not set; nothing is reported");
+    if (!this.plan) {
+      console.log("[peeps] PEEPS_PLAN_FILE is not set; nothing is reported");
+      return;
+    }
+    this.retriable = this.plan.nextAttempt(this.worker) <= specFileRetries;
   }
 
   /** WebdriverIO waits for this before the worker exits (`reporterSyncTimeout`). */
@@ -541,14 +629,27 @@ export class PeepsAppiumReporter {
     return this.plan!.entryFor(payload.file ?? this.file, [...this.suites, payload.title ?? ""]);
   }
 
-  private begin(entry: PlanEntry, testName: string): void {
+  /** Open an attempt of `entry`'s run; false when this worker does not report it. */
+  private begin(entry: PlanEntry, testName: string): boolean {
+    if (this.suppressed.has(entry.runId)) return false;
     const now = Date.now();
     if (!this.started.has(entry.runId)) {
+      const claim = this.plan!.claim(entry.runId, this.worker);
+      if (claim.state === "other" || claim.state === "ended") {
+        this.suppressed.add(entry.runId);
+        console.log(
+          claim.state === "other"
+            ? `[peeps] ${entry.titlePath}: reported by worker ${claim.owner}; this attempt (worker ${this.worker}) is not sent`
+            : `[peeps] ${entry.titlePath}: closed by an earlier attempt of worker ${this.worker}; this one is not sent`,
+        );
+        return false;
+      }
       this.started.add(entry.runId);
-      this.enqueue(entry.runId, { type: "run_start", timestamp: now });
+      if (claim.state === "new") this.enqueue(entry.runId, { type: "run_start", timestamp: now });
     }
     this.enqueue(entry.runId, { type: "test_start", timestamp: now, testName });
     this.attemptStart.set(entry.runId, now);
+    return true;
   }
 
   private onTestStart(payload: WdioEventPayload): void {
@@ -565,9 +666,9 @@ export class PeepsAppiumReporter {
       return;
     }
     // A test mocha reports twice (a second `done()`) closed its run already.
-    if (this.ended.has(entry.runId)) return;
+    if (this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
     // `it.skip` is reported without ever starting.
-    if (!this.attemptStart.has(entry.runId)) this.begin(entry, payload.title ?? "");
+    if (!this.attemptStart.has(entry.runId) && !this.begin(entry, payload.title ?? "")) return;
     const error = payload.error ?? payload.errors?.[0];
     const event: PeepsEvent = {
       type: "test_end",
@@ -587,7 +688,7 @@ export class PeepsAppiumReporter {
   /** A failed attempt mocha retries: a failed `test_end`, without evidence. */
   private onTestRetry(payload: WdioEventPayload): void {
     const entry = this.entryOf(payload);
-    if (!entry || this.ended.has(entry.runId)) return;
+    if (!entry || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
     const error = payload.error ?? payload.errors?.[0];
     this.enqueue(entry.runId, {
       type: "test_end",
@@ -620,7 +721,7 @@ export class PeepsAppiumReporter {
     for (const entry of this.plan!.entries.values()) {
       if (entry.path !== rel || !entry.titlePath.startsWith(prefix) || this.ended.has(entry.runId)) continue;
       const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
-      if (!this.attemptStart.has(entry.runId)) this.begin(entry, testName);
+      if (!this.attemptStart.has(entry.runId) && !this.begin(entry, testName)) continue;
       const message = `${payload.title ?? "a before hook"} failed: ${error?.message ?? ""}`;
       this.close(entry, {
         type: "test_end",
@@ -644,10 +745,19 @@ export class PeepsAppiumReporter {
   }
 
   private close(entry: PlanEntry, event: PeepsEvent): void {
-    this.enqueue(entry.runId, event);
-    this.enqueue(entry.runId, { type: "run_end", timestamp: Date.now() });
     this.ended.add(entry.runId);
     this.attemptStart.delete(entry.runId);
+    if (event.status === "failed" && this.retriable) {
+      // WebdriverIO will run this spec file again on this worker: like a
+      // mocha retry, a failed attempt without evidence, the run left open.
+      const { attachments: _a, attachmentsOmitted: _o, properties: _p, ...attempt } = event;
+      this.enqueue(entry.runId, attempt);
+      discardCaptured(entry.runId);
+    } else {
+      this.enqueue(entry.runId, event);
+      this.enqueue(entry.runId, { type: "run_end", timestamp: Date.now() });
+      this.plan!.markEnded(entry.runId);
+    }
     this.flush(entry.runId);
   }
 
@@ -717,6 +827,13 @@ async function deliver(peepsUrl: string, entry: PlanEntry, events: PeepsEvent[])
 export interface PeepsWdioOptions {
   /** Run mode: only these spec files (absolute). */
   specs?: string[];
+  /**
+   * Run mode: per capability, in the config's order, the planned spec files
+   * among its own. A capability gets exactly these as its `wdio:specs`, and
+   * one with none is left out of the run. Without it (agent mode's one
+   * file), every capability runs `specs`.
+   */
+  capabilitySpecs?: string[][];
   /** Run mode: a mocha grep over each test's full title (a coarse pre-filter). */
   grep?: string;
   /**
@@ -742,12 +859,14 @@ function isJunit(reporter: unknown): boolean {
 
 /**
  * The customer's config with Peeps' reporter and hooks appended, never
- * replacing theirs. In run mode, the planned spec files (capability-level
- * `wdio:specs` would otherwise win over them), a mocha grep, and the root
- * hook that skips any test the plan does not name.
+ * replacing theirs. In run mode, the planned spec files (each capability
+ * kept to the planned ones among its own `wdio:specs`, and left out when it
+ * has none), a mocha grep, and the root hook that skips any test the plan
+ * does not name.
  */
 export function withPeeps(base: Record<string, unknown>, options: PeepsWdioOptions = {}): Record<string, unknown> {
   if (!base || typeof base !== "object") throw new Error("the WebdriverIO config must export a `config` object");
+  specFileRetries = Math.max(0, Math.floor(Number(base.specFileRetries) || 0));
   const reporters: unknown[] = Array.isArray(base.reporters) ? [...(base.reporters as unknown[])] : [];
   reporters.push(PeepsAppiumReporter);
   // Only when the customer has none: WebdriverIO reads a reporter's options
@@ -770,11 +889,17 @@ export function withPeeps(base: Record<string, unknown>, options: PeepsWdioOptio
     config.specs = options.specs;
     config.exclude = [];
     if (Array.isArray(base.capabilities)) {
-      config.capabilities = (base.capabilities as Array<Record<string, unknown>>).map((cap) => {
-        if (!cap || typeof cap !== "object") return cap;
+      const caps = base.capabilities as Array<Record<string, unknown>>;
+      const perCapability = options.capabilitySpecs?.length === caps.length ? options.capabilitySpecs : null;
+      const narrowed: unknown[] = [];
+      caps.forEach((cap, index) => {
+        if (!cap || typeof cap !== "object") return void narrowed.push(cap);
+        // Its own excludes were applied when its list was resolved; the config's are cleared above.
         const { "wdio:specs": _s, "wdio:exclude": _e, ...rest } = cap;
-        return rest;
+        if (!perCapability) return void narrowed.push(rest);
+        if (perCapability[index]!.length > 0) narrowed.push({ ...rest, "wdio:specs": perCapability[index] });
       });
+      config.capabilities = narrowed;
     }
   }
   if (options.grep !== undefined || options.onlyPlanned) {

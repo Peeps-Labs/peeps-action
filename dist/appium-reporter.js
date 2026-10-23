@@ -74,15 +74,65 @@ function identityKey(test) {
   return `${test.path}
 ${test.titlePath}`;
 }
+function workerId() {
+  return process.env.WDIO_WORKER_ID || `pid-${process.pid}`;
+}
+var fileSafe = (value) => value.replace(/[^A-Za-z0-9._-]/g, "_");
 var Plan = class {
-  constructor(file) {
+  constructor(file, claimsDir = null) {
     this.file = file;
+    this.claimsDir = claimsDir;
     for (const run of file.runs) {
       const key = identityKey(run);
       if (!this.entries.has(key)) this.entries.set(key, run);
     }
   }
   entries = /* @__PURE__ */ new Map();
+  /**
+   * Claim `runId` for `worker` by creating its owner file exclusively, so
+   * exactly one worker reports each run however many capabilities run its
+   * test; a later attempt of the same worker (a specFileRetries retry keeps
+   * its cid) continues it. Without a usable claims directory, every worker
+   * reports, as before.
+   */
+  claim(runId, worker) {
+    if (!this.claimsDir) return { state: "new" };
+    const owner = import_node_path.default.join(this.claimsDir, `${fileSafe(runId)}.owner`);
+    try {
+      (0, import_node_fs.mkdirSync)(this.claimsDir, { recursive: true });
+      (0, import_node_fs.writeFileSync)(owner, worker, { flag: "wx" });
+      return { state: "new" };
+    } catch (error) {
+      if (error.code !== "EEXIST") {
+        console.log(`[peeps] could not claim ${runId}, reporting it anyway: ${String(error)}`);
+        return { state: "new" };
+      }
+    }
+    const holder = (0, import_node_fs.readFileSync)(owner, "utf8");
+    if (holder !== worker) return { state: "other", owner: holder };
+    return { state: (0, import_node_fs.existsSync)(import_node_path.default.join(this.claimsDir, `${fileSafe(runId)}.ended`)) ? "ended" : "continue" };
+  }
+  /** The run's `run_end` was sent: a later attempt of its worker must not reopen it. */
+  markEnded(runId) {
+    if (!this.claimsDir) return;
+    try {
+      (0, import_node_fs.writeFileSync)(import_node_path.default.join(this.claimsDir, `${fileSafe(runId)}.ended`), "");
+    } catch {
+    }
+  }
+  /** This worker's attempt number, 1 for its first (a specFileRetries retry keeps the cid). */
+  nextAttempt(worker) {
+    if (!this.claimsDir) return 1;
+    const file = import_node_path.default.join(this.claimsDir, `attempts-${fileSafe(worker)}`);
+    try {
+      (0, import_node_fs.mkdirSync)(this.claimsDir, { recursive: true });
+      const attempt = (Number((0, import_node_fs.existsSync)(file) ? (0, import_node_fs.readFileSync)(file, "utf8") : "0") || 0) + 1;
+      (0, import_node_fs.writeFileSync)(file, String(attempt));
+      return attempt;
+    } catch {
+      return 1;
+    }
+  }
   /** The run a test reports to: its spec file (absolute) and title chain. */
   entryFor(file, titles) {
     if (!file) return null;
@@ -112,12 +162,14 @@ function loadPlan() {
     cachedPlan = null;
     return null;
   }
-  cachedPlan = new Plan(JSON.parse((0, import_node_fs.readFileSync)(planPath, "utf8")));
+  cachedPlan = new Plan(JSON.parse((0, import_node_fs.readFileSync)(planPath, "utf8")), import_node_path.default.join(import_node_path.default.dirname(planPath), "claims"));
   return cachedPlan;
 }
+var specFileRetries = 0;
 function resetForTests() {
   cachedPlan = void 0;
   captured.clear();
+  specFileRetries = 0;
 }
 var DATA_EXTENSIONS = /* @__PURE__ */ new Set([
   "dat",
@@ -296,11 +348,25 @@ var PeepsAppiumReporter = class {
   started = /* @__PURE__ */ new Set();
   ended = /* @__PURE__ */ new Set();
   attemptStart = /* @__PURE__ */ new Map();
+  /** Runs another worker reports, or an earlier attempt closed: nothing is sent for them. */
+  suppressed = /* @__PURE__ */ new Set();
+  worker = workerId();
+  /**
+   * Whether WebdriverIO can still retry this worker's spec file
+   * (`specFileRetries`): it does whenever the file fails with retries left,
+   * so a failure here is a retried attempt, and the retry, keeping this
+   * worker's cid, continues the run.
+   */
+  retriable = false;
   inflight = 0;
   file;
   constructor(_options) {
     this.plan = loadPlan();
-    if (!this.plan) console.log("[peeps] PEEPS_PLAN_FILE is not set; nothing is reported");
+    if (!this.plan) {
+      console.log("[peeps] PEEPS_PLAN_FILE is not set; nothing is reported");
+      return;
+    }
+    this.retriable = this.plan.nextAttempt(this.worker) <= specFileRetries;
   }
   /** WebdriverIO waits for this before the worker exits (`reporterSyncTimeout`). */
   get isSynchronised() {
@@ -349,14 +415,25 @@ var PeepsAppiumReporter = class {
   entryOf(payload) {
     return this.plan.entryFor(payload.file ?? this.file, [...this.suites, payload.title ?? ""]);
   }
+  /** Open an attempt of `entry`'s run; false when this worker does not report it. */
   begin(entry, testName) {
+    if (this.suppressed.has(entry.runId)) return false;
     const now = Date.now();
     if (!this.started.has(entry.runId)) {
+      const claim = this.plan.claim(entry.runId, this.worker);
+      if (claim.state === "other" || claim.state === "ended") {
+        this.suppressed.add(entry.runId);
+        console.log(
+          claim.state === "other" ? `[peeps] ${entry.titlePath}: reported by worker ${claim.owner}; this attempt (worker ${this.worker}) is not sent` : `[peeps] ${entry.titlePath}: closed by an earlier attempt of worker ${this.worker}; this one is not sent`
+        );
+        return false;
+      }
       this.started.add(entry.runId);
-      this.enqueue(entry.runId, { type: "run_start", timestamp: now });
+      if (claim.state === "new") this.enqueue(entry.runId, { type: "run_start", timestamp: now });
     }
     this.enqueue(entry.runId, { type: "test_start", timestamp: now, testName });
     this.attemptStart.set(entry.runId, now);
+    return true;
   }
   onTestStart(payload) {
     const entry = this.entryOf(payload);
@@ -370,8 +447,8 @@ var PeepsAppiumReporter = class {
       );
       return;
     }
-    if (this.ended.has(entry.runId)) return;
-    if (!this.attemptStart.has(entry.runId)) this.begin(entry, payload.title ?? "");
+    if (this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
+    if (!this.attemptStart.has(entry.runId) && !this.begin(entry, payload.title ?? "")) return;
     const error = payload.error ?? payload.errors?.[0];
     const event = {
       type: "test_end",
@@ -390,7 +467,7 @@ var PeepsAppiumReporter = class {
   /** A failed attempt mocha retries: a failed `test_end`, without evidence. */
   onTestRetry(payload) {
     const entry = this.entryOf(payload);
-    if (!entry || this.ended.has(entry.runId)) return;
+    if (!entry || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
     const error = payload.error ?? payload.errors?.[0];
     this.enqueue(entry.runId, {
       type: "test_end",
@@ -420,7 +497,7 @@ var PeepsAppiumReporter = class {
     for (const entry of this.plan.entries.values()) {
       if (entry.path !== rel || !entry.titlePath.startsWith(prefix) || this.ended.has(entry.runId)) continue;
       const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
-      if (!this.attemptStart.has(entry.runId)) this.begin(entry, testName);
+      if (!this.attemptStart.has(entry.runId) && !this.begin(entry, testName)) continue;
       const message = `${payload.title ?? "a before hook"} failed: ${error?.message ?? ""}`;
       this.close(entry, {
         type: "test_end",
@@ -442,10 +519,17 @@ var PeepsAppiumReporter = class {
     return start === void 0 ? 0 : Date.now() - start;
   }
   close(entry, event) {
-    this.enqueue(entry.runId, event);
-    this.enqueue(entry.runId, { type: "run_end", timestamp: Date.now() });
     this.ended.add(entry.runId);
     this.attemptStart.delete(entry.runId);
+    if (event.status === "failed" && this.retriable) {
+      const { attachments: _a, attachmentsOmitted: _o, properties: _p, ...attempt } = event;
+      this.enqueue(entry.runId, attempt);
+      discardCaptured(entry.runId);
+    } else {
+      this.enqueue(entry.runId, event);
+      this.enqueue(entry.runId, { type: "run_end", timestamp: Date.now() });
+      this.plan.markEnded(entry.runId);
+    }
     this.flush(entry.runId);
   }
   enqueue(runId, event) {
@@ -513,6 +597,7 @@ function isJunit(reporter) {
 }
 function withPeeps(base, options = {}) {
   if (!base || typeof base !== "object") throw new Error("the WebdriverIO config must export a `config` object");
+  specFileRetries = Math.max(0, Math.floor(Number(base.specFileRetries) || 0));
   const reporters = Array.isArray(base.reporters) ? [...base.reporters] : [];
   reporters.push(PeepsAppiumReporter);
   if (options.junitDir && !reporters.some(isJunit)) {
@@ -533,11 +618,16 @@ function withPeeps(base, options = {}) {
     config.specs = options.specs;
     config.exclude = [];
     if (Array.isArray(base.capabilities)) {
-      config.capabilities = base.capabilities.map((cap) => {
-        if (!cap || typeof cap !== "object") return cap;
+      const caps = base.capabilities;
+      const perCapability = options.capabilitySpecs?.length === caps.length ? options.capabilitySpecs : null;
+      const narrowed = [];
+      caps.forEach((cap, index) => {
+        if (!cap || typeof cap !== "object") return void narrowed.push(cap);
         const { "wdio:specs": _s, "wdio:exclude": _e, ...rest } = cap;
-        return rest;
+        if (!perCapability) return void narrowed.push(rest);
+        if (perCapability[index].length > 0) narrowed.push({ ...rest, "wdio:specs": perCapability[index] });
       });
+      config.capabilities = narrowed;
     }
   }
   if (options.grep !== void 0 || options.onlyPlanned) {

@@ -269,9 +269,21 @@ failed in: `[{ "name": "context", "value": "WEBVIEW_com.example" }]`.
 
 A capture that fails or exceeds 25 MB is listed in `attachmentsOmitted` with
 its reason. Under mocha retries each retried attempt sends a failed
-`test_end` and only the final attempt's evidence is kept. Run one WebdriverIO
-capability per job (one platform per config): two capabilities running the
-same test would both report into its one run.
+`test_end` and only the final attempt's evidence is kept.
+
+One capability per config (one platform per config, named in `config`) is
+the supported shape. With several, each test is reported once, from the
+first capability that runs it; another capability's result for it is
+logged in the job, not sent. In `run` mode each capability runs only the
+planned spec files among its own (`wdio:specs` intersected with the plan),
+and a capability with none of them is left out of the run.
+
+With `specFileRetries`, a retry of a spec file runs on the same worker and
+continues its tests' runs rather than duplicating them: a test that failed
+in an attempt WebdriverIO will retry is sent as a retried attempt (a failed
+`test_end` without evidence), and its run closes with the test's first pass
+or with the last attempt. A test that already passed is not sent again when
+the retry reruns its file.
 
 ### Agent mode for an Appium suite
 

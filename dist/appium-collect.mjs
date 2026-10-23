@@ -113,16 +113,18 @@ async function specsFromWdio(configPath, wdioConfig) {
   const rootDir = config.rootDir ?? path.dirname(configPath);
   const lists = [parser.getSpecs()];
   const capabilities = parser.getCapabilities();
+  let capabilitySpecs = null;
   if (Array.isArray(capabilities)) {
-    for (const cap of capabilities) {
-      if (cap && (cap["wdio:specs"] || cap["wdio:exclude"])) {
-        lists.push(parser.getSpecs(cap["wdio:specs"], cap["wdio:exclude"]));
-      }
-    }
+    capabilitySpecs = capabilities.map((cap) => {
+      const list = parser.getSpecs(cap?.["wdio:specs"], cap?.["wdio:exclude"]);
+      lists.push(list);
+      return [...new Set(flatten(list).map((s) => toPath(s, rootDir)))];
+    });
   }
   return {
     rootDir,
     specs: [...new Set(lists.flatMap((list) => flatten(list)).map((s) => toPath(s, rootDir)))],
+    capabilitySpecs,
     mochaOpts: config.mochaOpts ?? {}
   };
 }
@@ -140,16 +142,25 @@ async function specsFromConfig(configPath) {
   const config = loaded.config ?? loaded.default?.config;
   if (!config || typeof config !== "object") throw new Error(`${configPath} exports no \`config\` object`);
   const rootDir = config.rootDir ? path.resolve(path.dirname(configPath), config.rootDir) : path.dirname(configPath);
-  const specs = new Set(glob(config.specs, rootDir));
+  const globalSpecs = glob(config.specs, rootDir);
+  const globalExclude = glob(config.exclude, rootDir);
+  const isFile = (file) => statSync(file).isFile();
+  const specs = new Set(globalSpecs);
+  let capabilitySpecs = null;
   if (Array.isArray(config.capabilities)) {
-    for (const cap of config.capabilities) {
-      for (const file of glob(cap?.["wdio:specs"], rootDir)) specs.add(file);
-    }
+    capabilitySpecs = config.capabilities.map((cap) => {
+      const own = cap?.["wdio:specs"];
+      const mine = own ? glob(own, rootDir) : globalSpecs;
+      for (const file of mine) specs.add(file);
+      const excluded2 = new Set(globalExclude.length > 0 ? globalExclude : glob(cap?.["wdio:exclude"], rootDir));
+      return [...new Set(mine)].filter((file) => !excluded2.has(file) && isFile(file));
+    });
   }
-  const excluded = new Set(glob(config.exclude, rootDir));
+  const excluded = new Set(globalExclude);
   return {
     rootDir,
-    specs: [...specs].filter((file) => !excluded.has(file) && statSync(file).isFile()),
+    specs: [...specs].filter((file) => !excluded.has(file) && isFile(file)),
+    capabilitySpecs,
     mochaOpts: config.mochaOpts ?? {}
   };
 }
@@ -206,7 +217,16 @@ async function collect(configPath) {
     };
     walk(mocha.suite);
   }
-  return { rootDir: list.rootDir, specs: list.specs, tests, errors, loader: tsx ? "tsx" : "node", specsFrom, notes };
+  return {
+    rootDir: list.rootDir,
+    specs: list.specs,
+    capabilitySpecs: list.capabilitySpecs,
+    tests,
+    errors,
+    loader: tsx ? "tsx" : "node",
+    specsFrom,
+    notes
+  };
 }
 function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);

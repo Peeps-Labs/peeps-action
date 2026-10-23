@@ -1390,20 +1390,29 @@ function specsForRuns(env, collection, runs) {
     if (rel !== null) fileOf.set(`${rel}
 ${test.titlePath.join(TITLE_PATH_SEPARATOR)}`, test.file);
   }
+  const perCapability = collection.capabilitySpecs ?? null;
+  const scheduled = perCapability ? new Set(perCapability.flat()) : null;
   const specs = /* @__PURE__ */ new Set();
   const matched = [];
   const unmatched = [];
   for (const run of runs) {
     const file = fileOf.get(`${run.path}
 ${run.titlePath}`);
-    if (file === void 0) {
+    if (file === void 0 || scheduled && !scheduled.has(file)) {
       unmatched.push(run);
       continue;
     }
     specs.add(file);
     matched.push(run);
   }
-  return { specs: [...specs].sort(), matched, unmatched };
+  const sorted = [...specs].sort();
+  if (!perCapability) return { specs: sorted, matched, unmatched };
+  return {
+    specs: sorted,
+    capabilitySpecs: perCapability.map((own) => sorted.filter((file) => own.includes(file))),
+    matched,
+    unmatched
+  };
 }
 function escapeRegex2(value) {
   return value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
@@ -1422,9 +1431,9 @@ async function runAppiumDispatched(env, peeps) {
   });
   if (!plan) return;
   console.log(`[peeps] run: batch ${plan.batchNumber} holds ${plan.runs.length} run(s)`);
-  const { specs, matched, unmatched } = specsForRuns(env, collection, plan.runs);
+  const { specs, capabilitySpecs, matched, unmatched } = specsForRuns(env, collection, plan.runs);
   for (const run of unmatched.slice(0, 10)) {
-    console.log(`[peeps]   not collected here, not run: ${run.path} \u203A ${run.titlePath}`);
+    console.log(`[peeps]   not collected here (or no capability runs its file), not run: ${run.path} \u203A ${run.titlePath}`);
   }
   if (matched.length === 0) {
     await peeps.post(`/api/v1/ci/batches/${plan.batchId}/complete`, { reportUploaded: false });
@@ -1437,7 +1446,7 @@ async function runAppiumDispatched(env, peeps) {
     configPath,
     runs: matched,
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
-    selection: { specs, grep: mochaGrepFor(matched.map((r) => r.titlePath)) }
+    selection: { specs, capabilitySpecs, grep: mochaGrepFor(matched.map((r) => r.titlePath)) }
   });
 }
 function hasPackage(name, from) {
@@ -1488,6 +1497,9 @@ async function executeAppiumAndReport(env, peeps, input2) {
   const options = { junitDir };
   if (input2.selection) {
     options.specs = input2.selection.specs.map((file) => (0, import_node_url2.pathToFileURL)(file).href);
+    if (input2.selection.capabilitySpecs) {
+      options.capabilitySpecs = input2.selection.capabilitySpecs.map((list) => list.map((file) => (0, import_node_url2.pathToFileURL)(file).href));
+    }
     options.grep = input2.selection.grep;
     options.onlyPlanned = true;
   }

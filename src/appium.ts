@@ -329,31 +329,43 @@ interface Plan {
 /**
  * Peeps' planned runs matched to the spec files collection found, by
  * `(path, titlePath)`. A run with no collected test (renamed or deleted since
- * Peeps planned it) is returned separately; nothing runs for it.
+ * Peeps planned it), or whose spec file no capability runs, is returned
+ * separately; nothing runs for it. `capabilitySpecs`: per capability, in the
+ * config's order, the planned spec files among its own (empty: it has none
+ * to run), when collection knew each capability's list.
  */
 export function specsForRuns(
   env: RunnerEnv,
   collection: AppiumCollection,
   runs: PlanEntry[],
-): { specs: string[]; matched: PlanEntry[]; unmatched: PlanEntry[] } {
+): { specs: string[]; capabilitySpecs?: string[][]; matched: PlanEntry[]; unmatched: PlanEntry[] } {
   const fileOf = new Map<string, string>();
   for (const test of collection.tests) {
     const rel = repoRelative(env.workspace, test.file);
     if (rel !== null) fileOf.set(`${rel}\n${test.titlePath.join(TITLE_PATH_SEPARATOR)}`, test.file);
   }
+  const perCapability = collection.capabilitySpecs ?? null;
+  const scheduled = perCapability ? new Set(perCapability.flat()) : null;
   const specs = new Set<string>();
   const matched: PlanEntry[] = [];
   const unmatched: PlanEntry[] = [];
   for (const run of runs) {
     const file = fileOf.get(`${run.path}\n${run.titlePath}`);
-    if (file === undefined) {
+    if (file === undefined || (scheduled && !scheduled.has(file))) {
       unmatched.push(run);
       continue;
     }
     specs.add(file);
     matched.push(run);
   }
-  return { specs: [...specs].sort(), matched, unmatched };
+  const sorted = [...specs].sort();
+  if (!perCapability) return { specs: sorted, matched, unmatched };
+  return {
+    specs: sorted,
+    capabilitySpecs: perCapability.map((own) => sorted.filter((file) => own.includes(file))),
+    matched,
+    unmatched,
+  };
 }
 
 function escapeRegex(value: string): string {
@@ -389,9 +401,9 @@ export async function runAppiumDispatched(env: RunnerEnv, peeps: PeepsClient): P
   });
   if (!plan) return;
   console.log(`[peeps] run: batch ${plan.batchNumber} holds ${plan.runs.length} run(s)`);
-  const { specs, matched, unmatched } = specsForRuns(env, collection, plan.runs);
+  const { specs, capabilitySpecs, matched, unmatched } = specsForRuns(env, collection, plan.runs);
   for (const run of unmatched.slice(0, 10)) {
-    console.log(`[peeps]   not collected here, not run: ${run.path} › ${run.titlePath}`);
+    console.log(`[peeps]   not collected here (or no capability runs its file), not run: ${run.path} › ${run.titlePath}`);
   }
   if (matched.length === 0) {
     // Never start wdio without a selection: with none it runs the whole suite.
@@ -405,7 +417,7 @@ export async function runAppiumDispatched(env: RunnerEnv, peeps: PeepsClient): P
     configPath,
     runs: matched,
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
-    selection: { specs, grep: mochaGrepFor(matched.map((r) => r.titlePath)) },
+    selection: { specs, capabilitySpecs, grep: mochaGrepFor(matched.map((r) => r.titlePath)) },
   });
 }
 
@@ -475,7 +487,7 @@ export async function executeAppiumAndReport(
     /** `runIds`: the runs a batch holds; omitted with a single batch, which holds every run. */
     batches: Array<{ batchId: string; batchNumber: number; runIds?: string[] }>;
     /** Run mode: only these spec files (absolute), this mocha grep, and only the planned (file, title path) pairs. */
-    selection?: { specs: string[]; grep: string };
+    selection?: { specs: string[]; capabilitySpecs?: string[][]; grep: string };
     /** For tests: run this instead of `npx wdio run <config>`. */
     runner?: (configPath: string, extraEnv: Record<string, string>) => Promise<number>;
   },
@@ -493,6 +505,9 @@ export async function executeAppiumAndReport(
   if (input.selection) {
     // As file URLs: WebdriverIO globs a plain path, and `[id].spec.ts` is a glob.
     options.specs = input.selection.specs.map((file) => pathToFileURL(file).href);
+    if (input.selection.capabilitySpecs) {
+      options.capabilitySpecs = input.selection.capabilitySpecs.map((list) => list.map((file) => pathToFileURL(file).href));
+    }
     options.grep = input.selection.grep;
     options.onlyPlanned = true;
   }
