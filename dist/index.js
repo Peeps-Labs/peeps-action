@@ -220,9 +220,9 @@ function expiryOf(token) {
   }
 }
 var PeepsHttpError = class extends Error {
-  constructor(path8, status, body) {
-    super(`Peeps ${path8} \u2192 ${status}: ${body.slice(0, 500)}`);
-    this.path = path8;
+  constructor(path10, status, body) {
+    super(`Peeps ${path10} \u2192 ${status}: ${body.slice(0, 500)}`);
+    this.path = path10;
     this.status = status;
     this.body = body;
     this.name = "PeepsHttpError";
@@ -289,11 +289,11 @@ var PeepsClient = class {
     );
   }
   /** Raw upload (artifacts). Retries transient failures a couple of times. */
-  async postBytes(path8, bytes) {
+  async postBytes(path10, bytes) {
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await fetch(`${this.env.peepsUrl}${path8}`, {
+        const response = await fetch(`${this.env.peepsUrl}${path10}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${await this.token()}`,
@@ -307,9 +307,9 @@ var PeepsClient = class {
         if (response.ok) return;
         const text = await response.text();
         if (response.status < 500 && response.status !== 408 && response.status !== 429) {
-          throw new Error(`Peeps ${path8} \u2192 ${response.status}: ${text.slice(0, 300)}`);
+          throw new Error(`Peeps ${path10} \u2192 ${response.status}: ${text.slice(0, 300)}`);
         }
-        lastError = new Error(`Peeps ${path8} \u2192 ${response.status}`);
+        lastError = new Error(`Peeps ${path10} \u2192 ${response.status}`);
       } catch (error) {
         lastError = error;
       }
@@ -318,8 +318,8 @@ var PeepsClient = class {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
   /** GET that treats 204 as "nothing" (long-poll idle) instead of an error. */
-  async getOrNull(path8) {
-    const response = await fetch(`${this.env.peepsUrl}${path8}`, {
+  async getOrNull(path10) {
+    const response = await fetch(`${this.env.peepsUrl}${path10}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -330,12 +330,12 @@ var PeepsClient = class {
     if (response.status === 204) return null;
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path8, response.status, text);
+      throw new PeepsHttpError(path10, response.status, text);
     }
     return JSON.parse(text);
   }
-  async get(path8) {
-    const response = await fetch(`${this.env.peepsUrl}${path8}`, {
+  async get(path10) {
+    const response = await fetch(`${this.env.peepsUrl}${path10}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -344,12 +344,12 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path8, response.status, text);
+      throw new PeepsHttpError(path10, response.status, text);
     }
     return JSON.parse(text);
   }
-  async post(path8, body) {
-    const response = await fetch(`${this.env.peepsUrl}${path8}`, {
+  async post(path10, body) {
+    const response = await fetch(`${this.env.peepsUrl}${path10}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${await this.token()}`,
@@ -361,7 +361,7 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path8, response.status, text);
+      throw new PeepsHttpError(path10, response.status, text);
     }
     return text ? JSON.parse(text) : {};
   }
@@ -1111,38 +1111,68 @@ function summarizeArgs(args) {
   return Object.entries(args).filter(([k]) => k !== "token" && k !== "content" && k !== "patch").map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 60)}`).join(", ");
 }
 
+// src/appium.ts
+var import_node_child_process5 = require("node:child_process");
+var import_node_crypto4 = require("node:crypto");
+var import_node_fs4 = require("node:fs");
+var import_promises6 = require("node:fs/promises");
+var import_node_os4 = require("node:os");
+var import_node_path9 = __toESM(require("node:path"));
+var import_node_url2 = require("node:url");
+
+// src/appium-reporter.ts
+var import_node_fs2 = require("node:fs");
+var import_node_path7 = __toESM(require("node:path"));
+var TITLE_PATH_SEPARATOR = " \u203A ";
+function repoRelative(workspace, abs) {
+  const attempt = (root, file) => {
+    const rel = import_node_path7.default.relative(root, file).split(import_node_path7.default.sep).join("/");
+    return rel === "" || rel === ".." || rel.startsWith("../") || import_node_path7.default.isAbsolute(rel) ? null : rel;
+  };
+  const direct = attempt(workspace, abs);
+  if (direct !== null) return direct;
+  try {
+    return attempt((0, import_node_fs2.realpathSync)(workspace), (0, import_node_fs2.realpathSync)(abs));
+  } catch {
+    return null;
+  }
+}
+var MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
 // src/pytest.ts
 var import_node_child_process4 = require("node:child_process");
 var import_node_crypto3 = require("node:crypto");
-var import_node_fs2 = require("node:fs");
+var import_node_fs3 = require("node:fs");
 var import_promises5 = require("node:fs/promises");
 var import_node_os3 = require("node:os");
-var import_node_path7 = __toESM(require("node:path"));
-var PLUGIN_DIR = import_node_path7.default.join(__dirname, "..", "python");
+var import_node_path8 = __toESM(require("node:path"));
+var WDIO_CONFIG = /^wdio(\..+)?\.conf\.[cm]?[jt]s$/;
+var PLUGIN_DIR = import_node_path8.default.join(__dirname, "..", "python");
 var PLUGIN = "peeps_pytest_plugin";
 var PLAYWRIGHT_CONFIG = /^playwright(\..+)?\.config\.[cm]?[jt]s$/;
 function resolveFramework(env) {
   const declared = env.framework;
-  if (declared === "playwright" || declared === "pytest") return declared;
+  if (declared === "playwright" || declared === "pytest" || declared === "appium") return declared;
   if (declared !== null && declared !== "auto") {
-    throw new Error(`unknown framework "${declared}": use playwright, pytest or auto`);
+    throw new Error(`unknown framework "${declared}": use playwright, pytest, appium or auto`);
   }
-  if (env.configPath) return "playwright";
+  if (env.configPath) return WDIO_CONFIG.test(import_node_path8.default.basename(env.configPath)) ? "appium" : "playwright";
   let names;
   try {
-    names = (0, import_node_fs2.readdirSync)(env.workingDirectory);
+    names = (0, import_node_fs3.readdirSync)(env.workingDirectory);
   } catch {
     return "playwright";
   }
   if (names.some((name) => PLAYWRIGHT_CONFIG.test(name))) return "playwright";
+  if (names.some((name) => WDIO_CONFIG.test(name))) return "appium";
   if (names.includes("pytest.ini") || names.includes("conftest.py")) return "pytest";
-  const pyproject = import_node_path7.default.join(env.workingDirectory, "pyproject.toml");
-  if ((0, import_node_fs2.existsSync)(pyproject) && /^\s*\[tool\.pytest(\.ini_options)?\]/m.test((0, import_node_fs2.readFileSync)(pyproject, "utf8"))) {
+  const pyproject = import_node_path8.default.join(env.workingDirectory, "pyproject.toml");
+  if ((0, import_node_fs3.existsSync)(pyproject) && /^\s*\[tool\.pytest(\.ini_options)?\]/m.test((0, import_node_fs3.readFileSync)(pyproject, "utf8"))) {
     return "pytest";
   }
   return "playwright";
 }
-var TITLE_PATH_SEPARATOR = " \u203A ";
+var TITLE_PATH_SEPARATOR2 = " \u203A ";
 function splitParameter(nodeId) {
   const open = nodeId.indexOf("[", Math.max(0, nodeId.indexOf("::")));
   if (open === -1 || !nodeId.endsWith("]")) return { head: nodeId, parameter: null };
@@ -1169,7 +1199,7 @@ function pytestNodeIdToTest(nodeId, options = {}) {
   const root = normalizeRoot(options.rootDir ?? ".");
   return {
     path: root === "" ? file : `${root}/${file}`,
-    titlePath: scopes.join(TITLE_PATH_SEPARATOR) + (kept === null ? "" : `[${kept}]`)
+    titlePath: scopes.join(TITLE_PATH_SEPARATOR2) + (kept === null ? "" : `[${kept}]`)
   };
 }
 function planKey(test) {
@@ -1204,7 +1234,7 @@ function nodeIdsForRuns(planned, runs) {
 }
 function pytestEnv(extra) {
   const env = { ...process.env, CI: "1", ...extra };
-  env.PYTHONPATH = process.env.PYTHONPATH ? `${PLUGIN_DIR}${import_node_path7.default.delimiter}${process.env.PYTHONPATH}` : PLUGIN_DIR;
+  env.PYTHONPATH = process.env.PYTHONPATH ? `${PLUGIN_DIR}${import_node_path8.default.delimiter}${process.env.PYTHONPATH}` : PLUGIN_DIR;
   if (!("PEEPS_PLAN_FILE" in extra)) delete env.PEEPS_PLAN_FILE;
   if (!("PEEPS_COLLECT_OUT" in extra)) delete env.PEEPS_COLLECT_OUT;
   if (!("PEEPS_SELECT_ONLY" in extra)) delete env.PEEPS_SELECT_ONLY;
@@ -1241,13 +1271,13 @@ function configArgs(env) {
   return env.configPath ? ["-c", env.configPath] : [];
 }
 async function collectPytest(env) {
-  const scratch = await (0, import_promises5.mkdtemp)(import_node_path7.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-collect-"));
-  const out = import_node_path7.default.join(scratch, "collection.json");
+  const scratch = await (0, import_promises5.mkdtemp)(import_node_path8.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-collect-"));
+  const out = import_node_path8.default.join(scratch, "collection.json");
   const { code, output } = await spawnPytest(
     ["--collect-only", "-q", "-p", PLUGIN, ...configArgs(env)],
     { cwd: env.workingDirectory, env: pytestEnv({ PEEPS_COLLECT_OUT: out }), capture: true }
   );
-  if (![0, 2, 5].includes(code) || !(0, import_node_fs2.existsSync)(out)) {
+  if (![0, 2, 5].includes(code) || !(0, import_node_fs3.existsSync)(out)) {
     throw new Error(`pytest --collect-only exited with ${code}:
 ${output.slice(-4e3)}`);
   }
@@ -1258,20 +1288,20 @@ ${error.message}`);
   }
   return collection;
 }
-function repoRelative(env, abs) {
+function repoRelative2(env, abs) {
   let workspace = env.workspace;
   try {
-    workspace = (0, import_node_fs2.realpathSync)(workspace);
+    workspace = (0, import_node_fs3.realpathSync)(workspace);
   } catch {
   }
-  const rel = import_node_path7.default.relative(workspace, abs).split(import_node_path7.default.sep).join("/");
-  if (rel === ".." || rel.startsWith("../") || import_node_path7.default.isAbsolute(rel)) {
+  const rel = import_node_path8.default.relative(workspace, abs).split(import_node_path8.default.sep).join("/");
+  if (rel === ".." || rel.startsWith("../") || import_node_path8.default.isAbsolute(rel)) {
     throw new Error(`${abs} is outside the repository (${env.workspace})`);
   }
   return rel;
 }
 function repoRootDir(env, collection) {
-  return repoRelative(env, collection.rootDir) || ".";
+  return repoRelative2(env, collection.rootDir) || ".";
 }
 async function moduleFilePayload(env, collection) {
   const modules = new Set(
@@ -1279,10 +1309,10 @@ async function moduleFilePayload(env, collection) {
   );
   const files = [];
   for (const file of [...modules].sort()) {
-    const abs = import_node_path7.default.join(collection.rootDir, file);
+    const abs = import_node_path8.default.join(collection.rootDir, file);
     const bytes = await (0, import_promises5.readFile)(abs);
     files.push({
-      path: repoRelative(env, abs),
+      path: repoRelative2(env, abs),
       blobSha: gitBlobSha(bytes),
       content: bytes.toString("utf8")
     });
@@ -1380,18 +1410,18 @@ function nodeIdArgument(nodeId, rootDirAbs, cwd) {
   const rest = separator === -1 ? "" : nodeId.slice(separator);
   let from = cwd;
   try {
-    from = (0, import_node_fs2.realpathSync)(cwd);
+    from = (0, import_node_fs3.realpathSync)(cwd);
   } catch {
   }
-  const relative = import_node_path7.default.relative(from, import_node_path7.default.join(rootDirAbs, file)).split(import_node_path7.default.sep).join("/");
+  const relative = import_node_path8.default.relative(from, import_node_path8.default.join(rootDirAbs, file)).split(import_node_path8.default.sep).join("/");
   return relative + rest;
 }
 async function executePytestAndReport(env, peeps, input2) {
-  const scratch = await (0, import_promises5.mkdtemp)(import_node_path7.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-"));
-  const planFile = import_node_path7.default.join(scratch, "plan.json");
-  const resultsFile = import_node_path7.default.join(scratch, "results.json");
-  const outputDir = import_node_path7.default.join(scratch, "output");
-  const artifactsDir = import_node_path7.default.join(scratch, "evidence");
+  const scratch = await (0, import_promises5.mkdtemp)(import_node_path8.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-"));
+  const planFile = import_node_path8.default.join(scratch, "plan.json");
+  const resultsFile = import_node_path8.default.join(scratch, "results.json");
+  const outputDir = import_node_path8.default.join(scratch, "output");
+  const artifactsDir = import_node_path8.default.join(scratch, "evidence");
   await (0, import_promises5.mkdir)(artifactsDir);
   const runs = Object.fromEntries(
     Object.entries(input2.byNodeId).map(([nodeId, run]) => [
@@ -1429,7 +1459,7 @@ async function executePytestAndReport(env, peeps, input2) {
     }
   );
   const runIdByOutputDir = await readOutputDirs(resultsFile, input2.byNodeId);
-  const evidence = await stagedEvidence(import_node_path7.default.join(artifactsDir, "upload"), input2.byNodeId);
+  const evidence = await stagedEvidence(import_node_path8.default.join(artifactsDir, "upload"), input2.byNodeId);
   for (const b of input2.batches) {
     try {
       const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir);
@@ -1459,7 +1489,7 @@ async function readOutputDirs(resultsFile, byNodeId) {
     const results = JSON.parse(await (0, import_promises5.readFile)(resultsFile, "utf8"));
     for (const [nodeId, dir] of Object.entries(results.outputDirs ?? {})) {
       const run = byNodeId[nodeId];
-      if (run) map.set(import_node_path7.default.basename(dir), run.runId);
+      if (run) map.set(import_node_path8.default.basename(dir), run.runId);
     }
   } catch {
   }
@@ -1471,7 +1501,7 @@ function artifactName(rel, runIdByOutputDir) {
   const runId = rest.length > 0 ? runIdByOutputDir.get(dir) : void 0;
   const flat = (runId ? [runId, ...rest] : [dir, ...rest]).join("-").replace(/[^A-Za-z0-9._-]/g, "_");
   if (flat.length <= 200) return `data/${flat}`;
-  const ext = import_node_path7.default.extname(flat);
+  const ext = import_node_path8.default.extname(flat);
   return `data/${(0, import_node_crypto3.createHash)("sha1").update(rel).digest("hex")}${ext}`;
 }
 async function* walkOutput(dir, rel = "") {
@@ -1482,7 +1512,7 @@ async function* walkOutput(dir, rel = "") {
     return;
   }
   for (const entry of entries) {
-    const abs = import_node_path7.default.join(dir, entry.name);
+    const abs = import_node_path8.default.join(dir, entry.name);
     const relPath = rel ? `${rel}/${entry.name}` : entry.name;
     if (entry.isDirectory()) yield* walkOutput(abs, relPath);
     else if (entry.isFile()) yield { abs, rel: relPath };
@@ -1505,7 +1535,7 @@ async function stagedEvidence(uploadDir, byNodeId) {
     }
     const runId = runIds.find((id) => name.startsWith(`${id}-evidence-`));
     if (runId === void 0) continue;
-    staged.push({ abs: import_node_path7.default.join(uploadDir, name), name, runId });
+    staged.push({ abs: import_node_path8.default.join(uploadDir, name), name, runId });
   }
   return staged.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -1551,6 +1581,372 @@ async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
   return uploaded;
 }
 
+// src/appium.ts
+var COLLECTOR = import_node_path9.default.join(__dirname, "..", "dist", "appium-collect.mjs");
+var APPIUM_REPORTER = import_node_path9.default.join(__dirname, "..", "dist", "appium-reporter.js");
+var DEFAULT_CONFIGS = ["ts", "mts", "js", "mjs", "cjs", "cts"].map((ext) => `wdio.conf.${ext}`);
+var COLLECT_TIMEOUT_MS = 10 * 60 * 1e3;
+var MAX_UPLOAD_BYTES3 = 128 * 1024 * 1024;
+function wdioConfigPath(env) {
+  if (env.configPath) return import_node_path9.default.resolve(env.workingDirectory, env.configPath);
+  for (const name of DEFAULT_CONFIGS) {
+    const candidate = import_node_path9.default.join(env.workingDirectory, name);
+    if ((0, import_node_fs4.existsSync)(candidate)) return candidate;
+  }
+  let names = [];
+  try {
+    names = (0, import_node_fs4.readdirSync)(env.workingDirectory).filter((name) => WDIO_CONFIG.test(name)).sort();
+  } catch {
+  }
+  if (names.length === 1) return import_node_path9.default.join(env.workingDirectory, names[0]);
+  throw new Error(
+    names.length > 1 ? `several WebdriverIO configs in ${env.workingDirectory} (${names.join(", ")}): set \`config\` to the one this job runs` : `no wdio.conf.ts (or .js, .mjs, .cjs) in ${env.workingDirectory}: set \`config\` to your WebdriverIO config`
+  );
+}
+async function collectAppium(env, configPath = wdioConfigPath(env)) {
+  const scratch = await (0, import_promises6.mkdtemp)(import_node_path9.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os4.tmpdir)(), "peeps-collect-"));
+  const out = import_node_path9.default.join(scratch, "collection.json");
+  const { code, output } = await new Promise((resolve, reject) => {
+    const child = (0, import_node_child_process5.spawn)(process.execPath, [COLLECTOR, configPath, out], {
+      cwd: env.workingDirectory,
+      env: { ...process.env, CI: "1" },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let output2 = "";
+    const keep = (chunk) => {
+      output2 = (output2 + chunk.toString("utf8")).slice(-2e4);
+    };
+    child.stdout.on("data", keep);
+    child.stderr.on("data", keep);
+    const timer = setTimeout(() => {
+      output2 += `
+[peeps] collection did not finish in ${COLLECT_TIMEOUT_MS / 1e3}s`;
+      child.kill("SIGKILL");
+    }, COLLECT_TIMEOUT_MS);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(new Error(`could not start the collector: ${error.message}`));
+    });
+    child.on("close", (code2) => {
+      clearTimeout(timer);
+      resolve({ code: code2 ?? 1, output: output2 });
+    });
+  });
+  if (code !== 0 || !(0, import_node_fs4.existsSync)(out)) {
+    throw new Error(`collecting the WebdriverIO suite failed (${code}):
+${output.slice(-4e3)}`);
+  }
+  const collection = JSON.parse(await (0, import_promises6.readFile)(out, "utf8"));
+  for (const note of collection.notes) console.log(`[peeps] ${note}`);
+  for (const error of collection.errors) {
+    console.log(`[peeps] collection error in ${error.file}:
+${error.message}`);
+  }
+  return collection;
+}
+function repoPath(env, abs) {
+  if (import_node_path9.default.resolve(abs) === import_node_path9.default.resolve(env.workspace)) return "";
+  const rel = repoRelative(env.workspace, abs);
+  if (rel === null) throw new Error(`${abs} is outside the repository (${env.workspace})`);
+  return rel;
+}
+function appiumRootDir(env, collection) {
+  let root = repoPath(env, collection.rootDir);
+  const files = collection.specs.map((file) => repoPath(env, file));
+  const holds = (file) => root === "" || file.startsWith(`${root}/`);
+  while (!files.every(holds)) {
+    const parent = import_node_path9.default.posix.dirname(root);
+    root = parent === "." ? "" : parent;
+  }
+  return root || ".";
+}
+function tagsOf(titles) {
+  const tags = /* @__PURE__ */ new Set();
+  for (const title of titles) for (const match of title.matchAll(/(?:^|\s)@([^\s@]+)/g)) tags.add(match[1]);
+  return [...tags];
+}
+function lineOf(source, titles) {
+  let from = 0;
+  let found = -1;
+  for (const title of titles) {
+    let best = -1;
+    for (const quote of ["'", '"', "`"]) {
+      const index = source.indexOf(`${quote}${title}${quote}`, from);
+      if (index !== -1 && (best === -1 || index < best)) best = index;
+    }
+    if (best === -1) return found === -1 ? 1 : source.slice(0, found).split("\n").length;
+    found = best;
+    from = best + 1;
+  }
+  return found === -1 ? 1 : source.slice(0, found).split("\n").length;
+}
+async function buildAppiumList(env, collection) {
+  const rootDir = appiumRootDir(env, collection);
+  const prefix = rootDir === "." ? "" : `${rootDir}/`;
+  const relativeToRoot = (abs) => repoPath(env, abs).slice(prefix.length);
+  const sources = /* @__PURE__ */ new Map();
+  const files = [];
+  const fileSuites = /* @__PURE__ */ new Map();
+  for (const test of collection.tests) {
+    const file = relativeToRoot(test.file);
+    let source = sources.get(test.file);
+    if (source === void 0) {
+      const bytes = await (0, import_promises6.readFile)(test.file);
+      source = bytes.toString("utf8");
+      sources.set(test.file, source);
+      files.push({ path: prefix + file, blobSha: gitBlobSha(bytes), content: source });
+    }
+    let suite = fileSuites.get(file);
+    if (!suite) {
+      suite = { title: file, file, line: 0, specs: [], suites: [] };
+      fileSuites.set(file, suite);
+    }
+    const describes = test.titlePath.slice(0, -1);
+    for (let depth = 0; depth < describes.length; depth++) {
+      const title = describes[depth];
+      let child = suite.suites.find((s2) => s2.title === title);
+      if (!child) {
+        child = { title, file, line: lineOf(source, describes.slice(0, depth + 1)), specs: [], suites: [] };
+        suite.suites.push(child);
+      }
+      suite = child;
+    }
+    suite.specs.push({
+      title: test.titlePath[test.titlePath.length - 1] ?? "",
+      file,
+      line: lineOf(source, test.titlePath),
+      tags: tagsOf(test.titlePath)
+    });
+  }
+  const sorted = [...fileSuites.keys()].sort();
+  return {
+    rootDir,
+    list: {
+      config: { rootDir: import_node_path9.default.join(env.workspace, rootDir === "." ? "" : rootDir), projects: [] },
+      suites: sorted.map((file) => fileSuites.get(file))
+    },
+    files: files.sort((a, b) => a.path.localeCompare(b.path)),
+    collectionErrors: collection.errors.map((error) => relativeToRoot(error.file))
+  };
+}
+async function buildAppiumInventoryRequest(env, collection) {
+  if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
+  const built = await buildAppiumList(env, collection);
+  return {
+    sha: env.sha,
+    framework: "appium",
+    rootDir: built.rootDir,
+    list: built.list,
+    // Spec files that did not load (relative to rootDir, as the list's
+    // files are): present, but unread, so their tests' absence from the list
+    // is not their deletion.
+    collectionErrors: built.collectionErrors,
+    files: built.files
+  };
+}
+async function runAppiumInventory(env, peeps) {
+  const collection = await collectAppium(env);
+  const request = await buildAppiumInventoryRequest(env, collection);
+  console.log(
+    `[peeps] inventory: ${collection.tests.length} WebdriverIO tests in ${request.files.length} spec files at ${request.sha.slice(0, 7)}`
+  );
+  const result = await peeps.post("/api/v1/ci/inventory", request);
+  console.log(`[peeps] inventory accepted: ${JSON.stringify(result.results)}`);
+}
+async function runAppiumReport(env, peeps) {
+  if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
+  const configPath = wdioConfigPath(env);
+  const collection = await collectAppium(env, configPath);
+  const built = await buildAppiumList(env, collection);
+  const tests = plannedTestsOf(built.list, built.rootDir);
+  console.log(`[peeps] report: ${tests.length} tests at ${env.sha.slice(0, 7)} (${env.ref ?? "?"})`);
+  const response = await peeps.post("/api/v1/ci/batches", {
+    sha: env.sha,
+    jobUrl: env.runUrl,
+    baseUrl: process.env.BASE_URL ?? null,
+    tests,
+    files: built.files
+  });
+  const runs = response.batches.flatMap((b) => b.runs);
+  const unmatched = response.batches.flatMap((b) => b.unmatched);
+  console.log(
+    `[peeps] planned ${runs.length} run(s) in ${response.batches.length} batch(es); ${unmatched.length} test(s) unknown to Peeps`
+  );
+  for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} \u203A ${u.titlePath}`);
+  await executeAppiumAndReport(env, peeps, {
+    configPath,
+    runs,
+    batches: response.batches.map((b) => ({
+      batchId: b.batchId,
+      batchNumber: b.batchNumber,
+      runIds: b.runs.map((r) => r.runId)
+    }))
+  });
+}
+function specsForRuns(env, collection, runs) {
+  const fileOf = /* @__PURE__ */ new Map();
+  for (const test of collection.tests) {
+    const rel = repoRelative(env.workspace, test.file);
+    if (rel !== null) fileOf.set(`${rel}
+${test.titlePath.join(TITLE_PATH_SEPARATOR)}`, test.file);
+  }
+  const specs = /* @__PURE__ */ new Set();
+  const matched = [];
+  const unmatched = [];
+  for (const run of runs) {
+    const file = fileOf.get(`${run.path}
+${run.titlePath}`);
+    if (file === void 0) {
+      unmatched.push(run);
+      continue;
+    }
+    specs.add(file);
+    matched.push(run);
+  }
+  return { specs: [...specs].sort(), matched, unmatched };
+}
+function escapeRegex2(value) {
+  return value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+}
+function mochaGrepFor(titlePaths) {
+  const alternatives = [...new Set(titlePaths)].map((t) => escapeRegex2(t.split(TITLE_PATH_SEPARATOR).join(" ")));
+  return `^(?:${alternatives.join("|")})$`;
+}
+async function runAppiumDispatched(env, peeps) {
+  if (!env.sessionId) throw new Error("`session-id` is required in run mode (Peeps passes it)");
+  const configPath = wdioConfigPath(env);
+  const collection = await collectAppium(env, configPath);
+  const built = await buildAppiumList(env, collection);
+  const plan = await requestPlan(peeps, env.sessionId, {
+    tests: plannedTestsOf(built.list, built.rootDir).slice(0, 2e3)
+  });
+  if (!plan) return;
+  console.log(`[peeps] run: batch ${plan.batchNumber} holds ${plan.runs.length} run(s)`);
+  const { specs, matched, unmatched } = specsForRuns(env, collection, plan.runs);
+  for (const run of unmatched.slice(0, 10)) {
+    console.log(`[peeps]   not collected here, not run: ${run.path} \u203A ${run.titlePath}`);
+  }
+  if (matched.length === 0) {
+    await peeps.post(`/api/v1/ci/batches/${plan.batchId}/complete`, { reportUploaded: false });
+    if (plan.runs.length > 0) {
+      throw new Error(`none of the ${plan.runs.length} planned test(s) were collected at this commit`);
+    }
+    return;
+  }
+  await executeAppiumAndReport(env, peeps, {
+    configPath,
+    runs: matched,
+    batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
+    selection: { specs, grep: mochaGrepFor(matched.map((r) => r.titlePath)) }
+  });
+}
+function hasPackage(name, from) {
+  for (let dir = from; ; dir = import_node_path9.default.dirname(dir)) {
+    if ((0, import_node_fs4.existsSync)(import_node_path9.default.join(dir, "node_modules", name, "package.json"))) return true;
+    if (import_node_path9.default.dirname(dir) === dir) return false;
+  }
+}
+async function writeWrapperConfig(configPath, options) {
+  const ts = /\.[cm]?ts$/.test(configPath);
+  const wrapper = import_node_path9.default.join(import_node_path9.default.dirname(configPath), `.peeps-${(0, import_node_crypto4.randomUUID)()}.wdio.conf.${ts ? "mts" : "mjs"}`);
+  const source = [
+    "// Written by peeps-action for this run and removed after it; never committed.",
+    'import { createRequire } from "node:module";',
+    `import * as loaded from ${JSON.stringify((0, import_node_url2.pathToFileURL)(configPath).href)};`,
+    "const require = createRequire(import.meta.url);",
+    `const { withPeeps } = require(${JSON.stringify(APPIUM_REPORTER)});`,
+    "const base = loaded.config ?? loaded.default?.config;",
+    `export const config = withPeeps(base, ${JSON.stringify(options)});`,
+    ""
+  ].join("\n");
+  await (0, import_promises6.writeFile)(wrapper, source, { flag: "wx", mode: 384 });
+  return { configPath: wrapper, cleanup: () => (0, import_promises6.unlink)(wrapper) };
+}
+function runWdio(env, configPath, extraEnv) {
+  return new Promise((resolve) => {
+    const child = (0, import_node_child_process5.spawn)("npx", ["wdio", "run", configPath], {
+      cwd: env.workingDirectory,
+      stdio: "inherit",
+      env: { ...process.env, CI: "1", ...extraEnv }
+    });
+    child.on("error", (error) => {
+      console.error(`[peeps] could not start WebdriverIO: ${String(error)}`);
+      resolve(1);
+    });
+    child.on("close", (code) => resolve(code ?? 1));
+  });
+}
+async function executeAppiumAndReport(env, peeps, input2) {
+  const scratch = await (0, import_promises6.mkdtemp)(import_node_path9.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os4.tmpdir)(), "peeps-"));
+  const planFile = import_node_path9.default.join(scratch, "plan.json");
+  const artifactsDir = import_node_path9.default.join(scratch, "evidence");
+  await (0, import_promises6.mkdir)(artifactsDir);
+  const plan = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: input2.runs };
+  await (0, import_promises6.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
+  const junitDir = hasPackage("@wdio/junit-reporter", import_node_path9.default.dirname(input2.configPath)) ? import_node_path9.default.join(scratch, "junit") : null;
+  const options = { junitDir };
+  if (input2.selection) {
+    options.specs = input2.selection.specs.map((file) => (0, import_node_url2.pathToFileURL)(file).href);
+    options.grep = input2.selection.grep;
+  }
+  let code = 1;
+  let wrapper;
+  try {
+    wrapper = await writeWrapperConfig(input2.configPath, options);
+    const extraEnv = { PEEPS_PLAN_FILE: planFile, PEEPS_ARTIFACTS_DIR: artifactsDir };
+    code = await (input2.runner ?? ((config, extra) => runWdio(env, config, extra)))(wrapper.configPath, extraEnv);
+  } catch (error) {
+    console.log(`[peeps] could not run WebdriverIO: ${String(error)}`);
+  } finally {
+    await wrapper?.cleanup().catch((error) => {
+      console.warn(`[peeps] could not remove the temporary wdio config: ${String(error)}`);
+    });
+  }
+  const byRunId = Object.fromEntries(input2.runs.map((run) => [run.runId, run]));
+  const evidence = await stagedEvidence(import_node_path9.default.join(artifactsDir, "upload"), byRunId);
+  for (const b of input2.batches) {
+    const mine = evidence.filter((file) => input2.batches.length === 1 || (b.runIds ?? []).includes(file.runId));
+    if (mine.length > 0) {
+      const uploaded = await uploadEvidence(peeps, b.batchId, mine);
+      console.log(`[peeps] uploaded ${uploaded} test attachment(s) for batch ${b.batchNumber}`);
+    }
+    if (junitDir) await uploadJunit(peeps, b.batchId, junitDir);
+    try {
+      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded: false });
+    } catch (error) {
+      console.log(`[peeps] could not complete batch ${b.batchId}: ${String(error)}`);
+    }
+  }
+  console.log(`[peeps] wdio exited with ${code}`);
+  if (code !== 0) process.exitCode = code;
+}
+function junitArtifactName(file) {
+  return `data/${file.replace(/[^A-Za-z0-9._-]/g, "_")}.dat`;
+}
+async function uploadJunit(peeps, batchId, junitDir) {
+  let names;
+  try {
+    names = (await (0, import_promises6.readdir)(junitDir)).filter((name) => name.endsWith(".xml")).sort();
+  } catch {
+    return;
+  }
+  let uploaded = 0;
+  for (const name of names) {
+    const file = import_node_path9.default.join(junitDir, name);
+    try {
+      if ((await (0, import_promises6.stat)(file)).size > MAX_UPLOAD_BYTES3) continue;
+      await peeps.postBytes(
+        `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(junitArtifactName(name))}`,
+        await (0, import_promises6.readFile)(file)
+      );
+      uploaded += 1;
+    } catch (error) {
+      console.log(`[peeps] skipped ${name}: ${String(error).slice(0, 200)}`);
+    }
+  }
+  if (uploaded > 0) console.log(`[peeps] uploaded ${uploaded} JUnit file(s)`);
+}
+
 // src/main.ts
 function onDefaultBranch(env) {
   if (env.defaultBranch) return env.ref === `refs/heads/${env.defaultBranch}`;
@@ -1563,22 +1959,24 @@ async function main() {
   console.log(
     `[peeps] mode=${mode} repo=${env.repository ?? "?"} sha=${env.sha?.slice(0, 7) ?? "?"} ref=${env.ref ?? "?"} peeps=${env.peepsUrl}`
   );
-  if (mode !== "agent" && resolveFramework(env) === "pytest") {
-    console.log("[peeps] framework=pytest");
+  const framework = mode === "agent" ? "playwright" : resolveFramework(env);
+  if (framework === "pytest" || framework === "appium") {
+    console.log(`[peeps] framework=${framework}`);
+    const path10 = framework === "pytest" ? { inventory: runPytestInventory, report: runPytestReport, run: runPytestDispatched } : { inventory: runAppiumInventory, report: runAppiumReport, run: runAppiumDispatched };
     switch (mode) {
       case "inventory":
-        await runPytestInventory(env, peeps);
+        await path10.inventory(env, peeps);
         return;
       case "report":
         if (onDefaultBranch(env)) {
-          await runPytestInventory(env, peeps).catch(
+          await path10.inventory(env, peeps).catch(
             (error) => console.log(`[peeps] inventory skipped: ${String(error)}`)
           );
         }
-        await runPytestReport(env, peeps);
+        await path10.report(env, peeps);
         return;
       case "run":
-        await runPytestDispatched(env, peeps);
+        await path10.run(env, peeps);
         return;
       default:
         throw new Error(`unknown mode ${mode}`);

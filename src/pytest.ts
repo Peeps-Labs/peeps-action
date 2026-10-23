@@ -35,6 +35,9 @@ import { requestPlan } from "./plan";
 import type { PlanEntry } from "./reporter";
 import type { PlannedTest } from "./report";
 
+/** A WebdriverIO config: `wdio.conf.ts`, `wdio.android.conf.ts`… (the Appium path). */
+export const WDIO_CONFIG = /^wdio(\..+)?\.conf\.[cm]?[jt]s$/;
+
 /** Where `peeps_pytest_plugin.py` lives: `<action>/python`, from src/ or dist/. */
 export const PLUGIN_DIR = path.join(__dirname, "..", "python");
 const PLUGIN = "peeps_pytest_plugin";
@@ -71,23 +74,25 @@ export interface PytestCollection {
 // Which framework
 // ---------------------------------------------------------------------------
 
-export type Framework = "playwright" | "pytest";
+export type Framework = "playwright" | "pytest" | "appium";
 
 const PLAYWRIGHT_CONFIG = /^playwright(\..+)?\.config\.[cm]?[jt]s$/;
 
 /**
  * The framework this job runs. An explicit `framework` input wins. Otherwise
- * Playwright, unless the working directory has pytest configuration and no
- * Playwright config (and no `config` input, which names a Playwright config):
- * every workflow written before pytest support keeps the path it had.
+ * Playwright, unless the working directory has a WebdriverIO config
+ * (`wdio.conf.ts`, `wdio.android.conf.ts`…: Appium) or pytest configuration,
+ * and no Playwright config. A `config` input names a Playwright config unless
+ * it is named like a WebdriverIO one. Every workflow written before pytest and
+ * Appium support keeps the path it had.
  */
 export function resolveFramework(env: RunnerEnv): Framework {
   const declared = env.framework;
-  if (declared === "playwright" || declared === "pytest") return declared;
+  if (declared === "playwright" || declared === "pytest" || declared === "appium") return declared;
   if (declared !== null && declared !== "auto") {
-    throw new Error(`unknown framework "${declared}": use playwright, pytest or auto`);
+    throw new Error(`unknown framework "${declared}": use playwright, pytest, appium or auto`);
   }
-  if (env.configPath) return "playwright";
+  if (env.configPath) return WDIO_CONFIG.test(path.basename(env.configPath)) ? "appium" : "playwright";
   let names: string[];
   try {
     names = readdirSync(env.workingDirectory);
@@ -95,6 +100,7 @@ export function resolveFramework(env: RunnerEnv): Framework {
     return "playwright";
   }
   if (names.some((name) => PLAYWRIGHT_CONFIG.test(name))) return "playwright";
+  if (names.some((name) => WDIO_CONFIG.test(name))) return "appium";
   if (names.includes("pytest.ini") || names.includes("conftest.py")) return "pytest";
   const pyproject = path.join(env.workingDirectory, "pyproject.toml");
   if (
@@ -703,7 +709,7 @@ export async function stagedEvidence(
   return staged.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function uploadEvidence(
+export async function uploadEvidence(
   peeps: PeepsClient,
   batchId: string,
   files: Array<{ abs: string; name: string }>,

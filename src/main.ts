@@ -2,8 +2,9 @@
  * The Peeps action — the runner side of Peeps.
  *
  * Modes:
- *   inventory   post `playwright test --list` (pytest: `pytest --collect-only`)
- *               to Peeps (what the repo's tests are)
+ *   inventory   post `playwright test --list` (pytest: `pytest --collect-only`;
+ *               Appium: a mocha load of the WebdriverIO specs) to Peeps (what
+ *               the repo's tests are)
  *   run         run the tests Peeps asked for and report them
  *   report      run this workflow's own tests and report them
  *   agent       host tools for a Peeps agent session
@@ -18,6 +19,7 @@ import { PeepsClient } from "./peeps";
 import { runReport } from "./report";
 import { runDispatched } from "./run";
 import { runAgent } from "./agent";
+import { runAppiumDispatched, runAppiumInventory, runAppiumReport } from "./appium";
 import {
   resolveFramework,
   runPytestDispatched,
@@ -45,24 +47,29 @@ async function main(): Promise<void> {
     `[peeps] mode=${mode} repo=${env.repository ?? "?"} sha=${env.sha?.slice(0, 7) ?? "?"} ref=${env.ref ?? "?"} peeps=${env.peepsUrl}`,
   );
 
-  // A pytest suite takes its own path through every mode that runs tests; a
-  // Playwright one falls through to the switch below, exactly as before.
-  if (mode !== "agent" && resolveFramework(env) === "pytest") {
-    console.log("[peeps] framework=pytest");
+  // A pytest or Appium suite takes its own path through every mode that runs
+  // tests; a Playwright one falls through to the switch below, exactly as before.
+  const framework = mode === "agent" ? "playwright" : resolveFramework(env);
+  if (framework === "pytest" || framework === "appium") {
+    console.log(`[peeps] framework=${framework}`);
+    const path =
+      framework === "pytest"
+        ? { inventory: runPytestInventory, report: runPytestReport, run: runPytestDispatched }
+        : { inventory: runAppiumInventory, report: runAppiumReport, run: runAppiumDispatched };
     switch (mode) {
       case "inventory":
-        await runPytestInventory(env, peeps);
+        await path.inventory(env, peeps);
         return;
       case "report":
         if (onDefaultBranch(env)) {
-          await runPytestInventory(env, peeps).catch((error: unknown) =>
+          await path.inventory(env, peeps).catch((error: unknown) =>
             console.log(`[peeps] inventory skipped: ${String(error)}`),
           );
         }
-        await runPytestReport(env, peeps);
+        await path.report(env, peeps);
         return;
       case "run":
-        await runPytestDispatched(env, peeps);
+        await path.run(env, peeps);
         return;
       default:
         throw new Error(`unknown mode ${mode}`);

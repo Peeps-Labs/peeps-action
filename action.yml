@@ -1,5 +1,5 @@
 name: "Peeps"
-description: "Runs your Playwright tests in your own CI and reports results to Peeps. Your repository stores no Peeps secret: the job authenticates with GitHub's OIDC token. See SECURITY.md for exactly what is sent to Peeps and what Peeps can do on your runner."
+description: "Runs your Playwright, pytest or Appium (WebdriverIO) tests in your own CI and reports results to Peeps. Your repository stores no Peeps secret: the job authenticates with GitHub's OIDC token. See SECURITY.md for exactly what is sent to Peeps and what Peeps can do on your runner."
 author: "Peeps Labs"
 branding:
   icon: "git-branch"
@@ -13,14 +13,14 @@ inputs:
     description: "Session id Peeps passes to workflow_dispatch. Required by run and agent modes; unused by inventory and report"
     required: false
   config:
-    description: "Path to the Playwright config (pytest: the ini file passed as -c), relative to working-directory"
+    description: "Path to the Playwright config (pytest: the ini file passed as -c; appium: the WebdriverIO config, e.g. wdio.android.conf.ts), relative to working-directory"
     required: false
   framework:
-    description: "playwright | pytest | auto (default: pytest when working-directory has pytest.ini, conftest.py or a pyproject.toml configuring pytest and no Playwright config; otherwise playwright)"
+    description: "playwright | pytest | appium | auto (default: appium when working-directory has a WebdriverIO config (wdio.conf.ts/.js/.mjs/.cjs, or wdio.<name>.conf.*) and no Playwright config; pytest when it has pytest.ini, conftest.py or a pyproject.toml configuring pytest and no Playwright config; otherwise playwright)"
     required: false
     default: "auto"
   working-directory:
-    description: "Directory to run Playwright in, relative to the repository root (default: the repository root)"
+    description: "Directory to run the tests in, relative to the repository root (default: the repository root)"
     required: false
 runs:
   using: "node24"
