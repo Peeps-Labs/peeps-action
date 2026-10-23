@@ -10,9 +10,11 @@
  * With `device-tools: true` on an Appium suite, the runner also offers the
  * `device_*` tools (`device-tools.ts`): Appium and a device session start in
  * the background right after attach, and are stopped when the loop ends, on
- * SIGTERM/SIGINT, or on an error.
+ * SIGTERM/SIGINT, or on an error. A signal also stops a `run_tests` still
+ * running WebdriverIO and removes its temporary config.
  */
 
+import { stopAppiumRuns } from "./appium";
 import { createDeviceTools, type DeviceToolHost, type DeviceToolsDeps } from "./device-tools";
 import type { RunnerEnv } from "./env";
 import type { PeepsClient } from "./peeps";
@@ -73,20 +75,19 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient, options: Agen
   );
   const expiresAt = new Date(attach.expiresAt).getTime();
   console.log(`[peeps] agent session ${attach.sessionId} (${attach.kind}) attached; ${specs.length} tools; cap ${attach.expiresAt}`);
-  if (!device) return serve(env, peeps, handlers, expiresAt);
-
-  // Stop Appium and the device session however the job ends.
+  // However the job ends: a run_tests still running WebdriverIO is stopped and
+  // its temporary config removed; Appium and the device session are closed.
   const host = device;
   const onSignal = (signal: NodeJS.Signals) => {
-    console.log(`[peeps] ${signal}: closing the device session`);
-    void host.close(signal).finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+    console.log(`[peeps] ${signal}: stopping what the session started`);
+    void stopForSignal(host, signal).finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
   };
   const handleSignals = options.handleSignals !== false;
   if (handleSignals) {
     process.once("SIGTERM", onSignal);
     process.once("SIGINT", onSignal);
   }
-  host.start();
+  host?.start();
   try {
     await serve(env, peeps, handlers, expiresAt);
   } finally {
@@ -94,8 +95,13 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient, options: Agen
       process.off("SIGTERM", onSignal);
       process.off("SIGINT", onSignal);
     }
-    await host.close("agent session over");
+    await host?.close("agent session over");
   }
+}
+
+/** On SIGTERM/SIGINT: stop a running wdio (removing its wrapper) and close the device session, together. */
+export async function stopForSignal(device: DeviceToolHost | null, signal: NodeJS.Signals): Promise<void> {
+  await Promise.allSettled([stopAppiumRuns(), device?.close(signal)]);
 }
 
 async function serve(

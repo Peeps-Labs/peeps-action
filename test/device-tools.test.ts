@@ -9,8 +9,8 @@ import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { runAgent, summarizeArgs } from "../src/agent";
-import { readAppiumCapabilities } from "../src/appium";
+import { runAgent, stopForSignal, summarizeArgs } from "../src/agent";
+import { readAppiumCapabilities, writeWrapperConfig } from "../src/appium";
 import { firstCapabilities } from "../src/appium-collect";
 import {
   createDeviceTools,
@@ -454,7 +454,7 @@ interface PeepsFake {
 }
 
 /** Peeps' bridge routes: attach, hand out the given calls one per poll, then 410. */
-async function fakeBridge(calls: Array<{ tool: string; args: Record<string, unknown> }>): Promise<PeepsFake> {
+async function fakeBridge(calls: Array<{ tool: string; args: Record<string, unknown> }>, onPoll: () => void = () => undefined): Promise<PeepsFake> {
   const state: PeepsFake = { url: "", attach: null, results: [], close: () => undefined };
   const queue = calls.map((c, i) => ({ id: `c-${i + 1}`, seq: i + 1, ...c }));
   const read = (req: IncomingMessage) =>
@@ -473,6 +473,7 @@ async function fakeBridge(calls: Array<{ tool: string; args: Record<string, unkn
       return;
     }
     if (url.pathname.endsWith("/calls")) {
+      onPoll();
       const next = queue.shift();
       if (!next) {
         res.writeHead(410, { "Content-Type": "application/json" });
@@ -558,6 +559,36 @@ test("without device-tools, or on a suite that is not Appium, no device tool is 
       assert.equal("deviceTools" in (bridge.attach!.runnerInfo as Record<string, unknown>), false);
       bridge.close();
     }
+  } finally {
+    if (previousKey === undefined) delete process.env.PEEPS_API_KEY;
+    else process.env.PEEPS_API_KEY = previousKey;
+  }
+});
+
+test("an agent session stops a running run_tests on SIGTERM/SIGINT, device tools or not", async () => {
+  const previousKey = process.env.PEEPS_API_KEY;
+  process.env.PEEPS_API_KEY = "test-key";
+  try {
+    // Handlers are installed for the whole session, not only with device tools.
+    const counts: number[] = [];
+    const before = { term: process.listenerCount("SIGTERM"), int: process.listenerCount("SIGINT") };
+    const bridge = await fakeBridge([], () => counts.push(process.listenerCount("SIGTERM") - before.term, process.listenerCount("SIGINT") - before.int));
+    const runnerEnv = env(undefined, { "INPUT_SESSION-ID": "sess-1", PEEPS_API_URL: bridge.url });
+    await runAgent(runnerEnv, new PeepsClient(runnerEnv));
+    bridge.close();
+    assert.deepEqual(counts, [1, 1]);
+    assert.equal(process.listenerCount("SIGTERM"), before.term);
+
+    // What the handler does: remove the temporary wdio config, and close the device session.
+    const dir = mkdtempSync(path.join(tmpdir(), "peeps-agent-signal-"));
+    writeFileSync(path.join(dir, "wdio.conf.mjs"), "export const config = {};\n");
+    const wrapper = await writeWrapperConfig(path.join(dir, "wdio.conf.mjs"), {});
+    let closed = "";
+    const host = { close: async (reason: string) => void (closed = reason) } as unknown as DeviceToolHost;
+    await stopForSignal(host, "SIGTERM");
+    assert.equal(existsSync(wrapper.configPath), false);
+    assert.equal(closed, "SIGTERM");
+    await stopForSignal(null, "SIGINT");
   } finally {
     if (previousKey === undefined) delete process.env.PEEPS_API_KEY;
     else process.env.PEEPS_API_KEY = previousKey;

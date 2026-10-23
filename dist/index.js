@@ -688,14 +688,6 @@ async function runDispatched(env, peeps) {
   });
 }
 
-// src/device-tools.ts
-var import_node_child_process5 = require("node:child_process");
-var import_node_fs5 = require("node:fs");
-var import_promises6 = require("node:fs/promises");
-var import_node_net = require("node:net");
-var import_node_os4 = require("node:os");
-var import_node_path9 = __toESM(require("node:path"));
-
 // src/appium.ts
 var import_node_child_process4 = require("node:child_process");
 var import_node_crypto4 = require("node:crypto");
@@ -1455,6 +1447,58 @@ function hasPackage(name, from) {
     if (import_node_path8.default.dirname(dir) === dir) return false;
   }
 }
+var liveWrappers = /* @__PURE__ */ new Set();
+var liveGroups = /* @__PURE__ */ new Map();
+function trackProcessGroup(child) {
+  const pid = child.pid;
+  if (pid === void 0) return;
+  liveGroups.set(
+    pid,
+    new Promise((resolve) => {
+      child.once("exit", () => {
+        liveGroups.delete(pid);
+        resolve();
+      });
+    })
+  );
+}
+function killGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+  }
+}
+async function stopAppiumRuns(graceMs = 3e3) {
+  for (const file of [...liveWrappers]) {
+    try {
+      (0, import_node_fs4.unlinkSync)(file);
+    } catch {
+    }
+    liveWrappers.delete(file);
+  }
+  const groups = [...liveGroups];
+  if (groups.length === 0) return;
+  for (const [pid] of groups) killGroup(pid, "SIGTERM");
+  let timer;
+  await Promise.race([
+    Promise.all(groups.map(([, exited]) => exited)),
+    new Promise((resolve) => timer = setTimeout(resolve, graceMs))
+  ]);
+  clearTimeout(timer);
+  for (const [pid] of groups) killGroup(pid, "SIGKILL");
+}
+function stopOnSignal() {
+  const onSignal = (signal) => {
+    console.log(`[peeps] ${signal}: stopping WebdriverIO and removing the temporary config`);
+    void stopAppiumRuns().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  return () => {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  };
+}
 async function writeWrapperConfig(configPath, options) {
   const ts = /\.[cm]?ts$/.test(configPath);
   const wrapper = import_node_path8.default.join(import_node_path8.default.dirname(configPath), `.peeps-${(0, import_node_crypto4.randomUUID)()}.wdio.conf.${ts ? "mts" : "mjs"}`);
@@ -1469,15 +1513,27 @@ async function writeWrapperConfig(configPath, options) {
     ""
   ].join("\n");
   await (0, import_promises5.writeFile)(wrapper, source, { flag: "wx", mode: 384 });
-  return { configPath: wrapper, cleanup: () => (0, import_promises5.unlink)(wrapper) };
+  liveWrappers.add(wrapper);
+  return {
+    configPath: wrapper,
+    cleanup: async () => {
+      liveWrappers.delete(wrapper);
+      await (0, import_promises5.unlink)(wrapper).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
+  };
 }
 function runWdio(env, configPath, extraEnv) {
   return new Promise((resolve) => {
     const child = (0, import_node_child_process4.spawn)("npx", ["wdio", "run", configPath], {
       cwd: env.workingDirectory,
       stdio: "inherit",
-      env: { ...process.env, CI: "1", ...extraEnv }
+      env: { ...process.env, CI: "1", ...extraEnv },
+      // Its own process group, so a cancelled job stops it and every worker and service it started.
+      detached: true
     });
+    trackProcessGroup(child);
     child.on("error", (error) => {
       console.error(`[peeps] could not start WebdriverIO: ${String(error)}`);
       resolve(1);
@@ -1505,6 +1561,7 @@ async function executeAppiumAndReport(env, peeps, input2) {
   }
   let code = 1;
   let wrapper;
+  const release = stopOnSignal();
   try {
     wrapper = await writeWrapperConfig(input2.configPath, options);
     const extraEnv = { PEEPS_PLAN_FILE: planFile, PEEPS_ARTIFACTS_DIR: artifactsDir };
@@ -1512,6 +1569,7 @@ async function executeAppiumAndReport(env, peeps, input2) {
   } catch (error) {
     console.log(`[peeps] could not run WebdriverIO: ${String(error)}`);
   } finally {
+    release();
     await wrapper?.cleanup().catch((error) => {
       console.warn(`[peeps] could not remove the temporary wdio config: ${String(error)}`);
     });
@@ -1572,9 +1630,10 @@ function runWdioCaptured(env, configPath, extraEnv) {
       cwd: env.workingDirectory,
       env: { ...process.env, CI: "1", ...extraEnv },
       stdio: ["ignore", "pipe", "pipe"],
-      // Its own process group, so a timeout also stops the Appium service it started.
+      // Its own process group, so a timeout (or a signal: `stopAppiumRuns`) also stops the Appium service it started.
       detached: true
     });
+    trackProcessGroup(child);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => stdout = (stdout + d.toString("utf8")).slice(-2e5));
@@ -1700,6 +1759,12 @@ async function runAppiumTests(env, input2, options = {}) {
 }
 
 // src/device-tools.ts
+var import_node_child_process5 = require("node:child_process");
+var import_node_fs5 = require("node:fs");
+var import_promises6 = require("node:fs/promises");
+var import_node_net = require("node:net");
+var import_node_os4 = require("node:os");
+var import_node_path9 = __toESM(require("node:path"));
 var DEFAULT_DEVICE_LIMITS = {
   readyWaitMs: 6e4,
   callMs: 5e4,
@@ -2615,7 +2680,7 @@ function createToolServer(env, deps = {}) {
         env.platform === "gitlab" ? "peeps-bot@noreply.peepsai.com" : "peeps[bot]@users.noreply.github.com"
       );
       await git("checkout", "-B", branch);
-      await git("add", "-A");
+      await git("add", "-A", "--", ".", ":(exclude,glob)**/.peeps-*.wdio.conf.*");
       const commit = await git("commit", "-m", message).catch((e) => {
         throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
       });
@@ -2730,18 +2795,17 @@ async function runAgent(env, peeps, options = {}) {
   );
   const expiresAt = new Date(attach.expiresAt).getTime();
   console.log(`[peeps] agent session ${attach.sessionId} (${attach.kind}) attached; ${specs.length} tools; cap ${attach.expiresAt}`);
-  if (!device) return serve(env, peeps, handlers, expiresAt);
   const host = device;
   const onSignal = (signal) => {
-    console.log(`[peeps] ${signal}: closing the device session`);
-    void host.close(signal).finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+    console.log(`[peeps] ${signal}: stopping what the session started`);
+    void stopForSignal(host, signal).finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
   };
   const handleSignals = options.handleSignals !== false;
   if (handleSignals) {
     process.once("SIGTERM", onSignal);
     process.once("SIGINT", onSignal);
   }
-  host.start();
+  host?.start();
   try {
     await serve(env, peeps, handlers, expiresAt);
   } finally {
@@ -2749,8 +2813,11 @@ async function runAgent(env, peeps, options = {}) {
       process.off("SIGTERM", onSignal);
       process.off("SIGINT", onSignal);
     }
-    await host.close("agent session over");
+    await host?.close("agent session over");
   }
+}
+async function stopForSignal(device, signal) {
+  await Promise.allSettled([stopAppiumRuns(), device?.close(signal)]);
 }
 async function serve(env, peeps, handlers, expiresAt) {
   let transportErrors = 0;

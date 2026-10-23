@@ -143,7 +143,9 @@ Two specifics a reviewer should weigh:
 
 - **The push stages everything.** It runs `git add -A`, so anything the job
   wrote to the working tree that your `.gitignore` does not exclude is committed
-  to the `peeps/*` branch. Your `.gitignore` is the only thing bounding that.
+  to the `peeps/*` branch, except the action's own temporary WebdriverIO
+  configs (`.peeps-*.wdio.conf.*`). Your `.gitignore` is otherwise the only
+  thing bounding that.
 - **The push is a force push** to the `peeps/*` branch it names. An existing
   Peeps branch of the same name is replaced; nothing else can be.
 
@@ -198,10 +200,16 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
   directory. It imports your WebdriverIO config and every spec file it names,
   through your own `tsx`, `@wdio/config` and `mocha`, so their top-level code
   runs as it would under `wdio`; it starts no device session and runs no hook
-  or test body. `report`/`run` then write a temporary config beside yours
-  (`.peeps-<id>.wdio.conf.mts` or `.mjs`, mode 0600, removed when WebdriverIO
-  exits) that imports yours and adds `dist/appium-reporter.js` from this
-  repository: a reporter and two hooks that use only Node's standard library,
+  or test body. `report`/`run` (and `run_tests` in `agent` mode) then write a
+  temporary config beside yours (`.peeps-<id>.wdio.conf.mts` or `.mjs`, mode
+  0600) that imports yours. It is removed when the run ends, or at once when
+  the job is cancelled (SIGINT/SIGTERM), when the action also stops
+  WebdriverIO's whole process group (SIGTERM, then SIGKILL after 3 seconds);
+  a hard kill of the action itself (SIGKILL) can leave it behind, and
+  `git_commit_push` never stages a `.peeps-*.wdio.conf.*` file. The wrapper
+  adds `dist/appium-reporter.js` from this repository: a reporter and two
+  hooks (and in `run` mode a mocha root hook that skips unplanned tests) that
+  use only Node's standard library,
   read the plan file the action names, save a failed test's screenshot and
   page source into the action's temporary directory, and send results to
   Peeps. In `agent` mode with `device-tools: true`, the collector runs once more

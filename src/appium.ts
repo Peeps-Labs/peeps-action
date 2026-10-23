@@ -19,9 +19,9 @@
  *              test whose (spec file, title path) is not planned.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, unlinkSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -433,11 +433,89 @@ function hasPackage(name: string, from: string): boolean {
   }
 }
 
+// ---------------------------------------------------------------------------
+// What a cancelled job must not leave behind
+// ---------------------------------------------------------------------------
+
+/** Temporary wrapper configs that exist right now, beside the customer's config. */
+const liveWrappers = new Set<string>();
+/** WebdriverIO process groups running right now: leader pid → its exit. */
+const liveGroups = new Map<number, Promise<void>>();
+
+/**
+ * Track a child started with `detached: true` (so it leads its own process
+ * group: wdio, its workers, and the Appium service they start), until it
+ * exits, so `stopAppiumRuns` can stop the whole group.
+ */
+export function trackProcessGroup(child: ChildProcess): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  liveGroups.set(
+    pid,
+    new Promise<void>((resolve) => {
+      child.once("exit", () => {
+        liveGroups.delete(pid);
+        resolve();
+      });
+    }),
+  );
+}
+
+function killGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // Gone already.
+  }
+}
+
+/**
+ * On SIGINT/SIGTERM: remove every temporary wrapper config at once (before
+ * anything that could be cut short), then SIGTERM each WebdriverIO process
+ * group and SIGKILL what is left after `graceMs`. Never throws.
+ */
+export async function stopAppiumRuns(graceMs = 3000): Promise<void> {
+  for (const file of [...liveWrappers]) {
+    try {
+      unlinkSync(file);
+    } catch {
+      // Gone already.
+    }
+    liveWrappers.delete(file);
+  }
+  const groups = [...liveGroups];
+  if (groups.length === 0) return;
+  for (const [pid] of groups) killGroup(pid, "SIGTERM");
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    Promise.all(groups.map(([, exited]) => exited)),
+    new Promise<void>((resolve) => (timer = setTimeout(resolve, graceMs))),
+  ]);
+  clearTimeout(timer);
+  // The leader may be gone while workers it started live on in its group.
+  for (const [pid] of groups) killGroup(pid, "SIGKILL");
+}
+
+/** `report`/`run`: while WebdriverIO runs, a cancelled job stops it and removes the wrapper, then exits. */
+function stopOnSignal(): () => void {
+  const onSignal = (signal: NodeJS.Signals) => {
+    console.log(`[peeps] ${signal}: stopping WebdriverIO and removing the temporary config`);
+    void stopAppiumRuns().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  return () => {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  };
+}
+
 /**
  * The config WebdriverIO runs: a module beside the customer's (so its
  * relative paths and `rootDir` hold) that imports it and exports
  * `withPeeps(config, options)`. TypeScript configs get an `.mts` wrapper,
  * which WebdriverIO loads with tsx as it would theirs; JavaScript an `.mjs`.
+ * Removed by `cleanup`, or by `stopAppiumRuns` on a signal.
  */
 export async function writeWrapperConfig(
   configPath: string,
@@ -456,7 +534,16 @@ export async function writeWrapperConfig(
     "",
   ].join("\n");
   await writeFile(wrapper, source, { flag: "wx", mode: 0o600 });
-  return { configPath: wrapper, cleanup: () => unlink(wrapper) };
+  liveWrappers.add(wrapper);
+  return {
+    configPath: wrapper,
+    cleanup: async () => {
+      liveWrappers.delete(wrapper);
+      await unlink(wrapper).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    },
+  };
 }
 
 function runWdio(env: RunnerEnv, configPath: string, extraEnv: Record<string, string>): Promise<number> {
@@ -465,7 +552,10 @@ function runWdio(env: RunnerEnv, configPath: string, extraEnv: Record<string, st
       cwd: env.workingDirectory,
       stdio: "inherit",
       env: { ...process.env, CI: "1", ...extraEnv },
+      // Its own process group, so a cancelled job stops it and every worker and service it started.
+      detached: true,
     });
+    trackProcessGroup(child);
     child.on("error", (error) => {
       console.error(`[peeps] could not start WebdriverIO: ${String(error)}`);
       resolve(1);
@@ -516,6 +606,7 @@ export async function executeAppiumAndReport(
   // planned run is left waiting for a job that is already over.
   let code = 1;
   let wrapper: Awaited<ReturnType<typeof writeWrapperConfig>> | undefined;
+  const release = stopOnSignal();
   try {
     wrapper = await writeWrapperConfig(input.configPath, options);
     const extraEnv = { PEEPS_PLAN_FILE: planFile, PEEPS_ARTIFACTS_DIR: artifactsDir };
@@ -523,6 +614,7 @@ export async function executeAppiumAndReport(
   } catch (error) {
     console.log(`[peeps] could not run WebdriverIO: ${String(error)}`);
   } finally {
+    release();
     await wrapper?.cleanup().catch((error: unknown) => {
       console.warn(`[peeps] could not remove the temporary wdio config: ${String(error)}`);
     });
@@ -638,9 +730,10 @@ function runWdioCaptured(env: RunnerEnv, configPath: string, extraEnv: Record<st
       cwd: env.workingDirectory,
       env: { ...process.env, CI: "1", ...extraEnv },
       stdio: ["ignore", "pipe", "pipe"],
-      // Its own process group, so a timeout also stops the Appium service it started.
+      // Its own process group, so a timeout (or a signal: `stopAppiumRuns`) also stops the Appium service it started.
       detached: true,
     });
+    trackProcessGroup(child);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d: Buffer) => (stdout = (stdout + d.toString("utf8")).slice(-200_000)));

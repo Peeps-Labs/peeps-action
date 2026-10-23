@@ -238,7 +238,8 @@ How each mode works for Appium:
   its spec file and its `describe` titles plus `it` title, exactly as a
   Playwright test is.
 - **report** and **run**: the action runs `npx wdio run` with a temporary
-  config beside yours (`.peeps-<id>.wdio.conf.mts`, removed afterwards) that
+  config beside yours (`.peeps-<id>.wdio.conf.mts`, removed afterwards, and
+  at once if the job is cancelled, when WebdriverIO is stopped too) that
   imports yours and adds Peeps' reporter and an `afterTest` hook; your own
   reporters, hooks and services stay. `run` narrows the spec files to the
   planned ones, passes a mocha grep over the planned titles, and adds a mocha

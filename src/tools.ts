@@ -496,7 +496,9 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
         env.platform === "gitlab" ? "peeps-bot@noreply.peepsai.com" : "peeps[bot]@users.noreply.github.com",
       );
       await git("checkout", "-B", branch);
-      await git("add", "-A");
+      // Everything, except a temporary WebdriverIO config a cancelled run_tests
+      // may have left beside the customer's (`.peeps-<id>.wdio.conf.mts`).
+      await git("add", "-A", "--", ".", ":(exclude,glob)**/.peeps-*.wdio.conf.*");
       const commit = await git("commit", "-m", message).catch((e: { stderr?: string }) => {
         throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
       });

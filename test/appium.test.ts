@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createRequire } from "node:module";
@@ -16,6 +17,9 @@ import {
   lineOf,
   mochaGrepFor,
   specsForRuns,
+  stopAppiumRuns,
+  trackProcessGroup,
+  writeWrapperConfig,
   tagsOf,
   wdioConfigPath,
 } from "../src/appium";
@@ -1003,6 +1007,87 @@ test("a WebdriverIO that cannot start still closes its batches and fails the job
     assert.deepEqual(peeps.received.completed, [{ batchId: "b-2", body: { reportUploaded: false } }]);
   } finally {
     process.exitCode = exitCode;
+    peeps.close();
+  }
+});
+
+/** Whether a process is still alive. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function until(check: () => boolean, ms = 5000): Promise<void> {
+  for (const end = Date.now() + ms; !check() && Date.now() < end; ) await new Promise((r) => setTimeout(r, 25));
+  assert.ok(check());
+}
+
+/** A detached process group like wdio's: a leader that ignores SIGTERM, and a child of its own. */
+async function fakeWdioGroup(): Promise<{ leader: number; child: number }> {
+  const script = `
+    const { spawn } = require("node:child_process");
+    process.on("SIGTERM", () => {});
+    const c = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    console.log(String(c.pid));
+    setInterval(() => {}, 1000);`;
+  const leader = spawn(process.execPath, ["-e", script], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  trackProcessGroup(leader);
+  const child = await new Promise<number>((resolve) => leader.stdout!.once("data", (d: Buffer) => resolve(Number(String(d).trim()))));
+  // Nothing of it may hold this test process open.
+  leader.stdout!.destroy();
+  leader.unref();
+  return { leader: leader.pid!, child };
+}
+
+test("on a signal, the temporary config is removed and WebdriverIO's whole process group stopped, SIGKILL if it ignores SIGTERM", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "peeps-signal-"));
+  writeFileSync(path.join(dir, "wdio.conf.mjs"), "export const config = {};\n");
+  const wrapper = await writeWrapperConfig(path.join(dir, "wdio.conf.mjs"), {});
+  assert.ok(existsSync(wrapper.configPath));
+  const group = await fakeWdioGroup();
+  assert.ok(alive(group.leader) && alive(group.child));
+  await stopAppiumRuns(300);
+  assert.equal(existsSync(wrapper.configPath), false);
+  await until(() => !alive(group.leader) && !alive(group.child));
+  // The run's own cleanup afterwards is harmless.
+  await wrapper.cleanup();
+});
+
+test("report and run stop WebdriverIO and remove the wrapper on SIGTERM", async () => {
+  const peeps = await fakePeeps();
+  process.env.PEEPS_API_KEY = "test-key";
+  const exit = process.exit;
+  let exitedWith: number | undefined;
+  try {
+    const { root, suite } = workspace();
+    const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile", PEEPS_API_URL: peeps.url });
+    let wrapperPath = "";
+    await executeAppiumAndReport(env, new PeepsClient(env), {
+      configPath: path.join(suite, "wdio.conf.ts"),
+      runs: [],
+      batches: [{ batchId: "b-1", batchNumber: 1 }],
+      runner: async (wrapper) => {
+        wrapperPath = wrapper;
+        const group = await fakeWdioGroup();
+        process.exit = ((code?: number) => void (exitedWith = code)) as typeof process.exit;
+        const handler = process.listeners("SIGTERM").at(-1) as (signal: NodeJS.Signals) => void;
+        handler("SIGTERM");
+        await until(() => exitedWith !== undefined, 8000);
+        assert.equal(existsSync(wrapper), false);
+        assert.ok(!alive(group.leader) && !alive(group.child));
+        return 143;
+      },
+    });
+    assert.equal(exitedWith, 143);
+    assert.ok(wrapperPath);
+    assert.equal(readdirSync(suite).some((name) => name.startsWith(".peeps-")), false);
+  } finally {
+    process.exit = exit;
+    process.exitCode = undefined;
     peeps.close();
   }
 });
