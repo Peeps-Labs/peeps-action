@@ -53,7 +53,8 @@ This is more than "test results". Concretely:
 | Appium only: for each **failed** test, a **screenshot of the device screen**, the **page source** of the screen it failed on (the native view hierarchy as XML, or the WebView's HTML), and the Appium context name; and, when `@wdio/junit-reporter` is installed and not already configured, the JUnit XML it writes | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
-| Tool results in an agent session: file contents, diffs, test output | `agent` |
+| Tool results in an agent session: file contents, diffs, test output (Appium: a failed test's page source too) | `agent` |
+| Appium, only with `device-tools: true`: what the device tools read from the app under test, when Peeps' agent calls them: **page source** of the screen (native hierarchy XML, or a WebView's HTML), element texts and positions, context names, **device logs** (logcat or syslog), and **screenshots** | `agent` |
 
 Two of those deserve emphasis.
 
@@ -81,6 +82,25 @@ hidden inputs and any token or state embedded in the markup. Nothing redacts eit
 Passing tests send neither. If that is not acceptable for a suite, use test
 accounts and data in it, or do not run `report`/`run` modes for it.
 
+**Device tools read the app under test, live.** With `device-tools: true`,
+an agent session can read whatever the app shows: the page source of any
+screen it reaches (every label and field value, and in a WebView the HTML
+with hidden inputs and any token in the markup), element texts, the device
+log since the last read (logcat or syslog: everything the app and the
+system log, including whatever your app logs), and screenshots. Text results
+are masked like every agent tool result (values of the job's secret-looking
+environment variables), and also mask every value the session itself typed
+into a secure field (an Android field whose `password` attribute is true, an
+iOS `SecureTextField`, an HTML `password` input); typed text is never echoed
+back or written to the job log. A secret that is neither, such as one the
+app displays or logs on its own, is not masked, and **pixels cannot be
+masked at all**: a screenshot shows what is on the screen. The tools can
+also tap, type, swipe and launch or stop apps on the device, so an agent
+can drive the app under test anywhere it can go, with whatever account the
+test build is signed in with. Use test builds, accounts and data on the
+device the Peeps job runs; leave `device-tools` unset (the default) and none
+of this is offered.
+
 **`BASE_URL` is sent verbatim** and is deliberately not masked, because masking
 it would mangle every URL in every result. A `BASE_URL` of the form
 `https://user:pass@staging.example.com` therefore reaches Peeps with the
@@ -96,6 +116,13 @@ file and running `npx playwright test`; Playwright loads your config file as
 Node code; so an agent that writes a config and runs tests runs code with the
 job's full environment. No arrangement of path checks changes that, and we have
 not tried to pretend it does.
+
+For an Appium suite, `run_tests` runs `npx wdio run`, which loads your
+WebdriverIO config as Node code in the same way; and with `device-tools:
+true` the action starts Appium (`node_modules/.bin/appium` in your working
+directory or above it, else `appium` on `PATH`) on a loopback port and opens
+a device session with your config's first capabilities. Appium is stopped,
+with every process it started, when the session ends.
 
 The limits that do exist are guardrails against mistakes, not a sandbox:
 
@@ -155,8 +182,10 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
   `@v1` is repointed at new releases.
 - The action has no runtime dependencies. It bundles to one file and calls only
   `git`, `npx playwright`, for a pytest suite `python -m pytest`, and for an
-  Appium suite `npx wdio run` and the job's own Node, always with an argument
-  array and never through a shell.
+  Appium suite `npx wdio run`, the job's own Node and, in `agent` mode with
+  `device-tools: true`, your own `appium`, always with an argument array and
+  never through a shell. The device tools talk to that Appium with plain
+  HTTP requests on `127.0.0.1`; they do not load WebdriverIO.
 - For a pytest suite it also loads `python/peeps_pytest_plugin.py` from this
   repository into pytest (`-p peeps_pytest_plugin`). It uses the Python
   standard library only, imports nothing from your repository, and reads the
@@ -175,4 +204,6 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
   repository: a reporter and two hooks that use only Node's standard library,
   read the plan file the action names, save a failed test's screenshot and
   page source into the action's temporary directory, and send results to
-  Peeps.
+  Peeps. In `agent` mode with `device-tools: true`, the collector runs once more
+  (`--capabilities`) to read the config's capabilities the same way; it
+  imports the config only, not the specs.

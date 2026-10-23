@@ -269,6 +269,63 @@ its reason. Under mocha retries each retried attempt sends a failed
 capability per job (one platform per config): two capabilities running the
 same test would both report into its one run.
 
+### Agent mode for an Appium suite
+
+When Peeps heals or generates an Appium test, it dispatches the same job in
+`agent` mode, and the runner serves its tool calls (see SECURITY.md for what
+that allows). For an Appium suite two things differ from Playwright:
+
+- **`run_tests`** runs `npx wdio run` through the same temporary wrapper
+  config as `run`, with `specs` narrowed to the one spec file and the
+  agent's grep (a regular expression over mocha's full title: the
+  `describe` titles and the test's own, joined by spaces) as mocha's
+  `grep`. The result has Playwright's shape: `exitCode`, `durationMs`,
+  `results` (one per test that ran: `title` as `Describe › test`, `file`
+  relative to the repository, `line`, `status` `passed`/`failed`/`skipped`,
+  `error`), `stderr`, and `stdoutTail` when the run failed or ran nothing.
+  A failed test adds `errorStack`, `evidence` (its screenshot and page
+  source, saved on the runner) and `pageSource` (the screen it failed on,
+  redacted, up to 20,000 characters, for at most three tests). Nothing is
+  reported to a Peeps run: results are read from the reporter's local
+  record. Playwright's `project` argument is ignored.
+- **Device tools**, with `device-tools: true` (GitLab:
+  `PEEPS_DEVICE_TOOLS=true`). Peeps passes it on dispatch when its agent
+  needs to look at the running app; it is off by default. (Peeps does not
+  pass it yet: what its side needs is in
+  [docs/device-tools-server-half.md](docs/device-tools-server-half.md).) Right after the
+  session attaches, the action reads your WebdriverIO config's first
+  capability set (WebdriverIO's own config parser, with the job's
+  environment, so `"appium:app": process.env.APP_PATH` resolves as it does
+  under `wdio run`), starts the `appium` your working directory resolves
+  (its `node_modules/.bin`, or a parent's, else one on `PATH`) on a free
+  loopback port with its log in `$RUNNER_TEMP/peeps-appium-<port>.log`, and
+  opens a WebDriver session with those capabilities. `wdio:` keys are left
+  out, and the session's `appium:newCommandTimeout` is raised to 30
+  minutes unless yours is longer (or 0), because an agent thinks for
+  longer than Appium's default minute between calls. The device steps of
+  your workflow (emulator or simulator, app build) must therefore run in
+  `agent` mode too, as they do in the workflows above.
+
+  | Tool | What it does |
+  | --- | --- |
+  | `device_page_source` | The screen's page source: the native hierarchy as XML, or the page's HTML in a `WEBVIEW` context; 60,000 characters by default, 150,000 at most |
+  | `device_screenshot` | A PNG of the screen, saved on the runner; returned as an image when it is under 180,000 base64 characters |
+  | `device_find` | Elements by strategy (`accessibility id`, `id`, `xpath`, `class name`, `-android uiautomator`, `-ios predicate string`, `-ios class chain`, `css selector`) and selector: id, text, rect, displayed |
+  | `device_tap` | Tap an element, or a point |
+  | `device_type` | Type into an element, optionally clearing it first; the text is never echoed |
+  | `device_swipe` / `device_scroll` | Swipe in a direction, across the screen or one element; scroll until an element is displayed |
+  | `device_back` | The system back button |
+  | `device_contexts` / `device_switch_context` | List `NATIVE_APP` and `WEBVIEW_…` contexts; switch between them |
+  | `device_launch_app` / `device_terminate_app` | Activate or stop an app; by default the app under test (`appium:appPackage` / `appium:bundleId`) |
+  | `device_logs` | logcat (Android) or syslog (iOS) since the last read, the last 200 lines by default |
+
+  Every call is bounded: it waits at most a minute for the session to be
+  ready and 50 seconds to finish. The session is deleted and Appium (its
+  whole process group) stopped when Peeps ends the session, the session's
+  time runs out, the job is cancelled (SIGTERM), or the loop fails.
+  Without Appium installed in the working directory or on `PATH`, every
+  device call answers with what to install.
+
 ## Failure evidence
 
 In Playwright `report` and `run` modes, Peeps defaults an unset `use.screenshot`
@@ -301,6 +358,7 @@ HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
 | `config` | no | Playwright config path, relative to `working-directory` (pytest: the ini file, passed as `-c`; Appium: the WebdriverIO config) |
 | `working-directory` | no | Where to run Playwright, pytest or WebdriverIO, relative to the repository root |
 | `framework` | no, defaults to `auto` | `playwright`, `pytest`, `appium`, or `auto` (see above) |
+| `device-tools` | no, defaults to `false` | `agent` mode, Appium suite: offer the `device_*` tools (see "Agent mode for an Appium suite"). Peeps passes it on dispatch |
 
 ## Modes
 
@@ -309,7 +367,7 @@ HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
 | `inventory` | `playwright test --list --reporter=json` (pytest: `pytest --collect-only`; Appium: a mocha load of the WebdriverIO specs), posted with the spec files |
 | `run` | the tests Peeps asked for, reported live |
 | `report` | this workflow's own test run, reported live |
-| `agent` | a tool server for a Peeps agent session; every call is echoed to the job log |
+| `agent` | a tool server for a Peeps agent session; every call is echoed to the job log. For an Appium suite `run_tests` runs WebdriverIO, and with `device-tools: true` Appium and a device session serve the `device_*` tools |
 
 `ci` is the default and means `report`. Peeps names the mode explicitly on every
 dispatch it makes.
@@ -389,6 +447,7 @@ action detects GitLab from `GITLAB_CI` and reads:
 | `PEEPS_WORKING_DIRECTORY` | Where to run, relative to the repository root |
 | `PEEPS_PLAYWRIGHT_CONFIG` | The Playwright config, relative to the working directory |
 | `PEEPS_FRAMEWORK` | `playwright`, `pytest`, `appium` or `auto` |
+| `PEEPS_DEVICE_TOOLS` | Set by Peeps with `PEEPS_MODE=agent` when its agent needs the device tools (Appium suites) |
 | `PEEPS_ID_TOKEN` | The ID token from `id_tokens:`; the job's identity |
 
 Peeps starts pipelines with variables, so the project's **minimum role to use
@@ -420,6 +479,8 @@ The Appium tests collect `test/fixtures/appium` with real mocha and tsx (both
 devDependencies) through the committed `dist/appium-collect.mjs`, and load
 `dist/appium-reporter.js` through the wrapper config, so they too need a
 rebuild after a source change. They start no device and no WebdriverIO.
+The device tools run against a fake Appium (`test/support/fake-webdriver.ts`),
+in-process and as the `appium` binary of a temporary working directory.
 
 ## License
 
