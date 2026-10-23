@@ -1770,8 +1770,12 @@ var DEFAULT_DEVICE_LIMITS = {
   callMs: 5e4,
   requestMs: 3e4,
   sessionCreateMs: 6 * 6e4,
-  closeMs: 1e4
+  // GitHub gives a cancelled job about 7 s between SIGINT and SIGTERM: the
+  // delete (3 s) and Appium's stop (SIGTERM, SIGKILL after 2 s, 1 s more)
+  // fit inside it.
+  closeMs: 3e3
 };
+var CLOSE_STARTUP_WAIT_MS = 500;
 var PAGE_SOURCE_DEFAULT_CHARS = 6e4;
 var PAGE_SOURCE_MAX_CHARS = 15e4;
 var SCREENSHOT_INLINE_BASE64 = 18e4;
@@ -1975,6 +1979,7 @@ function createDeviceTools(env, options = {}) {
   let sessionId = null;
   let caps = {};
   let closing = null;
+  let ended = false;
   const stopping = new AbortController();
   const typedSecrets = /* @__PURE__ */ new Set();
   let screenshots = 0;
@@ -2017,7 +2022,7 @@ function createDeviceTools(env, options = {}) {
     });
   }
   async function session() {
-    if (stopping.signal.aborted) throw new DeviceError("the device session has ended");
+    if (ended || stopping.signal.aborted) throw new DeviceError("the device session has ended");
     if (!ready) start();
     await withTimeout(
       ready,
@@ -2025,7 +2030,7 @@ function createDeviceTools(env, options = {}) {
       "the device session is still starting (Appium and the app launch can take a few minutes); call again shortly"
     );
     if (startError) throw new DeviceError(`the device session could not start: ${startError.message.slice(0, 1500)}`);
-    if (stopping.signal.aborted || !appium || !sessionId) throw new DeviceError("the device session has ended");
+    if (ended || stopping.signal.aborted || !appium || !sessionId) throw new DeviceError("the device session has ended");
     return { url: `${appium.url}/session/${sessionId}` };
   }
   async function wd(method, route, body, timeoutMs = limits.requestMs) {
@@ -2262,14 +2267,15 @@ ${lines.join("\n")}`);
   async function close(reason) {
     if (closing) return closing;
     closing = (async () => {
-      stopping.abort();
+      ended = true;
       const live = appium && sessionId ? `${appium.url}/session/${sessionId}` : null;
       if (live) {
         await webdriver(live, "DELETE", void 0, limits.closeMs).catch((error) => {
-          console.log(`[peeps] could not delete the device session: ${String(error).slice(0, 200)}`);
+          console.log(`[peeps] could not delete the device session: ${mask(String(error)).slice(0, 200)}`);
         });
       }
-      if (ready) await withTimeout(ready, limits.closeMs, "startup did not stop").catch(() => void 0);
+      stopping.abort();
+      if (ready) await withTimeout(ready, CLOSE_STARTUP_WAIT_MS, "startup did not stop").catch(() => void 0);
       await appium?.stop().catch(() => void 0);
       if (ready) console.log(`[peeps] device session closed (${reason})`);
     })();
@@ -2357,10 +2363,10 @@ async function startAppiumServer(env, signal, startMs = APPIUM_START_MS) {
     stopped ??= (async () => {
       if (exited !== null) return;
       kill("SIGTERM");
-      await Promise.race([exitedPromise, sleep(5e3)]);
+      await Promise.race([exitedPromise, sleep(2e3)]);
       if (exited === null) {
         kill("SIGKILL");
-        await Promise.race([exitedPromise, sleep(2e3)]);
+        await Promise.race([exitedPromise, sleep(1e3)]);
       }
     })();
     return stopped;

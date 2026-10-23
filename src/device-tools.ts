@@ -23,7 +23,9 @@
  *      local runner answers browser calls in, so Peeps can relay them the
  *      same way.
  *   5. On session end, SIGTERM or error: the WebDriver session is deleted
- *      and Appium's process group stopped (`close`).
+ *      (at most 3 s) while Appium is still up, then Appium's process group
+ *      stopped (SIGTERM, SIGKILL after 2 s): `close`, inside the ~7 s a
+ *      cancelled GitHub job gets.
  *
  * Why a fetch client and not webdriverio: the action has no runtime
  * dependencies (SECURITY.md, "Supply chain"), and resolving the customer's
@@ -84,7 +86,7 @@ export interface DeviceLimits {
   requestMs: number;
   /** Creating the session: installs and launches the app. */
   sessionCreateMs: number;
-  /** Deleting the session on close. */
+  /** Deleting the session on close (Appium is stopped after it). */
   closeMs: number;
 }
 
@@ -98,8 +100,14 @@ export const DEFAULT_DEVICE_LIMITS: DeviceLimits = {
   callMs: 50_000,
   requestMs: 30_000,
   sessionCreateMs: 6 * 60_000,
-  closeMs: 10_000,
+  // GitHub gives a cancelled job about 7 s between SIGINT and SIGTERM: the
+  // delete (3 s) and Appium's stop (SIGTERM, SIGKILL after 2 s, 1 s more)
+  // fit inside it.
+  closeMs: 3_000,
 };
+
+/** On close, how long a startup still in flight gets to notice the abort. */
+const CLOSE_STARTUP_WAIT_MS = 500;
 
 /** Page source returned by default, and at most. */
 export const PAGE_SOURCE_DEFAULT_CHARS = 60_000;
@@ -368,6 +376,8 @@ export function createDeviceTools(
   let sessionId: string | null = null;
   let caps: Record<string, unknown> = {};
   let closing: Promise<void> | null = null;
+  /** Set first on close: new calls are refused while the session is deleted. */
+  let ended = false;
   const stopping = new AbortController();
   /** Values typed into secure fields this session: masked in every later result. */
   const typedSecrets = new Set<string>();
@@ -417,7 +427,7 @@ export function createDeviceTools(
 
   /** The live session, waiting for it to be ready (within `readyWaitMs`). */
   async function session(): Promise<{ url: string }> {
-    if (stopping.signal.aborted) throw new DeviceError("the device session has ended");
+    if (ended || stopping.signal.aborted) throw new DeviceError("the device session has ended");
     if (!ready) start();
     await withTimeout(
       ready!,
@@ -425,7 +435,7 @@ export function createDeviceTools(
       "the device session is still starting (Appium and the app launch can take a few minutes); call again shortly",
     );
     if (startError) throw new DeviceError(`the device session could not start: ${startError.message.slice(0, 1500)}`);
-    if (stopping.signal.aborted || !appium || !sessionId) throw new DeviceError("the device session has ended");
+    if (ended || stopping.signal.aborted || !appium || !sessionId) throw new DeviceError("the device session has ended");
     return { url: `${appium.url}/session/${sessionId}` };
   }
 
@@ -685,15 +695,18 @@ export function createDeviceTools(
   async function close(reason: string): Promise<void> {
     if (closing) return closing;
     closing = (async () => {
-      stopping.abort();
+      ended = true;
+      // The session first, while Appium is still up to end it (and the app
+      // and driver with it); only then stop Appium.
       const live = appium && sessionId ? `${appium.url}/session/${sessionId}` : null;
       if (live) {
         await webdriver(live, "DELETE", undefined, limits.closeMs).catch((error: unknown) => {
-          console.log(`[peeps] could not delete the device session: ${String(error).slice(0, 200)}`);
+          console.log(`[peeps] could not delete the device session: ${mask(String(error)).slice(0, 200)}`);
         });
       }
+      stopping.abort();
       // A startup still in flight notices the abort and stops what it started.
-      if (ready) await withTimeout(ready, limits.closeMs, "startup did not stop").catch(() => undefined);
+      if (ready) await withTimeout(ready, CLOSE_STARTUP_WAIT_MS, "startup did not stop").catch(() => undefined);
       await (appium as AppiumServer | null)?.stop().catch(() => undefined);
       if (ready) console.log(`[peeps] device session closed (${reason})`);
     })();
@@ -804,10 +817,10 @@ export async function startAppiumServer(env: RunnerEnv, signal: AbortSignal, sta
     stopped ??= (async () => {
       if (exited !== null) return;
       kill("SIGTERM");
-      await Promise.race([exitedPromise, sleep(5000)]);
+      await Promise.race([exitedPromise, sleep(2000)]);
       if (exited === null) {
         kill("SIGKILL");
-        await Promise.race([exitedPromise, sleep(2000)]);
+        await Promise.race([exitedPromise, sleep(1000)]);
       }
     })();
     return stopped;

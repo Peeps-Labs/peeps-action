@@ -203,6 +203,8 @@ if (process.argv[1] && /fake-webdriver\.ts$/.test(process.argv[1])) {
   void startFakeWebDriver(port, process.env.FAKE_APPIUM_RECORD).then((fake) => {
     console.log(`fake appium listening on ${fake.url}`);
     process.on("SIGTERM", () => {
+      // An Appium stuck in shutdown: only SIGKILL stops it.
+      if (process.env.FAKE_APPIUM_IGNORE_TERM) return;
       void fake.close().then(() => process.exit(0));
     });
   });

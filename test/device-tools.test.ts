@@ -377,6 +377,51 @@ test("closing while Appium is still starting aborts the start, and later calls a
   assert.match(textOf(await host.handlers.device_back!({})), /the device session has ended/);
 });
 
+test("closing deletes the session before Appium is stopped, and gives up on a hung delete within 3 s", async () => {
+  /** A host whose Appium stops on abort, as startAppiumServer's does. */
+  const hostWithAbortingAppium = (fake: FakeWebDriver, seen: boolean[]) =>
+    createDeviceTools(env(), {
+      deps: {
+        readCapabilities: async () => CAPS,
+        startAppium: async (signal) => {
+          const server: AppiumServer = { url: fake.url, logFile: "", stop: async () => void seen.push(fake.state.deleted) };
+          signal.addEventListener("abort", () => void server.stop(), { once: true });
+          return server;
+        },
+      },
+    });
+  const fake = await startFakeWebDriver();
+  try {
+    const deletedWhenStopped: boolean[] = [];
+    const host = hostWithAbortingAppium(fake, deletedWhenStopped);
+    host.start();
+    assert.equal((await host.handlers.device_back!({})).isError, undefined);
+    await host.close("SIGTERM");
+    assert.equal(fake.state.deleted, true);
+    // Appium was still up when the session was deleted.
+    assert.equal(deletedWhenStopped[0], true);
+    assert.equal(fake.requests.filter((r) => r.method === "DELETE" && r.path === "/session/s-1").length, 1);
+  } finally {
+    await fake.close();
+  }
+
+  const hung = await startFakeWebDriver();
+  try {
+    hung.state.hang.add("DELETE ");
+    const stopped: boolean[] = [];
+    const host = hostWithAbortingAppium(hung, stopped);
+    host.start();
+    await host.handlers.device_back!({});
+    const started = Date.now();
+    await host.close("SIGTERM");
+    // Inside GitHub's cancel grace (about 7 s) with Appium's own stop to follow.
+    assert.ok(Date.now() - started < 3500, `close took ${Date.now() - started} ms`);
+    assert.equal(stopped.length > 0, true);
+  } finally {
+    await hung.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Appium itself
 // ---------------------------------------------------------------------------
@@ -428,6 +473,23 @@ test("Appium starts from the working directory on a free loopback port, logs to 
   } finally {
     delete process.env.RUNNER_TEMP;
     delete process.env.FAKE_APPIUM_ARGS;
+  }
+});
+
+test("an Appium that ignores SIGTERM is SIGKILLed within about 3 s", async () => {
+  const { root } = workspaceWithFakeAppium();
+  process.env.RUNNER_TEMP = mkdtempSync(path.join(tmpdir(), "peeps-runner-temp-"));
+  process.env.FAKE_APPIUM_IGNORE_TERM = "1";
+  try {
+    const server = await startAppiumServer(env(root, { "INPUT_WORKING-DIRECTORY": "mobile" }), new AbortController().signal, 30_000);
+    const started = Date.now();
+    await server.stop();
+    const took = Date.now() - started;
+    assert.ok(took < 3500, `stop took ${took} ms`);
+    await assert.rejects(fetch(`${server.url}/status`, { signal: AbortSignal.timeout(2000) }));
+  } finally {
+    delete process.env.RUNNER_TEMP;
+    delete process.env.FAKE_APPIUM_IGNORE_TERM;
   }
 });
 
