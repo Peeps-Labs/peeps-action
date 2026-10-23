@@ -12,9 +12,9 @@
  *      so `specs`, `exclude`, groups, `rootDir` and capability-level
  *      `wdio:specs` resolve exactly as `wdio run` resolves them. Without it,
  *      the config's `specs`/`exclude` globbed relative to its `rootDir`.
- *   3. Which tests: each spec file is loaded into mocha (the customer's,
- *      found beside `@wdio/mocha-framework`), one file at a time, and the
- *      suite tree is walked. Nothing runs: no hook, no test body. A file that
+ *   3. Which tests: each spec file is loaded into its own mocha instance
+ *      (the customer's mocha, found beside `@wdio/mocha-framework`), one file
+ *      at a time, and that instance's suite tree is walked. Nothing runs: no hook, no test body. A file that
  *      does not load is reported as a collection error, and its tests (any
  *      it registered before failing) are left out.
  *
@@ -283,38 +283,47 @@ export async function collect(configPath: string): Promise<AppiumCollection> {
   if (!mochaDir) throw new Error("mocha is not installed (it comes with @wdio/mocha-framework)");
   const loaded = await importFile(entryOf(mochaDir));
   const Mocha = (loaded.default ?? loaded) as new (options: Record<string, unknown>) => MochaInstance;
-  let mocha: MochaInstance;
-  try {
-    mocha = new Mocha({ ui: list.mochaOpts.ui ?? "bdd" });
-  } catch (error) {
-    notes.push(`mocha ui ${String(list.mochaOpts.ui)} unavailable, using bdd: ${message(error).split("\n")[0]}`);
-    mocha = new Mocha({ ui: "bdd" });
-  }
+  let ui = list.mochaOpts.ui ?? "bdd";
+  /**
+   * A fresh mocha, and so a fresh suite tree, for every spec file: the bdd
+   * interface pushes a describe's suite, runs its body and pops it with no
+   * `finally`, so a body that throws leaves its suite on the stack, and one
+   * shared instance would file every later spec's tests under it.
+   */
+  const fresh = (): MochaInstance => {
+    try {
+      return new Mocha({ ui });
+    } catch (error) {
+      notes.push(`mocha ui ${String(ui)} unavailable, using bdd: ${message(error).split("\n")[0]}`);
+      ui = "bdd";
+      return new Mocha({ ui });
+    }
+  };
 
   const errors: AppiumCollection["errors"] = [];
+  const tests: CollectedTest[] = [];
   for (const file of list.specs) {
+    const mocha = fresh();
     mocha.files = [file];
     try {
       await mocha.loadFilesAsync();
     } catch (error) {
+      // What it registered before failing is left out with it.
       errors.push({ file, message: message(error).slice(0, 4000) });
+      continue;
     }
+    const walk = (suite: MochaSuite) => {
+      for (const test of suite.tests) {
+        tests.push({
+          file: test.file ?? suite.file ?? file,
+          titlePath: test.titlePath(),
+          pending: Boolean(typeof test.isPending === "function" ? test.isPending() : test.pending),
+        });
+      }
+      for (const child of suite.suites) walk(child);
+    };
+    walk(mocha.suite);
   }
-  const broken = new Set(errors.map((e) => e.file));
-  const tests: CollectedTest[] = [];
-  const walk = (suite: MochaSuite) => {
-    for (const test of suite.tests) {
-      const file = test.file ?? suite.file;
-      if (!file || broken.has(file)) continue;
-      tests.push({
-        file,
-        titlePath: test.titlePath(),
-        pending: Boolean(typeof test.isPending === "function" ? test.isPending() : test.pending),
-      });
-    }
-    for (const child of suite.suites) walk(child);
-  };
-  walk(mocha.suite);
   return { rootDir: list.rootDir, specs: list.specs, tests, errors, loader: tsx ? "tsx" : "node", specsFrom, notes };
 }
 

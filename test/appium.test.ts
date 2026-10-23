@@ -210,6 +210,35 @@ test("a spec that does not load is a collection error, and none of its tests are
   assert.equal(request.files.some((f) => f.path.endsWith("broken.spec.ts")), false);
 });
 
+test("a describe body that throws leaves the next spec file's title paths untouched", async () => {
+  const { root, suite } = workspace();
+  // mocha's bdd interface pushes a describe's suite, runs its body and pops
+  // it, with no finally: a throwing body leaves it on the stack.
+  writeFileSync(
+    path.join(suite, "test", "specs", "a-throws.spec.ts"),
+    'describe("Broken", () => {\n  it("never listed", () => {});\n  throw new Error("boom in a describe body");\n});\n',
+  );
+  // Listed first, so the throwing file loads before the healthy one.
+  const config = readFileSync(path.join(suite, "wdio.conf.ts"), "utf8").replace(
+    'specs: ["./test/specs/**/*.spec.ts"]',
+    'specs: ["./test/specs/a-throws.spec.ts", "./test/specs/login.spec.ts"]',
+  );
+  writeFileSync(path.join(suite, "wdio.conf.ts"), config);
+  const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile" });
+  const collection = await collectAppium(env);
+  assert.deepEqual(collection.errors.map((e) => path.relative(suite, e.file)), ["test/specs/a-throws.spec.ts"]);
+  assert.match(collection.errors[0]!.message, /boom in a describe body/);
+  assert.deepEqual(
+    collection.tests.map((t) => [path.relative(suite, t.file), t.titlePath.join(" › ")]),
+    [
+      ["test/specs/login.spec.ts", "opens without a describe"],
+      ["test/specs/login.spec.ts", "Login › signs in with a valid account @smoke"],
+      ["test/specs/login.spec.ts", "Login › shows an error for a wrong password (and [brackets])"],
+      ["test/specs/login.spec.ts", "Login › Forgot password › sends a reset link"],
+    ],
+  );
+});
+
 test("the inventory root climbs to hold a spec outside WebdriverIO's rootDir", () => {
   const root = "/w";
   const env = envFor(root);

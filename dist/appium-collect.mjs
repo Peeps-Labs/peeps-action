@@ -173,37 +173,39 @@ async function collect(configPath) {
   if (!mochaDir) throw new Error("mocha is not installed (it comes with @wdio/mocha-framework)");
   const loaded = await importFile(entryOf(mochaDir));
   const Mocha = loaded.default ?? loaded;
-  let mocha;
-  try {
-    mocha = new Mocha({ ui: list.mochaOpts.ui ?? "bdd" });
-  } catch (error) {
-    notes.push(`mocha ui ${String(list.mochaOpts.ui)} unavailable, using bdd: ${message(error).split("\n")[0]}`);
-    mocha = new Mocha({ ui: "bdd" });
-  }
+  let ui = list.mochaOpts.ui ?? "bdd";
+  const fresh = () => {
+    try {
+      return new Mocha({ ui });
+    } catch (error) {
+      notes.push(`mocha ui ${String(ui)} unavailable, using bdd: ${message(error).split("\n")[0]}`);
+      ui = "bdd";
+      return new Mocha({ ui });
+    }
+  };
   const errors = [];
+  const tests = [];
   for (const file of list.specs) {
+    const mocha = fresh();
     mocha.files = [file];
     try {
       await mocha.loadFilesAsync();
     } catch (error) {
       errors.push({ file, message: message(error).slice(0, 4e3) });
+      continue;
     }
+    const walk = (suite) => {
+      for (const test of suite.tests) {
+        tests.push({
+          file: test.file ?? suite.file ?? file,
+          titlePath: test.titlePath(),
+          pending: Boolean(typeof test.isPending === "function" ? test.isPending() : test.pending)
+        });
+      }
+      for (const child of suite.suites) walk(child);
+    };
+    walk(mocha.suite);
   }
-  const broken = new Set(errors.map((e) => e.file));
-  const tests = [];
-  const walk = (suite) => {
-    for (const test of suite.tests) {
-      const file = test.file ?? suite.file;
-      if (!file || broken.has(file)) continue;
-      tests.push({
-        file,
-        titlePath: test.titlePath(),
-        pending: Boolean(typeof test.isPending === "function" ? test.isPending() : test.pending)
-      });
-    }
-    for (const child of suite.suites) walk(child);
-  };
-  walk(mocha.suite);
   return { rootDir: list.rootDir, specs: list.specs, tests, errors, loader: tsx ? "tsx" : "node", specsFrom, notes };
 }
 function isPlainObject(value) {
