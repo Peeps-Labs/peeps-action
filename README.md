@@ -315,7 +315,8 @@ that allows). For an Appium suite two things differ from Playwright:
   environment, so `"appium:app": process.env.APP_PATH` resolves as it does
   under `wdio run`), starts the `appium` your working directory resolves
   (its `node_modules/.bin`, or a parent's, else one on `PATH`) on a free
-  loopback port with its log in `$RUNNER_TEMP/peeps-appium-<port>.log`, and
+  loopback port with its log (warnings and errors only, so no request
+  bodies or typed text) in `$RUNNER_TEMP/peeps-appium-<port>.log`, and
   opens a WebDriver session with those capabilities. `wdio:` keys are left
   out, and the session's `appium:newCommandTimeout` is raised to 30
   minutes unless yours is longer (or 0), because an agent thinks for

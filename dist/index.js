@@ -1781,6 +1781,7 @@ var PAGE_SOURCE_MAX_CHARS = 15e4;
 var SCREENSHOT_INLINE_BASE64 = 18e4;
 var SESSION_IDLE_SECONDS = 1800;
 var ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
+var SENSITIVE = { "X-Appium-Is-Sensitive": "true" };
 var W3C_CAPABILITIES = /* @__PURE__ */ new Set([
   "browserName",
   "browserVersion",
@@ -1836,12 +1837,12 @@ function withTimeout(promise, ms, message) {
     })
   ]).finally(() => clearTimeout(timer));
 }
-async function webdriver(url, method, body, timeoutMs) {
+async function webdriver(url, method, body, timeoutMs, headers = {}) {
   let response;
   try {
     response = await fetch(url, {
       method,
-      headers: body === void 0 ? {} : { "Content-Type": "application/json; charset=utf-8" },
+      headers: body === void 0 ? headers : { "Content-Type": "application/json; charset=utf-8", ...headers },
       body: body === void 0 ? void 0 : JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs)
     });
@@ -2017,7 +2018,7 @@ function createDeviceTools(env, options = {}) {
     console.log("[peeps] device tools: reading capabilities, starting Appium and a device session");
     ready = startup().catch(async (error) => {
       startError = error instanceof Error ? error : new Error(String(error));
-      if (!stopping.signal.aborted) console.log(`[peeps] device session could not start: ${startError.message.slice(0, 2e3)}`);
+      if (!stopping.signal.aborted) console.log(`[peeps] device session could not start: ${mask(startError.message).slice(0, 2e3)}`);
       await appium?.stop().catch(() => void 0);
     });
   }
@@ -2033,9 +2034,9 @@ function createDeviceTools(env, options = {}) {
     if (ended || stopping.signal.aborted || !appium || !sessionId) throw new DeviceError("the device session has ended");
     return { url: `${appium.url}/session/${sessionId}` };
   }
-  async function wd(method, route, body, timeoutMs = limits.requestMs) {
+  async function wd(method, route, body, timeoutMs = limits.requestMs, headers) {
     const { url } = await session();
-    return (await webdriver(`${url}${route}`, method, body, timeoutMs)).value;
+    return (await webdriver(`${url}${route}`, method, body, timeoutMs, headers)).value;
   }
   async function currentContext() {
     const value = await wd("GET", "/context").catch(() => null);
@@ -2177,7 +2178,7 @@ ${masked.slice(0, maxChars)}`
       const secure = String(password) === "true" || /SecureTextField|^password$/i.test(String(type ?? ""));
       if (secure && value.length >= 3) typedSecrets.add(value);
       if (args.clear === true) await wd("POST", `${element}/clear`, {});
-      await wd("POST", `${element}/value`, { text: value, value: Array.from(value) });
+      await wd("POST", `${element}/value`, { text: value, value: Array.from(value) }, limits.requestMs, SENSITIVE);
       return text(
         `Typed ${Array.from(value).length} characters into element ${elementId}${secure ? " (a secure field: the value is masked in later results)" : ""}.`
       );
@@ -2328,7 +2329,22 @@ async function startAppiumServer(env, signal, startMs = APPIUM_START_MS) {
   const logFile = import_node_path9.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os4.tmpdir)(), `peeps-appium-${port}.log`);
   const child = (0, import_node_child_process5.spawn)(
     bin,
-    ["--address", "127.0.0.1", "--port", String(port), "--base-path", "/", "--log", logFile, "--log-no-colors", "--log-timestamp"],
+    // `warn`: at its default (debug) and at info Appium logs every request
+    // body, so the text device_type types would land in this file.
+    [
+      "--address",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--base-path",
+      "/",
+      "--log",
+      logFile,
+      "--log-level",
+      "warn",
+      "--log-no-colors",
+      "--log-timestamp"
+    ],
     { cwd: env.workingDirectory, env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: true }
   );
   let output = "";

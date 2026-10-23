@@ -124,6 +124,17 @@ directory or above it, else `appium` on `PATH`) on a loopback port and opens
 a device session with your config's first capabilities. Appium is stopped,
 with every process it started, when the session ends.
 
+Appium's own log goes to `$RUNNER_TEMP/peeps-appium-<port>.log` on the
+runner, at `warn` level. At its default level, and at `info`, Appium logs
+the body of every request it receives, which would put the text an agent
+types with `device_type` into that file; at `warn` request lines are not
+logged at all, and the typing request is also marked sensitive
+(`X-Appium-Is-Sensitive: true`), which Appium replaces with `**SECURE**` at
+any level. The file is never uploaded or printed; Appium's startup output
+that is printed to the job log when it fails to start is masked like a tool
+result. On a self-hosted runner that keeps `RUNNER_TEMP`, the file stays
+with it.
+
 The limits that do exist are guardrails against mistakes, not a sandbox:
 
 - Paths resolve inside the workspace. `..` and absolute paths are refused, as

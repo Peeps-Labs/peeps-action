@@ -274,6 +274,47 @@ test("typed text is never echoed, and a value typed into a secure field is maske
   }
 });
 
+test("typed text is sent marked sensitive, so an Appium that logs request bodies writes **SECURE** instead", async () => {
+  const { host, fake, call } = await hostOnFake();
+  try {
+    await call("device_type", { elementId: "e-user", text: "alice" });
+    const value = fake.requests.find((r) => r.path.endsWith("/element/e-user/value"))!;
+    assert.equal(value.headers?.["x-appium-is-sensitive"], "true");
+    // Other requests are not.
+    assert.equal(fake.requests.find((r) => r.path.endsWith("/attribute/password"))!.headers?.["x-appium-is-sensitive"], undefined);
+  } finally {
+    await host.close("test over");
+    await fake.close();
+  }
+});
+
+test("why a session could not start is redacted before it reaches the job log", async () => {
+  const lines: string[] = [];
+  const log = console.log;
+  const host = createDeviceTools(env(), {
+    redact: makeRedactor({ APPIUM_CLOUD_KEY: "cloud-key-0123456789" }),
+    deps: {
+      readCapabilities: async () => CAPS,
+      startAppium: async () => {
+        throw new Error("Appium exited before it was ready (1):\nbad key cloud-key-0123456789 for the device farm");
+      },
+    },
+  });
+  console.log = (...args: unknown[]) => void lines.push(args.join(" "));
+  try {
+    host.start();
+    const answer = await host.handlers.device_back!({});
+    assert.match(textOf(answer), /bad key \[redacted\]/);
+  } finally {
+    console.log = log;
+    await host.close("test over");
+  }
+  const printed = lines.find((l) => l.includes("could not start"));
+  assert.ok(printed, lines.join("\n"));
+  assert.match(printed, /bad key \[redacted\] for the device farm/);
+  assert.equal(lines.some((l) => l.includes("cloud-key-0123456789")), false);
+});
+
 test("bad arguments and missing pieces are tool errors, not crashes", async () => {
   const { host, fake, call } = await hostOnFake({ caps: { platformName: "iOS", "appium:automationName": "XCUITest" } });
   try {
@@ -458,19 +499,27 @@ test("Appium starts from the working directory on a free loopback port, logs to 
   const temp = mkdtempSync(path.join(tmpdir(), "peeps-runner-temp-"));
   process.env.RUNNER_TEMP = temp;
   process.env.FAKE_APPIUM_ARGS = argsFile;
+  let stop: () => Promise<void> = async () => undefined;
   try {
     const server = await startAppiumServer(env(root, { "INPUT_WORKING-DIRECTORY": "mobile" }), new AbortController().signal, 30_000);
+    stop = server.stop;
     const port = Number(new URL(server.url).port);
     assert.equal(new URL(server.url).hostname, "127.0.0.1");
     assert.equal(server.logFile, path.join(temp, `peeps-appium-${port}.log`));
     assert.ok(existsSync(server.logFile));
     const started = JSON.parse(readFileSync(argsFile, "utf8")) as { args: string[]; cwd: string };
     assert.equal(started.cwd, suite);
-    assert.deepEqual(started.args, ["--address", "127.0.0.1", "--port", String(port), "--base-path", "/", "--log", server.logFile, "--log-no-colors", "--log-timestamp"]);
+    // At warn: Appium logs every request body (typed text too) at info.
+    assert.deepEqual(started.args, [
+      "--address", "127.0.0.1", "--port", String(port), "--base-path", "/",
+      "--log", server.logFile, "--log-level", "warn", "--log-no-colors", "--log-timestamp",
+    ]);
     assert.equal((await fetch(`${server.url}/status`)).ok, true);
     await server.stop();
     await assert.rejects(fetch(`${server.url}/status`, { signal: AbortSignal.timeout(2000) }));
   } finally {
+    // Even when an assertion failed: a live fake Appium would hold the test process open.
+    await stop();
     delete process.env.RUNNER_TEMP;
     delete process.env.FAKE_APPIUM_ARGS;
   }

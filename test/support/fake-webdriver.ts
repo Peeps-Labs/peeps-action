@@ -15,6 +15,7 @@ export interface Recorded {
   method: string;
   path: string;
   body: unknown;
+  headers?: Record<string, string | string[] | undefined>;
 }
 
 export interface FakeWebDriver {
@@ -87,7 +88,7 @@ export function startFakeWebDriver(port = 0, record?: string): Promise<FakeWebDr
         body = raw;
       }
       const entry = { method: req.method ?? "GET", path: url.pathname, body };
-      requests.push(entry);
+      requests.push({ ...entry, headers: req.headers });
       if (record) appendFileSync(record, `${JSON.stringify(entry)}\n`);
       const send = (status: number, value: unknown, extra: Record<string, unknown> = {}) => {
         res.writeHead(status, { "Content-Type": "application/json" });

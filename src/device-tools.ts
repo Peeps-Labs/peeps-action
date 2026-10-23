@@ -14,7 +14,8 @@
  *   2. Appium. The `appium` the working directory resolves (its
  *      `node_modules/.bin`, walking up, as `npx appium` would; else one on
  *      PATH) is started on a free loopback port, in its own process group,
- *      logging to `$RUNNER_TEMP/peeps-appium-<port>.log`.
+ *      logging at `warn` (no request bodies, so no typed text) to
+ *      `$RUNNER_TEMP/peeps-appium-<port>.log`.
  *   3. A WebDriver session with those capabilities, through the minimal
  *      fetch client below. Started in the background at attach, so the first
  *      device call does not pay for the app's install and launch.
@@ -119,6 +120,9 @@ export const SESSION_IDLE_SECONDS = 1800;
 
 const ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
 
+/** Appium masks a request so marked as `**SECURE**` in every log line about it (Appium 2.x and later). */
+const SENSITIVE = { "X-Appium-Is-Sensitive": "true" };
+
 const W3C_CAPABILITIES = new Set([
   "browserName",
   "browserVersion",
@@ -192,12 +196,18 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 }
 
 /** One WebDriver request; a W3C error answer becomes a DeviceError with its code. */
-async function webdriver(url: string, method: string, body: unknown, timeoutMs: number): Promise<{ value: unknown; sessionId?: string }> {
+async function webdriver(
+  url: string,
+  method: string,
+  body: unknown,
+  timeoutMs: number,
+  headers: Record<string, string> = {},
+): Promise<{ value: unknown; sessionId?: string }> {
   let response: Response;
   try {
     response = await fetch(url, {
       method,
-      headers: body === undefined ? {} : { "Content-Type": "application/json; charset=utf-8" },
+      headers: body === undefined ? headers : { "Content-Type": "application/json; charset=utf-8", ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -420,7 +430,8 @@ export function createDeviceTools(
     console.log("[peeps] device tools: reading capabilities, starting Appium and a device session");
     ready = startup().catch(async (error: unknown) => {
       startError = error instanceof Error ? error : new Error(String(error));
-      if (!stopping.signal.aborted) console.log(`[peeps] device session could not start: ${startError.message.slice(0, 2000)}`);
+      // Appium's output can carry what the job's environment put in the capabilities.
+      if (!stopping.signal.aborted) console.log(`[peeps] device session could not start: ${mask(startError.message).slice(0, 2000)}`);
       await appium?.stop().catch(() => undefined);
     });
   }
@@ -439,9 +450,9 @@ export function createDeviceTools(
     return { url: `${appium.url}/session/${sessionId}` };
   }
 
-  async function wd(method: string, route: string, body?: unknown, timeoutMs = limits.requestMs): Promise<unknown> {
+  async function wd(method: string, route: string, body?: unknown, timeoutMs = limits.requestMs, headers?: Record<string, string>): Promise<unknown> {
     const { url } = await session();
-    return (await webdriver(`${url}${route}`, method, body, timeoutMs)).value;
+    return (await webdriver(`${url}${route}`, method, body, timeoutMs, headers)).value;
   }
 
   async function currentContext(): Promise<string | null> {
@@ -596,7 +607,9 @@ export function createDeviceTools(
       // Too short a value would mask ordinary text everywhere.
       if (secure && value.length >= 3) typedSecrets.add(value);
       if (args.clear === true) await wd("POST", `${element}/clear`, {});
-      await wd("POST", `${element}/value`, { text: value, value: Array.from(value) });
+      // Marked sensitive: an Appium that logs request bodies (it does at
+      // info; this one runs at warn) writes **SECURE** in place of the text.
+      await wd("POST", `${element}/value`, { text: value, value: Array.from(value) }, limits.requestMs, SENSITIVE);
       return text(
         `Typed ${Array.from(value).length} characters into element ${elementId}${secure ? " (a secure field: the value is masked in later results)" : ""}.`,
       );
@@ -768,7 +781,8 @@ const APPIUM_START_MS = 120_000;
 /**
  * Start Appium from the working directory on a free loopback port, in its
  * own process group (so stopping it also stops the drivers it spawned),
- * logging to `$RUNNER_TEMP/peeps-appium-<port>.log`, and wait for `/status`.
+ * logging warnings and errors only (no request bodies) to
+ * `$RUNNER_TEMP/peeps-appium-<port>.log`, and wait for `/status`.
  */
 export async function startAppiumServer(env: RunnerEnv, signal: AbortSignal, startMs = APPIUM_START_MS): Promise<AppiumServer> {
   const bin = resolveAppiumBinary(env.workingDirectory);
@@ -781,7 +795,12 @@ export async function startAppiumServer(env: RunnerEnv, signal: AbortSignal, sta
   const logFile = path.join(process.env.RUNNER_TEMP ?? tmpdir(), `peeps-appium-${port}.log`);
   const child = spawn(
     bin,
-    ["--address", "127.0.0.1", "--port", String(port), "--base-path", "/", "--log", logFile, "--log-no-colors", "--log-timestamp"],
+    // `warn`: at its default (debug) and at info Appium logs every request
+    // body, so the text device_type types would land in this file.
+    [
+      "--address", "127.0.0.1", "--port", String(port), "--base-path", "/",
+      "--log", logFile, "--log-level", "warn", "--log-no-colors", "--log-timestamp",
+    ],
     { cwd: env.workingDirectory, env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: true },
   );
   let output = "";
