@@ -26,7 +26,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AppiumCollection } from "./appium-collect";
-import { repoRelative, TITLE_PATH_SEPARATOR, type AppiumPlanFile, type PeepsWdioOptions } from "./appium-reporter";
+import {
+  repoRelative,
+  TITLE_PATH_SEPARATOR,
+  type AppiumPlanFile,
+  type LocalResultsLine,
+  type PeepsWdioOptions,
+} from "./appium-reporter";
 import type { RunnerEnv } from "./env";
 import { gitBlobSha, type PlaywrightList, type PlaywrightSuite } from "./inventory";
 import type { PeepsClient } from "./peeps";
@@ -535,4 +541,207 @@ async function uploadJunit(peeps: PeepsClient, batchId: string, junitDir: string
     }
   }
   if (uploaded > 0) console.log(`[peeps] uploaded ${uploaded} JUnit file(s)`);
+}
+
+// ---------------------------------------------------------------------------
+// Agent mode: `run_tests` for an Appium suite
+// ---------------------------------------------------------------------------
+
+/** A wdio run whose output is captured, for `run_tests`. */
+export type WdioRunner = (
+  configPath: string,
+  extraEnv: Record<string, string>,
+) => Promise<{ code: number; stdout: string; stderr: string }>;
+
+/** One test of a `run_tests` result: Playwright's entry, plus what an Appium failure leaves. */
+export interface AgentTestResult {
+  /** Describe titles and the test's own, joined with ` › `: the inventory's `titlePath`. */
+  title: string;
+  /** Repo-relative. */
+  file: string;
+  line: number;
+  status: string;
+  error?: string;
+  errorStack?: string;
+  /** The failure's screenshot and page source, on the runner (absolute paths). */
+  evidence?: Array<{ name: string; path: string; size: number }>;
+  /** The page source the test failed on, redacted and capped. */
+  pageSource?: string;
+  pageSourceTruncated?: boolean;
+}
+
+export interface AgentRunTestsResult {
+  exitCode: number;
+  durationMs: number;
+  results: AgentTestResult[] | null;
+  stderr: string;
+  stdoutTail?: string;
+}
+
+/** As long as Playwright's `run_tests` may run. */
+const AGENT_RUN_TIMEOUT_MS = 10 * 60 * 1000;
+/** Page source inlined per failed test, and for how many tests at most. */
+const AGENT_PAGE_SOURCE_CHARS = 20_000;
+const AGENT_PAGE_SOURCE_TESTS = 3;
+
+/**
+ * The agent's grep is a regular expression already (Peeps sends the same
+ * `titleGrep` it sends Playwright, which matches mocha's full title too).
+ * mocha builds its RegExp from a `.*` match of the string, which stops at a
+ * line terminator, so those are spelled as escapes, as `mochaGrepFor` does.
+ */
+export function mochaGrepFromRegex(grep: string): string {
+  return grep
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+function runWdioCaptured(env: RunnerEnv, configPath: string, extraEnv: Record<string, string>): ReturnType<WdioRunner> {
+  return new Promise((resolve) => {
+    const child = spawn("npx", ["wdio", "run", configPath], {
+      cwd: env.workingDirectory,
+      env: { ...process.env, CI: "1", ...extraEnv },
+      stdio: ["ignore", "pipe", "pipe"],
+      // Its own process group, so a timeout also stops the Appium service it started.
+      detached: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d: Buffer) => (stdout = (stdout + d.toString("utf8")).slice(-200_000)));
+    child.stderr.on("data", (d: Buffer) => (stderr = (stderr + d.toString("utf8")).slice(-200_000)));
+    const timer = setTimeout(() => {
+      stderr += `\n[peeps] wdio did not finish in ${AGENT_RUN_TIMEOUT_MS / 1000}s and was stopped`;
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    }, AGENT_RUN_TIMEOUT_MS);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ code: 1, stdout, stderr: `${stderr}\ncould not start WebdriverIO: ${error.message}` });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? 1, stdout, stderr });
+    });
+  });
+}
+
+/** Every test the local-results reporter recorded, with its last attempt's events. */
+async function readLocalResults(resultsDir: string): Promise<LocalResultsLine[]> {
+  let names: string[];
+  try {
+    names = (await readdir(resultsDir)).filter((name) => name.endsWith(".jsonl")).sort();
+  } catch {
+    return [];
+  }
+  const byRunId = new Map<string, LocalResultsLine>();
+  for (const name of names) {
+    for (const raw of (await readFile(path.join(resultsDir, name), "utf8")).split("\n")) {
+      if (!raw.trim()) continue;
+      let line: LocalResultsLine;
+      try {
+        line = JSON.parse(raw) as LocalResultsLine;
+      } catch {
+        continue;
+      }
+      const seen = byRunId.get(line.runId);
+      if (seen) seen.events.push(...line.events);
+      else byRunId.set(line.runId, { ...line, events: [...line.events] });
+    }
+  }
+  return [...byRunId.values()];
+}
+
+/**
+ * `run_tests` for an Appium suite: `npx wdio run` through the same wrapper
+ * config `run` uses, narrowed to one spec file and, when given, the agent's
+ * grep. The reporter records results locally (no Peeps runs exist for an
+ * agent's run), and they come back in the Playwright `run_tests` shape, so a
+ * heal or generate agent reads them unchanged: `title` is the title path
+ * Peeps matches the target against, `status` is passed, failed or skipped.
+ */
+export async function runAppiumTests(
+  env: RunnerEnv,
+  input: { file: string; grep?: string },
+  options: { redact?: (text: string) => string; runner?: WdioRunner } = {},
+): Promise<AgentRunTestsResult> {
+  const redact = options.redact ?? ((text: string) => text);
+  const configPath = wdioConfigPath(env);
+  const scratch = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-agent-run-"));
+  const planFile = path.join(scratch, "plan.json");
+  const artifactsDir = path.join(scratch, "evidence");
+  const resultsDir = path.join(scratch, "results");
+  await mkdir(artifactsDir);
+  const plan: AppiumPlanFile = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: [], resultsDir };
+  await writeFile(planFile, JSON.stringify(plan), { mode: 0o600 });
+  const wdioOptions: PeepsWdioOptions = {
+    junitDir: null,
+    // As a file URL: WebdriverIO globs a plain path, and `[id].spec.ts` is a glob.
+    specs: [pathToFileURL(input.file).href],
+  };
+  if (input.grep) wdioOptions.grep = mochaGrepFromRegex(input.grep);
+
+  const started = Date.now();
+  let run = { code: 1, stdout: "", stderr: "" };
+  let wrapper: Awaited<ReturnType<typeof writeWrapperConfig>> | undefined;
+  try {
+    wrapper = await writeWrapperConfig(configPath, wdioOptions);
+    const extraEnv = { PEEPS_PLAN_FILE: planFile, PEEPS_ARTIFACTS_DIR: artifactsDir };
+    run = await (options.runner ?? ((config, extra) => runWdioCaptured(env, config, extra)))(wrapper.configPath, extraEnv);
+  } catch (error) {
+    run = { ...run, stderr: `could not run WebdriverIO: ${String(error)}` };
+  } finally {
+    await wrapper?.cleanup().catch(() => undefined);
+  }
+
+  const sources = new Map<string, string | null>();
+  const sourceOf = async (rel: string) => {
+    if (!sources.has(rel)) sources.set(rel, await readFile(path.join(env.workspace, rel), "utf8").catch(() => null));
+    return sources.get(rel) ?? null;
+  };
+  const results: AgentTestResult[] = [];
+  let inlined = 0;
+  for (const line of await readLocalResults(resultsDir)) {
+    const end = line.events.filter((event) => event.type === "test_end").at(-1);
+    if (!end) continue;
+    const titles = line.titlePath.split(TITLE_PATH_SEPARATOR);
+    const source = await sourceOf(line.path);
+    const result: AgentTestResult = {
+      title: line.titlePath,
+      file: line.path,
+      line: source === null ? 1 : lineOf(source, titles),
+      status: end.status ?? "unknown",
+    };
+    if (end.error) result.error = redact(end.error.slice(0, 2000));
+    if (end.errorStack) result.errorStack = redact(end.errorStack.slice(0, 4000));
+    if (end.attachments?.length) {
+      result.evidence = end.attachments.map((a) => ({
+        name: a.name,
+        path: path.join(artifactsDir, "upload", path.basename(a.path)),
+        size: a.size,
+      }));
+      const pageSource = result.evidence.find((e) => e.name.startsWith("page-source"));
+      if (pageSource && inlined < AGENT_PAGE_SOURCE_TESTS) {
+        const text = await readFile(pageSource.path, "utf8").catch(() => null);
+        if (text !== null) {
+          inlined += 1;
+          result.pageSource = redact(text.slice(0, AGENT_PAGE_SOURCE_CHARS));
+          if (text.length > AGENT_PAGE_SOURCE_CHARS) result.pageSourceTruncated = true;
+        }
+      }
+    }
+    results.push(result);
+  }
+  const outcome: AgentRunTestsResult = {
+    exitCode: run.code,
+    durationMs: Date.now() - started,
+    results,
+    stderr: redact(run.stderr.slice(-8000)),
+  };
+  if (run.code !== 0 || results.length === 0) outcome.stdoutTail = redact(run.stdout.slice(-4000));
+  return outcome;
 }

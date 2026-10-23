@@ -38,6 +38,7 @@ __export(appium_reporter_exports, {
   evidenceFileName: () => evidenceFileName,
   failureEvidence: () => failureEvidence,
   identityKey: () => identityKey,
+  localRunId: () => localRunId,
   pageSourceExtension: () => pageSourceExtension,
   peepsAfterHook: () => peepsAfterHook,
   peepsAfterTest: () => peepsAfterTest,
@@ -46,10 +47,15 @@ __export(appium_reporter_exports, {
   withPeeps: () => withPeeps
 });
 module.exports = __toCommonJS(appium_reporter_exports);
+var import_node_crypto = require("node:crypto");
 var import_node_fs = require("node:fs");
 var import_node_path = __toESM(require("node:path"));
 var import_node_url = require("node:url");
 var TITLE_PATH_SEPARATOR = " \u203A ";
+function localRunId(relPath, titlePath) {
+  return `local-${(0, import_node_crypto.createHash)("sha1").update(`${relPath}
+${titlePath}`).digest("hex").slice(0, 16)}`;
+}
 function repoRelative(workspace, abs) {
   const attempt = (root, file) => {
     const rel = import_node_path.default.relative(root, file).split(import_node_path.default.sep).join("/");
@@ -81,7 +87,20 @@ var Plan = class {
     if (!file) return null;
     const rel = repoRelative(this.file.workspace, file.startsWith("file://") ? (0, import_node_url.fileURLToPath)(file) : file);
     if (rel === null) return null;
-    return this.entries.get(identityKey({ path: rel, titlePath: titles.join(TITLE_PATH_SEPARATOR) })) ?? null;
+    const titlePath = titles.join(TITLE_PATH_SEPARATOR);
+    const key = identityKey({ path: rel, titlePath });
+    const planned = this.entries.get(key);
+    if (planned || !this.file.resultsDir) return planned ?? null;
+    const entry = {
+      runId: localRunId(rel, titlePath),
+      path: rel,
+      titlePath,
+      pwProject: "",
+      credential: { exp: 0, sig: "" }
+    };
+    this.entries.set(key, entry);
+    this.file.runs.push(entry);
+    return entry;
   }
 };
 var cachedPlan;
@@ -280,7 +299,9 @@ var PeepsAppiumReporter = class {
     if (!this.plan) return;
     switch (event) {
       case "runner:start":
-        console.log(`[peeps] reporting ${this.plan.entries.size} planned run(s) to ${this.plan.file.peepsUrl}`);
+        console.log(
+          this.plan.file.resultsDir ? "[peeps] recording results for the agent session" : `[peeps] reporting ${this.plan.entries.size} planned run(s) to ${this.plan.file.peepsUrl}`
+        );
         return;
       case "suite:start":
         this.suites.push(payload.title ?? "");
@@ -427,6 +448,18 @@ var PeepsAppiumReporter = class {
     this.queues.set(runId, []);
     const entry = this.plan.file.runs.find((run) => run.runId === runId);
     if (!entry) return;
+    const resultsDir = this.plan.file.resultsDir;
+    if (resultsDir) {
+      const line = { runId, path: entry.path, titlePath: entry.titlePath, events };
+      try {
+        (0, import_node_fs.mkdirSync)(resultsDir, { recursive: true });
+        (0, import_node_fs.appendFileSync)(import_node_path.default.join(resultsDir, `events-${process.pid}.jsonl`), `${JSON.stringify(line)}
+`);
+      } catch (error) {
+        console.log(`[peeps] results for ${entry.titlePath} not written: ${String(error)}`);
+      }
+      return;
+    }
     this.inflight += 1;
     void deliver(this.plan.file.peepsUrl, entry, events).finally(() => {
       this.inflight -= 1;
@@ -512,6 +545,7 @@ function withPeeps(base, options = {}) {
   evidenceFileName,
   failureEvidence,
   identityKey,
+  localRunId,
   pageSourceExtension,
   peepsAfterHook,
   peepsAfterTest,

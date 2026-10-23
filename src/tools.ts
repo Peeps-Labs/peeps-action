@@ -36,7 +36,9 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { runAppiumTests, type WdioRunner } from "./appium";
 import type { RunnerEnv } from "./env";
+import { resolveFramework } from "./pytest";
 
 const execFileAsync = promisify(execFile);
 
@@ -283,7 +285,12 @@ const ALWAYS_MASK_KEYS = new Set([
 ]);
 const SAFE_ENV_KEYS = new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
 
-export function createToolServer(env: RunnerEnv): ToolServer {
+export interface ToolServerDeps {
+  /** For tests: run this instead of `npx wdio run <config>` for an Appium suite. */
+  appiumRunner?: WdioRunner;
+}
+
+export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): ToolServer {
   const workspace = env.workspace;
   const redact = makeRedactor(process.env);
 
@@ -424,6 +431,16 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       // Playwright resolve nothing, run zero tests, and report "no tests
       // found" — a confusing success. Re-express it relative to the cwd.
       const abs = jail(workspace, file);
+      // An Appium suite runs under WebdriverIO, through the same wrapper
+      // config `run` mode uses, and answers in this same shape. A pytest
+      // repository keeps the Playwright path below, as it always had.
+      if (resolveFramework(env) === "appium") {
+        return runAppiumTests(
+          env,
+          { file: abs, grep: typeof args.grep === "string" && args.grep ? args.grep : undefined },
+          { redact, runner: deps.appiumRunner },
+        );
+      }
       const rel = path.relative(env.workingDirectory, abs).split(path.sep).join("/");
       const cmd = ["playwright", "test", "--reporter=json"];
       if (typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
@@ -510,7 +527,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "grep", description: "Search source files for a regular expression; returns matching lines.", inputSchema: obj({ pattern: s("JavaScript regular expression"), path: s("Repo-relative directory to search; default the root"), ignoreCase: { type: "boolean" } }, ["pattern"]) },
     { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
     { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
-    { name: "run_tests", description: "Run one Playwright spec file with the repository's own config; optionally filter by --grep or project. Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name") }, ["file"]) },
+    { name: "run_tests", description: "Run one spec file with the repository's own config (Playwright; WebdriverIO for an Appium suite); optionally filter by a grep regular expression over the test's full title, or by Playwright project. Returns per-test results and errors (Appium: plus a failure's evidence paths and page source).", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name (ignored for Appium)") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
     { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) },

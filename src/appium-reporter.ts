@@ -29,7 +29,8 @@
  * saved is there when the reporter builds that test's `test_end`.
  */
 
-import { mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PlanEntry } from "./reporter";
@@ -42,6 +43,25 @@ export interface AppiumPlanFile {
   /** The repository root, absolute: test paths are relative to it. */
   workspace: string;
   runs: PlanEntry[];
+  /**
+   * Agent mode's `run_tests`: there are no Peeps runs to report to. Every
+   * test the run reports gets a local entry (`localRunId`), and its events
+   * are appended to `<resultsDir>/events-<pid>.jsonl` instead of being sent.
+   */
+  resultsDir?: string;
+}
+
+/** One line of a `resultsDir` events file: a test and the events it produced. */
+export interface LocalResultsLine {
+  runId: string;
+  path: string;
+  titlePath: string;
+  events: PeepsEvent[];
+}
+
+/** A stable, file-name-safe run id for a test that has no Peeps run. */
+export function localRunId(relPath: string, titlePath: string): string {
+  return `local-${createHash("sha1").update(`${relPath}\n${titlePath}`).digest("hex").slice(0, 16)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +107,21 @@ class Plan {
     if (!file) return null;
     const rel = repoRelative(this.file.workspace, file.startsWith("file://") ? fileURLToPath(file) : file);
     if (rel === null) return null;
-    return this.entries.get(identityKey({ path: rel, titlePath: titles.join(TITLE_PATH_SEPARATOR) })) ?? null;
+    const titlePath = titles.join(TITLE_PATH_SEPARATOR);
+    const key = identityKey({ path: rel, titlePath });
+    const planned = this.entries.get(key);
+    if (planned || !this.file.resultsDir) return planned ?? null;
+    // Local results: every test is "planned" the moment it is seen.
+    const entry: PlanEntry = {
+      runId: localRunId(rel, titlePath),
+      path: rel,
+      titlePath,
+      pwProject: "",
+      credential: { exp: 0, sig: "" },
+    };
+    this.entries.set(key, entry);
+    this.file.runs.push(entry);
+    return entry;
   }
 }
 
@@ -423,7 +457,11 @@ export class PeepsAppiumReporter {
     if (!this.plan) return;
     switch (event) {
       case "runner:start":
-        console.log(`[peeps] reporting ${this.plan.entries.size} planned run(s) to ${this.plan.file.peepsUrl}`);
+        console.log(
+          this.plan.file.resultsDir
+            ? "[peeps] recording results for the agent session"
+            : `[peeps] reporting ${this.plan.entries.size} planned run(s) to ${this.plan.file.peepsUrl}`,
+        );
         return;
       case "suite:start":
         this.suites.push(payload.title ?? "");
@@ -584,6 +622,18 @@ export class PeepsAppiumReporter {
     this.queues.set(runId, []);
     const entry = this.plan!.file.runs.find((run) => run.runId === runId);
     if (!entry) return;
+    const resultsDir = this.plan!.file.resultsDir;
+    if (resultsDir) {
+      // Synchronous, so nothing is in flight when the worker exits.
+      const line: LocalResultsLine = { runId, path: entry.path, titlePath: entry.titlePath, events };
+      try {
+        mkdirSync(resultsDir, { recursive: true });
+        appendFileSync(path.join(resultsDir, `events-${process.pid}.jsonl`), `${JSON.stringify(line)}\n`);
+      } catch (error) {
+        console.log(`[peeps] results for ${entry.titlePath} not written: ${String(error)}`);
+      }
+      return;
+    }
     this.inflight += 1;
     void deliver(this.plan!.file.peepsUrl, entry, events).finally(() => {
       this.inflight -= 1;
