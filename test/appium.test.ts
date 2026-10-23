@@ -23,6 +23,7 @@ import type { AppiumCollection } from "../src/appium-collect";
 import {
   captureEvidence,
   evidenceFileName,
+  mochaHooks,
   pageSourceExtension,
   PeepsAppiumReporter,
   peepsAfterHook,
@@ -330,6 +331,100 @@ test("planned runs are matched to collected spec files; a renamed test runs noth
   assert.deepEqual(specs, ["/w/mobile/b.spec.ts"]);
   assert.deepEqual(matched.map((r) => r.runId), ["r1"]);
   assert.deepEqual(unmatched.map((r) => r.runId), ["r2", "r3"]);
+});
+
+test("run mode executes only planned (file, title path) pairs: a same-titled test in another planned file is skipped, unreported", async () => {
+  const peeps = await fakePeeps();
+  try {
+    const ws = mkdtempSync(path.join(tmpdir(), "peeps-only-planned-"));
+    const ran = path.join(ws, "ran.log");
+    const a = path.join(ws, "a.spec.js");
+    const b = path.join(ws, "b.spec.js");
+    const body = (tag: string, fails = false) =>
+      `() => { require("node:fs").appendFileSync(${JSON.stringify(ran)}, "${tag}\\n");${fails ? ' throw new Error("unplanned and failing");' : ""} }`;
+    writeFileSync(a, `describe("Login", () => {\n  it("works", ${body("a works")});\n});\n`);
+    writeFileSync(
+      b,
+      `describe("Login", () => {\n  beforeEach(${body("b beforeEach")});\n  it("works", ${body("b works", true)});\n  it("other", ${body("b other")});\n});\n`,
+    );
+    const runs = [run("r-a", "a.spec.js", "Login › works"), run("r-b", "b.spec.js", "Login › other")];
+    // As the action writes it in run mode.
+    const dir = mkdtempSync(path.join(tmpdir(), "peeps-plan-"));
+    const plan: AppiumPlanFile = { peepsUrl: peeps.url, workspace: ws, runs, onlyPlanned: true };
+    writeFileSync(path.join(dir, "plan.json"), JSON.stringify(plan));
+    process.env.PEEPS_PLAN_FILE = path.join(dir, "plan.json");
+    resetForTests();
+
+    // Both files hold a planned test, and the coarse grep matches "Login works" in each.
+    const config = withPeeps(
+      { mochaOpts: { ui: "bdd" } },
+      { specs: [a, b].map((f) => pathToFileURL(f).href), grep: mochaGrepFor(runs.map((r) => r.titlePath)), onlyPlanned: true },
+    );
+    // What @wdio/mocha-framework does with mochaOpts: load `require` plugins, merge them in, construct mocha.
+    const req = createRequire(__filename);
+    const { handleRequires } = req("mocha/lib/cli/run-helpers.js") as { handleRequires: (r: string[]) => Promise<object> };
+    const mochaOpts = { ...(config.mochaOpts as Record<string, unknown>) };
+    Object.assign(mochaOpts, await handleRequires((mochaOpts.require as string[] | undefined) ?? []));
+    const MochaModule = req("mocha") as { default?: unknown };
+    const Mocha = (MochaModule.default ?? MochaModule) as new (o: object) => {
+      addFile(f: string): void;
+      reporter(r: unknown): void;
+      loadFilesAsync(): Promise<void>;
+      run(cb: (failures: number) => void): { on(e: string, cb: (t: { title: string; file?: string }) => void): void };
+    };
+    const mocha = new Mocha(mochaOpts);
+    mocha.reporter(function silent() {});
+    mocha.addFile(a);
+    mocha.addFile(b);
+    await mocha.loadFilesAsync();
+    const outcome: string[] = [];
+    const failures = await new Promise<number>((resolve) => {
+      const runner = mocha.run(resolve);
+      for (const [event, label] of [["pass", "passed"], ["fail", "failed"], ["pending", "skipped"]] as const) {
+        runner.on(event, (t) => outcome.push(`${path.basename(t.file ?? "?")} ${t.title} ${label}`));
+      }
+    });
+    assert.deepEqual(outcome.sort(), ["a.spec.js works passed", "b.spec.js other passed", "b.spec.js works skipped"]);
+    // The unplanned test never ran (nor the customer's beforeEach for it), and is no failure.
+    assert.equal(failures, 0);
+    assert.deepEqual(readFileSync(ran, "utf8").trim().split("\n"), ["a works", "b beforeEach", "b other"]);
+
+    // The reporter reports nothing for it: it is not planned.
+    const reporter = new PeepsAppiumReporter({});
+    reporter.emit("suite:start", { title: "Login", file: b });
+    reporter.emit("test:pending", { title: "works", file: b });
+    reporter.emit("runner:end", {});
+    await synchronised(reporter);
+    assert.equal(peeps.received.events.size, 0);
+  } finally {
+    delete process.env.PEEPS_PLAN_FILE;
+    resetForTests();
+    peeps.close();
+  }
+});
+
+test("the planned-only hook is inert outside run mode", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "peeps-plan-"));
+  const plan: AppiumPlanFile = { peepsUrl: "http://unused", workspace: "/w", runs: [run("r-a", "a.spec.js", "A › one")] };
+  writeFileSync(path.join(dir, "plan.json"), JSON.stringify(plan));
+  process.env.PEEPS_PLAN_FILE = path.join(dir, "plan.json");
+  resetForTests();
+  try {
+    let skipped = 0;
+    const context = { currentTest: mochaTest(["B", "two"], "/w/b.spec.js"), skip: () => void (skipped += 1) };
+    // Report mode (no onlyPlanned in the plan) runs the whole suite.
+    mochaHooks.beforeEach.call(context);
+    assert.equal(skipped, 0);
+    // And the hook is only wired in when asked.
+    assert.equal((withPeeps({ mochaOpts: { ui: "bdd" } }, { grep: "x" }).mochaOpts as { require?: unknown }).require, undefined);
+    assert.deepEqual(
+      (withPeeps({ mochaOpts: { require: ["./setup.ts"] } }, { onlyPlanned: true }).mochaOpts as { require: string[] }).require.slice(0, 1),
+      ["./setup.ts"],
+    );
+  } finally {
+    delete process.env.PEEPS_PLAN_FILE;
+    resetForTests();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -651,6 +746,7 @@ test("a run writes a wrapper beside the config, uploads what the workers staged,
         const plan = JSON.parse(readFileSync(extra.PEEPS_PLAN_FILE!, "utf8")) as AppiumPlanFile;
         assert.equal(plan.workspace, root);
         assert.deepEqual(plan.runs, runs);
+        assert.equal(plan.onlyPlanned, true);
         // A worker staged a capture, and one for a run this job does not hold.
         const upload = path.join(extra.PEEPS_ARTIFACTS_DIR!, "upload");
         mkdirSync(upload);
@@ -669,7 +765,14 @@ test("a run writes a wrapper beside the config, uploads what the workers staged,
     const config = seen.config;
     assert.equal(config.port, 4723);
     assert.deepEqual(config.specs, [pathToFileURL(path.join(suite, "test", "specs", "login.spec.ts")).href]);
-    assert.deepEqual(config.mochaOpts, { ui: "bdd", timeout: 60_000, grep: "^(?:Login signs in with a valid account @smoke)$", invert: false });
+    // The grep, and the root hook that holds it to the planned (file, title path) pairs.
+    assert.deepEqual(config.mochaOpts, {
+      ui: "bdd",
+      timeout: 60_000,
+      grep: "^(?:Login signs in with a valid account @smoke)$",
+      invert: false,
+      require: [path.join(__dirname, "..", "dist", "appium-reporter.js")],
+    });
     assert.equal((config.reporters as unknown[])[0], "spec");
     assert.equal(typeof (config.reporters as unknown[])[1], "function");
     assert.deepEqual(peeps.received.artifacts, ["data/r-1-evidence-screenshot.png"]);

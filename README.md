@@ -241,7 +241,11 @@ How each mode works for Appium:
   config beside yours (`.peeps-<id>.wdio.conf.mts`, removed afterwards) that
   imports yours and adds Peeps' reporter and an `afterTest` hook; your own
   reporters, hooks and services stay. `run` narrows the spec files to the
-  planned ones and passes a mocha grep that matches exactly the planned tests.
+  planned ones, passes a mocha grep over the planned titles, and adds a mocha
+  root `beforeEach` (through `mochaOpts.require`, beside any of yours) that
+  skips any test whose spec file and title path together are not planned, so
+  a same-titled test in another planned file never runs; it shows as skipped
+  in WebdriverIO's output and is not reported to Peeps.
   With `@wdio/junit-reporter` installed and not already in your config, its
   XML is uploaded to the batch too.
 

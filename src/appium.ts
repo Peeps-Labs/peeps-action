@@ -14,8 +14,9 @@
  *              config that adds the Peeps reporter (`dist/appium-reporter.js`)
  *              and an `afterTest` hook, and upload each failed test's
  *              screenshot and page source.
- *   run        the same, narrowed to the planned spec files and a mocha grep
- *              over the planned titles.
+ *   run        the same, narrowed to the planned spec files, a mocha grep
+ *              over the planned titles, and a mocha root hook that skips any
+ *              test whose (spec file, title path) is not planned.
  */
 
 import { spawn } from "node:child_process";
@@ -473,7 +474,7 @@ export async function executeAppiumAndReport(
     runs: PlanEntry[];
     /** `runIds`: the runs a batch holds; omitted with a single batch, which holds every run. */
     batches: Array<{ batchId: string; batchNumber: number; runIds?: string[] }>;
-    /** Run mode: only these spec files (absolute), and this mocha grep. */
+    /** Run mode: only these spec files (absolute), this mocha grep, and only the planned (file, title path) pairs. */
     selection?: { specs: string[]; grep: string };
     /** For tests: run this instead of `npx wdio run <config>`. */
     runner?: (configPath: string, extraEnv: Record<string, string>) => Promise<number>;
@@ -484,6 +485,8 @@ export async function executeAppiumAndReport(
   const artifactsDir = path.join(scratch, "evidence");
   await mkdir(artifactsDir);
   const plan: AppiumPlanFile = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: input.runs };
+  // Run mode: the grep matches titles only; the root hook holds it to the planned (file, title path) pairs.
+  if (input.selection) plan.onlyPlanned = true;
   await writeFile(planFile, JSON.stringify(plan), { mode: 0o600 });
   const junitDir = hasPackage("@wdio/junit-reporter", path.dirname(input.configPath)) ? path.join(scratch, "junit") : null;
   const options: PeepsWdioOptions = { junitDir };
@@ -491,6 +494,7 @@ export async function executeAppiumAndReport(
     // As file URLs: WebdriverIO globs a plain path, and `[id].spec.ts` is a glob.
     options.specs = input.selection.specs.map((file) => pathToFileURL(file).href);
     options.grep = input.selection.grep;
+    options.onlyPlanned = true;
   }
 
   // A run that cannot even start still has its batches closed below, so no

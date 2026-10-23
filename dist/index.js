@@ -1482,12 +1482,14 @@ async function executeAppiumAndReport(env, peeps, input2) {
   const artifactsDir = import_node_path8.default.join(scratch, "evidence");
   await (0, import_promises5.mkdir)(artifactsDir);
   const plan = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: input2.runs };
+  if (input2.selection) plan.onlyPlanned = true;
   await (0, import_promises5.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
   const junitDir = hasPackage("@wdio/junit-reporter", import_node_path8.default.dirname(input2.configPath)) ? import_node_path8.default.join(scratch, "junit") : null;
   const options = { junitDir };
   if (input2.selection) {
     options.specs = input2.selection.specs.map((file) => (0, import_node_url2.pathToFileURL)(file).href);
     options.grep = input2.selection.grep;
+    options.onlyPlanned = true;
   }
   let code = 1;
   let wrapper;

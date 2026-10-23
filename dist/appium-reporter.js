@@ -39,6 +39,7 @@ __export(appium_reporter_exports, {
   failureEvidence: () => failureEvidence,
   identityKey: () => identityKey,
   localRunId: () => localRunId,
+  mochaHooks: () => mochaHooks,
   pageSourceExtension: () => pageSourceExtension,
   peepsAfterHook: () => peepsAfterHook,
   peepsAfterTest: () => peepsAfterTest,
@@ -254,6 +255,16 @@ async function peepsAfterHook(_hook, context, result) {
     console.log(`[peeps] afterHook evidence not captured: ${String(error)}`);
   }
 }
+var mochaHooks = {
+  beforeEach() {
+    const plan = loadPlan();
+    if (!plan || !plan.file.onlyPlanned || plan.file.resultsDir) return;
+    const test = this.currentTest;
+    const titles = titlesOf(test);
+    if (!titles) return;
+    if (!plan.entryFor(test?.file, titles)) this.skip();
+  }
+};
 function trimMiddle(text, head = 2e3, tail = 1e4) {
   if (text.length <= head + tail) return text;
   return `${text.slice(0, head)}
@@ -529,9 +540,15 @@ function withPeeps(base, options = {}) {
       });
     }
   }
-  if (options.grep !== void 0) {
+  if (options.grep !== void 0 || options.onlyPlanned) {
     const mochaOpts = base.mochaOpts && typeof base.mochaOpts === "object" ? base.mochaOpts : {};
-    config.mochaOpts = { ...mochaOpts, grep: options.grep, invert: false };
+    const next = { ...mochaOpts };
+    if (options.grep !== void 0) Object.assign(next, { grep: options.grep, invert: false });
+    if (options.onlyPlanned) {
+      const theirs = Array.isArray(mochaOpts.require) ? mochaOpts.require : typeof mochaOpts.require === "string" ? [mochaOpts.require] : [];
+      next.require = [...theirs, __filename];
+    }
+    config.mochaOpts = next;
   }
   return config;
 }
@@ -546,6 +563,7 @@ function withPeeps(base, options = {}) {
   failureEvidence,
   identityKey,
   localRunId,
+  mochaHooks,
   pageSourceExtension,
   peepsAfterHook,
   peepsAfterTest,

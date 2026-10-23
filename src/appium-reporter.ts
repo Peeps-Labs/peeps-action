@@ -13,9 +13,11 @@
  *                        attachments the reporter lists on that test's final
  *                        `test_end`, in the pytest evidence shape
  *                        (`PytestTestEndEvidence`).
+ *   mochaHooks           run mode's mocha root hook: skips every test whose
+ *                        (spec file, title path) the plan does not name.
  *   withPeeps            what the wrapper config exports: the customer's
  *                        config with the above appended, and in run mode the
- *                        planned spec files and a mocha grep.
+ *                        planned spec files, a mocha grep and that hook.
  *
  * Bundled to its own file (dist/appium-reporter.js) and loaded inside the
  * customer's WebdriverIO workers, so it must stay dependency-free: it is a
@@ -49,6 +51,12 @@ export interface AppiumPlanFile {
    * are appended to `<resultsDir>/events-<pid>.jsonl` instead of being sent.
    */
   resultsDir?: string;
+  /**
+   * Run mode: execute only the planned `(spec file, title path)` pairs. The
+   * mocha grep matches titles only, so a planned file can hold a same-titled
+   * test of another file's plan entry; `mochaHooks` skips it.
+   */
+  onlyPlanned?: boolean;
 }
 
 /** One line of a `resultsDir` events file: a test and the events it produced. */
@@ -354,6 +362,39 @@ export async function peepsAfterHook(
     console.log(`[peeps] afterHook evidence not captured: ${String(error)}`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Run mode: only planned tests execute
+// ---------------------------------------------------------------------------
+
+/** The mocha `this` of a hook, as far as `mochaHooks` reads it. */
+interface MochaHookContext {
+  currentTest?: MochaRunnableLike;
+  skip(): void;
+}
+
+/**
+ * A mocha root-hook plugin (mocha's `mochaHooks` export), loaded through
+ * `mochaOpts.require` by the wrapper config in run mode only, so it merges
+ * with any root hooks the customer's own `require` plugins export instead of
+ * replacing them (`@wdio/mocha-framework` assigns the merged plugins onto
+ * `mochaOpts`). Its `beforeEach` runs before any other `beforeEach` and
+ * skips a test whose `(spec file, title path)` is not in the plan: mocha
+ * then runs none of the remaining `beforeEach` hooks or the test body,
+ * reports it pending (not a failure), and the reporter, finding no plan
+ * entry, reports nothing for it. Inert unless the plan file says
+ * `onlyPlanned` (run mode); report mode runs the whole suite.
+ */
+export const mochaHooks = {
+  beforeEach(this: MochaHookContext): void {
+    const plan = loadPlan();
+    if (!plan || !plan.file.onlyPlanned || plan.file.resultsDir) return;
+    const test = this.currentTest;
+    const titles = titlesOf(test);
+    if (!titles) return;
+    if (!plan.entryFor(test?.file, titles)) this.skip();
+  },
+};
 
 // ---------------------------------------------------------------------------
 // The reporter
@@ -676,8 +717,13 @@ async function deliver(peepsUrl: string, entry: PlanEntry, events: PeepsEvent[])
 export interface PeepsWdioOptions {
   /** Run mode: only these spec files (absolute). */
   specs?: string[];
-  /** Run mode: a mocha grep over each test's full title. */
+  /** Run mode: a mocha grep over each test's full title (a coarse pre-filter). */
   grep?: string;
+  /**
+   * Run mode: load this module as a mocha root-hook plugin, whose
+   * `beforeEach` skips every test the plan does not name (`mochaHooks`).
+   */
+  onlyPlanned?: boolean;
   /** Where `@wdio/junit-reporter` writes, when the action adds it. */
   junitDir?: string | null;
 }
@@ -697,7 +743,8 @@ function isJunit(reporter: unknown): boolean {
 /**
  * The customer's config with Peeps' reporter and hooks appended, never
  * replacing theirs. In run mode, the planned spec files (capability-level
- * `wdio:specs` would otherwise win over them) and a mocha grep.
+ * `wdio:specs` would otherwise win over them), a mocha grep, and the root
+ * hook that skips any test the plan does not name.
  */
 export function withPeeps(base: Record<string, unknown>, options: PeepsWdioOptions = {}): Record<string, unknown> {
   if (!base || typeof base !== "object") throw new Error("the WebdriverIO config must export a `config` object");
@@ -730,9 +777,16 @@ export function withPeeps(base: Record<string, unknown>, options: PeepsWdioOptio
       });
     }
   }
-  if (options.grep !== undefined) {
-    const mochaOpts = base.mochaOpts && typeof base.mochaOpts === "object" ? base.mochaOpts : {};
-    config.mochaOpts = { ...mochaOpts, grep: options.grep, invert: false };
+  if (options.grep !== undefined || options.onlyPlanned) {
+    const mochaOpts = (base.mochaOpts && typeof base.mochaOpts === "object" ? base.mochaOpts : {}) as Record<string, unknown>;
+    const next: Record<string, unknown> = { ...mochaOpts };
+    if (options.grep !== undefined) Object.assign(next, { grep: options.grep, invert: false });
+    if (options.onlyPlanned) {
+      const theirs = Array.isArray(mochaOpts.require) ? mochaOpts.require : typeof mochaOpts.require === "string" ? [mochaOpts.require] : [];
+      // This very file (dist/appium-reporter.js): its `mochaHooks` export.
+      next.require = [...theirs, __filename];
+    }
+    config.mochaOpts = next;
   }
   return config;
 }
