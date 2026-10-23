@@ -45,11 +45,12 @@ This is more than "test results". Concretely:
 
 | Sent to Peeps | When |
 | --- | --- |
-| The **full source of every spec file** Playwright lists (pytest: every test module it collects) | `inventory`, and every `report`/`run` |
-| The Playwright test list: files, titles, projects, tags (pytest: node ids, browsers, lines, markers) | `inventory`, `report`, `run` |
+| The **full source of every spec file** Playwright lists (pytest: every test module it collects; Appium: every WebdriverIO spec file that holds a test) | `inventory`, and every `report`/`run` |
+| The Playwright test list: files, titles, projects, tags (pytest: node ids, browsers, lines, markers; Appium: spec files, `describe`/`it` titles, `@tags` in titles, the line each title is written on, spec files that failed to load) | `inventory`, `report`, `run` |
 | Test results, timings, errors and stack traces | `report`, `run` |
 | The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run` |
 | pytest only: skip reasons, `record_property` values, a failed test's captured stdout/stderr/log output, and the files a test saves in `peeps_artifacts_dir` or attaches with `record_property("peeps_attachment", path)` (only from inside the repository or pytest's temporary directory) | `report`, `run` |
+| Appium only: for each **failed** test, a **screenshot of the device screen**, the **page source** of the screen it failed on (the native view hierarchy as XML, or the WebView's HTML), and the Appium context name; and, when `@wdio/junit-reporter` is installed and not already configured, the JUnit XML it writes | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
 | Tool results in an agent session: file contents, diffs, test output | `agent` |
@@ -70,6 +71,15 @@ content. A trace records HTTP requests and responses, which means headers,
 cookies and bearer tokens your tests obtained against your app. Nothing
 redacts the report before upload. If that is not acceptable, turn tracing off
 for the Peeps job, or do not run `report`/`run` modes.
+
+**An Appium failure sends what was on the device.** The screenshot shows the
+app's screen as the test left it, whatever data it displayed. The page source
+is the text of every element on that screen: labels, field values your test
+typed (the platforms normally show password fields masked; Peeps masks
+nothing), and for a WebView its HTML as the page serialises it, including
+hidden inputs and any token or state embedded in the markup. Nothing redacts either before upload.
+Passing tests send neither. If that is not acceptable for a suite, use test
+accounts and data in it, or do not run `report`/`run` modes for it.
 
 **`BASE_URL` is sent verbatim** and is deliberately not masked, because masking
 it would mangle every URL in every result. A `BASE_URL` of the form
@@ -144,8 +154,9 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
   exactly what you run: `uses: Peeps-Labs/peeps-action@<sha>`. A tag such as
   `@v1` is repointed at new releases.
 - The action has no runtime dependencies. It bundles to one file and calls only
-  `git`, `npx playwright` and, for a pytest suite, `python -m pytest`, always
-  with an argument array and never through a shell.
+  `git`, `npx playwright`, for a pytest suite `python -m pytest`, and for an
+  Appium suite `npx wdio run` and the job's own Node, always with an argument
+  array and never through a shell.
 - For a pytest suite it also loads `python/peeps_pytest_plugin.py` from this
   repository into pytest (`-p peeps_pytest_plugin`). It uses the Python
   standard library only, imports nothing from your repository, and reads the
@@ -153,3 +164,15 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
   attachments into the action's own temporary directory for upload, and
   refuses any path outside the repository, that directory and pytest's
   temporary directory, as well as `.git`, `node_modules` and `.env*`.
+- For an Appium suite, `inventory` (and `report`/`run`, which collect first)
+  runs `dist/appium-collect.mjs` in its own Node process in your working
+  directory. It imports your WebdriverIO config and every spec file it names,
+  through your own `tsx`, `@wdio/config` and `mocha`, so their top-level code
+  runs as it would under `wdio`; it starts no device session and runs no hook
+  or test body. `report`/`run` then write a temporary config beside yours
+  (`.peeps-<id>.wdio.conf.mts` or `.mjs`, mode 0600, removed when WebdriverIO
+  exits) that imports yours and adds `dist/appium-reporter.js` from this
+  repository: a reporter and two hooks that use only Node's standard library,
+  read the plan file the action names, save a failed test's screenshot and
+  page source into the action's temporary directory, and send results to
+  Peeps.

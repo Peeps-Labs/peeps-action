@@ -143,6 +143,132 @@ its own installation token, supplied for that one call, not with your
 
 Outside GitHub Actions there is no OIDC token, so set `PEEPS_API_KEY` instead.
 
+## Appium (WebdriverIO) suites
+
+Native and hybrid mobile apps are tested with Appium, driven by
+[WebdriverIO](https://webdriver.io) v9 with mocha and TypeScript specs. The
+action finds them by itself when the working directory has a WebdriverIO
+config (`wdio.conf.ts`, `.js`, `.mjs` or `.cjs`) and no Playwright config;
+`framework: appium` says so outright. With one config per platform
+(`wdio.android.conf.ts`, `wdio.ios.conf.ts`), name the one each job runs in
+`config`.
+
+Let WebdriverIO start Appium (`services: ["appium"]`, from
+`@wdio/appium-service`) and install the driver your platform needs before the
+action runs. Android runs on an Ubuntu runner's emulator:
+
+```yaml
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with: { ref: "${{ inputs.ref || github.ref }}" }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: 17 }
+      - run: npm ci
+      - run: npx appium driver install uiautomator2
+      # Build or download your debug .apk here; the config's
+      # `appium:app` capability points at it.
+      - name: Start an Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          IMAGE="system-images;android-34;google_apis;x86_64"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "$IMAGE" emulator platform-tools > /dev/null
+          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n ci -k "$IMAGE"
+          nohup "$ANDROID_HOME/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          "$ANDROID_HOME/platform-tools/adb" wait-for-device shell 'while [ -z "$(getprop sys.boot_completed)" ]; do sleep 2; done'
+      - uses: Peeps-Labs/peeps-action@v1
+        with:
+          framework: appium
+          config: wdio.android.conf.ts
+          mode: ${{ inputs.mode }}
+          session-id: ${{ inputs.sessionId }}
+```
+
+iOS runs on a macOS runner's simulator:
+
+```yaml
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with: { ref: "${{ inputs.ref || github.ref }}" }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: npm ci
+      - run: npx appium driver install xcuitest
+      # Build your app for the simulator here (xcodebuild … -sdk iphonesimulator);
+      # the config's `appium:app` capability points at the .app.
+      - name: Boot a simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name == "iPhone 16")][0].udid')
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+      - uses: Peeps-Labs/peeps-action@v1
+        with:
+          framework: appium
+          config: wdio.ios.conf.ts
+          mode: ${{ inputs.mode }}
+          session-id: ${{ inputs.sessionId }}
+```
+
+macOS minutes cost about ten times Linux ones; consider running the iOS job
+only on changes to the iOS app.
+
+**Hybrid apps: enable WebView inspection in the build you test.** Appium can
+switch into a WebView, use DOM selectors there and read its HTML only when
+the app allows it: `WebView.setWebContentsDebuggingEnabled(true)` on Android
+(debug builds), `webView.isInspectable = true` on iOS 16.4 and later. Without
+it, a test cannot reach the WebView's DOM, and a failure inside it is
+reported with the native accessibility tree only.
+
+How each mode works for Appium:
+
+- **inventory**: WebdriverIO has no `--list`, so the action loads every spec
+  file WebdriverIO's own config parser names into mocha, in a separate Node
+  process, and walks the suite tree. No device session starts and no hook or
+  test body runs, but your config and spec files are imported, so code at
+  their top level (and in `describe` bodies) does run; `browser`, `driver`,
+  `$`, `$$` and `@wdio/globals` are harmless stand-ins there. TypeScript
+  loads through your own `tsx` (WebdriverIO v9 depends on it). A spec that
+  fails to load is reported as a collection error. Each test is identified by
+  its spec file and its `describe` titles plus `it` title, exactly as a
+  Playwright test is.
+- **report** and **run**: the action runs `npx wdio run` with a temporary
+  config beside yours (`.peeps-<id>.wdio.conf.mts`, removed afterwards) that
+  imports yours and adds Peeps' reporter and an `afterTest` hook; your own
+  reporters, hooks and services stay. `run` narrows the spec files to the
+  planned ones and passes a mocha grep that matches exactly the planned tests.
+  With `@wdio/junit-reporter` installed and not already in your config, its
+  XML is uploaded to the batch too.
+
+### What an Appium test reports
+
+Results stream as they finish, one Peeps run per test. A failed test's final
+`test_end` carries the pytest evidence fields (see above):
+`failure { phase, exceptionType, message, traceback }`, where `phase` is
+`call` for the test body and `setup` when a `before`/`beforeEach` hook failed
+(every planned test under that hook's suite is then reported failed, since
+mocha runs none of them), and `attachments`:
+
+- `screenshot.png`, from `browser.saveScreenshot()`;
+- `page-source.xml` (native screen: UiAutomator2's or XCUITest's hierarchy)
+  or `page-source.html` (in a WebView), from `browser.getPageSource()`,
+  uploaded as `data/<runId>-evidence-page-source.xml.dat` (or `.html.dat`)
+  because Peeps' `data/` does not store xml or html under their own type.
+
+When the driver reports one, `properties` holds the Appium context the test
+failed in: `[{ "name": "context", "value": "WEBVIEW_com.example" }]`.
+
+A capture that fails or exceeds 25 MB is listed in `attachmentsOmitted` with
+its reason. Under mocha retries each retried attempt sends a failed
+`test_end` and only the final attempt's evidence is kept. Run one WebdriverIO
+capability per job (one platform per config): two capabilities running the
+same test would both report into its one run.
+
 ## Failure evidence
 
 In Playwright `report` and `run` modes, Peeps defaults an unset `use.screenshot`
@@ -153,7 +279,7 @@ system-browser suite keeps working. Explicit video settings still win. Failed
 attempts get evidence even without retries. Explicit repository, project and
 `test.use` settings still win, including `"off"` and options with a `mode`.
 Trace settings, viewport and device scale are unchanged. Inventory, agent-mode
-`run_tests`, and pytest do not use these Playwright defaults.
+`run_tests`, pytest and Appium do not use these Playwright defaults.
 
 The action loads your config through a temporary wrapper beside it, preserving
 config-relative paths without changing the original file. `config.configFile`
@@ -172,15 +298,15 @@ HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
 | --- | --- | --- |
 | `mode` | no, defaults to `ci` | `inventory`, `run`, `report`, `agent`, or `ci` |
 | `session-id` | for `run` and `agent` | The session id Peeps passes on dispatch. Unused by `inventory` and `report` |
-| `config` | no | Playwright config path, relative to `working-directory` (pytest: the ini file, passed as `-c`) |
-| `working-directory` | no | Where to run Playwright or pytest, relative to the repository root |
-| `framework` | no, defaults to `auto` | `playwright`, `pytest`, or `auto` (see above) |
+| `config` | no | Playwright config path, relative to `working-directory` (pytest: the ini file, passed as `-c`; Appium: the WebdriverIO config) |
+| `working-directory` | no | Where to run Playwright, pytest or WebdriverIO, relative to the repository root |
+| `framework` | no, defaults to `auto` | `playwright`, `pytest`, `appium`, or `auto` (see above) |
 
 ## Modes
 
 | Mode | What runs on your runner |
 | --- | --- |
-| `inventory` | `playwright test --list --reporter=json` (pytest: `pytest --collect-only`), posted with the spec files |
+| `inventory` | `playwright test --list --reporter=json` (pytest: `pytest --collect-only`; Appium: a mocha load of the WebdriverIO specs), posted with the spec files |
 | `run` | the tests Peeps asked for, reported live |
 | `report` | this workflow's own test run, reported live |
 | `agent` | a tool server for a Peeps agent session; every call is echoed to the job log |
@@ -262,7 +388,7 @@ action detects GitLab from `GITLAB_CI` and reads:
 | `PEEPS_SESSION_ID` | Set by Peeps with `PEEPS_MODE` |
 | `PEEPS_WORKING_DIRECTORY` | Where to run, relative to the repository root |
 | `PEEPS_PLAYWRIGHT_CONFIG` | The Playwright config, relative to the working directory |
-| `PEEPS_FRAMEWORK` | `playwright`, `pytest` or `auto` |
+| `PEEPS_FRAMEWORK` | `playwright`, `pytest`, `appium` or `auto` |
 | `PEEPS_ID_TOKEN` | The ID token from `id_tokens:`; the job's identity |
 
 Peeps starts pipelines with variables, so the project's **minimum role to use
@@ -289,6 +415,11 @@ and sets `PEEPS_REQUIRE_PYTEST=1`, so there they fail instead.
 
 The Playwright capture regressions execute the committed `dist/index.js` with
 real Chromium and a local fake Peeps service. Rebuild before testing source changes.
+
+The Appium tests collect `test/fixtures/appium` with real mocha and tsx (both
+devDependencies) through the committed `dist/appium-collect.mjs`, and load
+`dist/appium-reporter.js` through the wrapper config, so they too need a
+rebuild after a source change. They start no device and no WebdriverIO.
 
 ## License
 
