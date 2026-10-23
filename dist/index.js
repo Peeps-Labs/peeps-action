@@ -1576,13 +1576,16 @@ async function executeAppiumAndReport(env, peeps, input2) {
   }
   const byRunId = Object.fromEntries(input2.runs.map((run) => [run.runId, run]));
   const evidence = await stagedEvidence(import_node_path8.default.join(artifactsDir, "upload"), byRunId);
+  if (junitDir && input2.batches.length > 1) {
+    console.log(`[peeps] JUnit XML not uploaded: this run spans ${input2.batches.length} batches, and it holds every batch's tests`);
+  }
   for (const b of input2.batches) {
     const mine = evidence.filter((file) => input2.batches.length === 1 || (b.runIds ?? []).includes(file.runId));
     if (mine.length > 0) {
       const uploaded = await uploadEvidence(peeps, b.batchId, mine);
       console.log(`[peeps] uploaded ${uploaded} test attachment(s) for batch ${b.batchNumber}`);
     }
-    if (junitDir) await uploadJunit(peeps, b.batchId, junitDir);
+    if (junitDir && input2.batches.length === 1) await uploadJunit(peeps, b.batchId, junitDir);
     try {
       await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded: false });
     } catch (error) {

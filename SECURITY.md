@@ -50,7 +50,7 @@ This is more than "test results". Concretely:
 | Test results, timings, errors and stack traces | `report`, `run` |
 | The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run` |
 | pytest only: skip reasons, `record_property` values, a failed test's captured stdout/stderr/log output, and the files a test saves in `peeps_artifacts_dir` or attaches with `record_property("peeps_attachment", path)` (only from inside the repository or pytest's temporary directory) | `report`, `run` |
-| Appium only: for each **failed** test, a **screenshot of the device screen**, the **page source** of the screen it failed on (the native view hierarchy as XML, or the WebView's HTML), and the Appium context name; and, when `@wdio/junit-reporter` is installed and not already configured, the JUnit XML it writes | `report`, `run` |
+| Appium only: for each **failed** test, a **screenshot of the device screen**, the **page source** of the screen it failed on (the native view hierarchy as XML, or the WebView's HTML), and the Appium context name; and, when `@wdio/junit-reporter` is installed and not already configured, the JUnit XML it writes (only for a run that is a single batch, since it holds every test the run ran) | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
 | Tool results in an agent session: file contents, diffs, test output (Appium: a failed test's page source too) | `agent` |

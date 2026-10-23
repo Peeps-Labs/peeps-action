@@ -248,7 +248,9 @@ How each mode works for Appium:
   a same-titled test in another planned file never runs; it shows as skipped
   in WebdriverIO's output and is not reported to Peeps.
   With `@wdio/junit-reporter` installed and not already in your config, its
-  XML is uploaded to the batch too.
+  XML is uploaded to the batch too, when the run is a single batch (always
+  in `run`); a `report` run that Peeps splits into several batches uploads
+  none, since each file holds every batch's tests.
 
 ### What an Appium test reports
 

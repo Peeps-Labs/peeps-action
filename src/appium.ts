@@ -622,13 +622,19 @@ export async function executeAppiumAndReport(
 
   const byRunId = Object.fromEntries(input.runs.map((run) => [run.runId, run]));
   const evidence = await stagedEvidence(path.join(artifactsDir, "upload"), byRunId);
+  // The JUnit XML covers the whole run: with several batches (one per Peeps
+  // project) each file holds other batches' tests and their failure text, so
+  // it is uploaded only when the run is one batch.
+  if (junitDir && input.batches.length > 1) {
+    console.log(`[peeps] JUnit XML not uploaded: this run spans ${input.batches.length} batches, and it holds every batch's tests`);
+  }
   for (const b of input.batches) {
     const mine = evidence.filter((file) => input.batches.length === 1 || (b.runIds ?? []).includes(file.runId));
     if (mine.length > 0) {
       const uploaded = await uploadEvidence(peeps, b.batchId, mine);
       console.log(`[peeps] uploaded ${uploaded} test attachment(s) for batch ${b.batchNumber}`);
     }
-    if (junitDir) await uploadJunit(peeps, b.batchId, junitDir);
+    if (junitDir && input.batches.length === 1) await uploadJunit(peeps, b.batchId, junitDir);
     try {
       // No HTML report: the evidence is in the batch's `data/`, named by run.
       await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded: false });

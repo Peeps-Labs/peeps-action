@@ -1092,6 +1092,48 @@ test("report and run stop WebdriverIO and remove the wrapper on SIGTERM", async 
   }
 });
 
+test("the run's JUnit XML goes to its batch only when the run has one batch: it holds every batch's tests", async () => {
+  const peeps = await fakePeeps();
+  process.env.PEEPS_API_KEY = "test-key";
+  const exitCode = process.exitCode;
+  try {
+    const { root, suite } = workspace();
+    // @wdio/junit-reporter installed: the action adds it and uploads what it writes.
+    mkdirSync(path.join(suite, "node_modules", "@wdio", "junit-reporter"), { recursive: true });
+    writeFileSync(path.join(suite, "node_modules", "@wdio", "junit-reporter", "package.json"), '{"name":"@wdio/junit-reporter"}');
+    const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile", PEEPS_API_URL: peeps.url });
+    const runner = async (_wrapper: string, extra: Record<string, string>) => {
+      const junit = path.join(path.dirname(extra.PEEPS_PLAN_FILE!), "junit");
+      mkdirSync(junit, { recursive: true });
+      writeFileSync(path.join(junit, "junit-0-0.xml"), "<testsuites><testcase name='other project'><failure>secret-ish</failure></testcase></testsuites>");
+      return 0;
+    };
+    const runs = [run("r-1", "mobile/test/specs/login.spec.ts", "Login › x"), run("r-2", "mobile/test/specs/webview.spec.ts", "Checkout › y")];
+    await executeAppiumAndReport(env, new PeepsClient(env), {
+      configPath: path.join(suite, "wdio.conf.ts"),
+      runs,
+      batches: [
+        { batchId: "b-1", batchNumber: 1, runIds: ["r-1"] },
+        { batchId: "b-2", batchNumber: 2, runIds: ["r-2"] },
+      ],
+      runner,
+    });
+    assert.deepEqual(peeps.received.artifacts, []);
+    assert.deepEqual(peeps.received.completed.map((c) => c.batchId), ["b-1", "b-2"]);
+
+    await executeAppiumAndReport(env, new PeepsClient(env), {
+      configPath: path.join(suite, "wdio.conf.ts"),
+      runs,
+      batches: [{ batchId: "b-3", batchNumber: 3 }],
+      runner,
+    });
+    assert.deepEqual(peeps.received.artifacts, ["data/junit-0-0.xml.dat"]);
+  } finally {
+    process.exitCode = exitCode;
+    peeps.close();
+  }
+});
+
 test("JUnit files travel as .dat under data/", () => {
   assert.equal(junitArtifactName("junit-0-0.xml"), "data/junit-0-0.xml.dat");
   assert.equal(junitArtifactName("junit 0/1.xml"), "data/junit_0_1.xml.dat");
