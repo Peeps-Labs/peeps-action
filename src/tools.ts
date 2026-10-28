@@ -692,8 +692,8 @@ function s(description: string) {
 
 function summarizeReport(report: unknown) {
   if (!report || typeof report !== "object" || !("suites" in report)) return null;
-  const tests: Array<{ title: string; file: string; line: number; status: string; error?: string; errorSnippet?: string }> = [];
-  const walk = (suite: { title: string; file?: string; specs?: Array<{ title: string; file: string; line: number; tests?: Array<{ results?: Array<{ status: string; error?: { message?: string; snippet?: string } }> }> }>; suites?: unknown[] }, titles: string[], isFile: boolean) => {
+  const tests: Array<{ title: string; file: string; line: number; status: string; retry?: number; error?: string; errorSnippet?: string }> = [];
+  const walk = (suite: { title: string; file?: string; specs?: Array<{ title: string; file: string; line: number; tests?: Array<{ results?: Array<{ status: string; retry?: number; error?: { message?: string; snippet?: string } }> }> }>; suites?: unknown[] }, titles: string[], isFile: boolean) => {
     const next = isFile ? titles : [...titles, suite.title];
     for (const spec of suite.specs ?? []) {
       const last = spec.tests?.[0]?.results?.at(-1);
@@ -702,6 +702,9 @@ function summarizeReport(report: unknown) {
         file: spec.file,
         line: spec.line,
         status: last?.status ?? "unknown",
+        // The final attempt's index (0 = no retry), so a pass after a retry
+        // is not read as a clean one. Absent when Playwright ran no attempt.
+        ...(typeof last?.retry === "number" ? { retry: last.retry } : {}),
         error: last?.error?.message?.slice(0, 2000),
         errorSnippet: last?.error?.snippet?.slice(0, 2000),
       });

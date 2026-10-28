@@ -1116,6 +1116,9 @@ function summarizeReport(report) {
         file: spec.file,
         line: spec.line,
         status: last?.status ?? "unknown",
+        // The final attempt's index (0 = no retry), so a pass after a retry
+        // is not read as a clean one. Absent when Playwright ran no attempt.
+        ...typeof last?.retry === "number" ? { retry: last.retry } : {},
         error: last?.error?.message?.slice(0, 2e3),
         errorSnippet: last?.error?.snippet?.slice(0, 2e3)
       });

@@ -325,3 +325,30 @@ test("a staged copy names its source", async (t) => {
   const copy = result.files.find((f) => f.path === "e2e/copy.spec.ts")!;
   assert.deepEqual(copy, { path: "e2e/copy.spec.ts", status: "C ", kind: "file", sha256: sha256(body), from: "e2e/a.spec.ts" });
 });
+
+test("run_tests reports each test's final attempt with its retry index", async (t) => {
+  const { ws } = await repo(t);
+  await symlink(path.resolve(__dirname, "../node_modules"), path.join(ws, "node_modules"), "dir");
+  await writeFile(
+    path.join(ws, "pw.config.ts"),
+    'import { defineConfig } from "@playwright/test";\nexport default defineConfig({ testDir: "./pw", retries: 1, workers: 1, outputDir: "./results" });\n',
+  );
+  // Its own folder: `repo`'s e2e/*.spec.ts are not real specs. No page is
+  // needed: the retry index comes from Playwright's own result.
+  await mkdir(path.join(ws, "pw"));
+  await writeFile(
+    path.join(ws, "pw/flaky.spec.ts"),
+    'import { test, expect } from "@playwright/test";\n' +
+      'test("passes on retry", async ({}, info) => { expect(info.retry).toBe(1); });\n' +
+      'test("passes first time", async () => {});\n',
+  );
+  const env = { workspace: ws, workingDirectory: ws, configPath: "pw.config.ts", platform: "github" } as unknown as RunnerEnv;
+  const out = (await createToolServer(env).handlers.run_tests!({ file: "pw/flaky.spec.ts" })) as {
+    results: Array<{ title: string; status: string; retry?: number }>;
+  };
+  assert.deepEqual(
+    out.results.map((r) => [r.title, r.status, r.retry]),
+    [["passes on retry", "passed", 1], ["passes first time", "passed", 0]],
+    JSON.stringify(out).slice(0, 2000),
+  );
+});
