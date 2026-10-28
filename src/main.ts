@@ -18,6 +18,7 @@ import { PeepsClient } from "./peeps";
 import { runReport } from "./report";
 import { runDispatched } from "./run";
 import { runAgent } from "./agent";
+import { warnIfBrowsersMissing } from "./browser-check";
 import {
   resolveFramework,
   runPytestDispatched,
@@ -68,6 +69,9 @@ async function main(): Promise<void> {
         throw new Error(`unknown mode ${mode}`);
     }
   }
+
+  // Every mode but inventory launches browsers (`--list` launches none).
+  if (mode !== "inventory") await warnIfBrowsersMissing(env.workingDirectory, env.platform);
 
   switch (mode) {
     case "inventory":

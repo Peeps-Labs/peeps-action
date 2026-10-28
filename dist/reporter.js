@@ -99,7 +99,8 @@ var PeepsCiReporter = class {
       status: result.status,
       duration: Math.round(result.duration),
       error: error?.message?.slice(0, 4e3),
-      errorStack: error?.stack?.slice(0, 8e3)
+      errorStack: error?.stack?.slice(0, 8e3),
+      retry: result.retry
     });
     if (result.retry >= test.retries || result.status === "passed") {
       this.enqueue(entry, { type: "run_end", timestamp: Date.now() });

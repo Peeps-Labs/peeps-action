@@ -32,7 +32,9 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -225,6 +227,85 @@ function renameSides(field: string): string[] {
   }
   const [oldPath = "", newPath = ""] = field.split(" => ");
   return [oldPath, newPath];
+}
+
+/**
+ * One changed file in `git_status`'s `files`.
+ *
+ * `kind` says what is in the working tree at `path` now: a regular `file`
+ * (then `sha256` is the lowercase hex sha256 of its bytes), nothing
+ * (`deleted`), a `symlink` (never followed, since it can point anywhere on
+ * the runner), something `other` (a directory, e.g. a nested repository), or
+ * a path the tools may not touch (`off_limits`, e.g. `.env.local`: listed so
+ * the change is visible, never hashed). `sha256` is null for every kind but
+ * `file`. `from` is a rename's or copy's source.
+ */
+export interface ChangedFile {
+  path: string;
+  /** git's porcelain XY code, e.g. `??`, ` M`, `D `, `R `. */
+  status: string;
+  kind: "file" | "deleted" | "symlink" | "other" | "off_limits";
+  sha256: string | null;
+  from?: string;
+}
+
+/**
+ * Every changed file, one entry per file, for Peeps to check the writes it
+ * made against what is really in the tree (and to refuse a change it cannot
+ * account for, such as a file a test run rewrote).
+ *
+ * `-z` so paths arrive unquoted and exact, and `--untracked-files=all` so a
+ * new directory is listed file by file rather than collapsed to `dir/`.
+ */
+export async function changedFilesWithDigests(
+  workspace: string,
+  runGit: (args: string[], options?: { maxBuffer?: number }) => Promise<{ stdout: string }>,
+): Promise<{ files: ChangedFile[]; truncated: boolean }> {
+  const { stdout } = await runGit(
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    { maxBuffer: 8 * 1024 * 1024 },
+  );
+  const fields = stdout.split("\0");
+  const files: ChangedFile[] = [];
+  let truncated = false;
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i]!;
+    if (field.length < 4) continue;
+    if (files.length >= MAX_LIST) {
+      truncated = true;
+      break;
+    }
+    const status = field.slice(0, 2);
+    const entry: ChangedFile = { path: field.slice(3), status, kind: "other", sha256: null };
+    // A rename or copy is followed by its source, as its own field.
+    if (status.includes("R") || status.includes("C")) entry.from = fields[++i];
+    Object.assign(entry, await digestOf(workspace, entry.path));
+    files.push(entry);
+  }
+  return { files, truncated };
+}
+
+async function digestOf(
+  workspace: string,
+  relative: string,
+): Promise<Pick<ChangedFile, "kind" | "sha256">> {
+  let abs: string;
+  try {
+    abs = jail(workspace, relative);
+  } catch {
+    return { kind: "off_limits", sha256: null };
+  }
+  let info;
+  try {
+    info = await lstat(abs);
+  } catch {
+    return { kind: "deleted", sha256: null };
+  }
+  if (info.isSymbolicLink()) return { kind: "symlink", sha256: null };
+  if (!info.isFile()) return { kind: "other", sha256: null };
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(abs)) hash.update(chunk as Buffer);
+  return { kind: "file", sha256: hash.digest("hex") };
 }
 
 /**
@@ -451,9 +532,19 @@ export function createToolServer(env: RunnerEnv): ToolServer {
 
     async git_status() {
       const { stdout } = await runGit(["status", "--porcelain"]);
+      const digests = await changedFilesWithDigests(workspace, runGit);
       // Redacted like every other result: a path can carry a secret (a branch
       // or fixture named after one), and `git_diff` next door already did this.
-      return { changedFiles: stdout.trim().split("\n").filter(Boolean).map(redact) };
+      return {
+        // As before, for every Peeps server that reads only this.
+        changedFiles: stdout.trim().split("\n").filter(Boolean).map(redact),
+        files: digests.files.map((f) => ({
+          ...f,
+          path: redact(f.path),
+          ...(f.from === undefined ? {} : { from: redact(f.from) }),
+        })),
+        filesTruncated: digests.truncated,
+      };
     },
 
     async git_diff() {
@@ -511,7 +602,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
     { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
     { name: "run_tests", description: "Run one Playwright spec file with the repository's own config; optionally filter by --grep or project. Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name") }, ["file"]) },
-    { name: "git_status", description: "Files changed in the working tree.", inputSchema: obj({}, []) },
+    { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
     { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) },
   ];

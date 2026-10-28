@@ -683,8 +683,14 @@ async function runDispatched(env, peeps) {
   });
 }
 
+// src/agent.ts
+var import_node_child_process4 = require("node:child_process");
+var import_node_util3 = require("node:util");
+
 // src/tools.ts
 var import_node_child_process3 = require("node:child_process");
+var import_node_crypto3 = require("node:crypto");
+var import_node_fs2 = require("node:fs");
 var import_promises4 = require("node:fs/promises");
 var import_node_os2 = require("node:os");
 var import_node_path6 = __toESM(require("node:path"));
@@ -792,6 +798,48 @@ function renameSides(field) {
   }
   const [oldPath = "", newPath = ""] = field.split(" => ");
   return [oldPath, newPath];
+}
+async function changedFilesWithDigests(workspace, runGit) {
+  const { stdout } = await runGit(
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    { maxBuffer: 8 * 1024 * 1024 }
+  );
+  const fields = stdout.split("\0");
+  const files = [];
+  let truncated = false;
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    if (field.length < 4) continue;
+    if (files.length >= MAX_LIST) {
+      truncated = true;
+      break;
+    }
+    const status = field.slice(0, 2);
+    const entry = { path: field.slice(3), status, kind: "other", sha256: null };
+    if (status.includes("R") || status.includes("C")) entry.from = fields[++i];
+    Object.assign(entry, await digestOf(workspace, entry.path));
+    files.push(entry);
+  }
+  return { files, truncated };
+}
+async function digestOf(workspace, relative) {
+  let abs;
+  try {
+    abs = jail(workspace, relative);
+  } catch {
+    return { kind: "off_limits", sha256: null };
+  }
+  let info;
+  try {
+    info = await (0, import_promises4.lstat)(abs);
+  } catch {
+    return { kind: "deleted", sha256: null };
+  }
+  if (info.isSymbolicLink()) return { kind: "symlink", sha256: null };
+  if (!info.isFile()) return { kind: "other", sha256: null };
+  const hash = (0, import_node_crypto3.createHash)("sha256");
+  for await (const chunk of (0, import_node_fs2.createReadStream)(abs)) hash.update(chunk);
+  return { kind: "file", sha256: hash.digest("hex") };
 }
 function makeRedactor(env) {
   const values = Object.entries(env).filter(([k, v]) => v && v.length >= 8 && isSecretish(k)).map(([, v]) => v).sort((a, b) => b.length - a.length);
@@ -944,7 +992,17 @@ function createToolServer(env) {
     },
     async git_status() {
       const { stdout } = await runGit(["status", "--porcelain"]);
-      return { changedFiles: stdout.trim().split("\n").filter(Boolean).map(redact) };
+      const digests = await changedFilesWithDigests(workspace, runGit);
+      return {
+        // As before, for every Peeps server that reads only this.
+        changedFiles: stdout.trim().split("\n").filter(Boolean).map(redact),
+        files: digests.files.map((f) => ({
+          ...f,
+          path: redact(f.path),
+          ...f.from === void 0 ? {} : { from: redact(f.from) }
+        })),
+        filesTruncated: digests.truncated
+      };
     },
     async git_diff() {
       const { stdout } = await runGit(["diff"], { maxBuffer: 8 * 1024 * 1024 });
@@ -993,7 +1051,7 @@ function createToolServer(env) {
     { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
     { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
     { name: "run_tests", description: "Run one Playwright spec file with the repository's own config; optionally filter by --grep or project. Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name") }, ["file"]) },
-    { name: "git_status", description: "Files changed in the working tree.", inputSchema: obj({}, []) },
+    { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
     { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) }
   ];
@@ -1041,7 +1099,11 @@ function runCapture(cmd, args, cwd, timeoutMs) {
   });
 }
 
+// src/version.ts
+var ACTION_VERSION = "1.4.0";
+
 // src/agent.ts
+var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process4.execFile);
 async function runAgent(env, peeps) {
   if (!env.sessionId) throw new Error("`session-id` is required in agent mode (Peeps passes it)");
   const server = createToolServer(env);
@@ -1049,13 +1111,7 @@ async function runAgent(env, peeps) {
     `/api/v1/bridge/sessions/${env.sessionId}/attach`,
     {
       tools: server.specs,
-      runnerInfo: {
-        workingDirectory: env.workingDirectory,
-        configPath: env.configPath,
-        node: process.version,
-        sha: env.sha,
-        ref: env.ref
-      }
+      runnerInfo: await runnerInfoFor(env)
     }
   );
   const expiresAt = new Date(attach.expiresAt).getTime();
@@ -1107,14 +1163,112 @@ async function runAgent(env, peeps) {
     }
   }
 }
+async function runnerInfoFor(env) {
+  const info = {
+    workingDirectory: env.workingDirectory,
+    configPath: env.configPath,
+    node: process.version,
+    sha: env.sha,
+    ref: env.ref,
+    actionVersion: ACTION_VERSION
+  };
+  try {
+    const { stdout } = await execFileAsync3(
+      "git",
+      ["-c", `safe.directory=${env.workspace}`, "rev-parse", "HEAD"],
+      { cwd: env.workspace }
+    );
+    const sha = stdout.trim();
+    if (/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) info.checkoutSha = sha;
+  } catch {
+  }
+  return info;
+}
 function summarizeArgs(args) {
   return Object.entries(args).filter(([k]) => k !== "token" && k !== "content" && k !== "patch").map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 60)}`).join(", ");
 }
 
+// src/browser-check.ts
+var import_node_child_process5 = require("node:child_process");
+var import_node_fs3 = require("node:fs");
+var import_node_util4 = require("node:util");
+var execFileAsync4 = (0, import_node_util4.promisify)(import_node_child_process5.execFile);
+var PROBE = `
+const { createRequire } = require("node:module");
+const path = require("node:path");
+const from = (file) => createRequire(file);
+const here = path.join(process.cwd(), "noop.js");
+let pkg;
+try {
+  pkg = from(here).resolve("playwright-core/package.json");
+} catch {
+  const test = from(here).resolve("@playwright/test/package.json");
+  const pw = from(test).resolve("playwright/package.json");
+  pkg = from(pw).resolve("playwright-core/package.json");
+}
+const core = require(path.dirname(pkg));
+const browsers = [];
+for (const name of ["chromium", "firefox", "webkit"]) {
+  try { browsers.push({ name, executablePath: core[name].executablePath() }); } catch {}
+}
+process.stdout.write(JSON.stringify({ version: require(pkg).version, browsers }));
+`;
+async function probePlaywright(workingDirectory, env = process.env) {
+  try {
+    const { stdout } = await execFileAsync4(process.execPath, ["-e", PROBE], {
+      cwd: workingDirectory,
+      env,
+      timeout: 2e4
+    });
+    const parsed = JSON.parse(stdout);
+    return typeof parsed.version === "string" && Array.isArray(parsed.browsers) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+var BROWSER_DIR = /^(chromium|chromium_headless_shell|firefox|webkit)-\d+$/;
+function installOf(executablePath) {
+  const parts = executablePath.split(/[\\/]/);
+  const at = parts.findIndex((p) => BROWSER_DIR.test(p));
+  if (at < 0) return null;
+  return { root: parts.slice(0, at).join("/") || "/", dir: parts[at] };
+}
+function listDir(dir) {
+  try {
+    return (0, import_node_fs3.readdirSync)(dir);
+  } catch {
+    return [];
+  }
+}
+function missingBrowsersMessage(probe, fs) {
+  if (probe.browsers.length === 0) return null;
+  const list = fs.list ?? listDir;
+  const installs = probe.browsers.map((b) => ({ ...b, install: installOf(b.executablePath) }));
+  for (const b of installs) {
+    if (fs.exists(b.executablePath)) return null;
+    if (b.name === "chromium" && b.install) {
+      const shell = b.install.dir.replace(/^chromium-/, "chromium_headless_shell-");
+      if (fs.exists(`${b.install.root}/${shell}`)) return null;
+    }
+  }
+  const expected = installs.map((b) => b.install?.dir ?? b.name).join(", ");
+  const root = installs.find((b) => b.install)?.install?.root;
+  const found = root ? list(root).filter((d) => BROWSER_DIR.test(d)).sort() : [];
+  const where = root ? found.length > 0 ? ` ${root} has ${found.join(", ")}.` : ` ${root} has no Playwright browsers.` : "";
+  return `Playwright ${probe.version} is installed, but none of its browsers (${expected}) are on this runner.${where} Run the job in mcr.microsoft.com/playwright:v${probe.version}-jammy, the image for your @playwright/test version, or add \`npx playwright install --with-deps\` before the Peeps step. If your Playwright config launches a browser channel such as Chrome, you can ignore this.`;
+}
+async function warnIfBrowsersMissing(workingDirectory, platform) {
+  const probe = await probePlaywright(workingDirectory);
+  if (!probe) return;
+  const message = missingBrowsersMessage(probe, { exists: import_node_fs3.existsSync });
+  if (!message) return;
+  console.log(platform === "github" ? `::warning title=Playwright browsers missing::${message}` : `[peeps] warning: ${message}`);
+}
+
 // src/pytest.ts
-var import_node_child_process4 = require("node:child_process");
-var import_node_crypto3 = require("node:crypto");
-var import_node_fs2 = require("node:fs");
+var import_node_child_process6 = require("node:child_process");
+var import_node_crypto4 = require("node:crypto");
+var import_node_fs4 = require("node:fs");
 var import_promises5 = require("node:fs/promises");
 var import_node_os3 = require("node:os");
 var import_node_path7 = __toESM(require("node:path"));
@@ -1130,14 +1284,14 @@ function resolveFramework(env) {
   if (env.configPath) return "playwright";
   let names;
   try {
-    names = (0, import_node_fs2.readdirSync)(env.workingDirectory);
+    names = (0, import_node_fs4.readdirSync)(env.workingDirectory);
   } catch {
     return "playwright";
   }
   if (names.some((name) => PLAYWRIGHT_CONFIG.test(name))) return "playwright";
   if (names.includes("pytest.ini") || names.includes("conftest.py")) return "pytest";
   const pyproject = import_node_path7.default.join(env.workingDirectory, "pyproject.toml");
-  if ((0, import_node_fs2.existsSync)(pyproject) && /^\s*\[tool\.pytest(\.ini_options)?\]/m.test((0, import_node_fs2.readFileSync)(pyproject, "utf8"))) {
+  if ((0, import_node_fs4.existsSync)(pyproject) && /^\s*\[tool\.pytest(\.ini_options)?\]/m.test((0, import_node_fs4.readFileSync)(pyproject, "utf8"))) {
     return "pytest";
   }
   return "playwright";
@@ -1215,7 +1369,7 @@ function pytestEnv(extra) {
 function spawnPytest(args, options) {
   const candidates = process.env.PEEPS_PYTHON ? [process.env.PEEPS_PYTHON] : ["python", "python3"];
   const attempt = (index) => new Promise((resolve, reject) => {
-    const child = (0, import_node_child_process4.spawn)(candidates[index], ["-m", "pytest", ...args], {
+    const child = (0, import_node_child_process6.spawn)(candidates[index], ["-m", "pytest", ...args], {
       cwd: options.cwd,
       env: options.env,
       stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit"
@@ -1247,7 +1401,7 @@ async function collectPytest(env) {
     ["--collect-only", "-q", "-p", PLUGIN, ...configArgs(env)],
     { cwd: env.workingDirectory, env: pytestEnv({ PEEPS_COLLECT_OUT: out }), capture: true }
   );
-  if (![0, 2, 5].includes(code) || !(0, import_node_fs2.existsSync)(out)) {
+  if (![0, 2, 5].includes(code) || !(0, import_node_fs4.existsSync)(out)) {
     throw new Error(`pytest --collect-only exited with ${code}:
 ${output.slice(-4e3)}`);
   }
@@ -1261,7 +1415,7 @@ ${error.message}`);
 function repoRelative(env, abs) {
   let workspace = env.workspace;
   try {
-    workspace = (0, import_node_fs2.realpathSync)(workspace);
+    workspace = (0, import_node_fs4.realpathSync)(workspace);
   } catch {
   }
   const rel = import_node_path7.default.relative(workspace, abs).split(import_node_path7.default.sep).join("/");
@@ -1380,7 +1534,7 @@ function nodeIdArgument(nodeId, rootDirAbs, cwd) {
   const rest = separator === -1 ? "" : nodeId.slice(separator);
   let from = cwd;
   try {
-    from = (0, import_node_fs2.realpathSync)(cwd);
+    from = (0, import_node_fs4.realpathSync)(cwd);
   } catch {
   }
   const relative = import_node_path7.default.relative(from, import_node_path7.default.join(rootDirAbs, file)).split(import_node_path7.default.sep).join("/");
@@ -1472,7 +1626,7 @@ function artifactName(rel, runIdByOutputDir) {
   const flat = (runId ? [runId, ...rest] : [dir, ...rest]).join("-").replace(/[^A-Za-z0-9._-]/g, "_");
   if (flat.length <= 200) return `data/${flat}`;
   const ext = import_node_path7.default.extname(flat);
-  return `data/${(0, import_node_crypto3.createHash)("sha1").update(rel).digest("hex")}${ext}`;
+  return `data/${(0, import_node_crypto4.createHash)("sha1").update(rel).digest("hex")}${ext}`;
 }
 async function* walkOutput(dir, rel = "") {
   let entries;
@@ -1584,6 +1738,7 @@ async function main() {
         throw new Error(`unknown mode ${mode}`);
     }
   }
+  if (mode !== "inventory") await warnIfBrowsersMissing(env.workingDirectory, env.platform);
   switch (mode) {
     case "inventory":
       await runInventory(env, peeps);

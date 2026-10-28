@@ -194,6 +194,13 @@ read from the event payload, so this works whatever yours is called.
 
 ## Common setups
 
+**Keep the container image on your Playwright version.** The
+`mcr.microsoft.com/playwright:vX-jammy` image carries only Playwright X's
+browsers. Use the tag that matches the `@playwright/test` version in your
+lockfile, or add `npx playwright install --with-deps` after `npm ci`. When none
+of your Playwright's browsers are on the runner, the action prints a warning
+naming both versions before the tests start.
+
 **Tests in a subdirectory.** Point both inputs at it. `working-directory` is
 relative to the repository root, and `config` is relative to
 `working-directory`:
@@ -289,6 +296,11 @@ and sets `PEEPS_REQUIRE_PYTEST=1`, so there they fail instead.
 
 The Playwright capture regressions execute the committed `dist/index.js` with
 real Chromium and a local fake Peeps service. Rebuild before testing source changes.
+
+**Releasing.** `ACTION_VERSION` in `src/version.ts` is reported to Peeps as
+`runnerInfo.actionVersion`, and Peeps decides from it what the runner supports.
+Set it to the tag being released (without the `v`), rebuild `dist/`, and tag
+that commit.
 
 ## License
 

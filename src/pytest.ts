@@ -626,7 +626,8 @@ async function* walkOutput(dir: string, rel = ""): AsyncGenerator<{ abs: string;
 /**
  * The fields the plugin adds to a pytest test's FINAL `test_end` event (a
  * retried attempt's test_end carries none), on top of the fields every
- * test_end has (`testName`, `status`, `duration`, `error`, `errorStack`).
+ * test_end has (`testName`, `status`, `duration`, `error`, `errorStack`, and
+ * `retry`, the attempt's index from 0).
  * Every field is optional and absent when empty, and a server that does not
  * know them strips them. `python/peeps_pytest_plugin.py` builds them; this
  * type is their documentation.
