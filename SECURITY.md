@@ -47,13 +47,13 @@ This is more than "test results". Concretely:
 | --- | --- |
 | The **full source of every spec file** Playwright lists (pytest: every test module it collects) | `inventory`, and every `report`/`run` |
 | The Playwright test list: files, titles, projects, tags (pytest: node ids, browsers, lines, markers) | `inventory`, `report`, `run` |
-| Test results, timings, errors and stack traces, and which attempt each result was (Playwright's retry index) | `report`, `run` |
+| Test results, timings, errors and stack traces, and which attempt each result was (its retry index, from Playwright or pytest-rerunfailures) | `report`, `run` |
 | The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run` |
 | pytest only: skip reasons, `record_property` values, a failed test's captured stdout/stderr/log output, and the files a test saves in `peeps_artifacts_dir` or attaches with `record_property("peeps_attachment", path)` (only from inside the repository or pytest's temporary directory) | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
 | The sha actually checked out (`git rev-parse HEAD`), and this action's version | `agent` |
-| Tool results in an agent session: file contents, diffs, test output, and the sha256 of each changed file's contents | `agent` |
+| Tool results in an agent session: file contents, diffs, test output, and the sha256 of each changed file's contents (files up to 5 MB; symlinks are never followed) | `agent` |
 
 Two of those deserve emphasis.
 

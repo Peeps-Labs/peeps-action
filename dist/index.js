@@ -685,6 +685,7 @@ async function runDispatched(env, peeps) {
 
 // src/agent.ts
 var import_node_child_process4 = require("node:child_process");
+var import_promises5 = require("node:fs/promises");
 var import_node_util3 = require("node:util");
 
 // src/tools.ts
@@ -799,14 +800,22 @@ function renameSides(field) {
   const [oldPath = "", newPath = ""] = field.split(" => ");
   return [oldPath, newPath];
 }
-async function changedFilesWithDigests(workspace, runGit) {
+var MAX_HASH_BYTES = 5 * 1024 * 1024;
+var DIGEST_BUDGET_MS = 2e4;
+async function changedFilesWithDigests(workspace, runGit, limits = {}) {
+  const started = Date.now();
   const { stdout } = await runGit(
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    { maxBuffer: 8 * 1024 * 1024 }
+    { maxBuffer: 8 * 1024 * 1024, timeout: DIGEST_BUDGET_MS }
   );
   const fields = stdout.split("\0");
   const files = [];
   let truncated = false;
+  const realWorkspace = await (0, import_promises4.realpath)(workspace);
+  const hashing = {
+    maxBytes: limits.maxHashBytes ?? MAX_HASH_BYTES,
+    outOfTime: () => Date.now() - started >= (limits.budgetMs ?? DIGEST_BUDGET_MS)
+  };
   for (let i = 0; i < fields.length; i++) {
     const field = fields[i];
     if (field.length < 4) continue;
@@ -817,29 +826,55 @@ async function changedFilesWithDigests(workspace, runGit) {
     const status = field.slice(0, 2);
     const entry = { path: field.slice(3), status, kind: "other", sha256: null };
     if (status.includes("R") || status.includes("C")) entry.from = fields[++i];
-    Object.assign(entry, await digestOf(workspace, entry.path));
+    Object.assign(entry, await digestOf(workspace, realWorkspace, entry.path, hashing));
     files.push(entry);
   }
   return { files, truncated };
 }
-async function digestOf(workspace, relative) {
+function errorCode(error) {
+  return error.code ?? String(error).slice(0, 100);
+}
+async function digestOf(workspace, realWorkspace, relative, hashing) {
   let abs;
   try {
     abs = jail(workspace, relative);
   } catch {
     return { kind: "off_limits", sha256: null };
   }
+  const parent = import_node_path6.default.dirname(abs);
+  let realParent;
+  try {
+    realParent = await (0, import_promises4.realpath)(parent);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "deleted", sha256: null };
+    return { kind: "other", sha256: null, reason: `parent unreadable: ${code}` };
+  }
+  const resolved = import_node_path6.default.relative(realWorkspace, realParent);
+  if (resolved !== import_node_path6.default.relative(workspace, parent)) {
+    return resolved.startsWith("..") || import_node_path6.default.isAbsolute(resolved) ? { kind: "off_limits", sha256: null, reason: "under a symlinked directory that leads out of the workspace" } : { kind: "symlink", sha256: null, reason: "under a symlinked directory" };
+  }
   let info;
   try {
     info = await (0, import_promises4.lstat)(abs);
-  } catch {
-    return { kind: "deleted", sha256: null };
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT") return { kind: "deleted", sha256: null };
+    return { kind: "other", sha256: null, reason: `unreadable: ${code}` };
   }
   if (info.isSymbolicLink()) return { kind: "symlink", sha256: null };
   if (!info.isFile()) return { kind: "other", sha256: null };
-  const hash = (0, import_node_crypto3.createHash)("sha256");
-  for await (const chunk of (0, import_node_fs2.createReadStream)(abs)) hash.update(chunk);
-  return { kind: "file", sha256: hash.digest("hex") };
+  if (info.size > hashing.maxBytes) {
+    return { kind: "file", sha256: null, reason: `larger than ${hashing.maxBytes} bytes` };
+  }
+  if (hashing.outOfTime()) return { kind: "file", sha256: null, reason: "time budget for digests spent" };
+  try {
+    const hash = (0, import_node_crypto3.createHash)("sha256");
+    for await (const chunk of (0, import_node_fs2.createReadStream)(abs)) hash.update(chunk);
+    return { kind: "file", sha256: hash.digest("hex") };
+  } catch (error) {
+    return { kind: "file", sha256: null, reason: `unreadable: ${errorCode(error)}` };
+  }
 }
 function makeRedactor(env) {
   const values = Object.entries(env).filter(([k, v]) => v && v.length >= 8 && isSecretish(k)).map(([, v]) => v).sort((a, b) => b.length - a.length);
@@ -992,10 +1027,16 @@ function createToolServer(env) {
     },
     async git_status() {
       const { stdout } = await runGit(["status", "--porcelain"]);
-      const digests = await changedFilesWithDigests(workspace, runGit);
+      const changedFiles = stdout.trim().split("\n").filter(Boolean).map(redact);
+      let digests;
+      try {
+        digests = await changedFilesWithDigests(workspace, runGit);
+      } catch (error) {
+        const e = error;
+        return { changedFiles, filesTruncated: true, filesError: redact(String(e.message ?? error).slice(0, 300)) };
+      }
       return {
-        // As before, for every Peeps server that reads only this.
-        changedFiles: stdout.trim().split("\n").filter(Boolean).map(redact),
+        changedFiles,
         files: digests.files.map((f) => ({
           ...f,
           path: redact(f.path),
@@ -1175,11 +1216,12 @@ async function runnerInfoFor(env) {
   try {
     const { stdout } = await execFileAsync3(
       "git",
-      ["-c", `safe.directory=${env.workspace}`, "rev-parse", "HEAD"],
+      ["-c", `safe.directory=${env.workspace}`, "rev-parse", "--show-toplevel", "HEAD"],
       { cwd: env.workspace }
     );
-    const sha = stdout.trim();
-    if (/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) info.checkoutSha = sha;
+    const [toplevel = "", sha = ""] = stdout.trim().split("\n");
+    const [realTop, realWorkspace] = await Promise.all([(0, import_promises5.realpath)(toplevel), (0, import_promises5.realpath)(env.workspace)]);
+    if (realTop === realWorkspace && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) info.checkoutSha = sha;
   } catch {
   }
   return info;
@@ -1269,7 +1311,7 @@ async function warnIfBrowsersMissing(workingDirectory, platform) {
 var import_node_child_process6 = require("node:child_process");
 var import_node_crypto4 = require("node:crypto");
 var import_node_fs4 = require("node:fs");
-var import_promises5 = require("node:fs/promises");
+var import_promises6 = require("node:fs/promises");
 var import_node_os3 = require("node:os");
 var import_node_path7 = __toESM(require("node:path"));
 var PLUGIN_DIR = import_node_path7.default.join(__dirname, "..", "python");
@@ -1395,7 +1437,7 @@ function configArgs(env) {
   return env.configPath ? ["-c", env.configPath] : [];
 }
 async function collectPytest(env) {
-  const scratch = await (0, import_promises5.mkdtemp)(import_node_path7.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-collect-"));
+  const scratch = await (0, import_promises6.mkdtemp)(import_node_path7.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-collect-"));
   const out = import_node_path7.default.join(scratch, "collection.json");
   const { code, output } = await spawnPytest(
     ["--collect-only", "-q", "-p", PLUGIN, ...configArgs(env)],
@@ -1405,7 +1447,7 @@ async function collectPytest(env) {
     throw new Error(`pytest --collect-only exited with ${code}:
 ${output.slice(-4e3)}`);
   }
-  const collection = JSON.parse(await (0, import_promises5.readFile)(out, "utf8"));
+  const collection = JSON.parse(await (0, import_promises6.readFile)(out, "utf8"));
   for (const error of collection.errors) {
     console.log(`[peeps] collection error in ${error.nodeId}:
 ${error.message}`);
@@ -1434,7 +1476,7 @@ async function moduleFilePayload(env, collection) {
   const files = [];
   for (const file of [...modules].sort()) {
     const abs = import_node_path7.default.join(collection.rootDir, file);
-    const bytes = await (0, import_promises5.readFile)(abs);
+    const bytes = await (0, import_promises6.readFile)(abs);
     files.push({
       path: repoRelative(env, abs),
       blobSha: gitBlobSha(bytes),
@@ -1541,19 +1583,19 @@ function nodeIdArgument(nodeId, rootDirAbs, cwd) {
   return relative + rest;
 }
 async function executePytestAndReport(env, peeps, input2) {
-  const scratch = await (0, import_promises5.mkdtemp)(import_node_path7.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-"));
+  const scratch = await (0, import_promises6.mkdtemp)(import_node_path7.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-"));
   const planFile = import_node_path7.default.join(scratch, "plan.json");
   const resultsFile = import_node_path7.default.join(scratch, "results.json");
   const outputDir = import_node_path7.default.join(scratch, "output");
   const artifactsDir = import_node_path7.default.join(scratch, "evidence");
-  await (0, import_promises5.mkdir)(artifactsDir);
+  await (0, import_promises6.mkdir)(artifactsDir);
   const runs = Object.fromEntries(
     Object.entries(input2.byNodeId).map(([nodeId, run]) => [
       nodeId,
       { runId: run.runId, credential: run.credential }
     ])
   );
-  await (0, import_promises5.writeFile)(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 384 });
+  await (0, import_promises6.writeFile)(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 384 });
   const config = env.configPath ? configArgs(env) : input2.collection.iniPath ? ["-c", input2.collection.iniPath] : [];
   const args = ["-p", PLUGIN, "--rootdir", input2.collection.rootDir, ...config];
   if (input2.collection.playwright) args.push("--output", outputDir);
@@ -1610,7 +1652,7 @@ async function executePytestAndReport(env, peeps, input2) {
 async function readOutputDirs(resultsFile, byNodeId) {
   const map = /* @__PURE__ */ new Map();
   try {
-    const results = JSON.parse(await (0, import_promises5.readFile)(resultsFile, "utf8"));
+    const results = JSON.parse(await (0, import_promises6.readFile)(resultsFile, "utf8"));
     for (const [nodeId, dir] of Object.entries(results.outputDirs ?? {})) {
       const run = byNodeId[nodeId];
       if (run) map.set(import_node_path7.default.basename(dir), run.runId);
@@ -1631,7 +1673,7 @@ function artifactName(rel, runIdByOutputDir) {
 async function* walkOutput(dir, rel = "") {
   let entries;
   try {
-    entries = await (0, import_promises5.readdir)(dir, { withFileTypes: true });
+    entries = await (0, import_promises6.readdir)(dir, { withFileTypes: true });
   } catch {
     return;
   }
@@ -1645,13 +1687,13 @@ async function* walkOutput(dir, rel = "") {
 var MAX_EVIDENCE_BYTES = 25 * 1024 * 1024;
 async function stagedEvidence(uploadDir, byNodeId) {
   try {
-    if (!(await (0, import_promises5.lstat)(uploadDir)).isDirectory()) return [];
+    if (!(await (0, import_promises6.lstat)(uploadDir)).isDirectory()) return [];
   } catch {
     return [];
   }
   const runIds = Object.values(byNodeId).map((run) => run.runId);
   const staged = [];
-  for (const entry of await (0, import_promises5.readdir)(uploadDir, { withFileTypes: true })) {
+  for (const entry of await (0, import_promises6.readdir)(uploadDir, { withFileTypes: true })) {
     const name = entry.name;
     if (!entry.isFile() || !/^[A-Za-z0-9._-]{1,200}$/.test(name)) {
       console.log(`[peeps] not uploading ${JSON.stringify(name)}: not a staged attachment`);
@@ -1667,14 +1709,14 @@ async function uploadEvidence(peeps, batchId, files) {
   let uploaded = 0;
   for (const file of files) {
     try {
-      const info = await (0, import_promises5.lstat)(file.abs);
+      const info = await (0, import_promises6.lstat)(file.abs);
       if (!info.isFile() || info.size > MAX_EVIDENCE_BYTES) {
         console.log(`[peeps] skipping attachment ${file.name}: not a file within ${MAX_EVIDENCE_BYTES} bytes`);
         continue;
       }
       await peeps.postBytes(
         `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(`data/${file.name}`)}`,
-        await (0, import_promises5.readFile)(file.abs)
+        await (0, import_promises6.readFile)(file.abs)
       );
       uploaded += 1;
     } catch (error) {
@@ -1686,7 +1728,7 @@ async function uploadEvidence(peeps, batchId, files) {
 async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
   let uploaded = 0;
   for await (const file of walkOutput(outputDir)) {
-    const info = await (0, import_promises5.stat)(file.abs);
+    const info = await (0, import_promises6.stat)(file.abs);
     if (info.size > MAX_UPLOAD_BYTES2) {
       console.log(`[peeps] skipping ${file.rel}: ${info.size} bytes exceeds the upload limit`);
       continue;
@@ -1695,7 +1737,7 @@ async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
     try {
       await peeps.postBytes(
         `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(name)}`,
-        await (0, import_promises5.readFile)(file.abs)
+        await (0, import_promises6.readFile)(file.abs)
       );
       uploaded += 1;
     } catch (error) {

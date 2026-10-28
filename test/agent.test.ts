@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -66,4 +66,18 @@ test("runnerInfo leaves checkoutSha out when the workspace is not a git checkout
   const info = await runnerInfoFor(envAt(ws, null));
   assert.equal("checkoutSha" in info, false);
   assert.equal(info.actionVersion, ACTION_VERSION);
+});
+
+test("runnerInfo leaves checkoutSha out when the workspace is only a folder inside another repository", async (t) => {
+  const outer = await mkdtemp(path.join(tmpdir(), "peeps-agent-"));
+  t.after(() => rm(outer, { recursive: true, force: true }));
+  git(outer, "init", "-q", "-b", "main");
+  await writeFile(path.join(outer, "a.txt"), "1\n");
+  git(outer, "add", "-A");
+  git(outer, "commit", "-q", "-m", "one");
+  const ws = path.join(outer, "_work", "repo");
+  await mkdir(ws, { recursive: true });
+  const info = await runnerInfoFor(envAt(ws, null));
+  // HEAD there is the enclosing repository's, not this checkout's.
+  assert.equal("checkoutSha" in info, false);
 });

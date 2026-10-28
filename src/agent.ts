@@ -9,6 +9,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { RunnerEnv } from "./env";
 import type { PeepsClient } from "./peeps";
@@ -92,7 +93,8 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void
  * `sha` is the sha the workflow ran from (GITHUB_SHA / CI_COMMIT_SHA). When
  * Peeps pins the checkout (`actions/checkout` with `ref: <sha>`), the tree the
  * tools read and test is a different commit, so `checkoutSha` reports it:
- * `git rev-parse HEAD` in the workspace, left out when that fails. Peeps
+ * `git rev-parse HEAD` in the workspace, left out when that fails or when the
+ * workspace is not itself the repository's top level. Peeps
  * states a result as "verified at <sha>" only when `checkoutSha` is the sha it
  * asked for. `actionVersion` tells Peeps which of these fields, and which
  * tool behaviours, this runner has. A server that predates either field
@@ -112,11 +114,15 @@ export async function runnerInfoFor(env: RunnerEnv): Promise<Record<string, unkn
     // owned by another uid, and git refuses it without this (see tools.ts).
     const { stdout } = await execFileAsync(
       "git",
-      ["-c", `safe.directory=${env.workspace}`, "rev-parse", "HEAD"],
+      ["-c", `safe.directory=${env.workspace}`, "rev-parse", "--show-toplevel", "HEAD"],
       { cwd: env.workspace },
     );
-    const sha = stdout.trim();
-    if (/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) info.checkoutSha = sha;
+    const [toplevel = "", sha = ""] = stdout.trim().split("\n");
+    // Only the workspace's own repository: a workspace that is merely a
+    // folder inside another checkout (a self-hosted runner's `_work` inside a
+    // repository) would otherwise report that repository's HEAD.
+    const [realTop, realWorkspace] = await Promise.all([realpath(toplevel), realpath(env.workspace)]);
+    if (realTop === realWorkspace && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) info.checkoutSha = sha;
   } catch {
     // Not a git checkout, or git is missing: Peeps reads "not reported".
   }
