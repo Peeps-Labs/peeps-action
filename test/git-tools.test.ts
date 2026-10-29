@@ -716,7 +716,10 @@ test("a rename listed by both its paths commits the deletion and the addition", 
 });
 
 /** A pytest repository whose `.peeps/run-tests` sources a sibling and writes the JUnit. */
-async function hookRepo(t: TestContext) {
+async function hookRepo(
+  t: TestContext,
+  hook = `#!/bin/sh\n. "$(dirname "$0")/lib.sh"\njunit "$1"\necho customer-hook\n`,
+) {
   const root = await mkdtemp(path.join(tmpdir(), "peeps-hook-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const ws = path.join(root, "ws");
@@ -727,7 +730,7 @@ async function hookRepo(t: TestContext) {
     path.join(ws, ".peeps/lib.sh"),
     `junit() { printf '<testsuite><testcase classname="tests.test_a" name="test_a" file="tests/test_a.py"/></testsuite>' > "$1"; }\n`,
   );
-  await writeFile(path.join(ws, ".peeps/run-tests"), `#!/bin/sh\n. "$(dirname "$0")/lib.sh"\njunit "$1"\necho customer-hook\n`);
+  await writeFile(path.join(ws, ".peeps/run-tests"), hook);
   await chmod(path.join(ws, ".peeps/run-tests"), 0o755);
   await writeFile(path.join(ws, "tests/test_a.py"), "def test_a(): pass\n");
   git(ws, "add", "-A");
@@ -794,4 +797,18 @@ test("a .peeps/run-tests changed in the checkout and listed for commit is refuse
   assert.equal(out.results, null);
   assert.match(out.outputTail, /differs from the commit under test/);
   await assert.rejects(stat(marker));
+});
+
+test("a real hook that starts a lab run and prints peeps:pending comes back pending", async (t) => {
+  // The commit under test is the checkout's HEAD when the job starts.
+  const { tools } = await hookRepo(t, `#!/bin/sh\necho "queued $2"\necho "peeps:pending https://lab.example/runs/7"\n`);
+  const out = (await tools.run_tests!({ file: "tests/test_a.py", test: "test_a" })) as HookRun & {
+    pending: boolean;
+    pendingNote: string | null;
+  };
+  assert.equal(out.ranWith, ".peeps/run-tests");
+  assert.equal(out.pending, true);
+  assert.equal(out.pendingNote, "https://lab.example/runs/7");
+  assert.equal(out.results, null);
+  assert.match(out.outputTail, /queued tests\/test_a\.py::test_a/);
 });

@@ -1153,6 +1153,18 @@ function pytestNodeArgument(fileRelativeToCwd, titlePath, browser = null) {
   }
   return `${fileRelativeToCwd}::${scopes.join("::")}`;
 }
+var PENDING_MARKER = "peeps:pending";
+function pendingMarkerNote(output) {
+  let note = null;
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === PENDING_MARKER) note = "";
+    else if (line.startsWith(PENDING_MARKER) && /\s/.test(line[PENDING_MARKER.length] ?? "")) {
+      note = line.slice(PENDING_MARKER.length).trim().slice(0, 500);
+    }
+  }
+  return note;
+}
 var ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
 function decodeEntities(text) {
   return text.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (whole, code) => {
@@ -1242,6 +1254,8 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
         exitCode: 1,
         durationMs: Date.now() - started,
         ranWith: RUN_TESTS_HOOK,
+        pending: false,
+        pendingNote: null,
         results: null,
         outputTail: `${RUN_TESTS_HOOK} differs from the commit under test, so Peeps did not run it. Undo the change under .peeps/ and run the test again.`
       };
@@ -1265,10 +1279,13 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
       xml = await (0, import_promises5.readFile)(junit, "utf8");
     } catch {
     }
+    const note = hook && xml === null && ran.code === 0 ? pendingMarkerNote(ran.output) : null;
     return {
       exitCode: ran.code,
       durationMs: Date.now() - started,
       ranWith: hook ? RUN_TESTS_HOOK : "pytest",
+      pending: note !== null,
+      pendingNote: note ? note : null,
       results: xml === null ? null : parseJunitResults(xml, repoRel),
       outputTail: ran.output.slice(-8e3)
     };
@@ -1652,6 +1669,7 @@ function createToolServer(env) {
         });
         return {
           ...ran,
+          pendingNote: ran.pendingNote === null ? null : redact(ran.pendingNote),
           results: ran.results?.map((r) => ({ ...r, title: redact(r.title), ...r.error ? { error: redact(r.error) } : {} })) ?? null,
           outputTail: redact(ran.outputTail)
         };

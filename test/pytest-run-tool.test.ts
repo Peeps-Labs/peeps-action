@@ -194,6 +194,76 @@ test("a run that wrote no JUnit reports no results and keeps the output", async 
   assert.equal(out.outputTail, "1 passed");
 });
 
+function hookDeps(code: number, output: string, xml: string | null = null) {
+  const deps: PytestRunDeps = {
+    run: async (_cmd, args) => {
+      if (xml !== null) await writeFile(args[0]!, xml);
+      return { code, output };
+    },
+    pytest: async () => {
+      throw new Error("pytest must not run while a hook is ready");
+    },
+  };
+  return deps;
+}
+
+async function runHook(deps: PytestRunDeps) {
+  const env = await workspace(true);
+  return runPytestTool(
+    env,
+    {
+      fileAbs: path.join(env.workspace, "tests/test_a.py"),
+      titlePath: "test_up",
+      keyword: null,
+      hook: async (dir) => ({ kind: "ready", path: path.join(dir, "run-tests") }),
+    },
+    deps,
+  );
+}
+
+test("a hook that started a lab run and printed peeps:pending reports a pending run", async () => {
+  const out = await runHook(hookDeps(0, "reserving a camera\npeeps:pending\nbye\n"));
+  assert.equal(out.pending, true);
+  assert.equal(out.pendingNote, null);
+  assert.equal(out.results, null);
+  assert.equal(out.ranWith, ".peeps/run-tests");
+  assert.equal(out.exitCode, 0);
+});
+
+test("the pending line may carry a note, such as the lab run's link", async () => {
+  const out = await runHook(hookDeps(0, "  peeps:pending https://lab.example/runs/42  \r\n"));
+  assert.equal(out.pending, true);
+  assert.equal(out.pendingNote, "https://lab.example/runs/42");
+});
+
+test("a pending marker counts only on its own line, after a clean exit, with no JUnit", async () => {
+  // Not its own line: a log that mentions the marker.
+  assert.equal((await runHook(hookDeps(0, "echo peeps:pending later\n"))).pending, false);
+  assert.equal((await runHook(hookDeps(0, "peeps:pendingness\n"))).pending, false);
+  // A failed hook did not start anything Peeps can wait for.
+  assert.equal((await runHook(hookDeps(2, "peeps:pending\n"))).pending, false);
+  // A JUnit file is a verdict, and a verdict wins.
+  const withJunit = await runHook(hookDeps(0, "peeps:pending\n", ONE_PASS));
+  assert.equal(withJunit.pending, false);
+  assert.equal(withJunit.results?.[0]?.status, "passed");
+});
+
+test("pytest output is never read as a pending marker", async () => {
+  const env = await workspace(false);
+  const deps: PytestRunDeps = {
+    run: async () => {
+      throw new Error("no hook");
+    },
+    pytest: async () => ({ code: 0, output: "peeps:pending\n" }),
+  };
+  const out = await runPytestTool(
+    env,
+    { fileAbs: path.join(env.workspace, "tests/test_a.py"), titlePath: "test_up", keyword: null },
+    deps,
+  );
+  assert.equal(out.pending, false);
+});
+
 test("a .peeps/run-tests in the checkout runs only through a hook plan", async () => {
   const env = await workspace(true);
   const { deps, calls } = fakeDeps(ONE_PASS);

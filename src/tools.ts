@@ -668,6 +668,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         });
         return {
           ...ran,
+          pendingNote: ran.pendingNote === null ? null : redact(ran.pendingNote),
           results: ran.results?.map((r) => ({ ...r, title: redact(r.title), ...(r.error ? { error: redact(r.error) } : {}) })) ?? null,
           outputTail: redact(ran.outputTail),
         };
