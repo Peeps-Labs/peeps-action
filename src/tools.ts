@@ -39,6 +39,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { RunnerEnv } from "./env";
+import { resolveFramework } from "./pytest";
+import { RUN_TESTS_HOOK, runPytestTool } from "./pytest-run-tool";
 
 const execFileAsync = promisify(execFile);
 
@@ -101,6 +103,12 @@ export function jailForWrite(workspace: string, relative: string): string {
   const rel = path.relative(workspace, abs).split(path.sep).join("/");
   if (isCiConfiguration(rel)) {
     throw new ToolError(`workflow files are not writable by Peeps: ${relative}`);
+  }
+  // The customer's own hooks (`.peeps/run-tests` runs a heal's verification):
+  // a heal that could rewrite them could change what verifies it.
+  const folded = rel.toLowerCase();
+  if (folded === ".peeps" || folded.startsWith(".peeps/")) {
+    throw new ToolError(`.peeps/ holds your own hooks and is not writable by Peeps: ${relative}`);
   }
   return abs;
 }
@@ -506,6 +514,15 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       ...options,
     });
 
+  // The commit under test, read before any tool can move HEAD:
+  // `git_commit_push` commits before it pushes (and keeps the commit when the
+  // push fails), so HEAD alone would let a heal's own commit vouch for a
+  // `.peeps/run-tests` it rewrote.
+  const commitUnderTest: Promise<string | null> = runGit(["rev-parse", "HEAD"]).then(
+    (r) => r.stdout.trim() || null,
+    () => null,
+  );
+
   const handlers: Record<string, ToolHandler> = {
     async read_file(args) {
       const abs = jail(workspace, str(args, "path"));
@@ -618,6 +635,43 @@ export function createToolServer(env: RunnerEnv): ToolServer {
 
     async run_tests(args) {
       const file = str(args, "file");
+      if (resolveFramework(env) === "pytest") {
+        const ran = await runPytestTool(env, {
+          fileAbs: jail(workspace, file),
+          titlePath: typeof args.test === "string" && args.test ? args.test : null,
+          keyword: typeof args.grep === "string" && args.grep ? args.grep : null,
+          browser: typeof args.project === "string" && args.project ? args.project : null,
+          hook: async (scratchDir) => {
+            const sha = await commitUnderTest;
+            if (!sha) return { kind: "none" };
+            const listed = await runGit(["ls-tree", sha, "--", RUN_TESTS_HOOK]);
+            if (!listed.stdout.startsWith("100755 blob ")) return { kind: "none" };
+            // The agent's writes are refused under .peeps/; this catches one
+            // that reached it another way (through a symlink, say), since a
+            // hook may read its own files from the checkout.
+            try {
+              await runGit(["diff", "--quiet", sha, "--", ".peeps"]);
+              const untracked = await runGit(["ls-files", "--others", "--", ".peeps"]);
+              if (untracked.stdout.trim() !== "") return { kind: "changed" };
+            } catch {
+              return { kind: "changed" };
+            }
+            // What runs is a copy out of the commit, so nothing written to the
+            // checkout after that check reaches it.
+            const archive = path.join(scratchDir, "peeps.tar");
+            const copy = path.join(scratchDir, "hook");
+            await mkdir(copy);
+            await runGit(["archive", "--format=tar", "-o", archive, sha, ".peeps"]);
+            await execFileAsync("tar", ["-xf", archive, "-C", copy]);
+            return { kind: "ready", path: path.join(copy, RUN_TESTS_HOOK) };
+          },
+        });
+        return {
+          ...ran,
+          results: ran.results?.map((r) => ({ ...r, title: redact(r.title), ...(r.error ? { error: redact(r.error) } : {}) })) ?? null,
+          outputTail: redact(ran.outputTail),
+        };
+      }
       // `file` arrives repo-relative and is jailed against the workspace, but
       // Playwright runs with `workingDirectory` as its cwd. In any monorepo
       // those differ, and passing the repo-relative path straight through made
@@ -685,7 +739,11 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       const message = str(args, "message");
       const token = str(args, "token");
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
-      // Checked in full before anything is touched: one bad path refuses the call.
+      // HEAD is read before this commit can move it (see `commitUnderTest`).
+      await commitUnderTest;
+      // Checked in full before anything is touched: one bad path refuses the
+      // call. They pass `jailForWrite`, so `.peeps/` (the customer's own
+      // hooks, which verify a heal) can never be listed.
       const paths = args.paths === undefined ? null : await commitPaths(workspace, args.paths);
       const remote = await runGit(["remote", "get-url", "origin"]);
       const url = authenticatedPushUrl(remote.stdout, token, env.platform);
@@ -877,7 +935,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "grep", description: "Search source files for a regular expression; returns matching lines.", inputSchema: obj({ pattern: s("JavaScript regular expression"), path: s("Repo-relative directory to search; default the root"), ignoreCase: { type: "boolean" } }, ["pattern"]) },
     { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
     { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
-    { name: "run_tests", description: "Run one Playwright spec file with the repository's own config; optionally filter by --grep or project. Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name") }, ["file"]) },
+    { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec, or in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one). Optionally narrow it: Playwright by --grep or project; pytest by test (the title path, e.g. TestClass › test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name"), test: s("Optional pytest title path of one test, scopes joined by ' › '") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
     { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) },

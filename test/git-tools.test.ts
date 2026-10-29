@@ -7,7 +7,7 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -713,4 +713,85 @@ test("a rename listed by both its paths commits the deletion and the addition", 
   assert.deepEqual(result.skippedPaths, []);
   assert.equal(git(bare, "show", `${result.sha}:e2e/renamed.spec.ts`), "old");
   assert.throws(() => git(bare, "cat-file", "-e", `${result.sha}:e2e/old.spec.ts`));
+});
+
+/** A pytest repository whose `.peeps/run-tests` sources a sibling and writes the JUnit. */
+async function hookRepo(t: TestContext) {
+  const root = await mkdtemp(path.join(tmpdir(), "peeps-hook-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const ws = path.join(root, "ws");
+  await mkdir(path.join(ws, ".peeps"), { recursive: true });
+  await mkdir(path.join(ws, "tests"));
+  git(ws, "init", "-q", "-b", "main");
+  await writeFile(
+    path.join(ws, ".peeps/lib.sh"),
+    `junit() { printf '<testsuite><testcase classname="tests.test_a" name="test_a" file="tests/test_a.py"/></testsuite>' > "$1"; }\n`,
+  );
+  await writeFile(path.join(ws, ".peeps/run-tests"), `#!/bin/sh\n. "$(dirname "$0")/lib.sh"\njunit "$1"\necho customer-hook\n`);
+  await chmod(path.join(ws, ".peeps/run-tests"), 0o755);
+  await writeFile(path.join(ws, "tests/test_a.py"), "def test_a(): pass\n");
+  git(ws, "add", "-A");
+  git(ws, "commit", "-q", "-m", "init");
+  git(ws, "remote", "add", "origin", "https://example.invalid/acme/app.git");
+  const env = { workspace: ws, workingDirectory: ws, configPath: null, framework: "pytest", platform: "github" } as unknown as RunnerEnv;
+  return { root, ws, tools: createToolServer(env).handlers };
+}
+
+interface HookRun { ranWith: string; results: Array<{ title: string; status: string }> | null; outputTail: string }
+
+test("run_tests runs the commit's own .peeps/run-tests, siblings included", async (t) => {
+  const { tools } = await hookRepo(t);
+  const out = (await tools.run_tests!({ file: "tests/test_a.py", test: "test_a" })) as HookRun;
+  assert.equal(out.ranWith, ".peeps/run-tests");
+  assert.match(out.outputTail, /customer-hook/);
+  assert.deepEqual(out.results?.map((r) => [r.title, r.status]), [["test_a", "passed"]]);
+});
+
+test("a hook rewritten through a symlink and committed by a failed push never runs", async (t) => {
+  const { root, ws, tools } = await hookRepo(t);
+  const marker = path.join(root, "agent-ran");
+  const patch = "diff --git a/alias b/alias\nnew file mode 120000\nindex 0000000..1111111\n--- /dev/null\n+++ b/alias\n@@ -0,0 +1 @@\n+.peeps\n\\ No newline at end of file\n";
+  await tools.apply_patch!({ patch });
+  await tools.write_file!({ path: "alias/run-tests", content: `#!/bin/sh\ntouch '${marker}'\n` });
+  // The push fails on its bad token, but git_commit_push has committed by then,
+  // so HEAD now holds the agent's hook.
+  await assert.rejects(tools.git_commit_push!({ branch: "peeps/x", message: "m", token: "bogus" }));
+  assert.notEqual(git(ws, "log", "-1", "--format=%s"), "init");
+  const out = (await tools.run_tests!({ file: "tests/test_a.py", test: "test_a" })) as HookRun;
+  assert.equal(out.results, null);
+  assert.match(out.outputTail, /differs from the commit under test/);
+  await assert.rejects(stat(marker));
+});
+
+test("git_commit_push never lists .peeps/, in any case, so a heal cannot commit the hook that verifies it", async (t) => {
+  const { ws, bare } = await pinnedCheckout(t);
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "healed\n");
+  for (const listed of [".peeps/run-tests", ".PEEPS/run-tests", ".peeps/lib.sh"]) {
+    await refused(
+      toolsFor(ws).git_commit_push!({ branch: BRANCH, message: "Fix", token: TOKEN, paths: ["e2e/a.spec.ts", listed] }),
+      /\.peeps\/ holds your own hooks/,
+    );
+  }
+  noBranch(bare);
+  assert.equal(git(ws, "diff", "--cached", "--name-only"), "");
+});
+
+test("a .peeps/run-tests changed in the checkout and listed for commit is refused, and run_tests still will not run it", async (t) => {
+  const { root, ws, tools } = await hookRepo(t);
+  const marker = path.join(root, "agent-ran");
+  const head = git(ws, "rev-parse", "HEAD");
+  // However the hook was changed (a test run, a symlinked path), listing it
+  // is refused before anything is staged or committed.
+  await writeFile(path.join(ws, ".peeps/run-tests"), `#!/bin/sh\ntouch '${marker}'\n`);
+  await assert.rejects(
+    tools.git_commit_push!({ branch: "peeps/x", message: "m", token: "bogus", paths: [".peeps/run-tests"] }),
+    /\.peeps\/ holds your own hooks/,
+  );
+  assert.equal(git(ws, "rev-parse", "HEAD"), head);
+  assert.equal(git(ws, "diff", "--cached", "--name-only"), "");
+  // #8's rule holds: the checkout's hook differs from the commit's, so it never runs.
+  const out = (await tools.run_tests!({ file: "tests/test_a.py", test: "test_a" })) as HookRun;
+  assert.equal(out.results, null);
+  assert.match(out.outputTail, /differs from the commit under test/);
+  await assert.rejects(stat(marker));
 });

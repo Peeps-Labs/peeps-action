@@ -63,6 +63,12 @@ test("jailForWrite additionally refuses workflow files", () => {
     jailForWrite(WS, ".github/CODEOWNERS"),
     "/workspace/.github/CODEOWNERS",
   );
+  // The customer's hooks are theirs: a heal must not change what verifies it.
+  assert.throws(() => jailForWrite(WS, ".peeps/run-tests"), /not writable by Peeps/);
+  assert.throws(() => jailForWrite(WS, ".peeps"), /not writable by Peeps/);
+  // A case-insensitive filesystem would write the same files.
+  assert.throws(() => jailForWrite(WS, ".PEEPS/run-tests"), /not writable by Peeps/);
+  assert.equal(jail(WS, ".peeps/run-tests"), "/workspace/.peeps/run-tests");
   // And jailForWrite still enforces everything jail does.
   assert.throws(() => jailForWrite(WS, ".env"), /off limits/);
 });
