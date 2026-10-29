@@ -1153,6 +1153,7 @@ function pytestNodeArgument(fileRelativeToCwd, titlePath, browser = null) {
   }
   return `${fileRelativeToCwd}::${scopes.join("::")}`;
 }
+var OUTPUT_TAIL_CHARS = 2e4;
 var PENDING_MARKER = "peeps:pending";
 function pendingMarkerNote(output) {
   let note = null;
@@ -1160,7 +1161,7 @@ function pendingMarkerNote(output) {
     const line = raw.trim();
     if (line === PENDING_MARKER) note = "";
     else if (line.startsWith(PENDING_MARKER) && /\s/.test(line[PENDING_MARKER.length] ?? "")) {
-      note = line.slice(PENDING_MARKER.length).trim().slice(0, 500);
+      note = line.slice(PENDING_MARKER.length).trim();
     }
   }
   return note;
@@ -1222,7 +1223,7 @@ var defaultDeps = {
       const child = spawn4(cmd, args, { cwd, env: { ...process.env, ...RUN_ENV }, stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       const keep = (chunk) => {
-        output = (output + chunk.toString("utf8")).slice(-2e4);
+        output = (output + chunk.toString("utf8")).slice(-OUTPUT_TAIL_CHARS);
       };
       const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
       child.stdout.on("data", keep);
@@ -1279,7 +1280,8 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
       xml = await (0, import_promises5.readFile)(junit, "utf8");
     } catch {
     }
-    const note = hook && xml === null && ran.code === 0 ? pendingMarkerNote(ran.output) : null;
+    const whole = ran.output.length < OUTPUT_TAIL_CHARS ? ran.output : ran.output.slice(ran.output.indexOf("\n") + 1);
+    const note = hook && xml === null && ran.code === 0 ? pendingMarkerNote(whole) : null;
     return {
       exitCode: ran.code,
       durationMs: Date.now() - started,
@@ -1669,7 +1671,8 @@ function createToolServer(env) {
         });
         return {
           ...ran,
-          pendingNote: ran.pendingNote === null ? null : redact(ran.pendingNote),
+          // Redacted whole, then cut, so no secret is split past the redactor.
+          pendingNote: ran.pendingNote === null ? null : redact(ran.pendingNote).slice(0, 500),
           results: ran.results?.map((r) => ({ ...r, title: redact(r.title), ...r.error ? { error: redact(r.error) } : {} })) ?? null,
           outputTail: redact(ran.outputTail)
         };

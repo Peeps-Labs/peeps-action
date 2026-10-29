@@ -6,7 +6,9 @@ import path from "node:path";
 import type { RunnerEnv } from "../src/env";
 import {
   junitTitlePath,
+  OUTPUT_TAIL_CHARS,
   parseJunitResults,
+  pendingMarkerNote,
   pytestNodeArgument,
   runPytestTool,
   type PytestRunDeps,
@@ -246,6 +248,22 @@ test("a pending marker counts only on its own line, after a clean exit, with no 
   const withJunit = await runHook(hookDeps(0, "peeps:pending\n", ONE_PASS));
   assert.equal(withJunit.pending, false);
   assert.equal(withJunit.results?.[0]?.status, "passed");
+});
+
+test("a marker manufactured by cutting the output to its tail does not count", async () => {
+  // The run keeps the last OUTPUT_TAIL_CHARS of output, so its first line may
+  // be the end of a longer one: here, a log line that mentions the marker.
+  const cut = `peeps:pending ${"x".repeat(OUTPUT_TAIL_CHARS - 19)}\nbye\n`;
+  assert.equal(cut.length, OUTPUT_TAIL_CHARS);
+  assert.equal((await runHook(hookDeps(0, cut))).pending, false);
+  // A marker on a later, whole line still counts.
+  const kept = `${"x".repeat(OUTPUT_TAIL_CHARS)}\npeeps:pending\n`.slice(-OUTPUT_TAIL_CHARS);
+  assert.equal((await runHook(hookDeps(0, kept))).pending, true);
+});
+
+test("the note is kept whole, for the redactor to see every secret in it", () => {
+  const note = "y".repeat(800);
+  assert.equal(pendingMarkerNote(`peeps:pending ${note}\n`), note);
 });
 
 test("pytest output is never read as a pending marker", async () => {

@@ -78,6 +78,9 @@ export function pytestNodeArgument(
   return `${fileRelativeToCwd}::${scopes.join("::")}`;
 }
 
+/** How much of a run's output is kept: its tail. */
+export const OUTPUT_TAIL_CHARS = 20_000;
+
 /** The line a hook prints when it started a lab run and will not wait for it. */
 export const PENDING_MARKER = "peeps:pending";
 
@@ -92,7 +95,8 @@ export function pendingMarkerNote(output: string): string | null {
     const line = raw.trim();
     if (line === PENDING_MARKER) note = "";
     else if (line.startsWith(PENDING_MARKER) && /\s/.test(line[PENDING_MARKER.length] ?? "")) {
-      note = line.slice(PENDING_MARKER.length).trim().slice(0, 500);
+      // Whole: the caller redacts it, and a cut could split a secret.
+      note = line.slice(PENDING_MARKER.length).trim();
     }
   }
   return note;
@@ -198,7 +202,7 @@ const defaultDeps: PytestRunDeps = {
       const child = spawn(cmd, args, { cwd, env: { ...process.env, ...RUN_ENV }, stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       const keep = (chunk: Buffer) => {
-        output = (output + chunk.toString("utf8")).slice(-20_000);
+        output = (output + chunk.toString("utf8")).slice(-OUTPUT_TAIL_CHARS);
       };
       const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
       child.stdout.on("data", keep);
@@ -277,7 +281,10 @@ export async function runPytestTool(
       // No JUnit: pytest or the hook failed before writing one.
     }
     // A verdict wins: the marker means something only when no JUnit came back.
-    const note = hook && xml === null && ran.code === 0 ? pendingMarkerNote(ran.output) : null;
+    // Output cut to its tail may start mid-line, so that first line is no line.
+    const whole =
+      ran.output.length < OUTPUT_TAIL_CHARS ? ran.output : ran.output.slice(ran.output.indexOf("\n") + 1);
+    const note = hook && xml === null && ran.code === 0 ? pendingMarkerNote(whole) : null;
     return {
       exitCode: ran.code,
       durationMs: Date.now() - started,
