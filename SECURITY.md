@@ -47,12 +47,13 @@ This is more than "test results". Concretely:
 | --- | --- |
 | The **full source of every spec file** Playwright lists (pytest: every test module it collects) | `inventory`, and every `report`/`run` |
 | The Playwright test list: files, titles, projects, tags (pytest: node ids, browsers, lines, markers) | `inventory`, `report`, `run` |
-| Test results, timings, errors and stack traces | `report`, `run` |
+| Test results, timings, errors and stack traces, and which attempt each result was (its retry index, from Playwright or pytest-rerunfailures) | `report`, `run` |
 | The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run` |
 | pytest only: skip reasons, `record_property` values, a failed test's captured stdout/stderr/log output, and the files a test saves in `peeps_artifacts_dir` or attaches with `record_property("peeps_attachment", path)` (only from inside the repository or pytest's temporary directory) | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
-| Tool results in an agent session: file contents, diffs, test output | `agent` |
+| The sha actually checked out (`git rev-parse HEAD`), and this action's version | `agent` |
+| Tool results in an agent session: file contents, diffs, test output, and the sha256 of each changed file's contents (files up to 5 MB; symlinks are never followed) | `agent` |
 
 Two of those deserve emphasis.
 
@@ -96,6 +97,9 @@ The limits that do exist are guardrails against mistakes, not a sandbox:
   environment, including `GITHUB_TOKEN`, `ACTIONS_RUNTIME_TOKEN` and the OIDC
   request token. It cannot mask a secret that is not in this process's own
   environment, so a credential read out of a JSON file is not masked.
+  `git_status` reports the sha256 of each changed file's unredacted bytes, so
+  Peeps can check them against what it wrote. A digest does not reveal a
+  file's contents, but it does confirm a guess of a short or predictable file.
 - Every tool call and its arguments are echoed to the job log, so the session is
   auditable after the fact. Arguments known to carry secrets are excluded from
   that log.

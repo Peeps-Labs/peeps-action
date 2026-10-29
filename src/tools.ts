@@ -32,7 +32,9 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -228,6 +230,149 @@ function renameSides(field: string): string[] {
 }
 
 /**
+ * One changed file in `git_status`'s `files`.
+ *
+ * `kind` says what is in the working tree at `path` now: a regular `file`,
+ * nothing (`deleted`), a `symlink`, something `other` (a directory, e.g. a
+ * nested repository), or a path the tools may not touch (`off_limits`, e.g.
+ * `.env.local`: listed so the change is visible, never hashed).
+ *
+ * No symlink is followed, as the last component or as a leading directory: it
+ * can point anywhere on the runner, and git does not look through one either.
+ * A path under a symlinked directory is `symlink`, or `off_limits` when that
+ * directory leads out of the workspace.
+ *
+ * `sha256` is the lowercase hex sha256 of a `file`'s bytes, and null for every
+ * other kind. A `file` can also have a null `sha256`, with `reason` saying why
+ * (unreadable, over the size cap, past the time budget). `from` is a rename's
+ * or copy's source.
+ */
+export interface ChangedFile {
+  path: string;
+  /** git's porcelain XY code, e.g. `??`, ` M`, `D `, `R `. */
+  status: string;
+  kind: "file" | "deleted" | "symlink" | "other" | "off_limits";
+  sha256: string | null;
+  from?: string;
+  reason?: string;
+}
+
+type RunGit = (
+  args: string[],
+  options?: { maxBuffer?: number; timeout?: number },
+) => Promise<{ stdout: string }>;
+
+/** Larger files are listed but not hashed. The agent's own writes are capped at 512 KB. */
+const MAX_HASH_BYTES = 5 * 1024 * 1024;
+/** Peeps gives `git_status` 60 s; the digests get a third of it. */
+const DIGEST_BUDGET_MS = 20_000;
+
+/**
+ * Every changed file, one entry per file, for Peeps to check the writes it
+ * made against what is really in the tree (and to refuse a change it cannot
+ * account for, such as a file a test run rewrote).
+ *
+ * `-z` so paths arrive unquoted and exact, and `--untracked-files=all` so a
+ * new directory is listed file by file rather than collapsed to `dir/`.
+ *
+ * Throws only when the listing itself fails (too big for its buffer, or too
+ * slow); `git_status` then leaves `files` out. Each file's digest is best
+ * effort.
+ */
+export async function changedFilesWithDigests(
+  workspace: string,
+  runGit: RunGit,
+  limits: { maxHashBytes?: number; budgetMs?: number } = {},
+): Promise<{ files: ChangedFile[]; truncated: boolean }> {
+  const started = Date.now();
+  const { stdout } = await runGit(
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    { maxBuffer: 8 * 1024 * 1024, timeout: DIGEST_BUDGET_MS },
+  );
+  const fields = stdout.split("\0");
+  const files: ChangedFile[] = [];
+  let truncated = false;
+  const realWorkspace = await realpath(workspace);
+  const hashing = {
+    maxBytes: limits.maxHashBytes ?? MAX_HASH_BYTES,
+    outOfTime: () => Date.now() - started >= (limits.budgetMs ?? DIGEST_BUDGET_MS),
+  };
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i]!;
+    if (field.length < 4) continue;
+    if (files.length >= MAX_LIST) {
+      truncated = true;
+      break;
+    }
+    const status = field.slice(0, 2);
+    const entry: ChangedFile = { path: field.slice(3), status, kind: "other", sha256: null };
+    // A rename or copy is followed by its source, as its own field.
+    if (status.includes("R") || status.includes("C")) entry.from = fields[++i];
+    Object.assign(entry, await digestOf(workspace, realWorkspace, entry.path, hashing));
+    files.push(entry);
+  }
+  return { files, truncated };
+}
+
+function errorCode(error: unknown): string {
+  return (error as { code?: string }).code ?? String(error).slice(0, 100);
+}
+
+async function digestOf(
+  workspace: string,
+  realWorkspace: string,
+  relative: string,
+  hashing: { maxBytes: number; outOfTime: () => boolean },
+): Promise<Pick<ChangedFile, "kind" | "sha256" | "reason">> {
+  let abs: string;
+  try {
+    abs = jail(workspace, relative);
+  } catch {
+    return { kind: "off_limits", sha256: null };
+  }
+  // `jail` is lexical and `lstat` follows symlinks in the leading
+  // directories, so resolve the parent and require it to be exactly where the
+  // path says: otherwise a directory replaced by a symlink would have a file
+  // outside the workspace hashed under this path.
+  const parent = path.dirname(abs);
+  let realParent: string;
+  try {
+    realParent = await realpath(parent);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "deleted", sha256: null };
+    return { kind: "other", sha256: null, reason: `parent unreadable: ${code}` };
+  }
+  const resolved = path.relative(realWorkspace, realParent);
+  if (resolved !== path.relative(workspace, parent)) {
+    return resolved.startsWith("..") || path.isAbsolute(resolved)
+      ? { kind: "off_limits", sha256: null, reason: "under a symlinked directory that leads out of the workspace" }
+      : { kind: "symlink", sha256: null, reason: "under a symlinked directory" };
+  }
+  let info;
+  try {
+    info = await lstat(abs);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT") return { kind: "deleted", sha256: null };
+    return { kind: "other", sha256: null, reason: `unreadable: ${code}` };
+  }
+  if (info.isSymbolicLink()) return { kind: "symlink", sha256: null };
+  if (!info.isFile()) return { kind: "other", sha256: null };
+  if (info.size > hashing.maxBytes) {
+    return { kind: "file", sha256: null, reason: `larger than ${hashing.maxBytes} bytes` };
+  }
+  if (hashing.outOfTime()) return { kind: "file", sha256: null, reason: "time budget for digests spent" };
+  try {
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(abs)) hash.update(chunk as Buffer);
+    return { kind: "file", sha256: hash.digest("hex") };
+  } catch (error) {
+    return { kind: "file", sha256: null, reason: `unreadable: ${errorCode(error)}` };
+  }
+}
+
+/**
  * Mask every non-trivial value present in the job's environment: that set IS
  * the secrets the customer exposed to this job. Cheap, and it closes the
  * obvious leak (a test printing `process.env.TOKEN` into a trace or stdout).
@@ -300,7 +445,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
    * Peeps run forever. A per-invocation `-c` trusts exactly this path for
    * exactly this process.
    */
-  const runGit = (args: string[], options: { maxBuffer?: number } = {}) =>
+  const runGit = (args: string[], options: { maxBuffer?: number; timeout?: number } = {}) =>
     execFileAsync("git", ["-c", `safe.directory=${workspace}`, ...args], {
       cwd: workspace,
       ...options,
@@ -453,7 +598,26 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       const { stdout } = await runGit(["status", "--porcelain"]);
       // Redacted like every other result: a path can carry a secret (a branch
       // or fixture named after one), and `git_diff` next door already did this.
-      return { changedFiles: stdout.trim().split("\n").filter(Boolean).map(redact) };
+      // As before, for every Peeps server that reads only this.
+      const changedFiles = stdout.trim().split("\n").filter(Boolean).map(redact);
+      // `files` is additive and must never cost a caller `changedFiles`: when
+      // the listing fails, it is left out and the failure said.
+      let digests;
+      try {
+        digests = await changedFilesWithDigests(workspace, runGit);
+      } catch (error) {
+        const e = error as { message?: string };
+        return { changedFiles, filesTruncated: true, filesError: redact(String(e.message ?? error).slice(0, 300)) };
+      }
+      return {
+        changedFiles,
+        files: digests.files.map((f) => ({
+          ...f,
+          path: redact(f.path),
+          ...(f.from === undefined ? {} : { from: redact(f.from) }),
+        })),
+        filesTruncated: digests.truncated,
+      };
     },
 
     async git_diff() {
@@ -511,7 +675,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
     { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
     { name: "run_tests", description: "Run one Playwright spec file with the repository's own config; optionally filter by --grep or project. Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name") }, ["file"]) },
-    { name: "git_status", description: "Files changed in the working tree.", inputSchema: obj({}, []) },
+    { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
     { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) },
   ];
@@ -528,8 +692,8 @@ function s(description: string) {
 
 function summarizeReport(report: unknown) {
   if (!report || typeof report !== "object" || !("suites" in report)) return null;
-  const tests: Array<{ title: string; file: string; line: number; status: string; error?: string; errorSnippet?: string }> = [];
-  const walk = (suite: { title: string; file?: string; specs?: Array<{ title: string; file: string; line: number; tests?: Array<{ results?: Array<{ status: string; error?: { message?: string; snippet?: string } }> }> }>; suites?: unknown[] }, titles: string[], isFile: boolean) => {
+  const tests: Array<{ title: string; file: string; line: number; status: string; retry?: number; error?: string; errorSnippet?: string }> = [];
+  const walk = (suite: { title: string; file?: string; specs?: Array<{ title: string; file: string; line: number; tests?: Array<{ results?: Array<{ status: string; retry?: number; error?: { message?: string; snippet?: string } }> }> }>; suites?: unknown[] }, titles: string[], isFile: boolean) => {
     const next = isFile ? titles : [...titles, suite.title];
     for (const spec of suite.specs ?? []) {
       const last = spec.tests?.[0]?.results?.at(-1);
@@ -538,6 +702,9 @@ function summarizeReport(report: unknown) {
         file: spec.file,
         line: spec.line,
         status: last?.status ?? "unknown",
+        // The final attempt's index (0 = no retry), so a pass after a retry
+        // is not read as a clean one. Absent when Playwright ran no attempt.
+        ...(typeof last?.retry === "number" ? { retry: last.retry } : {}),
         error: last?.error?.message?.slice(0, 2000),
         errorSnippet: last?.error?.snippet?.slice(0, 2000),
       });

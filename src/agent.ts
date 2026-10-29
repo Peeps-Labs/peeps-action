@@ -8,9 +8,15 @@
  * (410), when the session's hard cap passes, or on repeated transport errors.
  */
 
+import { execFile } from "node:child_process";
+import { realpath } from "node:fs/promises";
+import { promisify } from "node:util";
 import type { RunnerEnv } from "./env";
 import type { PeepsClient } from "./peeps";
 import { createToolServer } from "./tools";
+import { ACTION_VERSION } from "./version";
+
+const execFileAsync = promisify(execFile);
 
 interface Call {
   id: string;
@@ -26,13 +32,7 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void
     `/api/v1/bridge/sessions/${env.sessionId}/attach`,
     {
       tools: server.specs,
-      runnerInfo: {
-        workingDirectory: env.workingDirectory,
-        configPath: env.configPath,
-        node: process.version,
-        sha: env.sha,
-        ref: env.ref,
-      },
+      runnerInfo: await runnerInfoFor(env),
     },
   );
   const expiresAt = new Date(attach.expiresAt).getTime();
@@ -85,6 +85,48 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void
       console.log(`[peeps] could not deliver result for #${call.seq}: ${String(error).slice(0, 200)}`);
     }
   }
+}
+
+/**
+ * What the runner tells Peeps about itself when it attaches.
+ *
+ * `sha` is the sha the workflow ran from (GITHUB_SHA / CI_COMMIT_SHA). When
+ * Peeps pins the checkout (`actions/checkout` with `ref: <sha>`), the tree the
+ * tools read and test is a different commit, so `checkoutSha` reports it:
+ * `git rev-parse HEAD` in the workspace, left out when that fails or when the
+ * workspace is not itself the repository's top level. Peeps
+ * states a result as "verified at <sha>" only when `checkoutSha` is the sha it
+ * asked for. `actionVersion` tells Peeps which of these fields, and which
+ * tool behaviours, this runner has. A server that predates either field
+ * ignores it.
+ */
+export async function runnerInfoFor(env: RunnerEnv): Promise<Record<string, unknown>> {
+  const info: Record<string, unknown> = {
+    workingDirectory: env.workingDirectory,
+    configPath: env.configPath,
+    node: process.version,
+    sha: env.sha,
+    ref: env.ref,
+    actionVersion: ACTION_VERSION,
+  };
+  try {
+    // `-c safe.directory`: inside the Playwright container the checkout is
+    // owned by another uid, and git refuses it without this (see tools.ts).
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-c", `safe.directory=${env.workspace}`, "rev-parse", "--show-toplevel", "HEAD"],
+      { cwd: env.workspace },
+    );
+    const [toplevel = "", sha = ""] = stdout.trim().split("\n");
+    // Only the workspace's own repository: a workspace that is merely a
+    // folder inside another checkout (a self-hosted runner's `_work` inside a
+    // repository) would otherwise report that repository's HEAD.
+    const [realTop, realWorkspace] = await Promise.all([realpath(toplevel), realpath(env.workspace)]);
+    if (realTop === realWorkspace && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) info.checkoutSha = sha;
+  } catch {
+    // Not a git checkout, or git is missing: Peeps reads "not reported".
+  }
+  return info;
 }
 
 function summarizeArgs(args: Record<string, unknown>): string {

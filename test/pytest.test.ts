@@ -341,6 +341,8 @@ test("a run streams one test_start/test_end per planned node id, pytest's outcom
     const base = "tests/shop/test_cart.py::";
     assert.equal(statusOf(`${base}test_opens[chromium]`).status, "passed");
     assert.equal(statusOf(`${base}test_opens[chromium]`).testName, "test_opens[chromium]");
+    // Without reruns every test_end is the first attempt.
+    assert.equal(statusOf(`${base}test_opens[chromium]`).retry, 0);
     assert.equal(statusOf(`${base}TestCart::test_quantity[chromium-2]`).status, "passed");
     const failed = statusOf(`${base}test_total_is_wrong`);
     assert.equal(failed.status, "failed");
@@ -486,9 +488,18 @@ test("with pytest-rerunfailures each attempt is a test_end and only the final on
     ],
   );
   assert.match(String(flaky[2]!.error), /first attempt/);
+  // Each test_end names its attempt, as the Playwright reporter's do.
+  assert.deepEqual(
+    flaky.filter((e) => e.type === "test_end").map((e) => (e as { retry?: unknown }).retry),
+    [0, 1],
+  );
   // A test that fails every attempt still fails.
   const wrong = received.events.get(byNodeId["tests/shop/test_cart.py::test_total_is_wrong"]!.runId) ?? [];
   assert.equal(wrong[2]!.status, "failed");
+  assert.deepEqual(
+    wrong.filter((e) => e.type === "test_end").map((e) => (e as { retry?: unknown }).retry),
+    [0, 1],
+  );
 });
 
 test("a pytest that cannot start still closes its batches and fails the job", async () => {

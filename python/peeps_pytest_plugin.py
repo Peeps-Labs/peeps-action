@@ -650,6 +650,10 @@ class _Streamer:
         self.phases: Dict[str, List[Dict[str, Any]]] = {}
         self.output_dirs: Dict[str, str] = {}
         self.statuses: Dict[str, str] = {}
+        # How many attempts of each node id have ended: the next test_end's
+        # `retry`. Counted across logfinish calls, because
+        # pytest-rerunfailures 16 gives every attempt its own.
+        self.attempts_ended: Dict[str, int] = {}
         # One delivery thread, in order; drained at session finish.
         self.outbox: "queue.Queue[Any]" = queue.Queue()
         threading.Thread(
@@ -730,6 +734,8 @@ class _Streamer:
                 else settle(phases)
             )
             self.statuses[nodeid] = settled["status"]
+            retry = self.attempts_ended.get(nodeid, 0)
+            self.attempts_ended[nodeid] = retry + 1
             if entry is None:
                 if not retried:
                     print(
@@ -743,6 +749,9 @@ class _Streamer:
                 "testName": _test_name(nodeid),
                 "status": settled["status"],
                 "duration": int(round(sum(p["duration"] for p in phases) * 1000)),
+                # Which attempt this was, 0 for the first, as the Playwright
+                # reporter sends `result.retry`.
+                "retry": retry,
             }
             if settled.get("error"):
                 event["error"] = settled["error"][:4000]
