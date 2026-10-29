@@ -668,6 +668,8 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         });
         return {
           ...ran,
+          // Redacted whole, then cut, so no secret is split past the redactor.
+          pendingNote: ran.pendingNote === null ? null : redact(ran.pendingNote).slice(0, 500),
           results: ran.results?.map((r) => ({ ...r, title: redact(r.title), ...(r.error ? { error: redact(r.error) } : {}) })) ?? null,
           outputTail: redact(ran.outputTail),
         };

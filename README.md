@@ -252,6 +252,30 @@ included, a heal can change, as with Playwright. A run must finish within
 Peeps' tool timeout (10 minutes for a call the agent makes, 15 for the final
 verification).
 
+**A lab run longer than a heal can wait.** If your lab cannot finish in that
+time (a device reservation alone can take 30 minutes), the hook may start the
+run and return without a verdict: exit 0, write no JUnit file, and print a line
+that is exactly
+
+```text
+peeps:pending
+```
+
+optionally followed by a space and a note, such as the lab run's link
+(`peeps:pending https://lab.example.com/runs/42`). Print it last: Peeps reads
+only the tail of the hook's output. `run_tests` then returns `pending: true`,
+`results: null` and the note as `pendingNote`. A JUnit file always wins over the
+marker, a non-zero exit ignores it, and pytest's own output never counts.
+The healer then works from the failing run's recorded evidence, and Peeps opens
+the fix as a draft pull request on its `peeps/*` branch. Have the lab upload
+its JUnit for that fix to Peeps' results API (`POST /api/v1/projects/{project}/ci-results`)
+with `gitRef` set to that branch and `commitSha` to its head commit (both are
+in the draft's description): a passing test marks the pull request ready for
+review, a failing one closes it with the failure. The hook runs before Peeps
+commits, so it cannot know that branch or commit yet. The simplest setup has
+your own CI run the lab on pushes to `peeps/*` branches, where both are known,
+and the hook only print the marker.
+
 **Running the workflow by hand.** `mode: inventory` needs no session id:
 
 ```bash

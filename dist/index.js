@@ -1153,6 +1153,19 @@ function pytestNodeArgument(fileRelativeToCwd, titlePath, browser = null) {
   }
   return `${fileRelativeToCwd}::${scopes.join("::")}`;
 }
+var OUTPUT_TAIL_CHARS = 2e4;
+var PENDING_MARKER = "peeps:pending";
+function pendingMarkerNote(output) {
+  let note = null;
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === PENDING_MARKER) note = "";
+    else if (line.startsWith(PENDING_MARKER) && /\s/.test(line[PENDING_MARKER.length] ?? "")) {
+      note = line.slice(PENDING_MARKER.length).trim();
+    }
+  }
+  return note;
+}
 var ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
 function decodeEntities(text) {
   return text.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (whole, code) => {
@@ -1210,7 +1223,7 @@ var defaultDeps = {
       const child = spawn4(cmd, args, { cwd, env: { ...process.env, ...RUN_ENV }, stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       const keep = (chunk) => {
-        output = (output + chunk.toString("utf8")).slice(-2e4);
+        output = (output + chunk.toString("utf8")).slice(-OUTPUT_TAIL_CHARS);
       };
       const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
       child.stdout.on("data", keep);
@@ -1242,6 +1255,8 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
         exitCode: 1,
         durationMs: Date.now() - started,
         ranWith: RUN_TESTS_HOOK,
+        pending: false,
+        pendingNote: null,
         results: null,
         outputTail: `${RUN_TESTS_HOOK} differs from the commit under test, so Peeps did not run it. Undo the change under .peeps/ and run the test again.`
       };
@@ -1265,10 +1280,15 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
       xml = await (0, import_promises5.readFile)(junit, "utf8");
     } catch {
     }
+    const firstBreak = ran.output.indexOf("\n");
+    const whole = ran.output.length < OUTPUT_TAIL_CHARS ? ran.output : firstBreak < 0 ? "" : ran.output.slice(firstBreak + 1);
+    const note = hook && xml === null && ran.code === 0 ? pendingMarkerNote(whole) : null;
     return {
       exitCode: ran.code,
       durationMs: Date.now() - started,
       ranWith: hook ? RUN_TESTS_HOOK : "pytest",
+      pending: note !== null,
+      pendingNote: note ? note : null,
       results: xml === null ? null : parseJunitResults(xml, repoRel),
       outputTail: ran.output.slice(-8e3)
     };
@@ -1652,6 +1672,8 @@ function createToolServer(env) {
         });
         return {
           ...ran,
+          // Redacted whole, then cut, so no secret is split past the redactor.
+          pendingNote: ran.pendingNote === null ? null : redact(ran.pendingNote).slice(0, 500),
           results: ran.results?.map((r) => ({ ...r, title: redact(r.title), ...r.error ? { error: redact(r.error) } : {} })) ?? null,
           outputTail: redact(ran.outputTail)
         };

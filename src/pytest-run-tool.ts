@@ -23,6 +23,16 @@
  * customer's: `.peeps/` is refused to the agent's writes, what runs is a copy
  * of `.peeps/` taken from the commit under test, and it runs only while the
  * checkout's `.peeps/` still matches that commit.
+ *
+ * ## A hook that cannot wait: `peeps:pending`
+ *
+ * A lab run can take longer than any heal may wait (a reservation alone can
+ * take 30 minutes). Such a hook may start the run and return at once: it exits
+ * 0, writes no JUnit file, and prints a line that is exactly `peeps:pending`,
+ * optionally followed by a space and a note (the lab run's link, say). The
+ * result is then `pending: true` with `results: null`, and the verdict reaches
+ * Peeps later, through the lab's own results upload. A JUnit file always wins
+ * over the marker, and the marker counts only from the hook, never from pytest.
  */
 
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -66,6 +76,30 @@ export function pytestNodeArgument(
     if (bracket !== -1) scopes[last] = scopes[last]!.slice(0, bracket);
   }
   return `${fileRelativeToCwd}::${scopes.join("::")}`;
+}
+
+/** How much of a run's output is kept: its tail. */
+export const OUTPUT_TAIL_CHARS = 20_000;
+
+/** The line a hook prints when it started a lab run and will not wait for it. */
+export const PENDING_MARKER = "peeps:pending";
+
+/**
+ * The note on the hook's last `peeps:pending` line: `""` for a bare marker,
+ * `null` when no line is the marker. A line counts only when, trimmed, it is
+ * the marker alone or the marker, whitespace, and a note.
+ */
+export function pendingMarkerNote(output: string): string | null {
+  let note: string | null = null;
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === PENDING_MARKER) note = "";
+    else if (line.startsWith(PENDING_MARKER) && /\s/.test(line[PENDING_MARKER.length] ?? "")) {
+      // Whole: the caller redacts it, and a cut could split a secret.
+      note = line.slice(PENDING_MARKER.length).trim();
+    }
+  }
+  return note;
 }
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
@@ -168,7 +202,7 @@ const defaultDeps: PytestRunDeps = {
       const child = spawn(cmd, args, { cwd, env: { ...process.env, ...RUN_ENV }, stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       const keep = (chunk: Buffer) => {
-        output = (output + chunk.toString("utf8")).slice(-20_000);
+        output = (output + chunk.toString("utf8")).slice(-OUTPUT_TAIL_CHARS);
       };
       const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
       child.stdout.on("data", keep);
@@ -218,6 +252,8 @@ export async function runPytestTool(
         exitCode: 1,
         durationMs: Date.now() - started,
         ranWith: RUN_TESTS_HOOK,
+        pending: false,
+        pendingNote: null,
         results: null,
         outputTail: `${RUN_TESTS_HOOK} differs from the commit under test, so Peeps did not run it. Undo the change under .peeps/ and run the test again.`,
       };
@@ -244,10 +280,19 @@ export async function runPytestTool(
     } catch {
       // No JUnit: pytest or the hook failed before writing one.
     }
+    // A verdict wins: the marker means something only when no JUnit came back.
+    // Output cut to its tail may start mid-line, so that first line is no line;
+    // a full tail with no line break is all cut line.
+    const firstBreak = ran.output.indexOf("\n");
+    const whole =
+      ran.output.length < OUTPUT_TAIL_CHARS ? ran.output : firstBreak < 0 ? "" : ran.output.slice(firstBreak + 1);
+    const note = hook && xml === null && ran.code === 0 ? pendingMarkerNote(whole) : null;
     return {
       exitCode: ran.code,
       durationMs: Date.now() - started,
       ranWith: hook ? RUN_TESTS_HOOK : "pytest",
+      pending: note !== null,
+      pendingNote: note ? note : null,
       results: xml === null ? null : parseJunitResults(xml, repoRel),
       outputTail: ran.output.slice(-8000),
     };
