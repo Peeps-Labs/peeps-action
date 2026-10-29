@@ -372,6 +372,51 @@ async function digestOf(
   }
 }
 
+const MAX_COMMIT_PATHS = 200;
+
+/**
+ * `git_commit_push`'s `paths`, checked and normalized to repo-relative form.
+ *
+ * Each goes through the same jail as a write (no `..`, absolute paths, `.git`,
+ * `node_modules`, `.env*` or CI configuration), and no symlink: neither the
+ * path itself nor any directory above it, since committing through one would
+ * commit something other than the file the path names. A directory is
+ * refused too: `git add` would take everything under it. Any bad path
+ * refuses the whole call.
+ */
+export async function commitPaths(workspace: string, value: unknown): Promise<string[]> {
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > MAX_COMMIT_PATHS ||
+    !value.every((p) => typeof p === "string" && p.length > 0)
+  ) {
+    throw new ToolError(`argument "paths" must be an array of 1 to ${MAX_COMMIT_PATHS} non-empty strings`);
+  }
+  const realWorkspace = await realpath(workspace);
+  const out = new Set<string>();
+  for (const relative of value as string[]) {
+    const abs = jailForWrite(workspace, relative);
+    const info = await lstat(abs).catch(() => null);
+    if (info?.isSymbolicLink()) throw new ToolError(`path is a symlink: ${relative}`);
+    if (info?.isDirectory()) throw new ToolError(`path is a directory, not a file: ${relative}`);
+    // The deepest directory above it that exists must be exactly where the
+    // path says it is.
+    let existing = path.dirname(abs);
+    for (;;) {
+      const found = await lstat(existing).then(() => true, () => false);
+      if (found || path.dirname(existing) === existing) break;
+      existing = path.dirname(existing);
+    }
+    const resolved = path.relative(realWorkspace, await realpath(existing));
+    if (resolved !== path.relative(workspace, existing)) {
+      throw new ToolError(`path is under a symlinked directory: ${relative}`);
+    }
+    out.add(path.relative(workspace, abs).split(path.sep).join("/"));
+  }
+  return [...out];
+}
+
 /**
  * Mask every non-trivial value present in the job's environment: that set IS
  * the secrets the customer exposed to this job. Cheap, and it closes the
@@ -630,6 +675,8 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       const message = str(args, "message");
       const token = str(args, "token");
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
+      // Checked in full before anything is touched: one bad path refuses the call.
+      const paths = args.paths === undefined ? null : await commitPaths(workspace, args.paths);
       const remote = await runGit(["remote", "get-url", "origin"]);
       const url = authenticatedPushUrl(remote.stdout, token, env.platform);
       // Via `runGit`, so these carry `-c safe.directory` like every other git
@@ -643,10 +690,30 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         env.platform === "gitlab" ? "peeps-bot@noreply.peepsai.com" : "peeps[bot]@users.noreply.github.com",
       );
       await git("checkout", "-B", branch);
-      await git("add", "-A");
-      const commit = await git("commit", "-m", message).catch((e: { stderr?: string }) => {
+      const nothingToCommit = (e: { stderr?: string }) => {
         throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
-      });
+      };
+      let commit;
+      if (paths === null) {
+        await git("add", "-A");
+        commit = await git("commit", "-m", message).catch(nothingToCommit);
+      } else {
+        // Only the listed paths, taken literally (`--literal-pathspecs`: a
+        // `*` is a character, not a pattern). A listed path that neither
+        // exists nor is tracked has nothing to stage, and naming it would make
+        // `git add` fail, so it is dropped. `add -A` stages a listed deletion;
+        // `commit --only` commits those paths and nothing else already staged.
+        const tracked = new Set(
+          (await git("--literal-pathspecs", "ls-files", "-z", "--", ...paths)).stdout.split("\0").filter(Boolean),
+        );
+        const present = await Promise.all(paths.map((p) => lstat(path.join(workspace, p)).then(() => true, () => false)));
+        const stage = paths.filter((p, i) => present[i] || tracked.has(p));
+        if (stage.length === 0) nothingToCommit({ stderr: "none of the listed paths has a change" });
+        await git("--literal-pathspecs", "add", "-A", "--", ...stage);
+        commit = await git("--literal-pathspecs", "commit", "-m", message, "--only", "--", ...stage).catch(
+          (e: { stderr?: string; stdout?: string }) => nothingToCommit({ stderr: e.stderr || e.stdout }),
+        );
+      }
       // actions/checkout persists the job's GITHUB_TOKEN as an `http.extraheader`
       // Authorization header, which git sends INSTEAD of the credentials in the
       // URL — and that token is usually `contents: read`. Blank the header for
@@ -664,7 +731,10 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         throw new ToolError(`git push refused: ${stderr.slice(-600)}`);
       });
       const sha = (await git("rev-parse", "HEAD")).stdout.trim();
-      return { branch, sha, summary: redact(commit.stdout.split("\n")[0] ?? "") };
+      // What the pushed commit really contains, from git, not from the request.
+      const committedPaths = (await git("diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"))
+        .stdout.split("\0").filter(Boolean).map(redact);
+      return { branch, sha, summary: redact(commit.stdout.split("\n")[0] ?? ""), committedPaths };
     },
   };
 
@@ -677,7 +747,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "run_tests", description: "Run one Playwright spec file with the repository's own config; optionally filter by --grep or project. Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
-    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) },
+    { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) },
   ];
 
   return { specs, handlers };

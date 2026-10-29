@@ -108,9 +108,12 @@ The limits that do exist are guardrails against mistakes, not a sandbox:
 
 Two specifics a reviewer should weigh:
 
-- **The push stages everything.** It runs `git add -A`, so anything the job
-  wrote to the working tree that your `.gitignore` does not exclude is committed
-  to the `peeps/*` branch. Your `.gitignore` is the only thing bounding that.
+- **What the push commits.** When Peeps names the files to commit (`paths`),
+  only those are staged and committed. Each must be a file inside the workspace,
+  reached through no symlink, and none can be under `.git`, `node_modules`,
+  `.env*` or your CI configuration. Without `paths` the push stages everything
+  (`git add -A`), so anything the job wrote to the working tree that your
+  `.gitignore` does not exclude is committed to the `peeps/*` branch.
 - **The push is a force push** to the `peeps/*` branch it names. An existing
   Peeps branch of the same name is replaced; nothing else can be.
 

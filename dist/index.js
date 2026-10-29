@@ -876,6 +876,32 @@ async function digestOf(workspace, realWorkspace, relative, hashing) {
     return { kind: "file", sha256: null, reason: `unreadable: ${errorCode(error)}` };
   }
 }
+var MAX_COMMIT_PATHS = 200;
+async function commitPaths(workspace, value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_COMMIT_PATHS || !value.every((p) => typeof p === "string" && p.length > 0)) {
+    throw new ToolError(`argument "paths" must be an array of 1 to ${MAX_COMMIT_PATHS} non-empty strings`);
+  }
+  const realWorkspace = await (0, import_promises4.realpath)(workspace);
+  const out = /* @__PURE__ */ new Set();
+  for (const relative of value) {
+    const abs = jailForWrite(workspace, relative);
+    const info = await (0, import_promises4.lstat)(abs).catch(() => null);
+    if (info?.isSymbolicLink()) throw new ToolError(`path is a symlink: ${relative}`);
+    if (info?.isDirectory()) throw new ToolError(`path is a directory, not a file: ${relative}`);
+    let existing = import_node_path6.default.dirname(abs);
+    for (; ; ) {
+      const found = await (0, import_promises4.lstat)(existing).then(() => true, () => false);
+      if (found || import_node_path6.default.dirname(existing) === existing) break;
+      existing = import_node_path6.default.dirname(existing);
+    }
+    const resolved = import_node_path6.default.relative(realWorkspace, await (0, import_promises4.realpath)(existing));
+    if (resolved !== import_node_path6.default.relative(workspace, existing)) {
+      throw new ToolError(`path is under a symlinked directory: ${relative}`);
+    }
+    out.add(import_node_path6.default.relative(workspace, abs).split(import_node_path6.default.sep).join("/"));
+  }
+  return [...out];
+}
 function makeRedactor(env) {
   const values = Object.entries(env).filter(([k, v]) => v && v.length >= 8 && isSecretish(k)).map(([, v]) => v).sort((a, b) => b.length - a.length);
   if (values.length === 0) return (t) => t;
@@ -1054,6 +1080,7 @@ function createToolServer(env) {
       const message = str(args, "message");
       const token = str(args, "token");
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
+      const paths = args.paths === void 0 ? null : await commitPaths(workspace, args.paths);
       const remote = await runGit(["remote", "get-url", "origin"]);
       const url = authenticatedPushUrl(remote.stdout, token, env.platform);
       const git = (...a) => runGit(a);
@@ -1064,10 +1091,25 @@ function createToolServer(env) {
         env.platform === "gitlab" ? "peeps-bot@noreply.peepsai.com" : "peeps[bot]@users.noreply.github.com"
       );
       await git("checkout", "-B", branch);
-      await git("add", "-A");
-      const commit = await git("commit", "-m", message).catch((e) => {
+      const nothingToCommit = (e) => {
         throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
-      });
+      };
+      let commit;
+      if (paths === null) {
+        await git("add", "-A");
+        commit = await git("commit", "-m", message).catch(nothingToCommit);
+      } else {
+        const tracked = new Set(
+          (await git("--literal-pathspecs", "ls-files", "-z", "--", ...paths)).stdout.split("\0").filter(Boolean)
+        );
+        const present = await Promise.all(paths.map((p) => (0, import_promises4.lstat)(import_node_path6.default.join(workspace, p)).then(() => true, () => false)));
+        const stage = paths.filter((p, i) => present[i] || tracked.has(p));
+        if (stage.length === 0) nothingToCommit({ stderr: "none of the listed paths has a change" });
+        await git("--literal-pathspecs", "add", "-A", "--", ...stage);
+        commit = await git("--literal-pathspecs", "commit", "-m", message, "--only", "--", ...stage).catch(
+          (e) => nothingToCommit({ stderr: e.stderr || e.stdout })
+        );
+      }
       await git(
         "-c",
         "http.extraheader=",
@@ -1082,7 +1124,8 @@ function createToolServer(env) {
         throw new ToolError(`git push refused: ${stderr.slice(-600)}`);
       });
       const sha = (await git("rev-parse", "HEAD")).stdout.trim();
-      return { branch, sha, summary: redact(commit.stdout.split("\n")[0] ?? "") };
+      const committedPaths = (await git("diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD")).stdout.split("\0").filter(Boolean).map(redact);
+      return { branch, sha, summary: redact(commit.stdout.split("\n")[0] ?? ""), committedPaths };
     }
   };
   const specs = [
@@ -1094,7 +1137,7 @@ function createToolServer(env) {
     { name: "run_tests", description: "Run one Playwright spec file with the repository's own config; optionally filter by --grep or project. Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
-    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) }
+    { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) }
   ];
   return { specs, handlers };
 }
@@ -1214,7 +1257,11 @@ async function runnerInfoFor(env) {
     node: process.version,
     sha: env.sha,
     ref: env.ref,
-    actionVersion: ACTION_VERSION
+    actionVersion: ACTION_VERSION,
+    // What this runner's tools can do beyond the basics, so Peeps need not
+    // infer it from the version. `commit_paths`: git_commit_push takes
+    // `paths` and commits only those files (PQA-2695).
+    capabilities: ["commit_paths"]
   };
   try {
     const { stdout } = await execFileAsync3(
