@@ -7,12 +7,12 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import type { RunnerEnv } from "../src/env";
-import { changedFilesWithDigests, createToolServer } from "../src/tools";
+import { changedFilesWithDigests, createToolServer, ToolError } from "../src/tools";
 
 // Nothing from this machine's own git configuration (signing, hooks, a
 // default branch name) may change what these tests see.
@@ -501,4 +501,164 @@ test("git_commit_push advertises paths in its input schema", () => {
     description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change.",
   });
   assert.deepEqual((spec.inputSchema as { required: string[] }).required, ["branch", "message", "token"]);
+});
+
+// --- Fix round 1 on #7 ------------------------------------------------------
+
+const BRANCH = "peeps/fix-abc1234";
+
+function noBranch(bare: string) {
+  assert.throws(() => git(bare, "rev-parse", "--verify", "-q", `refs/heads/${BRANCH}`));
+}
+
+/** A refusal is the tool's own error: no raw git command line, no errno. */
+async function refused(call: Promise<unknown>, pattern: RegExp) {
+  await assert.rejects(call, (error: unknown) => {
+    assert.ok(error instanceof ToolError, `not a ToolError: ${String(error)}`);
+    assert.match(error.message, pattern);
+    assert.doesNotMatch(error.message, /Command failed|safe\.directory|ENOENT|EACCES/);
+    return true;
+  });
+}
+
+test("a deletion already staged is still committed, not dropped", async (t) => {
+  const { ws, bare } = await pinnedCheckout(t);
+  git(ws, "rm", "-q", "e2e/gone.spec.ts");
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "healed\n");
+  const result = (await toolsFor(ws).git_commit_push!({
+    branch: BRANCH, message: "Fix", token: TOKEN, paths: ["e2e/a.spec.ts", "e2e/gone.spec.ts"],
+  })) as { sha: string; committedPaths: string[]; skippedPaths: string[] };
+  assert.deepEqual(result.committedPaths, ["e2e/a.spec.ts", "e2e/gone.spec.ts"]);
+  assert.deepEqual(result.skippedPaths, []);
+  assert.deepEqual(filesIn(bare, result.sha), ["e2e/a.spec.ts", "e2e/gone.spec.ts"]);
+});
+
+test("a commit hook that stages another file makes the call refuse, and nothing is pushed", async (t) => {
+  const { root, ws, bare, first } = await pinnedCheckout(t);
+  const hooks = path.join(root, "hooks");
+  await mkdir(hooks);
+  await writeFile(path.join(hooks, "pre-commit"), "#!/bin/sh\necho hooked > other.txt\ngit add other.txt\n", { mode: 0o755 });
+  git(ws, "config", "core.hooksPath", hooks);
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "healed\n");
+  await refused(
+    toolsFor(ws).git_commit_push!({ branch: BRANCH, message: "Fix", token: TOKEN, paths: ["e2e/a.spec.ts"] }),
+    /holds paths that were not listed: other\.txt/,
+  );
+  noBranch(bare);
+  // The commit is undone and nothing this call staged stays staged.
+  assert.equal(git(ws, "rev-parse", "HEAD"), first);
+  assert.equal(git(ws, "diff", "--cached", "--name-only"), "");
+  assert.equal(await readFile(path.join(ws, "e2e/a.spec.ts"), "utf8"), "healed\n");
+});
+
+test("a tracked folder replaced by a file of the same name is refused, not pushed with its deletions", async (t) => {
+  const { ws, bare } = await pinnedCheckout(t);
+  await mkdir(path.join(ws, "e2e/sub"));
+  await writeFile(path.join(ws, "e2e/sub/x.ts"), "x\n");
+  await writeFile(path.join(ws, "e2e/sub/y.ts"), "y\n");
+  git(ws, "add", "-A");
+  git(ws, "commit", "-q", "-m", "sub");
+  await rm(path.join(ws, "e2e/sub"), { recursive: true });
+  await writeFile(path.join(ws, "e2e/sub"), "now a file\n");
+  await refused(
+    toolsFor(ws).git_commit_push!({ branch: BRANCH, message: "Fix", token: TOKEN, paths: ["e2e/sub"] }),
+    /not listed: e2e\/sub\/x\.ts, e2e\/sub\/y\.ts/,
+  );
+  noBranch(bare);
+  assert.equal(git(ws, "diff", "--cached", "--name-only"), "");
+});
+
+test("a gitignored listed path is refused up front and nothing is left staged", async (t) => {
+  const { ws, bare } = await pinnedCheckout(t);
+  await writeFile(path.join(ws, ".gitignore"), "e2e/helpers/\n");
+  await mkdir(path.join(ws, "e2e/helpers"));
+  await writeFile(path.join(ws, "e2e/helpers/h.ts"), "h\n");
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "healed\n");
+  await refused(
+    toolsFor(ws).git_commit_push!({ branch: BRANCH, message: "Fix", token: TOKEN, paths: ["e2e/a.spec.ts", "e2e/helpers/h.ts"] }),
+    /ignored by \.gitignore: e2e\/helpers\/h\.ts/,
+  );
+  noBranch(bare);
+  assert.equal(git(ws, "diff", "--cached", "--name-only"), "");
+});
+
+test("an absolute path is refused, never re-rooted into the workspace", async (t) => {
+  const { ws, bare } = await pinnedCheckout(t);
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "healed\n");
+  for (const bad of [path.join(ws, "e2e/a.spec.ts"), "/e2e/a.spec.ts", "\\e2e\\a.spec.ts", "C:\\e2e\\a.spec.ts", "c:/e2e/a.spec.ts"]) {
+    await refused(
+      toolsFor(ws).git_commit_push!({ branch: BRANCH, message: "Fix", token: TOKEN, paths: [bad] }),
+      /absolute/,
+    );
+  }
+  noBranch(bare);
+});
+
+test("a dangling symlinked folder is the symlink refusal, not a raw error", async (t) => {
+  const { ws, bare } = await pinnedCheckout(t);
+  await symlink("/nonexistent-peeps-target", path.join(ws, "linked"), "dir");
+  await refused(
+    toolsFor(ws).git_commit_push!({ branch: BRANCH, message: "Fix", token: TOKEN, paths: ["linked/x.ts"] }),
+    /symlink/,
+  );
+  noBranch(bare);
+});
+
+test("listed paths that are neither present nor tracked are skipped, and said so", async (t) => {
+  const { ws, bare } = await pinnedCheckout(t);
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "healed\n");
+  const result = (await toolsFor(ws).git_commit_push!({
+    branch: BRANCH, message: "Fix", token: TOKEN, paths: ["e2e/a.spec.ts", "e2e/pages/typo.ts"],
+  })) as { sha: string; committedPaths: string[]; skippedPaths: string[] };
+  assert.deepEqual(result.committedPaths, ["e2e/a.spec.ts"]);
+  assert.deepEqual(result.skippedPaths, ["e2e/pages/typo.ts"]);
+  assert.deepEqual(filesIn(bare, result.sha), ["e2e/a.spec.ts"]);
+});
+
+test("a path differing only in case is never committed under that name", async (t) => {
+  const { ws, bare } = await pinnedCheckout(t);
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "healed\n");
+  // Case-insensitive filesystems (macOS) refuse it; case-sensitive ones
+  // (Linux) find no such file and skip it. Neither commits `E2E/…`.
+  try {
+    const result = (await toolsFor(ws).git_commit_push!({
+      branch: BRANCH, message: "Fix", token: TOKEN, paths: ["E2E/a.spec.ts"],
+    })) as { committedPaths: string[] };
+    assert.fail(`committed ${JSON.stringify(result.committedPaths)}`);
+  } catch (error) {
+    assert.ok(error instanceof ToolError, String(error));
+    assert.match(error.message, /does not resolve to itself|nothing to commit/);
+  }
+  noBranch(bare);
+});
+
+test("a workspace below the repository's top level reports committedPaths relative to the workspace", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "peeps-git-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const top = path.join(root, "top");
+  const ws = path.join(top, "app");
+  await mkdir(path.join(ws, "e2e"), { recursive: true });
+  git(top, "init", "-q", "-b", "main");
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "a\n");
+  git(top, "add", "-A");
+  git(top, "commit", "-q", "-m", "one");
+  const bare = await remoteFor(t, root, top, TOKEN);
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "healed\n");
+  const result = (await toolsFor(ws).git_commit_push!({
+    branch: BRANCH, message: "Fix", token: TOKEN, paths: ["e2e/a.spec.ts"],
+  })) as { sha: string; committedPaths: string[] };
+  assert.deepEqual(result.committedPaths, ["e2e/a.spec.ts"]);
+  assert.deepEqual(filesIn(bare, result.sha), ["app/e2e/a.spec.ts"]);
+});
+
+test("committedPaths is capped at 200, with committedPathsTruncated", async (t) => {
+  const { ws, bare } = await pinnedCheckout(t);
+  await mkdir(path.join(ws, "out"));
+  await Promise.all(Array.from({ length: 205 }, (_, i) => writeFile(path.join(ws, `out/${i}.txt`), `${i}\n`)));
+  const result = (await toolsFor(ws).git_commit_push!({ branch: BRANCH, message: "Fix", token: TOKEN })) as {
+    sha: string; committedPaths: string[]; committedPathsTruncated: boolean;
+  };
+  assert.equal(result.committedPaths.length, 200);
+  assert.equal(result.committedPathsTruncated, true);
+  assert.equal(filesIn(bare, result.sha).length, 205);
 });

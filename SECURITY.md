@@ -109,9 +109,17 @@ The limits that do exist are guardrails against mistakes, not a sandbox:
 Two specifics a reviewer should weigh:
 
 - **What the push commits.** When Peeps names the files to commit (`paths`),
-  only those are staged and committed. Each must be a file inside the workspace,
-  reached through no symlink, and none can be under `.git`, `node_modules`,
-  `.env*` or your CI configuration. Without `paths` the push stages everything
+  only those are staged and committed. Before anything is staged, each must be
+  a repo-relative path (an absolute one is refused) inside the workspace that is
+  not under `.git`, `node_modules`, `.env*` or your CI configuration, not a
+  directory, not ignored by your `.gitignore`, and reached through no symlink.
+  These name checks are case-sensitive; on a case-insensitive filesystem a path
+  that names an existing file in another case is refused because it does not
+  resolve to itself. Git never follows a symlink when it stages. Your own commit
+  hooks still run, and after the commit, before the push, the commit is checked
+  to hold the listed paths and nothing else: a hook that stages another file, or
+  a listed file that replaced a folder, makes the call refuse, the commit is
+  undone, and nothing is pushed. Without `paths` the push stages everything
   (`git add -A`), so anything the job wrote to the working tree that your
   `.gitignore` does not exclude is committed to the `peeps/*` branch.
 - **The push is a force push** to the `peeps/*` branch it names. An existing

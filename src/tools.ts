@@ -61,7 +61,8 @@ const MAX_GREP_MATCHES = 500;
 const MAX_PATTERN_CHARS = 500;
 const DENY_SEGMENTS = new Set([".git", "node_modules"]);
 
-class ToolError extends Error {}
+/** A refusal the agent sees as the tool's error: a clear message, nothing raw. */
+export class ToolError extends Error {}
 
 function str(args: Record<string, unknown>, key: string, required = true): string {
   const v = args[key];
@@ -396,21 +397,30 @@ export async function commitPaths(workspace: string, value: unknown): Promise<st
   const realWorkspace = await realpath(workspace);
   const out = new Set<string>();
   for (const relative of value as string[]) {
+    // `jail` re-roots a leading slash; here an absolute path is a caller bug
+    // to refuse, not a path to guess at.
+    if (path.isAbsolute(relative) || /^[\\/]/.test(relative) || /^[A-Za-z]:/.test(relative)) {
+      throw new ToolError(`path must be repo-relative, not absolute: ${relative}`);
+    }
     const abs = jailForWrite(workspace, relative);
     const info = await lstat(abs).catch(() => null);
     if (info?.isSymbolicLink()) throw new ToolError(`path is a symlink: ${relative}`);
     if (info?.isDirectory()) throw new ToolError(`path is a directory, not a file: ${relative}`);
-    // The deepest directory above it that exists must be exactly where the
-    // path says it is.
-    let existing = path.dirname(abs);
+    // The path itself if it exists, else the deepest directory above it that
+    // does, must resolve to exactly where the path says. Otherwise a symlinked
+    // directory is in the way, or (on a case-insensitive filesystem) the path
+    // names an existing file in another case.
+    let existing = info ? abs : path.dirname(abs);
     for (;;) {
       const found = await lstat(existing).then(() => true, () => false);
       if (found || path.dirname(existing) === existing) break;
       existing = path.dirname(existing);
     }
-    const resolved = path.relative(realWorkspace, await realpath(existing));
-    if (resolved !== path.relative(workspace, existing)) {
-      throw new ToolError(`path is under a symlinked directory: ${relative}`);
+    const real = await realpath(existing).catch(() => null);
+    if (real === null || path.relative(realWorkspace, real) !== path.relative(workspace, existing)) {
+      throw new ToolError(
+        `path does not resolve to itself (it is under a symlinked directory, or differs in case): ${relative}`,
+      );
     }
     out.add(path.relative(workspace, abs).split(path.sep).join("/"));
   }
@@ -683,6 +693,55 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       // call: inside the Playwright container the checkout is owned by another
       // uid and git refuses to touch it without that.
       const git = (...a: string[]) => runGit(a);
+      // Literal pathspecs everywhere a listed path is passed: a `*` is a
+      // character, not a pattern, and `:(…)` is not magic.
+      const lit = (...a: string[]) => runGit(["--literal-pathspecs", ...a], { maxBuffer: 8 * 1024 * 1024 });
+      /** git's own words only, never the command line (it holds the workspace path). */
+      const gitSaid = (error: unknown) => {
+        const e = error as { stderr?: string; stdout?: string };
+        return redact(maskUrlCredentials(`${e.stderr ?? ""}${e.stdout ?? ""}`.trim())).slice(-500);
+      };
+
+      let skippedPaths: string[] = [];
+      let stage: string[] = [];
+      // What `git add` is given: paths in the tree or the index. A deletion
+      // already staged is in neither (git add would refuse it as unmatched),
+      // yet `commit --only` still commits it, matching it against HEAD.
+      let add: string[] = [];
+      if (paths !== null) {
+        try {
+          // Tracked = in the index OR in HEAD, so a deletion already staged
+          // (gone from both the tree and the index) still counts.
+          const tracked = new Set(
+            (await lit("ls-files", "-z", "--with-tree=HEAD", "--", ...paths)).stdout.split("\0").filter(Boolean),
+          );
+          const present = await Promise.all(
+            paths.map((p) => lstat(path.join(workspace, p)).then(() => true, () => false)),
+          );
+          const indexed = new Set(
+            (await lit("ls-files", "-z", "--", ...paths)).stdout.split("\0").filter(Boolean),
+          );
+          stage = paths.filter((p, i) => present[i] || tracked.has(p));
+          add = paths.filter((p, i) => present[i] || indexed.has(p));
+          // A listed path with nothing to stage: one the heal wrote and then
+          // removed. Dropped, and named, so a caller can tell it from a change.
+          skippedPaths = paths.filter((p) => !stage.includes(p));
+          if (stage.length > 0) {
+            const ignored = (await lit("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...stage))
+              .stdout.split("\0").filter(Boolean);
+            if (ignored.length > 0) {
+              throw new ToolError(`path is not committed because it is ignored by .gitignore: ${ignored.slice(0, 10).map(redact).join(", ")}`);
+            }
+          }
+        } catch (error) {
+          if (error instanceof ToolError) throw error;
+          throw new ToolError(`could not read the listed paths' state: ${gitSaid(error)}`);
+        }
+        if (stage.length === 0) {
+          throw new ToolError(`nothing to commit? none of the listed paths exists or is tracked: ${skippedPaths.slice(0, 10).map(redact).join(", ")}`);
+        }
+      }
+
       await git("config", "user.name", "peeps[bot]");
       await git(
         "config",
@@ -690,30 +749,67 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         env.platform === "gitlab" ? "peeps-bot@noreply.peepsai.com" : "peeps[bot]@users.noreply.github.com",
       );
       await git("checkout", "-B", branch);
-      const nothingToCommit = (e: { stderr?: string }) => {
-        throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
-      };
       let commit;
       if (paths === null) {
         await git("add", "-A");
-        commit = await git("commit", "-m", message).catch(nothingToCommit);
+        commit = await git("commit", "-m", message).catch((e: { stderr?: string }) => {
+          throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
+        });
       } else {
-        // Only the listed paths, taken literally (`--literal-pathspecs`: a
-        // `*` is a character, not a pattern). A listed path that neither
-        // exists nor is tracked has nothing to stage, and naming it would make
-        // `git add` fail, so it is dropped. `add -A` stages a listed deletion;
-        // `commit --only` commits those paths and nothing else already staged.
-        const tracked = new Set(
-          (await git("--literal-pathspecs", "ls-files", "-z", "--", ...paths)).stdout.split("\0").filter(Boolean),
-        );
-        const present = await Promise.all(paths.map((p) => lstat(path.join(workspace, p)).then(() => true, () => false)));
-        const stage = paths.filter((p, i) => present[i] || tracked.has(p));
-        if (stage.length === 0) nothingToCommit({ stderr: "none of the listed paths has a change" });
-        await git("--literal-pathspecs", "add", "-A", "--", ...stage);
-        commit = await git("--literal-pathspecs", "commit", "-m", message, "--only", "--", ...stage).catch(
-          (e: { stderr?: string; stdout?: string }) => nothingToCommit({ stderr: e.stderr || e.stdout }),
-        );
+        // Undo this call's staging: the listed paths, and anything a hook or
+        // a pathspec added beside them.
+        const unstage = (extra: string[] = []) => lit("reset", "-q", "--", ...stage, ...extra).catch(() => undefined);
+        try {
+          // `add -A` stages a listed deletion; `commit --only` commits those
+          // paths and nothing else already staged. The customer's hooks run.
+          if (add.length > 0) await lit("add", "-A", "--", ...add);
+          commit = await lit("commit", "-m", message, "--only", "--", ...stage);
+        } catch (error) {
+          await unstage();
+          const said = gitSaid(error);
+          if (/did not match/.test(said)) {
+            throw new ToolError(
+              `a listed path did not match a file git knows (a different case, or a file in a nested repository): ${said}`,
+            );
+          }
+          if (/nothing to commit|nothing added to commit|no changes added to commit/.test(said)) {
+            throw new ToolError(`nothing to commit? ${said}`);
+          }
+          throw new ToolError(`git commit refused: ${said}`);
+        }
+        // Before anything leaves the runner: the commit must hold the listed
+        // paths and nothing else. A pre-commit hook that runs `git add`, or a
+        // listed file that replaced a tracked folder (whose files' deletions
+        // the pathspec then matches), would otherwise be pushed.
+        const listed = new Set(stage);
+        let contains: string[] | null = null;
+        try {
+          contains = await commitContents();
+        } catch {
+          // Unknown contents are treated as unlisted ones.
+        }
+        const extras = contains === null ? ["(the commit could not be listed)"] : contains.filter((p) => !listed.has(p));
+        if (extras.length > 0) {
+          await git("reset", "-q", "--soft", "HEAD~1").catch(() => undefined);
+          await unstage((contains ?? []).filter((p) => !listed.has(p)));
+          throw new ToolError(
+            `the commit holds paths that were not listed: ${extras.slice(0, 10).map(redact).join(", ")}` +
+              `${extras.length > 10 ? ` and ${extras.length - 10} more` : ""}` +
+              " (a commit hook staged them, or a listed file replaced a folder); nothing was pushed",
+          );
+        }
       }
+      // What the commit contains, read before the push so a failure here can
+      // never follow a push that happened. Relative to the workspace, the
+      // base `paths` uses.
+      let committed: string[] = [];
+      let committedPathsTruncated = false;
+      try {
+        committed = await commitContents();
+      } catch {
+        committedPathsTruncated = true;
+      }
+      if (committed.length > MAX_COMMIT_PATHS) committedPathsTruncated = true;
       // actions/checkout persists the job's GITHUB_TOKEN as an `http.extraheader`
       // Authorization header, which git sends INSTEAD of the credentials in the
       // URL — and that token is usually `contents: read`. Blank the header for
@@ -731,12 +827,30 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         throw new ToolError(`git push refused: ${stderr.slice(-600)}`);
       });
       const sha = (await git("rev-parse", "HEAD")).stdout.trim();
-      // What the pushed commit really contains, from git, not from the request.
-      const committedPaths = (await git("diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"))
-        .stdout.split("\0").filter(Boolean).map(redact);
-      return { branch, sha, summary: redact(commit.stdout.split("\n")[0] ?? ""), committedPaths };
+      return {
+        branch,
+        sha,
+        summary: redact(commit.stdout.split("\n")[0] ?? ""),
+        committedPaths: committed.slice(0, MAX_COMMIT_PATHS).map(redact),
+        ...(committedPathsTruncated ? { committedPathsTruncated: true } : {}),
+        ...(paths === null ? {} : { skippedPaths: skippedPaths.map(redact) }),
+      };
     },
   };
+
+  /**
+   * The paths HEAD's commit changes, relative to the workspace. `diff-tree`
+   * names them from the repository's top level; a workspace below it (rare)
+   * gets them re-based, so a path outside the workspace reads `../…`.
+   */
+  async function commitContents(): Promise<string[]> {
+    const prefix = (await runGit(["rev-parse", "--show-prefix"])).stdout.trim().replace(/\/+$/, "");
+    const { stdout } = await runGit(
+      ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"],
+      { maxBuffer: 8 * 1024 * 1024 },
+    );
+    return stdout.split("\0").filter(Boolean).map((p) => (prefix ? path.posix.relative(prefix, p) : p));
+  }
 
   const specs: ToolSpec[] = [
     { name: "read_file", description: "Read a file in the repository (repo-relative path). Up to 512 KB.", inputSchema: obj({ path: s("Repo-relative path") }, ["path"]) },
