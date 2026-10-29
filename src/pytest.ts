@@ -84,7 +84,8 @@ const PLAYWRIGHT_CONFIG = /^playwright(\..+)?\.config\.[cm]?[jt]s$/;
 export function resolveFramework(env: RunnerEnv): Framework {
   const declared = env.framework;
   if (declared === "playwright" || declared === "pytest") return declared;
-  if (declared !== null && declared !== "auto") {
+  // `undefined` is an env built before the input existed: treated as unset.
+  if (declared != null && declared !== "auto") {
     throw new Error(`unknown framework "${declared}": use playwright, pytest or auto`);
   }
   if (env.configPath) return "playwright";
@@ -226,7 +227,7 @@ function pytestEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
  * `python` (the Playwright Python image has both; a bare Ubuntu runner only
  * `python3`). `PEEPS_PYTHON` names another interpreter, e.g. a virtualenv's.
  */
-function spawnPytest(
+export function spawnPytest(
   args: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv; capture: boolean },
 ): Promise<{ code: number; output: string }> {
@@ -256,7 +257,7 @@ function spawnPytest(
   return attempt(0);
 }
 
-function configArgs(env: RunnerEnv): string[] {
+export function configArgs(env: RunnerEnv): string[] {
   return env.configPath ? ["-c", env.configPath] : [];
 }
 

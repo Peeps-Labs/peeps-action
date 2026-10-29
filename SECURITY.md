@@ -83,16 +83,22 @@ Only in `agent` mode, and only for the duration of one session.
 
 **In an agent session, Peeps has effective code execution on the runner.** We
 state that directly rather than implying otherwise. The tools include writing a
-file and running `npx playwright test`; Playwright loads your config file as
-Node code; so an agent that writes a config and runs tests runs code with the
-job's full environment. No arrangement of path checks changes that, and we have
+file and running `npx playwright test` (in a pytest suite, `python -m pytest`,
+or your own `.peeps/run-tests` hook); Playwright loads your config file as Node
+code and pytest imports your `conftest.py` and test modules as Python; so an
+agent that writes one of them and runs tests runs code with the job's full
+environment. No arrangement of path checks changes that, and we have
 not tried to pretend it does.
 
 The limits that do exist are guardrails against mistakes, not a sandbox:
 
 - Paths resolve inside the workspace. `..` and absolute paths are refused, as
   are `.git`, `node_modules` and `.env*`. Writes additionally refuse
-  `.github/workflows`, because Peeps never edits workflow files.
+  `.github/workflows`, because Peeps never edits workflow files, and `.peeps/`,
+  where your own hooks live. `.peeps/run-tests` runs as a copy taken from the
+  commit under test, and not at all while the checkout's `.peeps/` differs
+  from that commit, so a heal cannot change the hook itself (it can change the
+  tests the hook runs, as with Playwright).
 - Tool results pass through a redactor that masks values present in the job's
   environment, including `GITHUB_TOKEN`, `ACTIONS_RUNTIME_TOKEN` and the OIDC
   request token. It cannot mask a secret that is not in this process's own
