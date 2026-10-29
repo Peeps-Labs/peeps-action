@@ -246,7 +246,8 @@ through your own lab service: build the test image from this checkout, reserve
 a device, run the node ids, and copy the JUnit back. Peeps never writes under
 `.peeps/`, and runs a copy of `.peeps/` taken from the commit under test (and
 only while the checkout's `.peeps/` still matches it), so a heal cannot change
-the hook. What the hook runs from the checkout, your tests and `conftest.py`
+the hook. The copy lives outside the checkout, so find the
+repository from the working directory, not from the hook's own path. What the hook runs from the checkout, your tests and `conftest.py`
 included, a heal can change, as with Playwright. A run must finish within
 Peeps' tool timeout (10 minutes for a call the agent makes, 15 for the final
 verification).
