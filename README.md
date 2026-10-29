@@ -183,7 +183,7 @@ HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
 | `inventory` | `playwright test --list --reporter=json` (pytest: `pytest --collect-only`), posted with the spec files |
 | `run` | the tests Peeps asked for, reported live |
 | `report` | this workflow's own test run, reported live |
-| `agent` | a tool server for a Peeps agent session; every call is echoed to the job log |
+| `agent` | a tool server for a Peeps agent session; every call is echoed to the job log. `run_tests` runs Playwright, or pytest (or your `.peeps/run-tests` hook) in a pytest suite |
 
 `ci` is the default and means `report`. Peeps names the mode explicitly on every
 dispatch it makes.
@@ -230,6 +230,23 @@ there and the job fails. If you take fork contributions, filter the trigger:
     branches: [main]
     # fork PRs get no OIDC token; run Peeps on push instead
 ```
+
+**pytest tests that need lab hardware.** In `agent` mode, `run_tests` runs the
+one test a Peeps heal is fixing. For a pytest suite it runs pytest on the runner,
+unless your repository has an executable `.peeps/run-tests`. Then Peeps runs that
+instead, from the working directory and with the job's environment:
+
+```bash
+.peeps/run-tests <junit-path> <node-id>...
+```
+
+Write a JUnit file to `<junit-path>` (pytest's own `--junitxml` output works).
+That file is the verdict, not the exit code. Use the hook to send the run
+through your own lab service: build the test image from this checkout, reserve
+a device, run the node ids, and copy the JUnit back. Peeps never writes under
+`.peeps/`, so a heal cannot change what verifies it. A run must finish within
+Peeps' tool timeout (10 minutes for a call the agent makes, 15 for the final
+verification).
 
 **Running the workflow by hand.** `mode: inventory` needs no session id:
 

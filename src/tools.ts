@@ -39,6 +39,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { RunnerEnv } from "./env";
+import { resolveFramework } from "./pytest";
+import { RUN_TESTS_HOOK, runPytestTool } from "./pytest-run-tool";
 
 const execFileAsync = promisify(execFile);
 
@@ -100,6 +102,12 @@ export function jailForWrite(workspace: string, relative: string): string {
   const rel = path.relative(workspace, abs).split(path.sep).join("/");
   if (isCiConfiguration(rel)) {
     throw new ToolError(`workflow files are not writable by Peeps: ${relative}`);
+  }
+  // The customer's own hooks (`.peeps/run-tests` runs a heal's verification):
+  // a heal that could rewrite them could change what verifies it.
+  const folded = rel.toLowerCase();
+  if (folded === ".peeps" || folded.startsWith(".peeps/")) {
+    throw new ToolError(`.peeps/ holds your own hooks and is not writable by Peeps: ${relative}`);
   }
   return abs;
 }
@@ -563,6 +571,32 @@ export function createToolServer(env: RunnerEnv): ToolServer {
 
     async run_tests(args) {
       const file = str(args, "file");
+      if (resolveFramework(env) === "pytest") {
+        const ran = await runPytestTool(env, {
+          fileAbs: jail(workspace, file),
+          titlePath: typeof args.test === "string" && args.test ? args.test : null,
+          keyword: typeof args.grep === "string" && args.grep ? args.grep : null,
+          browser: typeof args.project === "string" && args.project ? args.project : null,
+          hookUnchanged: async () => {
+            // Only the hook the repository holds at HEAD runs: the agent's
+            // writes are refused under .peeps/, and this catches a write that
+            // reached it another way (through a symlink, say).
+            try {
+              await runGit(["ls-files", "--error-unmatch", "--", RUN_TESTS_HOOK]);
+              await runGit(["diff", "--quiet", "HEAD", "--", ".peeps"]);
+              const untracked = await runGit(["ls-files", "--others", "--", ".peeps"]);
+              return untracked.stdout.trim() === "";
+            } catch {
+              return false;
+            }
+          },
+        });
+        return {
+          ...ran,
+          results: ran.results?.map((r) => ({ ...r, title: redact(r.title), ...(r.error ? { error: redact(r.error) } : {}) })) ?? null,
+          outputTail: redact(ran.outputTail),
+        };
+      }
       // `file` arrives repo-relative and is jailed against the workspace, but
       // Playwright runs with `workingDirectory` as its cwd. In any monorepo
       // those differ, and passing the repo-relative path straight through made
@@ -674,7 +708,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "grep", description: "Search source files for a regular expression; returns matching lines.", inputSchema: obj({ pattern: s("JavaScript regular expression"), path: s("Repo-relative directory to search; default the root"), ignoreCase: { type: "boolean" } }, ["pattern"]) },
     { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
     { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
-    { name: "run_tests", description: "Run one Playwright spec file with the repository's own config; optionally filter by --grep or project. Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name") }, ["file"]) },
+    { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec, or in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one). Optionally narrow it: Playwright by --grep or project; pytest by test (the title path, e.g. TestClass › test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name"), test: s("Optional pytest title path of one test, scopes joined by ' › '") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
     { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) },

@@ -71,7 +71,11 @@ async function main(): Promise<void> {
   }
 
   // Every mode but inventory launches browsers (`--list` launches none).
-  if (mode !== "inventory") await warnIfBrowsersMissing(env.workingDirectory, env.platform);
+  // A pytest agent session never starts Node Playwright, so its browsers are
+  // not this check's business.
+  if (mode !== "inventory" && !(mode === "agent" && resolveFramework(env) === "pytest")) {
+    await warnIfBrowsersMissing(env.workingDirectory, env.platform);
+  }
 
   switch (mode) {
     case "inventory":
