@@ -1280,7 +1280,8 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
       xml = await (0, import_promises5.readFile)(junit, "utf8");
     } catch {
     }
-    const whole = ran.output.length < OUTPUT_TAIL_CHARS ? ran.output : ran.output.slice(ran.output.indexOf("\n") + 1);
+    const firstBreak = ran.output.indexOf("\n");
+    const whole = ran.output.length < OUTPUT_TAIL_CHARS ? ran.output : firstBreak < 0 ? "" : ran.output.slice(firstBreak + 1);
     const note = hook && xml === null && ran.code === 0 ? pendingMarkerNote(whole) : null;
     return {
       exitCode: ran.code,

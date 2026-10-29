@@ -259,6 +259,10 @@ test("a marker manufactured by cutting the output to its tail does not count", a
   // A marker on a later, whole line still counts.
   const kept = `${"x".repeat(OUTPUT_TAIL_CHARS)}\npeeps:pending\n`.slice(-OUTPUT_TAIL_CHARS);
   assert.equal((await runHook(hookDeps(0, kept))).pending, true);
+  // A full tail with no line break at all is one cut line, so nothing counts.
+  const unbroken = `peeps:pending ${"x".repeat(OUTPUT_TAIL_CHARS - 14)}`;
+  assert.equal(unbroken.length, OUTPUT_TAIL_CHARS);
+  assert.equal((await runHook(hookDeps(0, unbroken))).pending, false);
 });
 
 test("the note is kept whole, for the redactor to see every secret in it", () => {

@@ -281,9 +281,11 @@ export async function runPytestTool(
       // No JUnit: pytest or the hook failed before writing one.
     }
     // A verdict wins: the marker means something only when no JUnit came back.
-    // Output cut to its tail may start mid-line, so that first line is no line.
+    // Output cut to its tail may start mid-line, so that first line is no line;
+    // a full tail with no line break is all cut line.
+    const firstBreak = ran.output.indexOf("\n");
     const whole =
-      ran.output.length < OUTPUT_TAIL_CHARS ? ran.output : ran.output.slice(ran.output.indexOf("\n") + 1);
+      ran.output.length < OUTPUT_TAIL_CHARS ? ran.output : firstBreak < 0 ? "" : ran.output.slice(firstBreak + 1);
     const note = hook && xml === null && ran.code === 0 ? pendingMarkerNote(whole) : null;
     return {
       exitCode: ran.code,
