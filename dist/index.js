@@ -1140,6 +1140,7 @@ function createToolServer(env) {
         });
       } else {
         const unstage = (extra = []) => lit("reset", "-q", "--", ...stage, ...extra).catch(() => void 0);
+        const base = (await git("rev-parse", "HEAD")).stdout.trim();
         try {
           if (add.length > 0) await lit("add", "-A", "--", ...add);
           commit = await lit("commit", "-m", message, "--only", "--", ...stage);
@@ -1154,21 +1155,31 @@ function createToolServer(env) {
           if (/nothing to commit|nothing added to commit|no changes added to commit/.test(said)) {
             throw new ToolError(`nothing to commit? ${said}`);
           }
-          throw new ToolError(`git commit refused: ${said}`);
+          throw new ToolError(
+            `git commit refused: ${said || "no output from git or a commit hook (a hook such as pre-commit may have failed)"}`
+          );
         }
         const listed = new Set(stage);
         let contains = null;
+        let oneCommit = false;
         try {
-          contains = await commitContents();
+          oneCommit = (await git("rev-parse", "HEAD~1")).stdout.trim() === base;
+          contains = await commitContents(base);
         } catch {
         }
-        const extras = contains === null ? ["(the commit could not be listed)"] : contains.filter((p) => !listed.has(p));
-        if (extras.length > 0) {
-          await git("reset", "-q", "--soft", "HEAD~1").catch(() => void 0);
-          await unstage((contains ?? []).filter((p) => !listed.has(p)));
-          throw new ToolError(
-            `the commit holds paths that were not listed: ${extras.slice(0, 10).map(redact).join(", ")}${extras.length > 10 ? ` and ${extras.length - 10} more` : ""} (a commit hook staged them, or a listed file replaced a folder); nothing was pushed`
-          );
+        const unlisted = (contains ?? []).filter((p) => !listed.has(p));
+        if (contains === null || unlisted.length > 0 || !oneCommit) {
+          await git("reset", "-q", "--soft", base).catch(() => void 0);
+          await unstage(unlisted);
+          if (contains === null) {
+            throw new ToolError("the commit could not be listed, so it is not pushed; the commit was undone");
+          }
+          if (unlisted.length > 0) {
+            throw new ToolError(
+              `the commit holds paths that were not listed: ${unlisted.slice(0, 10).map(redact).join(", ")}${unlisted.length > 10 ? ` and ${unlisted.length - 10} more` : ""} (a commit hook staged or committed them, or a listed file replaced a folder); nothing was pushed`
+            );
+          }
+          throw new ToolError("a commit hook made another commit after this one; both were undone and nothing was pushed");
         }
       }
       let committed = [];
@@ -1203,10 +1214,10 @@ function createToolServer(env) {
       };
     }
   };
-  async function commitContents() {
+  async function commitContents(since) {
     const prefix = (await runGit(["rev-parse", "--show-prefix"])).stdout.trim().replace(/\/+$/, "");
     const { stdout } = await runGit(
-      ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"],
+      since ? ["diff", "--name-only", "--no-renames", "-z", since, "HEAD"] : ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"],
       { maxBuffer: 8 * 1024 * 1024 }
     );
     return stdout.split("\0").filter(Boolean).map((p) => prefix ? import_node_path6.default.posix.relative(prefix, p) : p);

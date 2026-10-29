@@ -662,3 +662,55 @@ test("committedPaths is capped at 200, with committedPathsTruncated", async (t) 
   assert.equal(result.committedPathsTruncated, true);
   assert.equal(filesIn(bare, result.sha).length, 205);
 });
+
+// --- Round 2 on #7 ----------------------------------------------------------
+
+test("a post-commit hook that makes its own commit is undone too, back to the base", async (t) => {
+  const { root, ws, bare, first } = await pinnedCheckout(t);
+  const hooks = path.join(root, "hooks");
+  await mkdir(hooks);
+  await writeFile(
+    path.join(hooks, "post-commit"),
+    '#!/bin/sh\n[ -n "$PEEPS_TEST_IN_HOOK" ] && exit 0\necho extra > extra.txt\ngit add extra.txt\nPEEPS_TEST_IN_HOOK=1 git commit -q -m extra\n',
+    { mode: 0o755 },
+  );
+  git(ws, "config", "core.hooksPath", hooks);
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "healed\n");
+  await refused(
+    toolsFor(ws).git_commit_push!({ branch: BRANCH, message: "Fix", token: TOKEN, paths: ["e2e/a.spec.ts"] }),
+    /commit hook made another commit|not listed: extra\.txt/,
+  );
+  noBranch(bare);
+  // Neither the call's commit nor the hook's is left behind.
+  assert.equal(git(ws, "rev-parse", "HEAD"), first);
+  assert.equal(git(ws, "diff", "--cached", "--name-only"), "");
+  assert.equal(await readFile(path.join(ws, "e2e/a.spec.ts"), "utf8"), "healed\n");
+});
+
+test("a commit hook that fails without output gets a clear refusal", async (t) => {
+  const { root, ws, bare, first } = await pinnedCheckout(t);
+  const hooks = path.join(root, "hooks");
+  await mkdir(hooks);
+  await writeFile(path.join(hooks, "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  git(ws, "config", "core.hooksPath", hooks);
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "healed\n");
+  await refused(
+    toolsFor(ws).git_commit_push!({ branch: BRANCH, message: "Fix", token: TOKEN, paths: ["e2e/a.spec.ts"] }),
+    /git commit refused: no output from git or a commit hook \(a hook such as pre-commit may have failed\)/,
+  );
+  noBranch(bare);
+  assert.equal(git(ws, "rev-parse", "HEAD"), first);
+  assert.equal(git(ws, "diff", "--cached", "--name-only"), "");
+});
+
+test("a rename listed by both its paths commits the deletion and the addition", async (t) => {
+  const { ws, bare } = await pinnedCheckout(t);
+  await rename(path.join(ws, "e2e/old.spec.ts"), path.join(ws, "e2e/renamed.spec.ts"));
+  const result = (await toolsFor(ws).git_commit_push!({
+    branch: BRANCH, message: "Rename", token: TOKEN, paths: ["e2e/old.spec.ts", "e2e/renamed.spec.ts"],
+  })) as { sha: string; committedPaths: string[]; skippedPaths: string[] };
+  assert.deepEqual([...result.committedPaths].sort(), ["e2e/old.spec.ts", "e2e/renamed.spec.ts"]);
+  assert.deepEqual(result.skippedPaths, []);
+  assert.equal(git(bare, "show", `${result.sha}:e2e/renamed.spec.ts`), "old");
+  assert.throws(() => git(bare, "cat-file", "-e", `${result.sha}:e2e/old.spec.ts`));
+});

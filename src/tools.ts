@@ -759,6 +759,9 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         // Undo this call's staging: the listed paths, and anything a hook or
         // a pathspec added beside them.
         const unstage = (extra: string[] = []) => lit("reset", "-q", "--", ...stage, ...extra).catch(() => undefined);
+        // The commit this call builds on, to undo back to: a post-commit hook
+        // can add commits of its own, so `HEAD~1` is not necessarily it.
+        const base = (await git("rev-parse", "HEAD")).stdout.trim();
         try {
           // `add -A` stages a listed deletion; `commit --only` commits those
           // paths and nothing else already staged. The customer's hooks run.
@@ -775,28 +778,40 @@ export function createToolServer(env: RunnerEnv): ToolServer {
           if (/nothing to commit|nothing added to commit|no changes added to commit/.test(said)) {
             throw new ToolError(`nothing to commit? ${said}`);
           }
-          throw new ToolError(`git commit refused: ${said}`);
+          throw new ToolError(
+            `git commit refused: ${said || "no output from git or a commit hook (a hook such as pre-commit may have failed)"}`,
+          );
         }
         // Before anything leaves the runner: the commit must hold the listed
         // paths and nothing else. A pre-commit hook that runs `git add`, or a
         // listed file that replaced a tracked folder (whose files' deletions
         // the pathspec then matches), would otherwise be pushed.
         const listed = new Set(stage);
+        // Everything between the base and HEAD, so a commit a hook added
+        // after ours is counted too.
         let contains: string[] | null = null;
+        let oneCommit = false;
         try {
-          contains = await commitContents();
+          oneCommit = (await git("rev-parse", "HEAD~1")).stdout.trim() === base;
+          contains = await commitContents(base);
         } catch {
           // Unknown contents are treated as unlisted ones.
         }
-        const extras = contains === null ? ["(the commit could not be listed)"] : contains.filter((p) => !listed.has(p));
-        if (extras.length > 0) {
-          await git("reset", "-q", "--soft", "HEAD~1").catch(() => undefined);
-          await unstage((contains ?? []).filter((p) => !listed.has(p)));
-          throw new ToolError(
-            `the commit holds paths that were not listed: ${extras.slice(0, 10).map(redact).join(", ")}` +
-              `${extras.length > 10 ? ` and ${extras.length - 10} more` : ""}` +
-              " (a commit hook staged them, or a listed file replaced a folder); nothing was pushed",
-          );
+        const unlisted = (contains ?? []).filter((p) => !listed.has(p));
+        if (contains === null || unlisted.length > 0 || !oneCommit) {
+          await git("reset", "-q", "--soft", base).catch(() => undefined);
+          await unstage(unlisted);
+          if (contains === null) {
+            throw new ToolError("the commit could not be listed, so it is not pushed; the commit was undone");
+          }
+          if (unlisted.length > 0) {
+            throw new ToolError(
+              `the commit holds paths that were not listed: ${unlisted.slice(0, 10).map(redact).join(", ")}` +
+                `${unlisted.length > 10 ? ` and ${unlisted.length - 10} more` : ""}` +
+                " (a commit hook staged or committed them, or a listed file replaced a folder); nothing was pushed",
+            );
+          }
+          throw new ToolError("a commit hook made another commit after this one; both were undone and nothing was pushed");
         }
       }
       // What the commit contains, read before the push so a failure here can
@@ -839,14 +854,18 @@ export function createToolServer(env: RunnerEnv): ToolServer {
   };
 
   /**
-   * The paths HEAD's commit changes, relative to the workspace. `diff-tree`
-   * names them from the repository's top level; a workspace below it (rare)
+   * The paths HEAD's commit changes (or, with `since`, every commit after
+   * that one), relative to the workspace. git names them from the
+   * repository's top level; a workspace below it (rare)
    * gets them re-based, so a path outside the workspace reads `../…`.
    */
-  async function commitContents(): Promise<string[]> {
+  async function commitContents(since?: string): Promise<string[]> {
     const prefix = (await runGit(["rev-parse", "--show-prefix"])).stdout.trim().replace(/\/+$/, "");
+    // `--no-renames`: a rename is its deletion and its addition, both named.
     const { stdout } = await runGit(
-      ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"],
+      since
+        ? ["diff", "--name-only", "--no-renames", "-z", since, "HEAD"]
+        : ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"],
       { maxBuffer: 8 * 1024 * 1024 },
     );
     return stdout.split("\0").filter(Boolean).map((p) => (prefix ? path.posix.relative(prefix, p) : p));
