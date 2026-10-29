@@ -97,7 +97,8 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void
  * workspace is not itself the repository's top level. Peeps
  * states a result as "verified at <sha>" only when `checkoutSha` is the sha it
  * asked for. `actionVersion` tells Peeps which of these fields, and which
- * tool behaviours, this runner has. A server that predates either field
+ * tool behaviours, this runner has; `capabilities` names the tool behaviours
+ * outright. A server that predates either field
  * ignores it.
  */
 export async function runnerInfoFor(env: RunnerEnv): Promise<Record<string, unknown>> {
@@ -108,6 +109,10 @@ export async function runnerInfoFor(env: RunnerEnv): Promise<Record<string, unkn
     sha: env.sha,
     ref: env.ref,
     actionVersion: ACTION_VERSION,
+    // What this runner's tools can do beyond the basics, so Peeps need not
+    // infer it from the version. `commit_paths`: git_commit_push takes
+    // `paths` and commits only those files (PQA-2695).
+    capabilities: ["commit_paths"],
   };
   try {
     // `-c safe.directory`: inside the Playwright container the checkout is

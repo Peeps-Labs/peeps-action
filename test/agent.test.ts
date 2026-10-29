@@ -58,6 +58,8 @@ test("runnerInfo reports the checked-out sha, which differs from the workflow sh
   assert.equal(info.workingDirectory, ws);
   assert.equal(info.configPath, "playwright.config.ts");
   assert.equal(info.node, process.version);
+  // PQA-2695: git_commit_push takes `paths`.
+  assert.deepEqual(info.capabilities, ["commit_paths"]);
 });
 
 test("runnerInfo leaves checkoutSha out when the workspace is not a git checkout", async (t) => {

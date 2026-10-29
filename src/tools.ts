@@ -63,7 +63,8 @@ const MAX_GREP_MATCHES = 500;
 const MAX_PATTERN_CHARS = 500;
 const DENY_SEGMENTS = new Set([".git", "node_modules"]);
 
-class ToolError extends Error {}
+/** A refusal the agent sees as the tool's error: a clear message, nothing raw. */
+export class ToolError extends Error {}
 
 function str(args: Record<string, unknown>, key: string, required = true): string {
   const v = args[key];
@@ -380,6 +381,60 @@ async function digestOf(
   }
 }
 
+const MAX_COMMIT_PATHS = 200;
+
+/**
+ * `git_commit_push`'s `paths`, checked and normalized to repo-relative form.
+ *
+ * Each goes through the same jail as a write (no `..`, absolute paths, `.git`,
+ * `node_modules`, `.env*` or CI configuration), and no symlink: neither the
+ * path itself nor any directory above it, since committing through one would
+ * commit something other than the file the path names. A directory is
+ * refused too: `git add` would take everything under it. Any bad path
+ * refuses the whole call.
+ */
+export async function commitPaths(workspace: string, value: unknown): Promise<string[]> {
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > MAX_COMMIT_PATHS ||
+    !value.every((p) => typeof p === "string" && p.length > 0)
+  ) {
+    throw new ToolError(`argument "paths" must be an array of 1 to ${MAX_COMMIT_PATHS} non-empty strings`);
+  }
+  const realWorkspace = await realpath(workspace);
+  const out = new Set<string>();
+  for (const relative of value as string[]) {
+    // `jail` re-roots a leading slash; here an absolute path is a caller bug
+    // to refuse, not a path to guess at.
+    if (path.isAbsolute(relative) || /^[\\/]/.test(relative) || /^[A-Za-z]:/.test(relative)) {
+      throw new ToolError(`path must be repo-relative, not absolute: ${relative}`);
+    }
+    const abs = jailForWrite(workspace, relative);
+    const info = await lstat(abs).catch(() => null);
+    if (info?.isSymbolicLink()) throw new ToolError(`path is a symlink: ${relative}`);
+    if (info?.isDirectory()) throw new ToolError(`path is a directory, not a file: ${relative}`);
+    // The path itself if it exists, else the deepest directory above it that
+    // does, must resolve to exactly where the path says. Otherwise a symlinked
+    // directory is in the way, or (on a case-insensitive filesystem) the path
+    // names an existing file in another case.
+    let existing = info ? abs : path.dirname(abs);
+    for (;;) {
+      const found = await lstat(existing).then(() => true, () => false);
+      if (found || path.dirname(existing) === existing) break;
+      existing = path.dirname(existing);
+    }
+    const real = await realpath(existing).catch(() => null);
+    if (real === null || path.relative(realWorkspace, real) !== path.relative(workspace, existing)) {
+      throw new ToolError(
+        `path does not resolve to itself (it is under a symlinked directory, or differs in case): ${relative}`,
+      );
+    }
+    out.add(path.relative(workspace, abs).split(path.sep).join("/"));
+  }
+  return [...out];
+}
+
 /**
  * Mask every non-trivial value present in the job's environment: that set IS
  * the secrets the customer exposed to this job. Cheap, and it closes the
@@ -686,12 +741,65 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
       // HEAD is read before this commit can move it (see `commitUnderTest`).
       await commitUnderTest;
+      // Checked in full before anything is touched: one bad path refuses the
+      // call. They pass `jailForWrite`, so `.peeps/` (the customer's own
+      // hooks, which verify a heal) can never be listed.
+      const paths = args.paths === undefined ? null : await commitPaths(workspace, args.paths);
       const remote = await runGit(["remote", "get-url", "origin"]);
       const url = authenticatedPushUrl(remote.stdout, token, env.platform);
       // Via `runGit`, so these carry `-c safe.directory` like every other git
       // call: inside the Playwright container the checkout is owned by another
       // uid and git refuses to touch it without that.
       const git = (...a: string[]) => runGit(a);
+      // Literal pathspecs everywhere a listed path is passed: a `*` is a
+      // character, not a pattern, and `:(…)` is not magic.
+      const lit = (...a: string[]) => runGit(["--literal-pathspecs", ...a], { maxBuffer: 8 * 1024 * 1024 });
+      /** git's own words only, never the command line (it holds the workspace path). */
+      const gitSaid = (error: unknown) => {
+        const e = error as { stderr?: string; stdout?: string };
+        return redact(maskUrlCredentials(`${e.stderr ?? ""}${e.stdout ?? ""}`.trim())).slice(-500);
+      };
+
+      let skippedPaths: string[] = [];
+      let stage: string[] = [];
+      // What `git add` is given: paths in the tree or the index. A deletion
+      // already staged is in neither (git add would refuse it as unmatched),
+      // yet `commit --only` still commits it, matching it against HEAD.
+      let add: string[] = [];
+      if (paths !== null) {
+        try {
+          // Tracked = in the index OR in HEAD, so a deletion already staged
+          // (gone from both the tree and the index) still counts.
+          const tracked = new Set(
+            (await lit("ls-files", "-z", "--with-tree=HEAD", "--", ...paths)).stdout.split("\0").filter(Boolean),
+          );
+          const present = await Promise.all(
+            paths.map((p) => lstat(path.join(workspace, p)).then(() => true, () => false)),
+          );
+          const indexed = new Set(
+            (await lit("ls-files", "-z", "--", ...paths)).stdout.split("\0").filter(Boolean),
+          );
+          stage = paths.filter((p, i) => present[i] || tracked.has(p));
+          add = paths.filter((p, i) => present[i] || indexed.has(p));
+          // A listed path with nothing to stage: one the heal wrote and then
+          // removed. Dropped, and named, so a caller can tell it from a change.
+          skippedPaths = paths.filter((p) => !stage.includes(p));
+          if (stage.length > 0) {
+            const ignored = (await lit("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...stage))
+              .stdout.split("\0").filter(Boolean);
+            if (ignored.length > 0) {
+              throw new ToolError(`path is not committed because it is ignored by .gitignore: ${ignored.slice(0, 10).map(redact).join(", ")}`);
+            }
+          }
+        } catch (error) {
+          if (error instanceof ToolError) throw error;
+          throw new ToolError(`could not read the listed paths' state: ${gitSaid(error)}`);
+        }
+        if (stage.length === 0) {
+          throw new ToolError(`nothing to commit? none of the listed paths exists or is tracked: ${skippedPaths.slice(0, 10).map(redact).join(", ")}`);
+        }
+      }
+
       await git("config", "user.name", "peeps[bot]");
       await git(
         "config",
@@ -699,10 +807,82 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         env.platform === "gitlab" ? "peeps-bot@noreply.peepsai.com" : "peeps[bot]@users.noreply.github.com",
       );
       await git("checkout", "-B", branch);
-      await git("add", "-A");
-      const commit = await git("commit", "-m", message).catch((e: { stderr?: string }) => {
-        throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
-      });
+      let commit;
+      if (paths === null) {
+        await git("add", "-A");
+        commit = await git("commit", "-m", message).catch((e: { stderr?: string }) => {
+          throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
+        });
+      } else {
+        // Undo this call's staging: the listed paths, and anything a hook or
+        // a pathspec added beside them.
+        const unstage = (extra: string[] = []) => lit("reset", "-q", "--", ...stage, ...extra).catch(() => undefined);
+        // The commit this call builds on, to undo back to: a post-commit hook
+        // can add commits of its own, so `HEAD~1` is not necessarily it.
+        const base = (await git("rev-parse", "HEAD")).stdout.trim();
+        try {
+          // `add -A` stages a listed deletion; `commit --only` commits those
+          // paths and nothing else already staged. The customer's hooks run.
+          if (add.length > 0) await lit("add", "-A", "--", ...add);
+          commit = await lit("commit", "-m", message, "--only", "--", ...stage);
+        } catch (error) {
+          await unstage();
+          const said = gitSaid(error);
+          if (/did not match/.test(said)) {
+            throw new ToolError(
+              `a listed path did not match a file git knows (a different case, or a file in a nested repository): ${said}`,
+            );
+          }
+          if (/nothing to commit|nothing added to commit|no changes added to commit/.test(said)) {
+            throw new ToolError(`nothing to commit? ${said}`);
+          }
+          throw new ToolError(
+            `git commit refused: ${said || "no output from git or a commit hook (a hook such as pre-commit may have failed)"}`,
+          );
+        }
+        // Before anything leaves the runner: the commit must hold the listed
+        // paths and nothing else. A pre-commit hook that runs `git add`, or a
+        // listed file that replaced a tracked folder (whose files' deletions
+        // the pathspec then matches), would otherwise be pushed.
+        const listed = new Set(stage);
+        // Everything between the base and HEAD, so a commit a hook added
+        // after ours is counted too.
+        let contains: string[] | null = null;
+        let oneCommit = false;
+        try {
+          oneCommit = (await git("rev-parse", "HEAD~1")).stdout.trim() === base;
+          contains = await commitContents(base);
+        } catch {
+          // Unknown contents are treated as unlisted ones.
+        }
+        const unlisted = (contains ?? []).filter((p) => !listed.has(p));
+        if (contains === null || unlisted.length > 0 || !oneCommit) {
+          await git("reset", "-q", "--soft", base).catch(() => undefined);
+          await unstage(unlisted);
+          if (contains === null) {
+            throw new ToolError("the commit could not be listed, so it is not pushed; the commit was undone");
+          }
+          if (unlisted.length > 0) {
+            throw new ToolError(
+              `the commit holds paths that were not listed: ${unlisted.slice(0, 10).map(redact).join(", ")}` +
+                `${unlisted.length > 10 ? ` and ${unlisted.length - 10} more` : ""}` +
+                " (a commit hook staged or committed them, or a listed file replaced a folder); nothing was pushed",
+            );
+          }
+          throw new ToolError("a commit hook made another commit after this one; both were undone and nothing was pushed");
+        }
+      }
+      // What the commit contains, read before the push so a failure here can
+      // never follow a push that happened. Relative to the workspace, the
+      // base `paths` uses.
+      let committed: string[] = [];
+      let committedPathsTruncated = false;
+      try {
+        committed = await commitContents();
+      } catch {
+        committedPathsTruncated = true;
+      }
+      if (committed.length > MAX_COMMIT_PATHS) committedPathsTruncated = true;
       // actions/checkout persists the job's GITHUB_TOKEN as an `http.extraheader`
       // Authorization header, which git sends INSTEAD of the credentials in the
       // URL — and that token is usually `contents: read`. Blank the header for
@@ -720,9 +900,34 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         throw new ToolError(`git push refused: ${stderr.slice(-600)}`);
       });
       const sha = (await git("rev-parse", "HEAD")).stdout.trim();
-      return { branch, sha, summary: redact(commit.stdout.split("\n")[0] ?? "") };
+      return {
+        branch,
+        sha,
+        summary: redact(commit.stdout.split("\n")[0] ?? ""),
+        committedPaths: committed.slice(0, MAX_COMMIT_PATHS).map(redact),
+        ...(committedPathsTruncated ? { committedPathsTruncated: true } : {}),
+        ...(paths === null ? {} : { skippedPaths: skippedPaths.map(redact) }),
+      };
     },
   };
+
+  /**
+   * The paths HEAD's commit changes (or, with `since`, every commit after
+   * that one), relative to the workspace. git names them from the
+   * repository's top level; a workspace below it (rare)
+   * gets them re-based, so a path outside the workspace reads `../…`.
+   */
+  async function commitContents(since?: string): Promise<string[]> {
+    const prefix = (await runGit(["rev-parse", "--show-prefix"])).stdout.trim().replace(/\/+$/, "");
+    // `--no-renames`: a rename is its deletion and its addition, both named.
+    const { stdout } = await runGit(
+      since
+        ? ["diff", "--name-only", "--no-renames", "-z", since, "HEAD"]
+        : ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"],
+      { maxBuffer: 8 * 1024 * 1024 },
+    );
+    return stdout.split("\0").filter(Boolean).map((p) => (prefix ? path.posix.relative(prefix, p) : p));
+  }
 
   const specs: ToolSpec[] = [
     { name: "read_file", description: "Read a file in the repository (repo-relative path). Up to 512 KB.", inputSchema: obj({ path: s("Repo-relative path") }, ["path"]) },
@@ -733,7 +938,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec, or in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one). Optionally narrow it: Playwright by --grep or project; pytest by test (the title path, e.g. TestClass › test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name"), test: s("Optional pytest title path of one test, scopes joined by ' › '") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
-    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) },
+    { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) },
   ];
 
   return { specs, handlers };

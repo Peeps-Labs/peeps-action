@@ -1462,6 +1462,37 @@ async function digestOf(workspace, realWorkspace, relative, hashing) {
     return { kind: "file", sha256: null, reason: `unreadable: ${errorCode(error)}` };
   }
 }
+var MAX_COMMIT_PATHS = 200;
+async function commitPaths(workspace, value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_COMMIT_PATHS || !value.every((p) => typeof p === "string" && p.length > 0)) {
+    throw new ToolError(`argument "paths" must be an array of 1 to ${MAX_COMMIT_PATHS} non-empty strings`);
+  }
+  const realWorkspace = await (0, import_promises6.realpath)(workspace);
+  const out = /* @__PURE__ */ new Set();
+  for (const relative of value) {
+    if (import_node_path8.default.isAbsolute(relative) || /^[\\/]/.test(relative) || /^[A-Za-z]:/.test(relative)) {
+      throw new ToolError(`path must be repo-relative, not absolute: ${relative}`);
+    }
+    const abs = jailForWrite(workspace, relative);
+    const info = await (0, import_promises6.lstat)(abs).catch(() => null);
+    if (info?.isSymbolicLink()) throw new ToolError(`path is a symlink: ${relative}`);
+    if (info?.isDirectory()) throw new ToolError(`path is a directory, not a file: ${relative}`);
+    let existing = info ? abs : import_node_path8.default.dirname(abs);
+    for (; ; ) {
+      const found = await (0, import_promises6.lstat)(existing).then(() => true, () => false);
+      if (found || import_node_path8.default.dirname(existing) === existing) break;
+      existing = import_node_path8.default.dirname(existing);
+    }
+    const real = await (0, import_promises6.realpath)(existing).catch(() => null);
+    if (real === null || import_node_path8.default.relative(realWorkspace, real) !== import_node_path8.default.relative(workspace, existing)) {
+      throw new ToolError(
+        `path does not resolve to itself (it is under a symlinked directory, or differs in case): ${relative}`
+      );
+    }
+    out.add(import_node_path8.default.relative(workspace, abs).split(import_node_path8.default.sep).join("/"));
+  }
+  return [...out];
+}
 function makeRedactor(env) {
   const values = Object.entries(env).filter(([k, v]) => v && v.length >= 8 && isSecretish(k)).map(([, v]) => v).sort((a, b) => b.length - a.length);
   if (values.length === 0) return (t) => t;
@@ -1677,9 +1708,46 @@ function createToolServer(env) {
       const token = str(args, "token");
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
       await commitUnderTest;
+      const paths = args.paths === void 0 ? null : await commitPaths(workspace, args.paths);
       const remote = await runGit(["remote", "get-url", "origin"]);
       const url = authenticatedPushUrl(remote.stdout, token, env.platform);
       const git = (...a) => runGit(a);
+      const lit = (...a) => runGit(["--literal-pathspecs", ...a], { maxBuffer: 8 * 1024 * 1024 });
+      const gitSaid = (error) => {
+        const e = error;
+        return redact(maskUrlCredentials(`${e.stderr ?? ""}${e.stdout ?? ""}`.trim())).slice(-500);
+      };
+      let skippedPaths = [];
+      let stage = [];
+      let add = [];
+      if (paths !== null) {
+        try {
+          const tracked = new Set(
+            (await lit("ls-files", "-z", "--with-tree=HEAD", "--", ...paths)).stdout.split("\0").filter(Boolean)
+          );
+          const present = await Promise.all(
+            paths.map((p) => (0, import_promises6.lstat)(import_node_path8.default.join(workspace, p)).then(() => true, () => false))
+          );
+          const indexed = new Set(
+            (await lit("ls-files", "-z", "--", ...paths)).stdout.split("\0").filter(Boolean)
+          );
+          stage = paths.filter((p, i) => present[i] || tracked.has(p));
+          add = paths.filter((p, i) => present[i] || indexed.has(p));
+          skippedPaths = paths.filter((p) => !stage.includes(p));
+          if (stage.length > 0) {
+            const ignored = (await lit("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...stage)).stdout.split("\0").filter(Boolean);
+            if (ignored.length > 0) {
+              throw new ToolError(`path is not committed because it is ignored by .gitignore: ${ignored.slice(0, 10).map(redact).join(", ")}`);
+            }
+          }
+        } catch (error) {
+          if (error instanceof ToolError) throw error;
+          throw new ToolError(`could not read the listed paths' state: ${gitSaid(error)}`);
+        }
+        if (stage.length === 0) {
+          throw new ToolError(`nothing to commit? none of the listed paths exists or is tracked: ${skippedPaths.slice(0, 10).map(redact).join(", ")}`);
+        }
+      }
       await git("config", "user.name", "peeps[bot]");
       await git(
         "config",
@@ -1687,10 +1755,64 @@ function createToolServer(env) {
         env.platform === "gitlab" ? "peeps-bot@noreply.peepsai.com" : "peeps[bot]@users.noreply.github.com"
       );
       await git("checkout", "-B", branch);
-      await git("add", "-A");
-      const commit = await git("commit", "-m", message).catch((e) => {
-        throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
-      });
+      let commit;
+      if (paths === null) {
+        await git("add", "-A");
+        commit = await git("commit", "-m", message).catch((e) => {
+          throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
+        });
+      } else {
+        const unstage = (extra = []) => lit("reset", "-q", "--", ...stage, ...extra).catch(() => void 0);
+        const base = (await git("rev-parse", "HEAD")).stdout.trim();
+        try {
+          if (add.length > 0) await lit("add", "-A", "--", ...add);
+          commit = await lit("commit", "-m", message, "--only", "--", ...stage);
+        } catch (error) {
+          await unstage();
+          const said = gitSaid(error);
+          if (/did not match/.test(said)) {
+            throw new ToolError(
+              `a listed path did not match a file git knows (a different case, or a file in a nested repository): ${said}`
+            );
+          }
+          if (/nothing to commit|nothing added to commit|no changes added to commit/.test(said)) {
+            throw new ToolError(`nothing to commit? ${said}`);
+          }
+          throw new ToolError(
+            `git commit refused: ${said || "no output from git or a commit hook (a hook such as pre-commit may have failed)"}`
+          );
+        }
+        const listed = new Set(stage);
+        let contains = null;
+        let oneCommit = false;
+        try {
+          oneCommit = (await git("rev-parse", "HEAD~1")).stdout.trim() === base;
+          contains = await commitContents(base);
+        } catch {
+        }
+        const unlisted = (contains ?? []).filter((p) => !listed.has(p));
+        if (contains === null || unlisted.length > 0 || !oneCommit) {
+          await git("reset", "-q", "--soft", base).catch(() => void 0);
+          await unstage(unlisted);
+          if (contains === null) {
+            throw new ToolError("the commit could not be listed, so it is not pushed; the commit was undone");
+          }
+          if (unlisted.length > 0) {
+            throw new ToolError(
+              `the commit holds paths that were not listed: ${unlisted.slice(0, 10).map(redact).join(", ")}${unlisted.length > 10 ? ` and ${unlisted.length - 10} more` : ""} (a commit hook staged or committed them, or a listed file replaced a folder); nothing was pushed`
+            );
+          }
+          throw new ToolError("a commit hook made another commit after this one; both were undone and nothing was pushed");
+        }
+      }
+      let committed = [];
+      let committedPathsTruncated = false;
+      try {
+        committed = await commitContents();
+      } catch {
+        committedPathsTruncated = true;
+      }
+      if (committed.length > MAX_COMMIT_PATHS) committedPathsTruncated = true;
       await git(
         "-c",
         "http.extraheader=",
@@ -1705,9 +1827,24 @@ function createToolServer(env) {
         throw new ToolError(`git push refused: ${stderr.slice(-600)}`);
       });
       const sha = (await git("rev-parse", "HEAD")).stdout.trim();
-      return { branch, sha, summary: redact(commit.stdout.split("\n")[0] ?? "") };
+      return {
+        branch,
+        sha,
+        summary: redact(commit.stdout.split("\n")[0] ?? ""),
+        committedPaths: committed.slice(0, MAX_COMMIT_PATHS).map(redact),
+        ...committedPathsTruncated ? { committedPathsTruncated: true } : {},
+        ...paths === null ? {} : { skippedPaths: skippedPaths.map(redact) }
+      };
     }
   };
+  async function commitContents(since) {
+    const prefix = (await runGit(["rev-parse", "--show-prefix"])).stdout.trim().replace(/\/+$/, "");
+    const { stdout } = await runGit(
+      since ? ["diff", "--name-only", "--no-renames", "-z", since, "HEAD"] : ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"],
+      { maxBuffer: 8 * 1024 * 1024 }
+    );
+    return stdout.split("\0").filter(Boolean).map((p) => prefix ? import_node_path8.default.posix.relative(prefix, p) : p);
+  }
   const specs = [
     { name: "read_file", description: "Read a file in the repository (repo-relative path). Up to 512 KB.", inputSchema: obj({ path: s("Repo-relative path") }, ["path"]) },
     { name: "list_files", description: "List files under a repository directory, recursively.", inputSchema: obj({ path: s("Repo-relative directory; default the repository root") }, []) },
@@ -1717,7 +1854,7 @@ function createToolServer(env) {
     { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec, or in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one). Optionally narrow it: Playwright by --grep or project; pytest by test (the title path, e.g. TestClass \u203A test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name"), test: s("Optional pytest title path of one test, scopes joined by ' \u203A '") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
-    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) }
+    { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) }
   ];
   return { specs, handlers };
 }
@@ -1837,7 +1974,11 @@ async function runnerInfoFor(env) {
     node: process.version,
     sha: env.sha,
     ref: env.ref,
-    actionVersion: ACTION_VERSION
+    actionVersion: ACTION_VERSION,
+    // What this runner's tools can do beyond the basics, so Peeps need not
+    // infer it from the version. `commit_paths`: git_commit_push takes
+    // `paths` and commits only those files (PQA-2695).
+    capabilities: ["commit_paths"]
   };
   try {
     const { stdout } = await execFileAsync3(
