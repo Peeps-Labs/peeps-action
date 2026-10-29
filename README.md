@@ -244,7 +244,10 @@ Write a JUnit file to `<junit-path>` (pytest's own `--junitxml` output works).
 That file is the verdict, not the exit code. Use the hook to send the run
 through your own lab service: build the test image from this checkout, reserve
 a device, run the node ids, and copy the JUnit back. Peeps never writes under
-`.peeps/`, so a heal cannot change what verifies it. A run must finish within
+`.peeps/`, and runs a copy of `.peeps/` taken from the commit under test (and
+only while the checkout's `.peeps/` still matches it), so a heal cannot change
+the hook. What the hook runs from the checkout, your tests and `conftest.py`
+included, a heal can change, as with Playwright. A run must finish within
 Peeps' tool timeout (10 minutes for a call the agent makes, 15 for the final
 verification).
 

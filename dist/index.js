@@ -691,7 +691,7 @@ var import_node_util3 = require("node:util");
 // src/tools.ts
 var import_node_child_process4 = require("node:child_process");
 var import_node_crypto4 = require("node:crypto");
-var import_node_fs4 = require("node:fs");
+var import_node_fs3 = require("node:fs");
 var import_promises6 = require("node:fs/promises");
 var import_node_os4 = require("node:os");
 var import_node_path8 = __toESM(require("node:path"));
@@ -1138,7 +1138,6 @@ async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
 }
 
 // src/pytest-run-tool.ts
-var import_node_fs3 = require("node:fs");
 var import_promises5 = require("node:fs/promises");
 var import_node_os3 = require("node:os");
 var import_node_path7 = __toESM(require("node:path"));
@@ -1203,22 +1202,12 @@ function parseJunitResults(xml, requestedFile = null) {
   }
   return results;
 }
-async function hookPath(workspace) {
-  const abs = import_node_path7.default.join(workspace, RUN_TESTS_HOOK);
-  try {
-    if (!(await (0, import_promises5.lstat)(import_node_path7.default.dirname(abs))).isDirectory()) return null;
-    if (!(await (0, import_promises5.lstat)(abs)).isFile()) return null;
-    await (0, import_promises5.access)(abs, import_node_fs3.constants.X_OK);
-    return abs;
-  } catch {
-    return null;
-  }
-}
+var RUN_ENV = { CI: "1", PYTHONDONTWRITEBYTECODE: "1" };
 var defaultDeps = {
   run: async (cmd, args, cwd, timeoutMs) => {
     const { spawn: spawn4 } = await import("node:child_process");
     return new Promise((resolve) => {
-      const child = spawn4(cmd, args, { cwd, env: { ...process.env, CI: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn4(cmd, args, { cwd, env: { ...process.env, ...RUN_ENV }, stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       const keep = (chunk) => {
         output = (output + chunk.toString("utf8")).slice(-2e4);
@@ -1236,7 +1225,7 @@ var defaultDeps = {
       });
     });
   },
-  pytest: (args, cwd) => spawnPytest(args, { cwd, env: { ...process.env, CI: "1" }, capture: true })
+  pytest: (args, cwd) => spawnPytest(args, { cwd, env: { ...process.env, ...RUN_ENV }, capture: true })
 };
 async function runPytestTool(env, input2, deps = defaultDeps) {
   const rel = import_node_path7.default.relative(env.workingDirectory, input2.fileAbs).split(import_node_path7.default.sep).join("/");
@@ -1247,8 +1236,8 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
   const junit = import_node_path7.default.join(dir, "junit.xml");
   const started = Date.now();
   try {
-    const hook = await hookPath(env.workspace);
-    if (hook && input2.hookUnchanged && !await input2.hookUnchanged()) {
+    const plan = input2.hook ? await input2.hook(dir) : { kind: "none" };
+    if (plan.kind === "changed") {
       return {
         exitCode: 1,
         durationMs: Date.now() - started,
@@ -1257,6 +1246,7 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
         outputTail: `${RUN_TESTS_HOOK} differs from the commit under test, so Peeps did not run it. Undo the change under .peeps/ and run the test again.`
       };
     }
+    const hook = plan.kind === "ready" ? plan.path : null;
     const ran = hook ? await deps.run(hook, [junit, target], env.workingDirectory, RUN_TESTS_TIMEOUT_MS) : await deps.pytest(
       [
         ...configArgs(env),
@@ -1466,7 +1456,7 @@ async function digestOf(workspace, realWorkspace, relative, hashing) {
   if (hashing.outOfTime()) return { kind: "file", sha256: null, reason: "time budget for digests spent" };
   try {
     const hash = (0, import_node_crypto4.createHash)("sha256");
-    for await (const chunk of (0, import_node_fs4.createReadStream)(abs)) hash.update(chunk);
+    for await (const chunk of (0, import_node_fs3.createReadStream)(abs)) hash.update(chunk);
     return { kind: "file", sha256: hash.digest("hex") };
   } catch (error) {
     return { kind: "file", sha256: null, reason: `unreadable: ${errorCode(error)}` };
@@ -1507,6 +1497,10 @@ function createToolServer(env) {
     cwd: workspace,
     ...options
   });
+  const commitUnderTest = runGit(["rev-parse", "HEAD"]).then(
+    (r) => r.stdout.trim() || null,
+    () => null
+  );
   const handlers = {
     async read_file(args) {
       const abs = jail(workspace, str(args, "path"));
@@ -1605,15 +1599,24 @@ function createToolServer(env) {
           titlePath: typeof args.test === "string" && args.test ? args.test : null,
           keyword: typeof args.grep === "string" && args.grep ? args.grep : null,
           browser: typeof args.project === "string" && args.project ? args.project : null,
-          hookUnchanged: async () => {
+          hook: async (scratchDir) => {
+            const sha = await commitUnderTest;
+            if (!sha) return { kind: "none" };
+            const listed = await runGit(["ls-tree", sha, "--", RUN_TESTS_HOOK]);
+            if (!listed.stdout.startsWith("100755 blob ")) return { kind: "none" };
             try {
-              await runGit(["ls-files", "--error-unmatch", "--", RUN_TESTS_HOOK]);
-              await runGit(["diff", "--quiet", "HEAD", "--", ".peeps"]);
+              await runGit(["diff", "--quiet", sha, "--", ".peeps"]);
               const untracked = await runGit(["ls-files", "--others", "--", ".peeps"]);
-              return untracked.stdout.trim() === "";
+              if (untracked.stdout.trim() !== "") return { kind: "changed" };
             } catch {
-              return false;
+              return { kind: "changed" };
             }
+            const archive = import_node_path8.default.join(scratchDir, "peeps.tar");
+            const copy = import_node_path8.default.join(scratchDir, "hook");
+            await (0, import_promises6.mkdir)(copy);
+            await runGit(["archive", "--format=tar", "-o", archive, sha, ".peeps"]);
+            await execFileAsync2("tar", ["-xf", archive, "-C", copy]);
+            return { kind: "ready", path: import_node_path8.default.join(copy, RUN_TESTS_HOOK) };
           }
         });
         return {
@@ -1673,6 +1676,7 @@ function createToolServer(env) {
       const message = str(args, "message");
       const token = str(args, "token");
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
+      await commitUnderTest;
       const remote = await runGit(["remote", "get-url", "origin"]);
       const url = authenticatedPushUrl(remote.stdout, token, env.platform);
       const git = (...a) => runGit(a);
@@ -1854,7 +1858,7 @@ function summarizeArgs(args) {
 
 // src/browser-check.ts
 var import_node_child_process6 = require("node:child_process");
-var import_node_fs5 = require("node:fs");
+var import_node_fs4 = require("node:fs");
 var import_node_util4 = require("node:util");
 var execFileAsync4 = (0, import_node_util4.promisify)(import_node_child_process6.execFile);
 var PROBE = `
@@ -1899,7 +1903,7 @@ function installOf(executablePath) {
 }
 function listDir(dir) {
   try {
-    return (0, import_node_fs5.readdirSync)(dir);
+    return (0, import_node_fs4.readdirSync)(dir);
   } catch {
     return [];
   }
@@ -1924,7 +1928,7 @@ function missingBrowsersMessage(probe, fs) {
 async function warnIfBrowsersMissing(workingDirectory, platform) {
   const probe = await probePlaywright(workingDirectory);
   if (!probe) return;
-  const message = missingBrowsersMessage(probe, { exists: import_node_fs5.existsSync });
+  const message = missingBrowsersMessage(probe, { exists: import_node_fs4.existsSync });
   if (!message) return;
   console.log(platform === "github" ? `::warning title=Playwright browsers missing::${message}` : `[peeps] warning: ${message}`);
 }

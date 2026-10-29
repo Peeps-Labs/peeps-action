@@ -459,6 +459,15 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       ...options,
     });
 
+  // The commit under test, read before any tool can move HEAD:
+  // `git_commit_push` commits before it pushes (and keeps the commit when the
+  // push fails), so HEAD alone would let a heal's own commit vouch for a
+  // `.peeps/run-tests` it rewrote.
+  const commitUnderTest: Promise<string | null> = runGit(["rev-parse", "HEAD"]).then(
+    (r) => r.stdout.trim() || null,
+    () => null,
+  );
+
   const handlers: Record<string, ToolHandler> = {
     async read_file(args) {
       const abs = jail(workspace, str(args, "path"));
@@ -577,18 +586,29 @@ export function createToolServer(env: RunnerEnv): ToolServer {
           titlePath: typeof args.test === "string" && args.test ? args.test : null,
           keyword: typeof args.grep === "string" && args.grep ? args.grep : null,
           browser: typeof args.project === "string" && args.project ? args.project : null,
-          hookUnchanged: async () => {
-            // Only the hook the repository holds at HEAD runs: the agent's
-            // writes are refused under .peeps/, and this catches a write that
-            // reached it another way (through a symlink, say).
+          hook: async (scratchDir) => {
+            const sha = await commitUnderTest;
+            if (!sha) return { kind: "none" };
+            const listed = await runGit(["ls-tree", sha, "--", RUN_TESTS_HOOK]);
+            if (!listed.stdout.startsWith("100755 blob ")) return { kind: "none" };
+            // The agent's writes are refused under .peeps/; this catches one
+            // that reached it another way (through a symlink, say), since a
+            // hook may read its own files from the checkout.
             try {
-              await runGit(["ls-files", "--error-unmatch", "--", RUN_TESTS_HOOK]);
-              await runGit(["diff", "--quiet", "HEAD", "--", ".peeps"]);
+              await runGit(["diff", "--quiet", sha, "--", ".peeps"]);
               const untracked = await runGit(["ls-files", "--others", "--", ".peeps"]);
-              return untracked.stdout.trim() === "";
+              if (untracked.stdout.trim() !== "") return { kind: "changed" };
             } catch {
-              return false;
+              return { kind: "changed" };
             }
+            // What runs is a copy out of the commit, so nothing written to the
+            // checkout after that check reaches it.
+            const archive = path.join(scratchDir, "peeps.tar");
+            const copy = path.join(scratchDir, "hook");
+            await mkdir(copy);
+            await runGit(["archive", "--format=tar", "-o", archive, sha, ".peeps"]);
+            await execFileAsync("tar", ["-xf", archive, "-C", copy]);
+            return { kind: "ready", path: path.join(copy, RUN_TESTS_HOOK) };
           },
         });
         return {
@@ -664,6 +684,8 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       const message = str(args, "message");
       const token = str(args, "token");
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
+      // HEAD is read before this commit can move it (see `commitUnderTest`).
+      await commitUnderTest;
       const remote = await runGit(["remote", "get-url", "origin"]);
       const url = authenticatedPushUrl(remote.stdout, token, env.platform);
       // Via `runGit`, so these carry `-c safe.directory` like every other git

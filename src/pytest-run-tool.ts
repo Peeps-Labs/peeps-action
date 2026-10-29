@@ -20,12 +20,12 @@
  * JUnit file to `<junit-path>` (pytest's own `--junitxml` output works) and
  * may take as long as the lab does, up to the tool's timeout. Its exit code is
  * reported but not trusted: the JUnit file is the verdict. The hook is the
- * customer's: `.peeps/` is refused to the agent's writes, so a heal can never
- * change what verifies it.
+ * customer's: `.peeps/` is refused to the agent's writes, what runs is a copy
+ * of `.peeps/` taken from the commit under test, and it runs only while the
+ * checkout's `.peeps/` still matches that commit.
  */
 
-import { constants } from "node:fs";
-import { access, lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { RunnerEnv } from "./env";
@@ -144,18 +144,16 @@ export function parseJunitResults(xml: string, requestedFile: string | null = nu
   return results;
 }
 
-/** The hook, when it is a plain executable file under a plain `.peeps/`. */
-async function hookPath(workspace: string): Promise<string | null> {
-  const abs = path.join(workspace, RUN_TESTS_HOOK);
-  try {
-    if (!(await lstat(path.dirname(abs))).isDirectory()) return null;
-    if (!(await lstat(abs)).isFile()) return null;
-    await access(abs, constants.X_OK);
-    return abs;
-  } catch {
-    return null;
-  }
-}
+/**
+ * What runs for the customer's hook: nothing (no hook at the commit under
+ * test), a refusal (the checkout's `.peeps/` differs from that commit), or the
+ * path of the hook copied out of that commit.
+ */
+export type HookPlan = { kind: "none" } | { kind: "changed" } | { kind: "ready"; path: string };
+
+// A run must not leave `__pycache__` in the checkout: a heal commits every
+// change, and bytecode would make its fix touch files it may not change.
+const RUN_ENV = { CI: "1", PYTHONDONTWRITEBYTECODE: "1" };
 
 export interface PytestRunDeps {
   /** Runs a command and resolves with its exit code and the tail of its output. */
@@ -167,7 +165,7 @@ const defaultDeps: PytestRunDeps = {
   run: async (cmd, args, cwd, timeoutMs) => {
     const { spawn } = await import("node:child_process");
     return new Promise((resolve) => {
-      const child = spawn(cmd, args, { cwd, env: { ...process.env, CI: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(cmd, args, { cwd, env: { ...process.env, ...RUN_ENV }, stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       const keep = (chunk: Buffer) => {
         output = (output + chunk.toString("utf8")).slice(-20_000);
@@ -186,7 +184,7 @@ const defaultDeps: PytestRunDeps = {
     });
   },
   pytest: (args, cwd) =>
-    spawnPytest(args, { cwd, env: { ...process.env, CI: "1" }, capture: true }),
+    spawnPytest(args, { cwd, env: { ...process.env, ...RUN_ENV }, capture: true }),
 };
 
 /**
@@ -201,8 +199,8 @@ export async function runPytestTool(
     keyword: string | null;
     /** The Playwright browser a pytest-playwright test ran in, if any. */
     browser?: string | null;
-    /** Whether `.peeps/` matches HEAD: a changed hook is never run. */
-    hookUnchanged?: () => Promise<boolean>;
+    /** Finds the customer's hook, copying it into the run's scratch directory. */
+    hook?: (scratchDir: string) => Promise<HookPlan>;
   },
   deps: PytestRunDeps = defaultDeps,
 ) {
@@ -214,8 +212,8 @@ export async function runPytestTool(
   const junit = path.join(dir, "junit.xml");
   const started = Date.now();
   try {
-    const hook = await hookPath(env.workspace);
-    if (hook && input.hookUnchanged && !(await input.hookUnchanged())) {
+    const plan: HookPlan = input.hook ? await input.hook(dir) : { kind: "none" };
+    if (plan.kind === "changed") {
       return {
         exitCode: 1,
         durationMs: Date.now() - started,
@@ -224,6 +222,7 @@ export async function runPytestTool(
         outputTail: `${RUN_TESTS_HOOK} differs from the commit under test, so Peeps did not run it. Undo the change under .peeps/ and run the test again.`,
       };
     }
+    const hook = plan.kind === "ready" ? plan.path : null;
     const ran = hook
       ? await deps.run(hook, [junit, target], env.workingDirectory, RUN_TESTS_TIMEOUT_MS)
       : await deps.pytest(

@@ -128,13 +128,23 @@ test("without a hook, pytest runs the one test with legacy JUnit and the -k filt
 test("an executable .peeps/run-tests runs instead, with the JUnit path and the node id", async () => {
   const env = await workspace(true);
   const { deps, calls } = fakeDeps(ONE_PASS);
+  let scratch: string | null = null;
   const out = await runPytestTool(
     env,
-    { fileAbs: path.join(env.workspace, "tests/test_a.py"), titlePath: "test_up", keyword: null },
+    {
+      fileAbs: path.join(env.workspace, "tests/test_a.py"),
+      titlePath: "test_up",
+      keyword: null,
+      hook: async (dir) => {
+        scratch = dir;
+        return { kind: "ready", path: path.join(dir, "hook", ".peeps", "run-tests") };
+      },
+    },
     deps,
   );
   assert.equal(calls[0]!.via, "hook");
-  assert.equal(calls[0]!.cmd, path.join(env.workspace, ".peeps", "run-tests"));
+  // The copy the hook plan made, never the checkout's own file.
+  assert.equal(calls[0]!.cmd, path.join(scratch!, "hook", ".peeps", "run-tests"));
   assert.match(calls[0]!.args[0]!, /junit\.xml$/);
   assert.equal(calls[0]!.args[1], "tests/test_a.py::test_up");
   // The JUnit file is the verdict, not the hook's exit code.
@@ -152,7 +162,7 @@ test("a hook that differs from the commit under test is not run", async () => {
       fileAbs: path.join(env.workspace, "tests/test_a.py"),
       titlePath: "test_up",
       keyword: null,
-      hookUnchanged: async () => false,
+      hook: async () => ({ kind: "changed" }),
     },
     deps,
   );
@@ -182,4 +192,15 @@ test("a run that wrote no JUnit reports no results and keeps the output", async 
   );
   assert.equal(out.results, null);
   assert.equal(out.outputTail, "1 passed");
+});
+
+test("a .peeps/run-tests in the checkout runs only through a hook plan", async () => {
+  const env = await workspace(true);
+  const { deps, calls } = fakeDeps(ONE_PASS);
+  await runPytestTool(
+    env,
+    { fileAbs: path.join(env.workspace, "tests/test_a.py"), titlePath: "test_up", keyword: null },
+    deps,
+  );
+  assert.equal(calls[0]!.via, "pytest");
 });
