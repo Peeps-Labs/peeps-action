@@ -1676,7 +1676,15 @@ function createToolServer(env) {
           pendingNote: ran.pendingNote === null ? null : redact(ran.pendingNote).slice(0, 500),
           results: ran.results?.map((r) => {
             const title = redact(r.title);
-            return { ...r, title, ...title === r.title ? {} : { titleRedacted: true }, ...r.error ? { error: redact(r.error) } : {} };
+            const file2 = redact(r.file);
+            return {
+              ...r,
+              title,
+              ...title === r.title ? {} : { titleRedacted: true },
+              file: file2,
+              ...file2 === r.file ? {} : { fileRedacted: true },
+              ...r.error ? { error: redact(r.error) } : {}
+            };
           }) ?? null,
           outputTail: redact(ran.outputTail)
         };
@@ -1892,6 +1900,10 @@ function s(description) {
 var ERROR_CONTEXT_MAX_BYTES = 16 * 1024;
 var ERROR_CONTEXT_MAX_READ_BYTES = 1024 * 1024;
 var ERROR_CONTEXT_TOTAL_BYTES = 128 * 1024;
+var RUN_TESTS_RESULT_MAX_BYTES = 400 * 1024;
+function jsonBytes(value) {
+  return Buffer.byteLength(JSON.stringify(value));
+}
 async function readErrorContext(file, redact, allowedRoots) {
   if (import_node_path8.default.basename(file) !== "error-context.md") return null;
   let handle;
@@ -1907,13 +1919,15 @@ async function readErrorContext(file, redact, allowedRoots) {
     if (!inside) return null;
     handle = await (0, import_promises6.open)(file, import_node_fs3.constants.O_RDONLY | import_node_fs3.constants.O_NOFOLLOW);
     const info = await handle.stat();
-    if (!info.isFile() || info.size > ERROR_CONTEXT_MAX_READ_BYTES) return null;
+    if (!info.isFile()) return null;
+    if (info.size > ERROR_CONTEXT_MAX_READ_BYTES) return "too_large";
     const raw = await handle.readFile();
-    if (raw.length > ERROR_CONTEXT_MAX_READ_BYTES) return null;
+    if (raw.length > ERROR_CONTEXT_MAX_READ_BYTES) return "too_large";
     let text = raw.toString("utf8");
     if (text.startsWith("# Instructions\n")) {
       const next = text.indexOf("\n# ");
-      text = next === -1 ? "" : text.slice(next + 1);
+      if (next === -1) return null;
+      text = text.slice(next + 1);
     }
     const bytes = Buffer.from(redact(text), "utf8");
     if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return { text: bytes.toString("utf8"), truncated: false };
@@ -1946,9 +1960,10 @@ async function playwrightResults(report, env, redact) {
     let evidence = {};
     if (errorContextPath !== null) {
       const read = budget > 0 ? await readErrorContext(errorContextPath, redact, allowedRoots) : null;
-      const bytes = read === null ? 0 : Buffer.byteLength(read.text);
-      if (read !== null && bytes <= budget) {
-        budget -= bytes;
+      if (read === "too_large") {
+        evidence = { errorContextOmitted: true };
+      } else if (read !== null && jsonBytes(read.text) <= budget) {
+        budget -= jsonBytes(read.text);
         evidence = { errorContext: read.text, errorContextTruncated: read.truncated };
       } else if (read !== null || budget <= 0) {
         budget = 0;
@@ -1966,6 +1981,14 @@ async function playwrightResults(report, env, redact) {
       ...file === null ? {} : { file: redact(file), ...redact(file) === file ? {} : { fileRedacted: true } },
       ...evidence
     });
+  }
+  let size = jsonBytes(results);
+  for (let i = results.length - 1; i >= 0 && size > RUN_TESTS_RESULT_MAX_BYTES; i--) {
+    const r = results[i];
+    if (r.errorContext === void 0) continue;
+    const { errorContext: _dropped, errorContextTruncated: _cut, ...rest } = r;
+    results[i] = { ...rest, errorContextOmitted: true };
+    size = jsonBytes(results);
   }
   return results;
 }

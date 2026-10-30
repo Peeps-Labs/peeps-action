@@ -288,8 +288,9 @@ A failed result also carries `errorContext`: Playwright's `error-context.md`
 for that test (the error, the test's source and, when the test had a page, the
 page's accessibility snapshot at the failure), without Playwright's
 "Instructions" preamble, masked, and cut to 16 KB (`errorContextTruncated`
-says whether it was cut). One answer carries at most 128 KB of it; failures
-past that get `errorContextOmitted: true`, so narrow the run with `grep`. The
+says whether it was cut). One answer carries at most 128 KB of it, counted as
+sent; failures past that, or whose file is over 1 MB, get
+`errorContextOmitted: true`, so narrow the run with `grep`. The
 runner advertises these to Peeps as the capabilities `result_files` and
 `error_context`.
 
@@ -348,6 +349,10 @@ access token Peeps was given (Maintainer).
   through the job's secret masking, as pytest's did; a masked title carries
   `titleRedacted: true`, on both paths, and a masked `file` `fileRedacted: true`.
   `grep` match paths are masked too.
+- Release note: don't release this until Peeps' server matches redacted titles
+  ([PQA-2743](https://linear.app/peeps-ai/issue/PQA-2743), live on prod Peeps).
+  Until then, a Playwright heal of a test whose title holds a masked value
+  fails Peeps' exact-title match and reads as "the test did not run".
 
 ## Development
 

@@ -824,21 +824,22 @@ test("grep redacts an env value in a match's path", async (t) => {
   assert.deepEqual(out.matches.map((m) => m.path), ["e2e/[redacted]/a.spec.ts"]);
 });
 
-test("a pytest title the redactor changed says so", async (t) => {
+test("a pytest title or file the redactor changed says so", async (t) => {
   process.env.PEEPS_TEST_LAB_SITE = "production";
   t.after(() => delete process.env.PEEPS_TEST_LAB_SITE);
   const { tools } = await hookRepo(
     t,
-    `#!/bin/sh\nprintf '<testsuite><testcase classname="tests.test_a" name="test_production_banner" file="tests/test_a.py" line="4"/><testcase classname="tests.test_a" name="test_a" file="tests/test_a.py"/></testsuite>' > "$1"\n`,
+    `#!/bin/sh\nprintf '<testsuite><testcase classname="tests.test_a" name="test_production_banner" file="tests/production/test_a.py" line="4"/><testcase classname="tests.test_a" name="test_a" file="tests/test_a.py"/></testsuite>' > "$1"\n`,
   );
   const out = (await tools.run_tests!({ file: "tests/test_a.py" })) as {
-    results: Array<{ title: string; line?: number; titleRedacted?: boolean }>;
+    results: Array<{ title: string; file: string; line?: number; titleRedacted?: boolean; fileRedacted?: boolean }>;
   };
-  assert.deepEqual(out.results.map((r) => [r.title, r.line, r.titleRedacted]), [
-    ["test_[redacted]_banner", 4, true],
-    ["test_a", undefined, undefined],
+  assert.deepEqual(out.results.map((r) => [r.title, r.file, r.line, r.titleRedacted, r.fileRedacted]), [
+    ["test_[redacted]_banner", "tests/[redacted]/test_a.py", 4, true, true],
+    ["test_a", "tests/test_a.py", undefined, undefined, undefined],
   ]);
   assert.equal("titleRedacted" in out.results[1]!, false);
+  assert.equal("fileRedacted" in out.results[1]!, false);
 });
 
 test("a hook rewritten through a symlink and committed by a failed push never runs", async (t) => {

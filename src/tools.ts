@@ -673,8 +673,16 @@ export function createToolServer(env: RunnerEnv): ToolServer {
           results:
             ran.results?.map((r) => {
               const title = redact(r.title);
-              // A changed title says so, so Peeps can match by file and line.
-              return { ...r, title, ...(title === r.title ? {} : { titleRedacted: true }), ...(r.error ? { error: redact(r.error) } : {}) };
+              const file = redact(r.file);
+              // A changed title or file says so, so Peeps knows it is not the real name.
+              return {
+                ...r,
+                title,
+                ...(title === r.title ? {} : { titleRedacted: true }),
+                file,
+                ...(file === r.file ? {} : { fileRedacted: true }),
+                ...(r.error ? { error: redact(r.error) } : {}),
+              };
             }) ?? null,
           outputTail: redact(ran.outputTail),
         };
@@ -968,6 +976,17 @@ export const ERROR_CONTEXT_MAX_READ_BYTES = 1024 * 1024;
  * every status; failures past this get `errorContextOmitted: true`.
  */
 export const ERROR_CONTEXT_TOTAL_BYTES = 128 * 1024;
+/**
+ * A Playwright `run_tests` answer's `results`, serialized, at most: what
+ * remains over it after the budget (long control-character errors, say) is
+ * paid by dropping `errorContext` from the latest results.
+ */
+export const RUN_TESTS_RESULT_MAX_BYTES = 400 * 1024;
+
+/** A string's size as JSON sends it: control characters cost six bytes. */
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value));
+}
 
 /**
  * Playwright's `error-context.md` for a failed test: the error, the test's
@@ -979,7 +998,7 @@ export const ERROR_CONTEXT_TOTAL_BYTES = 128 * 1024;
  *
  * Read whole and redacted whole, never a partial read (a secret cut by the
  * read would reach the result as an unmasked prefix), so a file over
- * `ERROR_CONTEXT_MAX_READ_BYTES` is left out. Playwright's "# Instructions"
+ * `ERROR_CONTEXT_MAX_READ_BYTES` is "too_large". Playwright's "# Instructions"
  * preamble, a prompt written for another assistant, is dropped. Then the text
  * is cut to `ERROR_CONTEXT_MAX_BYTES` at a character boundary.
  */
@@ -987,7 +1006,7 @@ export async function readErrorContext(
   file: string,
   redact: (text: string) => string,
   allowedRoots: string[],
-): Promise<{ text: string; truncated: boolean } | null> {
+): Promise<{ text: string; truncated: boolean } | "too_large" | null> {
   if (path.basename(file) !== "error-context.md") return null;
   let handle;
   try {
@@ -1003,13 +1022,16 @@ export async function readErrorContext(
     handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
     // Checked again on what was opened, so a swap after the lstat is caught.
     const info = await handle.stat();
-    if (!info.isFile() || info.size > ERROR_CONTEXT_MAX_READ_BYTES) return null;
+    if (!info.isFile()) return null;
+    if (info.size > ERROR_CONTEXT_MAX_READ_BYTES) return "too_large";
     const raw = await handle.readFile();
-    if (raw.length > ERROR_CONTEXT_MAX_READ_BYTES) return null;
+    if (raw.length > ERROR_CONTEXT_MAX_READ_BYTES) return "too_large";
     let text = raw.toString("utf8");
     if (text.startsWith("# Instructions\n")) {
       const next = text.indexOf("\n# ");
-      text = next === -1 ? "" : text.slice(next + 1);
+      // Nothing after the preamble: no context at all.
+      if (next === -1) return null;
+      text = text.slice(next + 1);
     }
     const bytes = Buffer.from(redact(text), "utf8");
     if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return { text: bytes.toString("utf8"), truncated: false };
@@ -1059,8 +1081,9 @@ type Summary = { test: SummarizedTest; specFile: string; errorContextPath: strin
  *   `fileRedacted: true`. Left out when the report names no rootDir or the
  *   spec lies outside the workspace.
  * - A failed result carries its `errorContext` (see `readErrorContext`) while
- *   `ERROR_CONTEXT_TOTAL_BYTES` lasts, with `errorContextTruncated`; past it,
- *   `errorContextOmitted: true`.
+ *   `ERROR_CONTEXT_TOTAL_BYTES` lasts (counted as JSON sends it), with
+ *   `errorContextTruncated`; past it, or over the read cap, or dropped to keep
+ *   the answer under `RUN_TESTS_RESULT_MAX_BYTES`, `errorContextOmitted: true`.
  */
 export async function playwrightResults(
   report: unknown,
@@ -1089,9 +1112,11 @@ export async function playwrightResults(
     let evidence: Partial<SummarizedTest> = {};
     if (errorContextPath !== null) {
       const read = budget > 0 ? await readErrorContext(errorContextPath, redact, allowedRoots) : null;
-      const bytes = read === null ? 0 : Buffer.byteLength(read.text);
-      if (read !== null && bytes <= budget) {
-        budget -= bytes;
+      if (read === "too_large") {
+        evidence = { errorContextOmitted: true };
+      } else if (read !== null && jsonBytes(read.text) <= budget) {
+        // Counted as sent: JSON escaping, not the raw bytes, meets the cap.
+        budget -= jsonBytes(read.text);
         evidence = { errorContext: read.text, errorContextTruncated: read.truncated };
       } else if (read !== null || budget <= 0) {
         budget = 0;
@@ -1109,6 +1134,15 @@ export async function playwrightResults(
       ...(file === null ? {} : { file: redact(file), ...(redact(file) === file ? {} : { fileRedacted: true as const }) }),
       ...evidence,
     });
+  }
+  // The last guard: still too large, drop errorContext from the latest results.
+  let size = jsonBytes(results);
+  for (let i = results.length - 1; i >= 0 && size > RUN_TESTS_RESULT_MAX_BYTES; i--) {
+    const r = results[i]!;
+    if (r.errorContext === undefined) continue;
+    const { errorContext: _dropped, errorContextTruncated: _cut, ...rest } = r;
+    results[i] = { ...rest, errorContextOmitted: true };
+    size = jsonBytes(results);
   }
   return results;
 }

@@ -8,6 +8,7 @@ import {
   ERROR_CONTEXT_MAX_BYTES,
   ERROR_CONTEXT_MAX_READ_BYTES,
   ERROR_CONTEXT_TOTAL_BYTES,
+  RUN_TESTS_RESULT_MAX_BYTES,
   ensureParentDirInside,
   jail,
   jailForWrite,
@@ -248,13 +249,18 @@ async function contextFile(dir: string, body: string): Promise<string> {
 
 const noRedact = makeRedactor({});
 
+/** The text read, failing the test on "too_large" or null. */
+function textOf(read: Awaited<ReturnType<typeof readErrorContext>>) {
+  assert.ok(read !== null && read !== "too_large", String(read));
+  return read;
+}
+
 test("readErrorContext cuts mid-character back to the character's start, and says it cut", async (t) => {
   const ws = await workspace(t);
   // "€" is 3 bytes; after a 2-byte prefix, byte 16384 is the third byte of one.
   const body = "xy" + "€".repeat(10_000);
   assert.equal(Buffer.from(body)[ERROR_CONTEXT_MAX_BYTES]! & 0xc0, 0x80, "the cut must land mid-character");
-  const read = await readErrorContext(await contextFile(path.join(ws, "r"), body), noRedact, [ws]);
-  assert.ok(read !== null);
+  const read = textOf(await readErrorContext(await contextFile(path.join(ws, "r"), body), noRedact, [ws]));
   assert.equal(read.truncated, true);
   assert.equal(read.text.includes("�"), false);
   // Backed off two bytes to the start of that "€".
@@ -274,8 +280,7 @@ test("readErrorContext never redacts a partial read: a secret past 32 KB leaves 
   const secret = "S".repeat(40) + "0123456789".repeat(5) + "abcde";
   assert.equal(secret.length, 95);
   const file = await contextFile(path.join(ws, "r"), Array.from({ length: 400 }, () => secret).join("\n"));
-  const read = await readErrorContext(file, makeRedactor({ LAB_SECRET: secret }), [ws]);
-  assert.ok(read !== null);
+  const read = textOf(await readErrorContext(file, makeRedactor({ LAB_SECRET: secret }), [ws]));
   assert.ok(Buffer.byteLength(read.text) <= ERROR_CONTEXT_MAX_BYTES);
   assert.equal(/[S0-9a-e]{8,}/.test(read.text), false, read.text.slice(-200));
 });
@@ -285,8 +290,14 @@ test("readErrorContext drops Playwright's Instructions preamble, which is a prom
   const body =
     "# Instructions\n\n- Following Playwright test failed.\n- Explain why, be concise.\n\n" +
     "# Test info\n\n- Name: a\n\n# Error details\n\n```yaml\n- paragraph: refused\n```\n";
-  const read = await readErrorContext(await contextFile(path.join(ws, "r"), body), noRedact, [ws]);
-  assert.equal(read?.text, "# Test info\n\n- Name: a\n\n# Error details\n\n```yaml\n- paragraph: refused\n```\n");
+  const read = textOf(await readErrorContext(await contextFile(path.join(ws, "r"), body), noRedact, [ws]));
+  assert.equal(read.text, "# Test info\n\n- Name: a\n\n# Error details\n\n```yaml\n- paragraph: refused\n```\n");
+});
+
+test("readErrorContext leaves out a context that is only the preamble", async (t) => {
+  const ws = await workspace(t);
+  const file = await contextFile(path.join(ws, "r"), "# Instructions\n\n- Explain why.\n");
+  assert.equal(await readErrorContext(file, noRedact, [ws]), null);
 });
 
 test("readErrorContext reads only a regular error-context.md under an allowed root, at most 1 MB", async (t) => {
@@ -294,10 +305,10 @@ test("readErrorContext reads only a regular error-context.md under an allowed ro
   const outside = await workspace(t);
   assert.equal(ERROR_CONTEXT_MAX_READ_BYTES, 1024 * 1024);
   const ok = await contextFile(path.join(ws, "ok"), "- paragraph: hi\n");
-  assert.equal((await readErrorContext(ok, noRedact, [ws]))?.text, "- paragraph: hi\n");
+  assert.equal(textOf(await readErrorContext(ok, noRedact, [ws])).text, "- paragraph: hi\n");
   // Over 1 MB: read whole or not at all.
   const big = await contextFile(path.join(ws, "big"), "x".repeat(ERROR_CONTEXT_MAX_READ_BYTES + 1));
-  assert.equal(await readErrorContext(big, noRedact, [ws]), null);
+  assert.equal(await readErrorContext(big, noRedact, [ws]), "too_large");
   // A symlink, even one named error-context.md pointing at a good file.
   await mkdir(path.join(ws, "link"));
   await symlink(ok, path.join(ws, "link/error-context.md"));
@@ -308,14 +319,14 @@ test("readErrorContext reads only a regular error-context.md under an allowed ro
   // Outside every allowed root, then allowed through a project's outputDir.
   const far = await contextFile(path.join(outside, "out"), "- paragraph: far\n");
   assert.equal(await readErrorContext(far, noRedact, [ws]), null);
-  assert.equal((await readErrorContext(far, noRedact, [ws, path.join(outside, "out")]))?.text, "- paragraph: far\n");
+  assert.equal(textOf(await readErrorContext(far, noRedact, [ws, path.join(outside, "out")])).text, "- paragraph: far\n");
   // A directory, and a missing file.
   await mkdir(path.join(ws, "dir/error-context.md"), { recursive: true });
   assert.equal(await readErrorContext(path.join(ws, "dir/error-context.md"), noRedact, [ws]), null);
   assert.equal(await readErrorContext(path.join(ws, "missing/error-context.md"), noRedact, [ws]), null);
 });
 
-type Spec = { title: string; line: number; status: string; context?: string };
+type Spec = { title: string; line: number; status: string; context?: string; error?: string };
 
 /** Playwright's JSON report for one spec file, as `run_tests` parses it. */
 function report(rootDir: string | undefined, specFile: string, specs: Spec[], outputDir?: string) {
@@ -332,7 +343,7 @@ function report(rootDir: string | undefined, specFile: string, specs: Spec[], ou
           results: [{
             status: s.status,
             retry: 0,
-            ...(s.status === "failed" ? { error: { message: `Error in ${s.title}`, snippet: `> ${s.line} | ${s.title}` } } : {}),
+            ...(s.status === "failed" ? { error: { message: s.error ?? `Error in ${s.title}`, snippet: s.error ?? `> ${s.line} | ${s.title}` } } : {}),
             attachments: s.context ? [{ name: "error-context", path: s.context, contentType: "text/markdown" }] : [],
           }],
         }],
@@ -359,9 +370,10 @@ test("errorContext has a budget across the whole result: 40 failures stay far un
   assert.ok(results.every((r) => r.status === "failed" && r.file === "e2e/a.spec.ts"));
   assert.ok(Buffer.byteLength(JSON.stringify(results)) < 512 * 1024, String(Buffer.byteLength(JSON.stringify(results))));
   const carried = results.filter((r) => r.errorContext !== undefined);
-  const total = carried.reduce((n, r) => n + Buffer.byteLength(r.errorContext!), 0);
+  // Counted as JSON sends it: quotes and line breaks cost two bytes each.
+  const total = carried.reduce((n, r) => n + Buffer.byteLength(JSON.stringify(r.errorContext)), 0);
   assert.ok(total <= ERROR_CONTEXT_TOTAL_BYTES, String(total));
-  assert.ok(carried.length >= 7, String(carried.length));
+  assert.ok(carried.length >= 5, String(carried.length));
   assert.ok(carried.every((r) => r.errorContextTruncated === true));
   // Every failure past the budget says its context was left out.
   const omitted = results.filter((r) => r.errorContext === undefined);
@@ -421,4 +433,57 @@ test("a failure's context under a project's outputDir outside the workspace is r
   ))!;
   assert.equal(results[0]!.errorContext, "- paragraph: far\n");
   assert.equal(results[0]!.errorContextTruncated, false);
+});
+
+test("the budget counts errorContext as sent: 40 control-character contexts stay under the cap", async (t) => {
+  const ws = await workspace(t);
+  const specs: Spec[] = [];
+  for (let i = 0; i < 40; i++) {
+    // U+0001 is 1 byte on disk and 6 in JSON (\u0001).
+    const ctx = await contextFile(path.join(ws, "results", `t${i}`), "\u0001".repeat(20_000));
+    specs.push({ title: `case ${i}`, line: i + 2, status: "failed", context: ctx });
+  }
+  const results = (await playwrightResults(report(ws, "a.spec.ts", specs), envFor(ws), noRedact))!;
+  const sent = results.reduce((n, r) => n + (r.errorContext === undefined ? 0 : Buffer.byteLength(JSON.stringify(r.errorContext))), 0);
+  assert.ok(sent <= ERROR_CONTEXT_TOTAL_BYTES, String(sent));
+  assert.ok(Buffer.byteLength(JSON.stringify(results)) <= RUN_TESTS_RESULT_MAX_BYTES);
+  assert.ok(results.every((r) => r.status === "failed"));
+  assert.ok(results.filter((r) => r.errorContextOmitted === true).length >= 39);
+});
+
+test("a whole answer still too large drops the latest errorContext until it fits", async (t) => {
+  const ws = await workspace(t);
+  assert.equal(RUN_TESTS_RESULT_MAX_BYTES, 400 * 1024);
+  const specs: Spec[] = [];
+  for (let i = 0; i < 12; i++) {
+    const ctx = await contextFile(path.join(ws, "results", `t${i}`), "- row\n".repeat(4000));
+    // 2000 control characters in both error and snippet: ~24 KB each as JSON.
+    specs.push({ title: `case ${i}`, line: i + 2, status: "failed", context: ctx, error: "\u001b".repeat(2000) });
+  }
+  const results = (await playwrightResults(report(ws, "a.spec.ts", specs), envFor(ws), noRedact))!;
+  const size = Buffer.byteLength(JSON.stringify(results));
+  assert.ok(size <= RUN_TESTS_RESULT_MAX_BYTES, String(size));
+  assert.equal(results.length, 12);
+  assert.ok(results[0]!.errorContext !== undefined);
+  // The budget alone would have kept the first 7; the guard dropped from the end.
+  const kept = results.filter((r) => r.errorContext !== undefined).length;
+  assert.ok(kept >= 1 && kept < 7, String(kept));
+  for (const r of results) {
+    if (r.errorContext === undefined) {
+      assert.equal(r.errorContextOmitted, true);
+      assert.equal("errorContextTruncated" in r, false);
+    }
+  }
+});
+
+test("an error-context.md over 1 MB is marked omitted, not dropped silently", async (t) => {
+  const ws = await workspace(t);
+  const ctx = await contextFile(path.join(ws, "results", "big"), "x".repeat(ERROR_CONTEXT_MAX_READ_BYTES + 1));
+  const results = (await playwrightResults(
+    report(ws, "a.spec.ts", [{ title: "big", line: 1, status: "failed", context: ctx }]),
+    envFor(ws),
+    noRedact,
+  ))!;
+  assert.equal(results[0]!.errorContextOmitted, true);
+  assert.equal("errorContext" in results[0]!, false);
 });
