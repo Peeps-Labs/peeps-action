@@ -281,7 +281,7 @@ and the hook only print the marker.
 relative to its `testDir`). A failed result also carries `errorContext`: the
 text of Playwright's `error-context.md` for that test (the error, the test's
 source and, when the test had a page, the page's accessibility snapshot at the
-failure), cut to 16 KB. Both pass through the same secret masking as every
+failure), cut to 16 KB; a file over 1 MB is left out. Both pass through the same secret masking as every
 tool result. The runner advertises them to Peeps as the capabilities
 `result_files` and `error_context`. pytest results are unchanged.
 

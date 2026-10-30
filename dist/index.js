@@ -721,9 +721,9 @@ function resolveFramework(env) {
 }
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function splitParameter(nodeId) {
-  const open2 = nodeId.indexOf("[", Math.max(0, nodeId.indexOf("::")));
-  if (open2 === -1 || !nodeId.endsWith("]")) return { head: nodeId, parameter: null };
-  return { head: nodeId.slice(0, open2), parameter: nodeId.slice(open2 + 1, -1) };
+  const open = nodeId.indexOf("[", Math.max(0, nodeId.indexOf("::")));
+  if (open === -1 || !nodeId.endsWith("]")) return { head: nodeId, parameter: null };
+  return { head: nodeId.slice(0, open), parameter: nodeId.slice(open + 1, -1) };
 }
 function withoutBrowser(parameter, browser) {
   if (parameter === browser) return null;
@@ -1887,23 +1887,20 @@ function s(description) {
   return { type: "string", description };
 }
 var ERROR_CONTEXT_MAX_BYTES = 16 * 1024;
+var ERROR_CONTEXT_MAX_READ_BYTES = 1024 * 1024;
 async function readErrorContext(file, redact) {
-  let handle;
   try {
-    if (!(await (0, import_promises6.stat)(file)).isFile()) return null;
-    handle = await (0, import_promises6.open)(file, "r");
-    const buffer = Buffer.alloc(ERROR_CONTEXT_MAX_BYTES * 2);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    const text = redact(buffer.subarray(0, bytesRead).toString("utf8"));
-    const bytes = Buffer.from(text, "utf8");
-    if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return text;
+    const info = await (0, import_promises6.lstat)(file);
+    if (!info.isFile() || info.size > ERROR_CONTEXT_MAX_READ_BYTES) return null;
+    const raw = await (0, import_promises6.readFile)(file);
+    if (raw.length > ERROR_CONTEXT_MAX_READ_BYTES) return null;
+    const bytes = Buffer.from(redact(raw.toString("utf8")), "utf8");
+    if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return bytes.toString("utf8");
     let end = ERROR_CONTEXT_MAX_BYTES;
     while (end > 0 && (bytes[end] & 192) === 128) end--;
     return bytes.subarray(0, end).toString("utf8");
   } catch {
     return null;
-  } finally {
-    await handle?.close();
   }
 }
 async function withEvidence(summaries, report, env, redact) {

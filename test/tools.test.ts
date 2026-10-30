@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ERROR_CONTEXT_MAX_BYTES, ensureParentDirInside, jail, jailForWrite, makeRedactor, patchPaths, readErrorContext } from "../src/tools";
+import { ERROR_CONTEXT_MAX_BYTES, ERROR_CONTEXT_MAX_READ_BYTES, ensureParentDirInside, jail, jailForWrite, makeRedactor, patchPaths, readErrorContext } from "../src/tools";
 
 const WS = "/workspace";
 
@@ -239,4 +239,35 @@ test("readErrorContext is null for a file that is missing or not a regular file"
   const redact = makeRedactor({});
   assert.equal(await readErrorContext(path.join(dir, "missing.md"), redact), null);
   assert.equal(await readErrorContext(dir, redact), null);
+});
+
+test("readErrorContext never redacts a partial read: a secret past 32 KB leaves no prefix behind", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "peeps-ctx-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "error-context.md");
+  // 400 lines of a 95-character secret: ~38 KB, so one copy straddles any
+  // fixed-size read near 32 KB.
+  const secret = "S".repeat(40) + "0123456789".repeat(5) + "abcde";
+  assert.equal(secret.length, 95);
+  await writeFile(file, Array.from({ length: 400 }, () => secret).join("\n"));
+  const text = await readErrorContext(file, makeRedactor({ LAB_SECRET: secret }));
+  assert.ok(text !== null);
+  assert.ok(Buffer.byteLength(text) <= ERROR_CONTEXT_MAX_BYTES);
+  assert.equal(/[S0-9a-e]{8,}/.test(text), false, text.slice(-200));
+});
+
+test("readErrorContext leaves out a file over 1 MB, and a symlink", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "peeps-ctx-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  assert.equal(ERROR_CONTEXT_MAX_READ_BYTES, 1024 * 1024);
+  const big = path.join(dir, "big.md");
+  await writeFile(big, "x".repeat(ERROR_CONTEXT_MAX_READ_BYTES + 1));
+  const redact = makeRedactor({});
+  assert.equal(await readErrorContext(big, redact), null);
+  const small = path.join(dir, "small.md");
+  await writeFile(small, "- paragraph: hi\n");
+  const link = path.join(dir, "link.md");
+  await symlink(small, link);
+  assert.equal(await readErrorContext(link, redact), null);
+  assert.equal(await readErrorContext(small, redact), "- paragraph: hi\n");
 });

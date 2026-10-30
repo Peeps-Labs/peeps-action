@@ -34,7 +34,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -955,32 +955,33 @@ function s(description: string) {
 
 /** What `error-context.md` a failed result carries, at most (PQA-2737). */
 export const ERROR_CONTEXT_MAX_BYTES = 16 * 1024;
+/** A larger `error-context.md` is left out: it is read whole or not at all. */
+export const ERROR_CONTEXT_MAX_READ_BYTES = 1024 * 1024;
 
 /**
  * Playwright's `error-context.md` for a failed test: the error, the test's
  * source and, when the test had a page, the page's ARIA snapshot at the
- * failure. Redacted whole, then cut to `ERROR_CONTEXT_MAX_BYTES` at a
- * character boundary. Null when there is no regular file to read.
+ * failure. Read whole and redacted whole, never a partial read (a secret cut
+ * by the read would reach the result as an unmasked prefix), then cut to
+ * `ERROR_CONTEXT_MAX_BYTES` at a character boundary. Null for a symlink, a
+ * file that is not regular, one over `ERROR_CONTEXT_MAX_READ_BYTES`, or one
+ * that cannot be read.
  */
 export async function readErrorContext(file: string, redact: (text: string) => string): Promise<string | null> {
-  let handle;
   try {
-    if (!(await stat(file)).isFile()) return null;
-    handle = await open(file, "r");
-    // Read a little past the cap, so redaction sees a secret that straddles it.
-    const buffer = Buffer.alloc(ERROR_CONTEXT_MAX_BYTES * 2);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    const text = redact(buffer.subarray(0, bytesRead).toString("utf8"));
-    const bytes = Buffer.from(text, "utf8");
-    if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return text;
+    const info = await lstat(file);
+    if (!info.isFile() || info.size > ERROR_CONTEXT_MAX_READ_BYTES) return null;
+    const raw = await readFile(file);
+    // It may have grown since the lstat: still whole or nothing.
+    if (raw.length > ERROR_CONTEXT_MAX_READ_BYTES) return null;
+    const bytes = Buffer.from(redact(raw.toString("utf8")), "utf8");
+    if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return bytes.toString("utf8");
     let end = ERROR_CONTEXT_MAX_BYTES;
     // Back off continuation bytes (10xxxxxx) to the start of a character.
     while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
     return bytes.subarray(0, end).toString("utf8");
   } catch {
     return null;
-  } finally {
-    await handle?.close();
   }
 }
 
