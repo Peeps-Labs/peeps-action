@@ -588,7 +588,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         }
         const lines = text.split("\n");
         for (let i = 0; i < lines.length && matches.length < MAX_GREP_MATCHES; i++) {
-          if (pattern.test(lines[i]!)) matches.push({ path: rel, line: i + 1, text: redact(lines[i]!.slice(0, 300)) });
+          if (pattern.test(lines[i]!)) matches.push({ path: redact(rel), line: i + 1, text: redact(lines[i]!.slice(0, 300)) });
         }
       }
       return { matches, truncated: matches.length >= MAX_GREP_MATCHES };
@@ -1035,6 +1035,7 @@ type SummarizedTest = {
   title: string;
   titleRedacted?: true;
   file?: string;
+  fileRedacted?: true;
   line: number;
   status: string;
   retry?: number;
@@ -1054,9 +1055,9 @@ type Summary = { test: SummarizedTest; specFile: string; errorContextPath: strin
  *   `line` it still names its test.
  * - `file` is the spec relative to the repository root (Playwright names it
  *   relative to its rootDir, which says nothing about which spec ran in a
- *   monorepo). Not redacted: it is a path in the checkout, like `list_files`
- *   returns. Left out when the report names no rootDir or the spec lies
- *   outside the workspace.
+ *   monorepo). Redacted like every path in a result; when that changed it,
+ *   `fileRedacted: true`. Left out when the report names no rootDir or the
+ *   spec lies outside the workspace.
  * - A failed result carries its `errorContext` (see `readErrorContext`) while
  *   `ERROR_CONTEXT_TOTAL_BYTES` lasts, with `errorContextTruncated`; past it,
  *   `errorContextOmitted: true`.
@@ -1105,7 +1106,7 @@ export async function playwrightResults(
       ...(title === test.title ? {} : { titleRedacted: true as const }),
       error: test.error === undefined ? undefined : redact(test.error).slice(0, 2000),
       errorSnippet: test.errorSnippet === undefined ? undefined : redact(test.errorSnippet).slice(0, 2000),
-      ...(file === null ? {} : { file }),
+      ...(file === null ? {} : { file: redact(file), ...(redact(file) === file ? {} : { fileRedacted: true as const }) }),
       ...evidence,
     });
   }

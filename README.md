@@ -280,9 +280,10 @@ and the hook only print the marker.
 names its spec as `file`, relative to the repository root (Playwright's own
 report names it relative to its `testDir`), and its `line`. `file` is left out
 when the spec lies outside the checkout or Playwright reports no `rootDir`.
-Titles, errors and snippets pass through the same secret masking as every tool
-result. A title the masking changed carries `titleRedacted: true`, so Peeps
-matches it by `file` and `line` instead (pytest results carry the same flag).
+Titles, files, errors and snippets pass through the same secret masking as
+every tool result. A title the masking changed carries `titleRedacted: true`
+(pytest results carry the same flag), and a file `fileRedacted: true`, so Peeps
+knows the value is not the test's real name.
 A failed result also carries `errorContext`: Playwright's `error-context.md`
 for that test (the error, the test's source and, when the test had a page, the
 page's accessibility snapshot at the failure), without Playwright's
@@ -345,7 +346,8 @@ access token Peeps was given (Maintainer).
   Advertised as the runner capabilities `result_files` and `error_context`.
 - Agent mode: Playwright results' `title`, `error` and `errorSnippet` now pass
   through the job's secret masking, as pytest's did; a masked title carries
-  `titleRedacted: true`, on both paths.
+  `titleRedacted: true`, on both paths, and a masked `file` `fileRedacted: true`.
+  `grep` match paths are masked too.
 
 ## Development
 

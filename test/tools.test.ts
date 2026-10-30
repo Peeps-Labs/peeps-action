@@ -370,11 +370,11 @@ test("errorContext has a budget across the whole result: 40 failures stay far un
   assert.equal(results[0]!.errorContext !== undefined, true);
 });
 
-test("a redacted title says so and keeps its line; file is never redacted", async (t) => {
+test("a redacted title or file says so, and keeps its line", async (t) => {
   const ws = await workspace(t);
   // Not a secret, but redacted all the same: any env value of 8+ characters.
   const redact = makeRedactor({ APP_ENV: "production" });
-  const results = (await playwrightResults(
+  const shown = (await playwrightResults(
     report(path.join(ws, "tests/production"), "smoke.spec.ts", [
       { title: "shows the production banner", line: 3, status: "passed" },
       { title: "loads", line: 7, status: "passed" },
@@ -383,13 +383,20 @@ test("a redacted title says so and keeps its line; file is never redacted", asyn
     redact,
   ))!;
   assert.deepEqual(
-    results.map((r) => ({ title: r.title, file: r.file, line: r.line, titleRedacted: r.titleRedacted })),
+    shown.map((r) => [r.title, r.titleRedacted, r.file, r.fileRedacted, r.line]),
     [
-      { title: "shows the [redacted] banner", file: "tests/production/smoke.spec.ts", line: 3, titleRedacted: true },
-      { title: "loads", file: "tests/production/smoke.spec.ts", line: 7, titleRedacted: undefined },
+      ["shows the [redacted] banner", true, "tests/[redacted]/smoke.spec.ts", true, 3],
+      ["loads", undefined, "tests/[redacted]/smoke.spec.ts", true, 7],
     ],
   );
-  assert.equal("titleRedacted" in results[1]!, false);
+  assert.equal("titleRedacted" in shown[1]!, false);
+  const plain = (await playwrightResults(
+    report(path.join(ws, "tests"), "smoke.spec.ts", [{ title: "loads", line: 7, status: "passed" }]),
+    envFor(ws),
+    redact,
+  ))!;
+  assert.equal(plain[0]!.file, "tests/smoke.spec.ts");
+  assert.equal("fileRedacted" in plain[0]!, false);
 });
 
 test("file is left out for a spec outside the workspace, and when the report names no rootDir", async (t) => {

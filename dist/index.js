@@ -1608,7 +1608,7 @@ function createToolServer(env) {
         }
         const lines = text.split("\n");
         for (let i = 0; i < lines.length && matches.length < MAX_GREP_MATCHES; i++) {
-          if (pattern.test(lines[i])) matches.push({ path: rel, line: i + 1, text: redact(lines[i].slice(0, 300)) });
+          if (pattern.test(lines[i])) matches.push({ path: redact(rel), line: i + 1, text: redact(lines[i].slice(0, 300)) });
         }
       }
       return { matches, truncated: matches.length >= MAX_GREP_MATCHES };
@@ -1963,7 +1963,7 @@ async function playwrightResults(report, env, redact) {
       ...title === test.title ? {} : { titleRedacted: true },
       error: test.error === void 0 ? void 0 : redact(test.error).slice(0, 2e3),
       errorSnippet: test.errorSnippet === void 0 ? void 0 : redact(test.errorSnippet).slice(0, 2e3),
-      ...file === null ? {} : { file },
+      ...file === null ? {} : { file: redact(file), ...redact(file) === file ? {} : { fileRedacted: true } },
       ...evidence
     });
   }

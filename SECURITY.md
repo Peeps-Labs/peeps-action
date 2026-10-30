@@ -106,8 +106,9 @@ The limits that do exist are guardrails against mistakes, not a sandbox:
   `git_status` reports the sha256 of each changed file's unredacted bytes, so
   Peeps can check them against what it wrote. A digest does not reveal a
   file's contents, but it does confirm a guess of a short or predictable file.
-  Paths in `run_tests` results (`file`) are not masked, as `list_files` paths
-  are not. A test title that masking changed carries `titleRedacted: true`.
+  Paths in `run_tests` and `grep` results are masked too. A test title or
+  `file` that masking changed carries `titleRedacted: true` or
+  `fileRedacted: true`.
   The masking replaces any environment value of 8 or more characters outside
   the CI prefixes, not only secrets, so a title naming one (`production`) is
   masked too.

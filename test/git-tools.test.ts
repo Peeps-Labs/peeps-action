@@ -814,6 +814,16 @@ test("run_tests runs the commit's own .peeps/run-tests, siblings included", asyn
   assert.deepEqual(out.results?.map((r) => [r.title, r.status]), [["test_a", "passed"]]);
 });
 
+test("grep redacts an env value in a match's path", async (t) => {
+  const { ws } = await repo(t);
+  process.env.PEEPS_TEST_GREP_SITE = "production";
+  t.after(() => delete process.env.PEEPS_TEST_GREP_SITE);
+  await mkdir(path.join(ws, "e2e/production"), { recursive: true });
+  await writeFile(path.join(ws, "e2e/production/a.spec.ts"), "needle\n");
+  const out = (await toolsFor(ws).grep!({ pattern: "needle" })) as { matches: Array<{ path: string }> };
+  assert.deepEqual(out.matches.map((m) => m.path), ["e2e/[redacted]/a.spec.ts"]);
+});
+
 test("a pytest title the redactor changed says so", async (t) => {
   process.env.PEEPS_TEST_LAB_SITE = "production";
   t.after(() => delete process.env.PEEPS_TEST_LAB_SITE);
