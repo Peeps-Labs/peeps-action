@@ -353,6 +353,70 @@ test("run_tests reports each test's final attempt with its retry index", async (
   );
 });
 
+test("run_tests names each result's file repo-relative, and a failed one carries Playwright's error context", async (t) => {
+  const { ws } = await repo(t);
+  // A monorepo: Playwright runs from app/, and its JSON names files relative
+  // to the testDir (`fail.spec.ts`), which says nothing about which spec ran.
+  const app = path.join(ws, "app");
+  await mkdir(path.join(app, "pw"), { recursive: true });
+  await symlink(path.resolve(__dirname, "../node_modules"), path.join(app, "node_modules"), "dir");
+  await writeFile(
+    path.join(app, "pw.config.ts"),
+    'import { defineConfig } from "@playwright/test";\nexport default defineConfig({ testDir: "./pw", workers: 1, outputDir: "./results" });\n',
+  );
+  await writeFile(
+    path.join(app, "pw/login.spec.ts"),
+    'import { test, expect } from "@playwright/test";\n' +
+      'test("refused", async ({ page }) => {\n' +
+      '  await page.setContent("<h1>Sign in</h1><p>affiliation level does not permit</p>");\n' +
+      '  await expect(page.getByText("Welcome")).toBeVisible({ timeout: 300 });\n' +
+      "});\n" +
+      'test("passes", async () => {});\n',
+  );
+  const env = { workspace: ws, workingDirectory: app, configPath: "pw.config.ts", platform: "github" } as unknown as RunnerEnv;
+  const out = (await createToolServer(env).handlers.run_tests!({ file: "app/pw/login.spec.ts" })) as {
+    results: Array<{ title: string; status: string; file?: string; errorContext?: string }>;
+  };
+  const [refused, passes] = out.results;
+  assert.equal(refused?.status, "failed", JSON.stringify(out).slice(0, 2000));
+  assert.equal(refused?.file, "app/pw/login.spec.ts");
+  assert.equal(passes?.file, "app/pw/login.spec.ts");
+  // The page as it was at the failure: Playwright's ARIA snapshot.
+  assert.match(refused?.errorContext ?? "", /- paragraph: affiliation level does not permit/);
+  assert.equal(passes?.status, "passed");
+  assert.equal("errorContext" in passes!, false);
+});
+
+test("run_tests redacts a secret in a Playwright result's title, error and snippet", async (t) => {
+  const { ws } = await repo(t);
+  await symlink(path.resolve(__dirname, "../node_modules"), path.join(ws, "node_modules"), "dir");
+  const secret = "pw-secret-value-8812";
+  process.env.PEEPS_TEST_PW_SECRET = secret;
+  t.after(() => delete process.env.PEEPS_TEST_PW_SECRET);
+  await writeFile(
+    path.join(ws, "pw.config.ts"),
+    'import { defineConfig } from "@playwright/test";\nexport default defineConfig({ testDir: "./pw", workers: 1, outputDir: "./results" });\n',
+  );
+  await mkdir(path.join(ws, "pw"));
+  // The value is in the spec itself, so it reaches the title, Playwright's
+  // error message and the source snippet.
+  await writeFile(
+    path.join(ws, "pw/leak.spec.ts"),
+    'import { test, expect } from "@playwright/test";\n' +
+      `test("logs in with ${secret}", async () => { expect("${secret}").toBe("nope"); });\n`,
+  );
+  const env = { workspace: ws, workingDirectory: ws, configPath: "pw.config.ts", platform: "github" } as unknown as RunnerEnv;
+  const out = (await createToolServer(env).handlers.run_tests!({ file: "pw/leak.spec.ts" })) as {
+    results: Array<{ title: string; status: string; error?: string; errorSnippet?: string; errorContext?: string }>;
+  };
+  const [r] = out.results;
+  assert.equal(r?.status, "failed", JSON.stringify(out).slice(0, 2000));
+  assert.equal(r?.title, "logs in with [redacted]");
+  assert.match(r?.error ?? "", /\[redacted\]/);
+  assert.match(r?.errorSnippet ?? "", /\[redacted\]/);
+  assert.equal(JSON.stringify(out).includes(secret), false);
+});
+
 // ---------------------------------------------------------------------------
 // git_commit_push with `paths` (PQA-2695): commit only the listed files
 // ---------------------------------------------------------------------------
@@ -748,6 +812,34 @@ test("run_tests runs the commit's own .peeps/run-tests, siblings included", asyn
   assert.equal(out.ranWith, ".peeps/run-tests");
   assert.match(out.outputTail, /customer-hook/);
   assert.deepEqual(out.results?.map((r) => [r.title, r.status]), [["test_a", "passed"]]);
+});
+
+test("grep redacts an env value in a match's path", async (t) => {
+  const { ws } = await repo(t);
+  process.env.PEEPS_TEST_GREP_SITE = "production";
+  t.after(() => delete process.env.PEEPS_TEST_GREP_SITE);
+  await mkdir(path.join(ws, "e2e/production"), { recursive: true });
+  await writeFile(path.join(ws, "e2e/production/a.spec.ts"), "needle\n");
+  const out = (await toolsFor(ws).grep!({ pattern: "needle" })) as { matches: Array<{ path: string }> };
+  assert.deepEqual(out.matches.map((m) => m.path), ["e2e/[redacted]/a.spec.ts"]);
+});
+
+test("a pytest title or file the redactor changed says so", async (t) => {
+  process.env.PEEPS_TEST_LAB_SITE = "production";
+  t.after(() => delete process.env.PEEPS_TEST_LAB_SITE);
+  const { tools } = await hookRepo(
+    t,
+    `#!/bin/sh\nprintf '<testsuite><testcase classname="tests.test_a" name="test_production_banner" file="tests/production/test_a.py" line="4"/><testcase classname="tests.test_a" name="test_a" file="tests/test_a.py"/></testsuite>' > "$1"\n`,
+  );
+  const out = (await tools.run_tests!({ file: "tests/test_a.py" })) as {
+    results: Array<{ title: string; file: string; line?: number; titleRedacted?: boolean; fileRedacted?: boolean }>;
+  };
+  assert.deepEqual(out.results.map((r) => [r.title, r.file, r.line, r.titleRedacted, r.fileRedacted]), [
+    ["test_[redacted]_banner", "tests/[redacted]/test_a.py", 4, true, true],
+    ["test_a", "tests/test_a.py", undefined, undefined, undefined],
+  ]);
+  assert.equal("titleRedacted" in out.results[1]!, false);
+  assert.equal("fileRedacted" in out.results[1]!, false);
 });
 
 test("a hook rewritten through a symlink and committed by a failed push never runs", async (t) => {

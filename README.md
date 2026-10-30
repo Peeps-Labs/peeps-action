@@ -276,6 +276,24 @@ commits, so it cannot know that branch or commit yet. The simplest setup has
 your own CI run the lab on pushes to `peeps/*` branches, where both are known,
 and the hook only print the marker.
 
+**What `run_tests` reports for Playwright.** In `agent` mode, each result
+names its spec as `file`, relative to the repository root (Playwright's own
+report names it relative to its `testDir`), and its `line`. `file` is left out
+when the spec lies outside the checkout or Playwright reports no `rootDir`.
+Titles, files, errors and snippets pass through the same secret masking as
+every tool result. A title the masking changed carries `titleRedacted: true`
+(pytest results carry the same flag), and a file `fileRedacted: true`, so Peeps
+knows the value is not the test's real name.
+A failed result also carries `errorContext`: Playwright's `error-context.md`
+for that test (the error, the test's source and, when the test had a page, the
+page's accessibility snapshot at the failure), without Playwright's
+"Instructions" preamble, masked, and cut to 16 KB (`errorContextTruncated`
+says whether it was cut). One answer carries at most 128 KB of it, counted as
+sent; failures past that, or whose file is over 1 MB, get
+`errorContextOmitted: true`, so narrow the run with `grep`. The
+runner advertises these to Peeps as the capabilities `result_files` and
+`error_context`.
+
 **Running the workflow by hand.** `mode: inventory` needs no session id:
 
 ```bash
@@ -320,6 +338,21 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## Unreleased
+
+- Agent mode, Playwright: `run_tests` results name each spec's `file`
+  relative to the repository root, and a failed result carries Playwright's
+  `error-context.md` as `errorContext` (16 KB each, 128 KB per answer).
+  Advertised as the runner capabilities `result_files` and `error_context`.
+- Agent mode: Playwright results' `title`, `error` and `errorSnippet` now pass
+  through the job's secret masking, as pytest's did; a masked title carries
+  `titleRedacted: true`, on both paths, and a masked `file` `fileRedacted: true`.
+  `grep` match paths are masked too.
+- Release note: don't release this until Peeps' server matches redacted titles
+  ([PQA-2743](https://linear.app/peeps-ai/issue/PQA-2743), live on prod Peeps).
+  Until then, a Playwright heal of a test whose title holds a masked value
+  fails Peeps' exact-title match and reads as "the test did not run".
 
 ## Development
 

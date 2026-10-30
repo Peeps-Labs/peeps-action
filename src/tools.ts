@@ -33,8 +33,8 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -588,7 +588,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         }
         const lines = text.split("\n");
         for (let i = 0; i < lines.length && matches.length < MAX_GREP_MATCHES; i++) {
-          if (pattern.test(lines[i]!)) matches.push({ path: rel, line: i + 1, text: redact(lines[i]!.slice(0, 300)) });
+          if (pattern.test(lines[i]!)) matches.push({ path: redact(rel), line: i + 1, text: redact(lines[i]!.slice(0, 300)) });
         }
       }
       return { matches, truncated: matches.length >= MAX_GREP_MATCHES };
@@ -670,7 +670,20 @@ export function createToolServer(env: RunnerEnv): ToolServer {
           ...ran,
           // Redacted whole, then cut, so no secret is split past the redactor.
           pendingNote: ran.pendingNote === null ? null : redact(ran.pendingNote).slice(0, 500),
-          results: ran.results?.map((r) => ({ ...r, title: redact(r.title), ...(r.error ? { error: redact(r.error) } : {}) })) ?? null,
+          results:
+            ran.results?.map((r) => {
+              const title = redact(r.title);
+              const file = redact(r.file);
+              // A changed title or file says so, so Peeps knows it is not the real name.
+              return {
+                ...r,
+                title,
+                ...(title === r.title ? {} : { titleRedacted: true }),
+                file,
+                ...(file === r.file ? {} : { fileRedacted: true }),
+                ...(r.error ? { error: redact(r.error) } : {}),
+              };
+            }) ?? null,
           outputTail: redact(ran.outputTail),
         };
       }
@@ -699,7 +712,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       return {
         exitCode: code,
         durationMs: Date.now() - started,
-        results: summarizeReport(report),
+        results: await playwrightResults(report, env, redact),
         stderr: redact(stderr.slice(-8000)),
         stdoutTail: report ? undefined : redact(stdout.slice(-4000)),
       };
@@ -953,23 +966,210 @@ function s(description: string) {
   return { type: "string", description };
 }
 
-function summarizeReport(report: unknown) {
+/** What `error-context.md` a failed result carries, at most (PQA-2737). */
+export const ERROR_CONTEXT_MAX_BYTES = 16 * 1024;
+/** A larger `error-context.md` is left out: it is read whole or not at all. */
+export const ERROR_CONTEXT_MAX_READ_BYTES = 1024 * 1024;
+/**
+ * All the `errorContext` one `run_tests` answer carries. Peeps refuses a tool
+ * result over 512 KB whole, so 40 failures at 16 KB each would cost the agent
+ * every status; failures past this get `errorContextOmitted: true`.
+ */
+export const ERROR_CONTEXT_TOTAL_BYTES = 128 * 1024;
+/**
+ * A Playwright `run_tests` answer's `results`, serialized, at most: what
+ * remains over it after the budget (long control-character errors, say) is
+ * paid by dropping `errorContext` from the latest results.
+ */
+export const RUN_TESTS_RESULT_MAX_BYTES = 400 * 1024;
+
+/** A string's size as JSON sends it: control characters cost six bytes. */
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value));
+}
+
+/**
+ * Playwright's `error-context.md` for a failed test: the error, the test's
+ * source and, when the test had a page, the page's ARIA snapshot at the
+ * failure. Its path comes from the report, and a spec can attach any path as
+ * "error-context", so it is read only when it is a regular file (never a
+ * symlink) named `error-context.md` whose real path is inside one of
+ * `allowedRoots` (the workspace and the projects' output directories).
+ *
+ * Read whole and redacted whole, never a partial read (a secret cut by the
+ * read would reach the result as an unmasked prefix), so a file over
+ * `ERROR_CONTEXT_MAX_READ_BYTES` is "too_large". Playwright's "# Instructions"
+ * preamble, a prompt written for another assistant, is dropped. Then the text
+ * is cut to `ERROR_CONTEXT_MAX_BYTES` at a character boundary.
+ */
+export async function readErrorContext(
+  file: string,
+  redact: (text: string) => string,
+  allowedRoots: string[],
+): Promise<{ text: string; truncated: boolean } | "too_large" | null> {
+  if (path.basename(file) !== "error-context.md") return null;
+  let handle;
+  try {
+    if (!(await lstat(file)).isFile()) return null;
+    const real = await realpath(file);
+    const roots = await Promise.all(allowedRoots.map((r) => realpath(r).catch(() => null)));
+    const inside = roots.some((root) => {
+      if (root === null) return false;
+      const rel = path.relative(root, real);
+      return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+    });
+    if (!inside) return null;
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Checked again on what was opened, so a swap after the lstat is caught.
+    const info = await handle.stat();
+    if (!info.isFile()) return null;
+    if (info.size > ERROR_CONTEXT_MAX_READ_BYTES) return "too_large";
+    const raw = await handle.readFile();
+    if (raw.length > ERROR_CONTEXT_MAX_READ_BYTES) return "too_large";
+    let text = raw.toString("utf8");
+    if (text.startsWith("# Instructions\n")) {
+      const next = text.indexOf("\n# ");
+      // Nothing after the preamble: no context at all.
+      if (next === -1) return null;
+      text = text.slice(next + 1);
+    }
+    const bytes = Buffer.from(redact(text), "utf8");
+    if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return { text: bytes.toString("utf8"), truncated: false };
+    let end = ERROR_CONTEXT_MAX_BYTES;
+    // Back off continuation bytes (10xxxxxx) to the start of a character.
+    while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+    return { text: bytes.subarray(0, end).toString("utf8"), truncated: true };
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
+  }
+}
+
+type ReportAttachment = { name?: string; path?: string };
+type ReportResult = {
+  status: string;
+  retry?: number;
+  error?: { message?: string; snippet?: string };
+  attachments?: ReportAttachment[];
+};
+type SummarizedTest = {
+  title: string;
+  titleRedacted?: true;
+  file?: string;
+  fileRedacted?: true;
+  line: number;
+  status: string;
+  retry?: number;
+  error?: string;
+  errorSnippet?: string;
+  errorContext?: string;
+  errorContextTruncated?: boolean;
+  errorContextOmitted?: true;
+};
+type Summary = { test: SummarizedTest; specFile: string; errorContextPath: string | null };
+
+/**
+ * The `results` of a Playwright `run_tests` answer, from its JSON report.
+ *
+ * - `title`, `error` and `errorSnippet` are redacted whole, then cut. A title
+ *   the redactor changed carries `titleRedacted: true`; with `file` and
+ *   `line` it still names its test.
+ * - `file` is the spec relative to the repository root (Playwright names it
+ *   relative to its rootDir, which says nothing about which spec ran in a
+ *   monorepo). Redacted like every path in a result; when that changed it,
+ *   `fileRedacted: true`. Left out when the report names no rootDir or the
+ *   spec lies outside the workspace.
+ * - A failed result carries its `errorContext` (see `readErrorContext`) while
+ *   `ERROR_CONTEXT_TOTAL_BYTES` lasts (counted as JSON sends it), with
+ *   `errorContextTruncated`; past it, or over the read cap, or dropped to keep
+ *   the answer under `RUN_TESTS_RESULT_MAX_BYTES`, `errorContextOmitted: true`.
+ */
+export async function playwrightResults(
+  report: unknown,
+  env: RunnerEnv,
+  redact: (text: string) => string,
+): Promise<SummarizedTest[] | null> {
+  const summaries = summarizeReport(report);
+  if (summaries === null) return null;
+  const config = (report as { config?: { rootDir?: string; projects?: Array<{ outputDir?: string }> } }).config;
+  const rootDir = config?.rootDir;
+  const outputDirs = (config?.projects ?? []).flatMap((p) => (typeof p.outputDir === "string" ? [p.outputDir] : []));
+  const allowedRoots = [env.workspace, ...outputDirs];
+  // Playwright reports real paths, and a workspace may be reached through a
+  // symlink (macOS's /var is /private/var), so both sides are made real.
+  const real = (p: string) => realpath(p).catch(() => p);
+  const workspace = await real(env.workspace);
+  let budget = ERROR_CONTEXT_TOTAL_BYTES;
+  const results: SummarizedTest[] = [];
+  // In order, so the budget goes to the first failures.
+  for (const { test, specFile, errorContextPath } of summaries) {
+    let file: string | null = null;
+    if (typeof rootDir === "string" && specFile !== "") {
+      const rel = path.relative(workspace, await real(path.resolve(rootDir, specFile)));
+      if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) file = rel.split(path.sep).join("/");
+    }
+    let evidence: Partial<SummarizedTest> = {};
+    if (errorContextPath !== null) {
+      const read = budget > 0 ? await readErrorContext(errorContextPath, redact, allowedRoots) : null;
+      if (read === "too_large") {
+        evidence = { errorContextOmitted: true };
+      } else if (read !== null && jsonBytes(read.text) <= budget) {
+        // Counted as sent: JSON escaping, not the raw bytes, meets the cap.
+        budget -= jsonBytes(read.text);
+        evidence = { errorContext: read.text, errorContextTruncated: read.truncated };
+      } else if (read !== null || budget <= 0) {
+        budget = 0;
+        evidence = { errorContextOmitted: true };
+      }
+    }
+    const title = redact(test.title);
+    results.push({
+      ...test,
+      // Redacted whole, then cut, so no secret is split past the redactor.
+      title,
+      ...(title === test.title ? {} : { titleRedacted: true as const }),
+      error: test.error === undefined ? undefined : redact(test.error).slice(0, 2000),
+      errorSnippet: test.errorSnippet === undefined ? undefined : redact(test.errorSnippet).slice(0, 2000),
+      ...(file === null ? {} : { file: redact(file), ...(redact(file) === file ? {} : { fileRedacted: true as const }) }),
+      ...evidence,
+    });
+  }
+  // The last guard: still too large, drop errorContext from the latest results.
+  let size = jsonBytes(results);
+  for (let i = results.length - 1; i >= 0 && size > RUN_TESTS_RESULT_MAX_BYTES; i--) {
+    const r = results[i]!;
+    if (r.errorContext === undefined) continue;
+    const { errorContext: _dropped, errorContextTruncated: _cut, ...rest } = r;
+    results[i] = { ...rest, errorContextOmitted: true };
+    size = jsonBytes(results);
+  }
+  return results;
+}
+
+function summarizeReport(report: unknown): Summary[] | null {
   if (!report || typeof report !== "object" || !("suites" in report)) return null;
-  const tests: Array<{ title: string; file: string; line: number; status: string; retry?: number; error?: string; errorSnippet?: string }> = [];
-  const walk = (suite: { title: string; file?: string; specs?: Array<{ title: string; file: string; line: number; tests?: Array<{ results?: Array<{ status: string; retry?: number; error?: { message?: string; snippet?: string } }> }> }>; suites?: unknown[] }, titles: string[], isFile: boolean) => {
+  const tests: Summary[] = [];
+  const walk = (suite: { title: string; file?: string; specs?: Array<{ title: string; file: string; line: number; tests?: Array<{ results?: ReportResult[] }> }>; suites?: unknown[] }, titles: string[], isFile: boolean) => {
     const next = isFile ? titles : [...titles, suite.title];
     for (const spec of suite.specs ?? []) {
       const last = spec.tests?.[0]?.results?.at(-1);
+      const failed = last !== undefined && last.status !== "passed" && last.status !== "skipped";
+      const context = failed ? last.attachments?.find((a) => a.name === "error-context" && typeof a.path === "string") : undefined;
       tests.push({
-        title: [...next, spec.title].join(" › "),
-        file: spec.file,
-        line: spec.line,
-        status: last?.status ?? "unknown",
-        // The final attempt's index (0 = no retry), so a pass after a retry
-        // is not read as a clean one. Absent when Playwright ran no attempt.
-        ...(typeof last?.retry === "number" ? { retry: last.retry } : {}),
-        error: last?.error?.message?.slice(0, 2000),
-        errorSnippet: last?.error?.snippet?.slice(0, 2000),
+        specFile: typeof spec.file === "string" ? spec.file : "",
+        errorContextPath: context?.path ?? null,
+        test: {
+          title: [...next, spec.title].join(" › "),
+          line: spec.line,
+          status: last?.status ?? "unknown",
+          // The final attempt's index (0 = no retry), so a pass after a retry
+          // is not read as a clean one. Absent when Playwright ran no attempt.
+          ...(typeof last?.retry === "number" ? { retry: last.retry } : {}),
+          // Cut to 2000 in `playwrightResults`, after redaction.
+          error: last?.error?.message,
+          errorSnippet: last?.error?.snippet,
+        },
       });
     }
     for (const child of suite.suites ?? []) walk(child as never, next, false);

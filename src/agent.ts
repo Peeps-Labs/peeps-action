@@ -13,6 +13,7 @@ import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { RunnerEnv } from "./env";
 import type { PeepsClient } from "./peeps";
+import { resolveFramework } from "./pytest";
 import { createToolServer } from "./tools";
 import { ACTION_VERSION } from "./version";
 
@@ -111,8 +112,11 @@ export async function runnerInfoFor(env: RunnerEnv): Promise<Record<string, unkn
     actionVersion: ACTION_VERSION,
     // What this runner's tools can do beyond the basics, so Peeps need not
     // infer it from the version. `commit_paths`: git_commit_push takes
-    // `paths` and commits only those files (PQA-2695).
-    capabilities: ["commit_paths"],
+    // `paths` and commits only those files (PQA-2695). On a Playwright job,
+    // `result_files`: each run_tests result's `file` is the repo-relative spec
+    // it came from (PQA-2733); `error_context`: a failed one carries
+    // Playwright's error-context.md as `errorContext` (PQA-2737).
+    capabilities: ["commit_paths", ...(playwrightJob(env) ? ["result_files", "error_context"] : [])],
   };
   try {
     // `-c safe.directory`: inside the Playwright container the checkout is
@@ -139,4 +143,13 @@ function summarizeArgs(args: Record<string, unknown>): string {
     .filter(([k]) => k !== "token" && k !== "content" && k !== "patch")
     .map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 60)}`)
     .join(", ");
+}
+
+function playwrightJob(env: RunnerEnv): boolean {
+  try {
+    return resolveFramework(env) === "playwright";
+  } catch {
+    // An unknown framework input fails the job elsewhere; claim nothing here.
+    return false;
+  }
 }
