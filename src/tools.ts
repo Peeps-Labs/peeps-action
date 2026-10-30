@@ -1004,7 +1004,7 @@ type SummarizedTest = {
 type Summary = { test: SummarizedTest; specFile: string; errorContextPath: string | null };
 
 /**
- * Each result's `file` repo-relative (Playwright names it relative to its
+ * Each result redacted (title, error, snippet), its `file` repo-relative (Playwright names it relative to its
  * rootDir, which says nothing about which spec ran in a monorepo), and for a
  * failed one its `errorContext`. A file outside the workspace is left out.
  */
@@ -1027,6 +1027,10 @@ async function withEvidence(
       const errorContext = errorContextPath ? await readErrorContext(errorContextPath, redact) : null;
       return {
         ...test,
+        // Redacted whole, then cut, so no secret is split past the redactor.
+        title: redact(test.title),
+        error: test.error === undefined ? undefined : redact(test.error).slice(0, 2000),
+        errorSnippet: test.errorSnippet === undefined ? undefined : redact(test.errorSnippet).slice(0, 2000),
         ...(inside ? { file: redact(rel.split(path.sep).join("/")) } : {}),
         ...(errorContext === null ? {} : { errorContext }),
       };
@@ -1053,8 +1057,9 @@ function summarizeReport(report: unknown): Summary[] | null {
           // The final attempt's index (0 = no retry), so a pass after a retry
           // is not read as a clean one. Absent when Playwright ran no attempt.
           ...(typeof last?.retry === "number" ? { retry: last.retry } : {}),
-          error: last?.error?.message?.slice(0, 2000),
-          errorSnippet: last?.error?.snippet?.slice(0, 2000),
+          // Cut to 2000 in `withEvidence`, after redaction.
+          error: last?.error?.message,
+          errorSnippet: last?.error?.snippet,
         },
       });
     }

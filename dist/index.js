@@ -1918,6 +1918,10 @@ async function withEvidence(summaries, report, env, redact) {
       const errorContext = errorContextPath ? await readErrorContext(errorContextPath, redact) : null;
       return {
         ...test,
+        // Redacted whole, then cut, so no secret is split past the redactor.
+        title: redact(test.title),
+        error: test.error === void 0 ? void 0 : redact(test.error).slice(0, 2e3),
+        errorSnippet: test.errorSnippet === void 0 ? void 0 : redact(test.errorSnippet).slice(0, 2e3),
         ...inside ? { file: redact(rel.split(import_node_path8.default.sep).join("/")) } : {},
         ...errorContext === null ? {} : { errorContext }
       };
@@ -1943,8 +1947,9 @@ function summarizeReport(report) {
           // The final attempt's index (0 = no retry), so a pass after a retry
           // is not read as a clean one. Absent when Playwright ran no attempt.
           ...typeof last?.retry === "number" ? { retry: last.retry } : {},
-          error: last?.error?.message?.slice(0, 2e3),
-          errorSnippet: last?.error?.snippet?.slice(0, 2e3)
+          // Cut to 2000 in `withEvidence`, after redaction.
+          error: last?.error?.message,
+          errorSnippet: last?.error?.snippet
         }
       });
     }

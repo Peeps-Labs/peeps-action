@@ -362,6 +362,8 @@ that commit.
   to the repository root, and a failed result carries Playwright's
   `error-context.md` as `errorContext` (at most 16 KB). Advertised as the
   runner capabilities `result_files` and `error_context`.
+- Agent mode, Playwright: `run_tests` results' `title`, `error` and
+  `errorSnippet` now pass through the job's secret masking, as pytest's did.
 
 ## License
 

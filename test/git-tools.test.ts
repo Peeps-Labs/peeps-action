@@ -387,6 +387,36 @@ test("run_tests names each result's file repo-relative, and a failed one carries
   assert.equal("errorContext" in passes!, false);
 });
 
+test("run_tests redacts a secret in a Playwright result's title, error and snippet", async (t) => {
+  const { ws } = await repo(t);
+  await symlink(path.resolve(__dirname, "../node_modules"), path.join(ws, "node_modules"), "dir");
+  const secret = "pw-secret-value-8812";
+  process.env.PEEPS_TEST_PW_SECRET = secret;
+  t.after(() => delete process.env.PEEPS_TEST_PW_SECRET);
+  await writeFile(
+    path.join(ws, "pw.config.ts"),
+    'import { defineConfig } from "@playwright/test";\nexport default defineConfig({ testDir: "./pw", workers: 1, outputDir: "./results" });\n',
+  );
+  await mkdir(path.join(ws, "pw"));
+  // The value is in the spec itself, so it reaches the title, Playwright's
+  // error message and the source snippet.
+  await writeFile(
+    path.join(ws, "pw/leak.spec.ts"),
+    'import { test, expect } from "@playwright/test";\n' +
+      `test("logs in with ${secret}", async () => { expect("${secret}").toBe("nope"); });\n`,
+  );
+  const env = { workspace: ws, workingDirectory: ws, configPath: "pw.config.ts", platform: "github" } as unknown as RunnerEnv;
+  const out = (await createToolServer(env).handlers.run_tests!({ file: "pw/leak.spec.ts" })) as {
+    results: Array<{ title: string; status: string; error?: string; errorSnippet?: string; errorContext?: string }>;
+  };
+  const [r] = out.results;
+  assert.equal(r?.status, "failed", JSON.stringify(out).slice(0, 2000));
+  assert.equal(r?.title, "logs in with [redacted]");
+  assert.match(r?.error ?? "", /\[redacted\]/);
+  assert.match(r?.errorSnippet ?? "", /\[redacted\]/);
+  assert.equal(JSON.stringify(out).includes(secret), false);
+});
+
 // ---------------------------------------------------------------------------
 // git_commit_push with `paths` (PQA-2695): commit only the listed files
 // ---------------------------------------------------------------------------
