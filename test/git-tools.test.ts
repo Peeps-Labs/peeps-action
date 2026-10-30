@@ -353,6 +353,40 @@ test("run_tests reports each test's final attempt with its retry index", async (
   );
 });
 
+test("run_tests names each result's file repo-relative, and a failed one carries Playwright's error context", async (t) => {
+  const { ws } = await repo(t);
+  // A monorepo: Playwright runs from app/, and its JSON names files relative
+  // to the testDir (`fail.spec.ts`), which says nothing about which spec ran.
+  const app = path.join(ws, "app");
+  await mkdir(path.join(app, "pw"), { recursive: true });
+  await symlink(path.resolve(__dirname, "../node_modules"), path.join(app, "node_modules"), "dir");
+  await writeFile(
+    path.join(app, "pw.config.ts"),
+    'import { defineConfig } from "@playwright/test";\nexport default defineConfig({ testDir: "./pw", workers: 1, outputDir: "./results" });\n',
+  );
+  await writeFile(
+    path.join(app, "pw/login.spec.ts"),
+    'import { test, expect } from "@playwright/test";\n' +
+      'test("refused", async ({ page }) => {\n' +
+      '  await page.setContent("<h1>Sign in</h1><p>affiliation level does not permit</p>");\n' +
+      '  await expect(page.getByText("Welcome")).toBeVisible({ timeout: 300 });\n' +
+      "});\n" +
+      'test("passes", async () => {});\n',
+  );
+  const env = { workspace: ws, workingDirectory: app, configPath: "pw.config.ts", platform: "github" } as unknown as RunnerEnv;
+  const out = (await createToolServer(env).handlers.run_tests!({ file: "app/pw/login.spec.ts" })) as {
+    results: Array<{ title: string; status: string; file?: string; errorContext?: string }>;
+  };
+  const [refused, passes] = out.results;
+  assert.equal(refused?.status, "failed", JSON.stringify(out).slice(0, 2000));
+  assert.equal(refused?.file, "app/pw/login.spec.ts");
+  assert.equal(passes?.file, "app/pw/login.spec.ts");
+  // The page as it was at the failure: Playwright's ARIA snapshot.
+  assert.match(refused?.errorContext ?? "", /- paragraph: affiliation level does not permit/);
+  assert.equal(passes?.status, "passed");
+  assert.equal("errorContext" in passes!, false);
+});
+
 // ---------------------------------------------------------------------------
 // git_commit_push with `paths` (PQA-2695): commit only the listed files
 // ---------------------------------------------------------------------------

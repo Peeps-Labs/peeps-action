@@ -276,6 +276,15 @@ commits, so it cannot know that branch or commit yet. The simplest setup has
 your own CI run the lab on pushes to `peeps/*` branches, where both are known,
 and the hook only print the marker.
 
+**What `run_tests` reports for Playwright.** Each result names its spec as
+`file`, relative to the repository root (Playwright's own report names it
+relative to its `testDir`). A failed result also carries `errorContext`: the
+text of Playwright's `error-context.md` for that test (the error, the test's
+source and, when the test had a page, the page's accessibility snapshot at the
+failure), cut to 16 KB. Both pass through the same secret masking as every
+tool result. The runner advertises them to Peeps as the capabilities
+`result_files` and `error_context`. pytest results are unchanged.
+
 **Running the workflow by hand.** `mode: inventory` needs no session id:
 
 ```bash
@@ -346,6 +355,13 @@ real Chromium and a local fake Peeps service. Rebuild before testing source chan
 `runnerInfo.actionVersion`, and Peeps decides from it what the runner supports.
 Set it to the tag being released (without the `v`), rebuild `dist/`, and tag
 that commit.
+
+## Unreleased
+
+- Agent mode, Playwright: `run_tests` results name each spec's `file` relative
+  to the repository root, and a failed result carries Playwright's
+  `error-context.md` as `errorContext` (at most 16 KB). Advertised as the
+  runner capabilities `result_files` and `error_context`.
 
 ## License
 

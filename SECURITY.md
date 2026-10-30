@@ -53,7 +53,7 @@ This is more than "test results". Concretely:
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
 | The sha actually checked out (`git rev-parse HEAD`), and this action's version | `agent` |
-| Tool results in an agent session: file contents, diffs, test output, and the sha256 of each changed file's contents (files up to 5 MB; symlinks are never followed) | `agent` |
+| Tool results in an agent session: file contents, diffs, test output (for a failed Playwright test, its `error-context.md`, which holds the page's accessibility snapshot at the failure, up to 16 KB), and the sha256 of each changed file's contents (files up to 5 MB; symlinks are never followed) | `agent` |
 
 Two of those deserve emphasis.
 

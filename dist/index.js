@@ -688,15 +688,6 @@ var import_node_child_process5 = require("node:child_process");
 var import_promises7 = require("node:fs/promises");
 var import_node_util3 = require("node:util");
 
-// src/tools.ts
-var import_node_child_process4 = require("node:child_process");
-var import_node_crypto4 = require("node:crypto");
-var import_node_fs3 = require("node:fs");
-var import_promises6 = require("node:fs/promises");
-var import_node_os4 = require("node:os");
-var import_node_path8 = __toESM(require("node:path"));
-var import_node_util2 = require("node:util");
-
 // src/pytest.ts
 var import_node_child_process3 = require("node:child_process");
 var import_node_crypto3 = require("node:crypto");
@@ -730,9 +721,9 @@ function resolveFramework(env) {
 }
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function splitParameter(nodeId) {
-  const open = nodeId.indexOf("[", Math.max(0, nodeId.indexOf("::")));
-  if (open === -1 || !nodeId.endsWith("]")) return { head: nodeId, parameter: null };
-  return { head: nodeId.slice(0, open), parameter: nodeId.slice(open + 1, -1) };
+  const open2 = nodeId.indexOf("[", Math.max(0, nodeId.indexOf("::")));
+  if (open2 === -1 || !nodeId.endsWith("]")) return { head: nodeId, parameter: null };
+  return { head: nodeId.slice(0, open2), parameter: nodeId.slice(open2 + 1, -1) };
 }
 function withoutBrowser(parameter, browser) {
   if (parameter === browser) return null;
@@ -1136,6 +1127,15 @@ async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
   }
   return uploaded;
 }
+
+// src/tools.ts
+var import_node_child_process4 = require("node:child_process");
+var import_node_crypto4 = require("node:crypto");
+var import_node_fs3 = require("node:fs");
+var import_promises6 = require("node:fs/promises");
+var import_node_os4 = require("node:os");
+var import_node_path8 = __toESM(require("node:path"));
+var import_node_util2 = require("node:util");
 
 // src/pytest-run-tool.ts
 var import_promises5 = require("node:fs/promises");
@@ -1695,7 +1695,7 @@ function createToolServer(env) {
       return {
         exitCode: code,
         durationMs: Date.now() - started,
-        results: summarizeReport(report),
+        results: await withEvidence(summarizeReport(report), report, env, redact),
         stderr: redact(stderr.slice(-8e3)),
         stdoutTail: report ? void 0 : redact(stdout.slice(-4e3))
       };
@@ -1886,6 +1886,44 @@ function obj(properties, required) {
 function s(description) {
   return { type: "string", description };
 }
+var ERROR_CONTEXT_MAX_BYTES = 16 * 1024;
+async function readErrorContext(file, redact) {
+  let handle;
+  try {
+    if (!(await (0, import_promises6.stat)(file)).isFile()) return null;
+    handle = await (0, import_promises6.open)(file, "r");
+    const buffer = Buffer.alloc(ERROR_CONTEXT_MAX_BYTES * 2);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const text = redact(buffer.subarray(0, bytesRead).toString("utf8"));
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return text;
+    let end = ERROR_CONTEXT_MAX_BYTES;
+    while (end > 0 && (bytes[end] & 192) === 128) end--;
+    return bytes.subarray(0, end).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
+  }
+}
+async function withEvidence(summaries, report, env, redact) {
+  if (summaries === null) return null;
+  const rootDir = report.config?.rootDir ?? env.workingDirectory;
+  const real = (p) => (0, import_promises6.realpath)(p).catch(() => p);
+  const workspace = await real(env.workspace);
+  return Promise.all(
+    summaries.map(async ({ test, specFile, errorContextPath }) => {
+      const rel = import_node_path8.default.relative(workspace, await real(import_node_path8.default.resolve(rootDir, specFile)));
+      const inside = specFile !== "" && rel !== "" && !rel.startsWith("..") && !import_node_path8.default.isAbsolute(rel);
+      const errorContext = errorContextPath ? await readErrorContext(errorContextPath, redact) : null;
+      return {
+        ...test,
+        ...inside ? { file: redact(rel.split(import_node_path8.default.sep).join("/")) } : {},
+        ...errorContext === null ? {} : { errorContext }
+      };
+    })
+  );
+}
 function summarizeReport(report) {
   if (!report || typeof report !== "object" || !("suites" in report)) return null;
   const tests = [];
@@ -1893,16 +1931,21 @@ function summarizeReport(report) {
     const next = isFile ? titles : [...titles, suite.title];
     for (const spec of suite.specs ?? []) {
       const last = spec.tests?.[0]?.results?.at(-1);
+      const failed = last !== void 0 && last.status !== "passed" && last.status !== "skipped";
+      const context = failed ? last.attachments?.find((a) => a.name === "error-context" && typeof a.path === "string") : void 0;
       tests.push({
-        title: [...next, spec.title].join(" \u203A "),
-        file: spec.file,
-        line: spec.line,
-        status: last?.status ?? "unknown",
-        // The final attempt's index (0 = no retry), so a pass after a retry
-        // is not read as a clean one. Absent when Playwright ran no attempt.
-        ...typeof last?.retry === "number" ? { retry: last.retry } : {},
-        error: last?.error?.message?.slice(0, 2e3),
-        errorSnippet: last?.error?.snippet?.slice(0, 2e3)
+        specFile: typeof spec.file === "string" ? spec.file : "",
+        errorContextPath: context?.path ?? null,
+        test: {
+          title: [...next, spec.title].join(" \u203A "),
+          line: spec.line,
+          status: last?.status ?? "unknown",
+          // The final attempt's index (0 = no retry), so a pass after a retry
+          // is not read as a clean one. Absent when Playwright ran no attempt.
+          ...typeof last?.retry === "number" ? { retry: last.retry } : {},
+          error: last?.error?.message?.slice(0, 2e3),
+          errorSnippet: last?.error?.snippet?.slice(0, 2e3)
+        }
       });
     }
     for (const child of suite.suites ?? []) walk2(child, next, false);
@@ -1999,8 +2042,11 @@ async function runnerInfoFor(env) {
     actionVersion: ACTION_VERSION,
     // What this runner's tools can do beyond the basics, so Peeps need not
     // infer it from the version. `commit_paths`: git_commit_push takes
-    // `paths` and commits only those files (PQA-2695).
-    capabilities: ["commit_paths"]
+    // `paths` and commits only those files (PQA-2695). On a Playwright job,
+    // `result_files`: each run_tests result's `file` is the repo-relative spec
+    // it came from (PQA-2733); `error_context`: a failed one carries
+    // Playwright's error-context.md as `errorContext` (PQA-2737).
+    capabilities: ["commit_paths", ...playwrightJob(env) ? ["result_files", "error_context"] : []]
   };
   try {
     const { stdout } = await execFileAsync3(
@@ -2017,6 +2063,13 @@ async function runnerInfoFor(env) {
 }
 function summarizeArgs(args) {
   return Object.entries(args).filter(([k]) => k !== "token" && k !== "content" && k !== "patch").map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 60)}`).join(", ");
+}
+function playwrightJob(env) {
+  try {
+    return resolveFramework(env) === "playwright";
+  } catch {
+    return false;
+  }
 }
 
 // src/browser-check.ts

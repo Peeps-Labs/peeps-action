@@ -58,8 +58,9 @@ test("runnerInfo reports the checked-out sha, which differs from the workflow sh
   assert.equal(info.workingDirectory, ws);
   assert.equal(info.configPath, "playwright.config.ts");
   assert.equal(info.node, process.version);
-  // PQA-2695: git_commit_push takes `paths`.
-  assert.deepEqual(info.capabilities, ["commit_paths"]);
+  // PQA-2695: git_commit_push takes `paths`. A Playwright job's run_tests
+  // also names each result's file and a failure's error context (PQA-2733).
+  assert.deepEqual(info.capabilities, ["commit_paths", "result_files", "error_context"]);
 });
 
 test("runnerInfo leaves checkoutSha out when the workspace is not a git checkout", async (t) => {
@@ -82,4 +83,11 @@ test("runnerInfo leaves checkoutSha out when the workspace is only a folder insi
   const info = await runnerInfoFor(envAt(ws, null));
   // HEAD there is the enclosing repository's, not this checkout's.
   assert.equal("checkoutSha" in info, false);
+});
+
+test("a pytest job's runnerInfo claims neither result_files nor error_context", async (t) => {
+  const ws = await mkdtemp(path.join(tmpdir(), "peeps-agent-"));
+  t.after(() => rm(ws, { recursive: true, force: true }));
+  const info = await runnerInfoFor({ ...envAt(ws, null), configPath: null, framework: "pytest" } as unknown as RunnerEnv);
+  assert.deepEqual(info.capabilities, ["commit_paths"]);
 });

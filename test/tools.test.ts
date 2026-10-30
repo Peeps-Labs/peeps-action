@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ensureParentDirInside, jail, jailForWrite, makeRedactor, patchPaths } from "../src/tools";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { ERROR_CONTEXT_MAX_BYTES, ensureParentDirInside, jail, jailForWrite, makeRedactor, patchPaths, readErrorContext } from "../src/tools";
 
 const WS = "/workspace";
 
@@ -211,4 +214,29 @@ test("a symlinked folder that stays inside the workspace is allowed", async () =
   await symlink(path.join(ws, "real"), path.join(ws, "alias"));
   await ensureParentDirInside(ws, jailForWrite(ws, "alias/sub/x.spec.ts"));
   assert.ok((await stat(path.join(ws, "real/sub"))).isDirectory());
+});
+
+test("readErrorContext keeps at most 16 KB, redacted, and never cuts a character in half", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "peeps-ctx-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "error-context.md");
+  const secret = "s3cr3t-value-123";
+  // "é" is two bytes, so an odd byte budget lands mid-character somewhere.
+  await writeFile(file, `- paragraph: ${secret}\n` + "é".repeat(20_000));
+  const redact = makeRedactor({ API_SECRET: secret });
+  const text = await readErrorContext(file, redact);
+  assert.ok(text !== null);
+  assert.equal(ERROR_CONTEXT_MAX_BYTES, 16 * 1024);
+  assert.ok(Buffer.byteLength(text) <= ERROR_CONTEXT_MAX_BYTES);
+  assert.ok(Buffer.byteLength(text) > ERROR_CONTEXT_MAX_BYTES - 4);
+  assert.ok(text.startsWith("- paragraph: [redacted]\n"));
+  assert.equal(text.includes("\uFFFD"), false);
+});
+
+test("readErrorContext is null for a file that is missing or not a regular file", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "peeps-ctx-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const redact = makeRedactor({});
+  assert.equal(await readErrorContext(path.join(dir, "missing.md"), redact), null);
+  assert.equal(await readErrorContext(dir, redact), null);
 });

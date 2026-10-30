@@ -34,7 +34,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -699,7 +699,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       return {
         exitCode: code,
         durationMs: Date.now() - started,
-        results: summarizeReport(report),
+        results: await withEvidence(summarizeReport(report), report, env, redact),
         stderr: redact(stderr.slice(-8000)),
         stdoutTail: report ? undefined : redact(stdout.slice(-4000)),
       };
@@ -953,23 +953,109 @@ function s(description: string) {
   return { type: "string", description };
 }
 
-function summarizeReport(report: unknown) {
+/** What `error-context.md` a failed result carries, at most (PQA-2737). */
+export const ERROR_CONTEXT_MAX_BYTES = 16 * 1024;
+
+/**
+ * Playwright's `error-context.md` for a failed test: the error, the test's
+ * source and, when the test had a page, the page's ARIA snapshot at the
+ * failure. Redacted whole, then cut to `ERROR_CONTEXT_MAX_BYTES` at a
+ * character boundary. Null when there is no regular file to read.
+ */
+export async function readErrorContext(file: string, redact: (text: string) => string): Promise<string | null> {
+  let handle;
+  try {
+    if (!(await stat(file)).isFile()) return null;
+    handle = await open(file, "r");
+    // Read a little past the cap, so redaction sees a secret that straddles it.
+    const buffer = Buffer.alloc(ERROR_CONTEXT_MAX_BYTES * 2);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const text = redact(buffer.subarray(0, bytesRead).toString("utf8"));
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return text;
+    let end = ERROR_CONTEXT_MAX_BYTES;
+    // Back off continuation bytes (10xxxxxx) to the start of a character.
+    while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+    return bytes.subarray(0, end).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
+  }
+}
+
+type ReportAttachment = { name?: string; path?: string };
+type ReportResult = {
+  status: string;
+  retry?: number;
+  error?: { message?: string; snippet?: string };
+  attachments?: ReportAttachment[];
+};
+type SummarizedTest = {
+  title: string;
+  file?: string;
+  line: number;
+  status: string;
+  retry?: number;
+  error?: string;
+  errorSnippet?: string;
+  errorContext?: string;
+};
+type Summary = { test: SummarizedTest; specFile: string; errorContextPath: string | null };
+
+/**
+ * Each result's `file` repo-relative (Playwright names it relative to its
+ * rootDir, which says nothing about which spec ran in a monorepo), and for a
+ * failed one its `errorContext`. A file outside the workspace is left out.
+ */
+async function withEvidence(
+  summaries: Summary[] | null,
+  report: unknown,
+  env: RunnerEnv,
+  redact: (text: string) => string,
+): Promise<SummarizedTest[] | null> {
+  if (summaries === null) return null;
+  const rootDir = (report as { config?: { rootDir?: string } }).config?.rootDir ?? env.workingDirectory;
+  // Playwright reports real paths, and a workspace may be reached through a
+  // symlink (macOS's /var is /private/var), so both sides are made real.
+  const real = (p: string) => realpath(p).catch(() => p);
+  const workspace = await real(env.workspace);
+  return Promise.all(
+    summaries.map(async ({ test, specFile, errorContextPath }) => {
+      const rel = path.relative(workspace, await real(path.resolve(rootDir, specFile)));
+      const inside = specFile !== "" && rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+      const errorContext = errorContextPath ? await readErrorContext(errorContextPath, redact) : null;
+      return {
+        ...test,
+        ...(inside ? { file: redact(rel.split(path.sep).join("/")) } : {}),
+        ...(errorContext === null ? {} : { errorContext }),
+      };
+    }),
+  );
+}
+
+function summarizeReport(report: unknown): Summary[] | null {
   if (!report || typeof report !== "object" || !("suites" in report)) return null;
-  const tests: Array<{ title: string; file: string; line: number; status: string; retry?: number; error?: string; errorSnippet?: string }> = [];
-  const walk = (suite: { title: string; file?: string; specs?: Array<{ title: string; file: string; line: number; tests?: Array<{ results?: Array<{ status: string; retry?: number; error?: { message?: string; snippet?: string } }> }> }>; suites?: unknown[] }, titles: string[], isFile: boolean) => {
+  const tests: Summary[] = [];
+  const walk = (suite: { title: string; file?: string; specs?: Array<{ title: string; file: string; line: number; tests?: Array<{ results?: ReportResult[] }> }>; suites?: unknown[] }, titles: string[], isFile: boolean) => {
     const next = isFile ? titles : [...titles, suite.title];
     for (const spec of suite.specs ?? []) {
       const last = spec.tests?.[0]?.results?.at(-1);
+      const failed = last !== undefined && last.status !== "passed" && last.status !== "skipped";
+      const context = failed ? last.attachments?.find((a) => a.name === "error-context" && typeof a.path === "string") : undefined;
       tests.push({
-        title: [...next, spec.title].join(" › "),
-        file: spec.file,
-        line: spec.line,
-        status: last?.status ?? "unknown",
-        // The final attempt's index (0 = no retry), so a pass after a retry
-        // is not read as a clean one. Absent when Playwright ran no attempt.
-        ...(typeof last?.retry === "number" ? { retry: last.retry } : {}),
-        error: last?.error?.message?.slice(0, 2000),
-        errorSnippet: last?.error?.snippet?.slice(0, 2000),
+        specFile: typeof spec.file === "string" ? spec.file : "",
+        errorContextPath: context?.path ?? null,
+        test: {
+          title: [...next, spec.title].join(" › "),
+          line: spec.line,
+          status: last?.status ?? "unknown",
+          // The final attempt's index (0 = no retry), so a pass after a retry
+          // is not read as a clean one. Absent when Playwright ran no attempt.
+          ...(typeof last?.retry === "number" ? { retry: last.retry } : {}),
+          error: last?.error?.message?.slice(0, 2000),
+          errorSnippet: last?.error?.snippet?.slice(0, 2000),
+        },
       });
     }
     for (const child of suite.suites ?? []) walk(child as never, next, false);
