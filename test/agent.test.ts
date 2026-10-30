@@ -91,3 +91,10 @@ test("a pytest job's runnerInfo claims neither result_files nor error_context", 
   const info = await runnerInfoFor({ ...envAt(ws, null), configPath: null, framework: "pytest" } as unknown as RunnerEnv);
   assert.deepEqual(info.capabilities, ["commit_paths"]);
 });
+
+test("a job with an unknown framework input claims neither, rather than throwing", async (t) => {
+  const ws = await mkdtemp(path.join(tmpdir(), "peeps-agent-"));
+  t.after(() => rm(ws, { recursive: true, force: true }));
+  const info = await runnerInfoFor({ ...envAt(ws, null), framework: "bogus" } as unknown as RunnerEnv);
+  assert.deepEqual(info.capabilities, ["commit_paths"]);
+});

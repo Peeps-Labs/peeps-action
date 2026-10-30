@@ -53,7 +53,7 @@ This is more than "test results". Concretely:
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
 | The sha actually checked out (`git rev-parse HEAD`), and this action's version | `agent` |
-| Tool results in an agent session: file contents, diffs, test output (for a failed Playwright test, its `error-context.md`, which holds the page's accessibility snapshot at the failure, up to 16 KB), and the sha256 of each changed file's contents (files up to 5 MB; symlinks are never followed) | `agent` |
+| Tool results in an agent session: file contents, diffs, test output (for a failed Playwright test, its `error-context.md`, which holds the page's accessibility snapshot at the failure: up to 16 KB each and 128 KB per run, read only when it is a regular file, not a symlink, named `error-context.md`, inside the workspace or a Playwright project's output directory, and masked like every result), and the sha256 of each changed file's contents (files up to 5 MB; symlinks are never followed) | `agent` |
 
 Two of those deserve emphasis.
 
@@ -106,6 +106,11 @@ The limits that do exist are guardrails against mistakes, not a sandbox:
   `git_status` reports the sha256 of each changed file's unredacted bytes, so
   Peeps can check them against what it wrote. A digest does not reveal a
   file's contents, but it does confirm a guess of a short or predictable file.
+  Paths in `run_tests` results (`file`) are not masked, as `list_files` paths
+  are not. A test title that masking changed carries `titleRedacted: true`.
+  The masking replaces any environment value of 8 or more characters outside
+  the CI prefixes, not only secrets, so a title naming one (`production`) is
+  masked too.
 - Every tool call and its arguments are echoed to the job log, so the session is
   auditable after the fact. Arguments known to carry secrets are excluded from
   that log.

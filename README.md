@@ -276,14 +276,21 @@ commits, so it cannot know that branch or commit yet. The simplest setup has
 your own CI run the lab on pushes to `peeps/*` branches, where both are known,
 and the hook only print the marker.
 
-**What `run_tests` reports for Playwright.** Each result names its spec as
-`file`, relative to the repository root (Playwright's own report names it
-relative to its `testDir`). A failed result also carries `errorContext`: the
-text of Playwright's `error-context.md` for that test (the error, the test's
-source and, when the test had a page, the page's accessibility snapshot at the
-failure), cut to 16 KB; a file over 1 MB is left out. Both pass through the same secret masking as every
-tool result. The runner advertises them to Peeps as the capabilities
-`result_files` and `error_context`. pytest results are unchanged.
+**What `run_tests` reports for Playwright.** In `agent` mode, each result
+names its spec as `file`, relative to the repository root (Playwright's own
+report names it relative to its `testDir`), and its `line`. `file` is left out
+when the spec lies outside the checkout or Playwright reports no `rootDir`.
+Titles, errors and snippets pass through the same secret masking as every tool
+result. A title the masking changed carries `titleRedacted: true`, so Peeps
+matches it by `file` and `line` instead (pytest results carry the same flag).
+A failed result also carries `errorContext`: Playwright's `error-context.md`
+for that test (the error, the test's source and, when the test had a page, the
+page's accessibility snapshot at the failure), without Playwright's
+"Instructions" preamble, masked, and cut to 16 KB (`errorContextTruncated`
+says whether it was cut). One answer carries at most 128 KB of it; failures
+past that get `errorContextOmitted: true`, so narrow the run with `grep`. The
+runner advertises these to Peeps as the capabilities `result_files` and
+`error_context`.
 
 **Running the workflow by hand.** `mode: inventory` needs no session id:
 
@@ -330,6 +337,16 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
+## Unreleased
+
+- Agent mode, Playwright: `run_tests` results name each spec's `file`
+  relative to the repository root, and a failed result carries Playwright's
+  `error-context.md` as `errorContext` (16 KB each, 128 KB per answer).
+  Advertised as the runner capabilities `result_files` and `error_context`.
+- Agent mode: Playwright results' `title`, `error` and `errorSnippet` now pass
+  through the job's secret masking, as pytest's did; a masked title carries
+  `titleRedacted: true`, on both paths.
+
 ## Development
 
 ```bash
@@ -355,15 +372,6 @@ real Chromium and a local fake Peeps service. Rebuild before testing source chan
 `runnerInfo.actionVersion`, and Peeps decides from it what the runner supports.
 Set it to the tag being released (without the `v`), rebuild `dist/`, and tag
 that commit.
-
-## Unreleased
-
-- Agent mode, Playwright: `run_tests` results name each spec's `file` relative
-  to the repository root, and a failed result carries Playwright's
-  `error-context.md` as `errorContext` (at most 16 KB). Advertised as the
-  runner capabilities `result_files` and `error_context`.
-- Agent mode, Playwright: `run_tests` results' `title`, `error` and
-  `errorSnippet` now pass through the job's secret masking, as pytest's did.
 
 ## License
 

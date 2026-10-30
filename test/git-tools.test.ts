@@ -814,6 +814,23 @@ test("run_tests runs the commit's own .peeps/run-tests, siblings included", asyn
   assert.deepEqual(out.results?.map((r) => [r.title, r.status]), [["test_a", "passed"]]);
 });
 
+test("a pytest title the redactor changed says so", async (t) => {
+  process.env.PEEPS_TEST_LAB_SITE = "production";
+  t.after(() => delete process.env.PEEPS_TEST_LAB_SITE);
+  const { tools } = await hookRepo(
+    t,
+    `#!/bin/sh\nprintf '<testsuite><testcase classname="tests.test_a" name="test_production_banner" file="tests/test_a.py" line="4"/><testcase classname="tests.test_a" name="test_a" file="tests/test_a.py"/></testsuite>' > "$1"\n`,
+  );
+  const out = (await tools.run_tests!({ file: "tests/test_a.py" })) as {
+    results: Array<{ title: string; line?: number; titleRedacted?: boolean }>;
+  };
+  assert.deepEqual(out.results.map((r) => [r.title, r.line, r.titleRedacted]), [
+    ["test_[redacted]_banner", 4, true],
+    ["test_a", undefined, undefined],
+  ]);
+  assert.equal("titleRedacted" in out.results[1]!, false);
+});
+
 test("a hook rewritten through a symlink and committed by a failed push never runs", async (t) => {
   const { root, ws, tools } = await hookRepo(t);
   const marker = path.join(root, "agent-ran");

@@ -721,9 +721,9 @@ function resolveFramework(env) {
 }
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function splitParameter(nodeId) {
-  const open = nodeId.indexOf("[", Math.max(0, nodeId.indexOf("::")));
-  if (open === -1 || !nodeId.endsWith("]")) return { head: nodeId, parameter: null };
-  return { head: nodeId.slice(0, open), parameter: nodeId.slice(open + 1, -1) };
+  const open2 = nodeId.indexOf("[", Math.max(0, nodeId.indexOf("::")));
+  if (open2 === -1 || !nodeId.endsWith("]")) return { head: nodeId, parameter: null };
+  return { head: nodeId.slice(0, open2), parameter: nodeId.slice(open2 + 1, -1) };
 }
 function withoutBrowser(parameter, browser) {
   if (parameter === browser) return null;
@@ -1674,7 +1674,10 @@ function createToolServer(env) {
           ...ran,
           // Redacted whole, then cut, so no secret is split past the redactor.
           pendingNote: ran.pendingNote === null ? null : redact(ran.pendingNote).slice(0, 500),
-          results: ran.results?.map((r) => ({ ...r, title: redact(r.title), ...r.error ? { error: redact(r.error) } : {} })) ?? null,
+          results: ran.results?.map((r) => {
+            const title = redact(r.title);
+            return { ...r, title, ...title === r.title ? {} : { titleRedacted: true }, ...r.error ? { error: redact(r.error) } : {} };
+          }) ?? null,
           outputTail: redact(ran.outputTail)
         };
       }
@@ -1695,7 +1698,7 @@ function createToolServer(env) {
       return {
         exitCode: code,
         durationMs: Date.now() - started,
-        results: await withEvidence(summarizeReport(report), report, env, redact),
+        results: await playwrightResults(report, env, redact),
         stderr: redact(stderr.slice(-8e3)),
         stdoutTail: report ? void 0 : redact(stdout.slice(-4e3))
       };
@@ -1888,42 +1891,83 @@ function s(description) {
 }
 var ERROR_CONTEXT_MAX_BYTES = 16 * 1024;
 var ERROR_CONTEXT_MAX_READ_BYTES = 1024 * 1024;
-async function readErrorContext(file, redact) {
+var ERROR_CONTEXT_TOTAL_BYTES = 128 * 1024;
+async function readErrorContext(file, redact, allowedRoots) {
+  if (import_node_path8.default.basename(file) !== "error-context.md") return null;
+  let handle;
   try {
-    const info = await (0, import_promises6.lstat)(file);
+    if (!(await (0, import_promises6.lstat)(file)).isFile()) return null;
+    const real = await (0, import_promises6.realpath)(file);
+    const roots = await Promise.all(allowedRoots.map((r) => (0, import_promises6.realpath)(r).catch(() => null)));
+    const inside = roots.some((root) => {
+      if (root === null) return false;
+      const rel = import_node_path8.default.relative(root, real);
+      return rel !== "" && !rel.startsWith("..") && !import_node_path8.default.isAbsolute(rel);
+    });
+    if (!inside) return null;
+    handle = await (0, import_promises6.open)(file, import_node_fs3.constants.O_RDONLY | import_node_fs3.constants.O_NOFOLLOW);
+    const info = await handle.stat();
     if (!info.isFile() || info.size > ERROR_CONTEXT_MAX_READ_BYTES) return null;
-    const raw = await (0, import_promises6.readFile)(file);
+    const raw = await handle.readFile();
     if (raw.length > ERROR_CONTEXT_MAX_READ_BYTES) return null;
-    const bytes = Buffer.from(redact(raw.toString("utf8")), "utf8");
-    if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return bytes.toString("utf8");
+    let text = raw.toString("utf8");
+    if (text.startsWith("# Instructions\n")) {
+      const next = text.indexOf("\n# ");
+      text = next === -1 ? "" : text.slice(next + 1);
+    }
+    const bytes = Buffer.from(redact(text), "utf8");
+    if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return { text: bytes.toString("utf8"), truncated: false };
     let end = ERROR_CONTEXT_MAX_BYTES;
     while (end > 0 && (bytes[end] & 192) === 128) end--;
-    return bytes.subarray(0, end).toString("utf8");
+    return { text: bytes.subarray(0, end).toString("utf8"), truncated: true };
   } catch {
     return null;
+  } finally {
+    await handle?.close();
   }
 }
-async function withEvidence(summaries, report, env, redact) {
+async function playwrightResults(report, env, redact) {
+  const summaries = summarizeReport(report);
   if (summaries === null) return null;
-  const rootDir = report.config?.rootDir ?? env.workingDirectory;
+  const config = report.config;
+  const rootDir = config?.rootDir;
+  const outputDirs = (config?.projects ?? []).flatMap((p) => typeof p.outputDir === "string" ? [p.outputDir] : []);
+  const allowedRoots = [env.workspace, ...outputDirs];
   const real = (p) => (0, import_promises6.realpath)(p).catch(() => p);
   const workspace = await real(env.workspace);
-  return Promise.all(
-    summaries.map(async ({ test, specFile, errorContextPath }) => {
+  let budget = ERROR_CONTEXT_TOTAL_BYTES;
+  const results = [];
+  for (const { test, specFile, errorContextPath } of summaries) {
+    let file = null;
+    if (typeof rootDir === "string" && specFile !== "") {
       const rel = import_node_path8.default.relative(workspace, await real(import_node_path8.default.resolve(rootDir, specFile)));
-      const inside = specFile !== "" && rel !== "" && !rel.startsWith("..") && !import_node_path8.default.isAbsolute(rel);
-      const errorContext = errorContextPath ? await readErrorContext(errorContextPath, redact) : null;
-      return {
-        ...test,
-        // Redacted whole, then cut, so no secret is split past the redactor.
-        title: redact(test.title),
-        error: test.error === void 0 ? void 0 : redact(test.error).slice(0, 2e3),
-        errorSnippet: test.errorSnippet === void 0 ? void 0 : redact(test.errorSnippet).slice(0, 2e3),
-        ...inside ? { file: redact(rel.split(import_node_path8.default.sep).join("/")) } : {},
-        ...errorContext === null ? {} : { errorContext }
-      };
-    })
-  );
+      if (rel !== "" && !rel.startsWith("..") && !import_node_path8.default.isAbsolute(rel)) file = rel.split(import_node_path8.default.sep).join("/");
+    }
+    let evidence = {};
+    if (errorContextPath !== null) {
+      const read = budget > 0 ? await readErrorContext(errorContextPath, redact, allowedRoots) : null;
+      const bytes = read === null ? 0 : Buffer.byteLength(read.text);
+      if (read !== null && bytes <= budget) {
+        budget -= bytes;
+        evidence = { errorContext: read.text, errorContextTruncated: read.truncated };
+      } else if (read !== null || budget <= 0) {
+        budget = 0;
+        evidence = { errorContextOmitted: true };
+      }
+    }
+    const title = redact(test.title);
+    results.push({
+      ...test,
+      // Redacted whole, then cut, so no secret is split past the redactor.
+      title,
+      ...title === test.title ? {} : { titleRedacted: true },
+      error: test.error === void 0 ? void 0 : redact(test.error).slice(0, 2e3),
+      errorSnippet: test.errorSnippet === void 0 ? void 0 : redact(test.errorSnippet).slice(0, 2e3),
+      ...file === null ? {} : { file },
+      ...evidence
+    });
+  }
+  return results;
 }
 function summarizeReport(report) {
   if (!report || typeof report !== "object" || !("suites" in report)) return null;
@@ -1944,7 +1988,7 @@ function summarizeReport(report) {
           // The final attempt's index (0 = no retry), so a pass after a retry
           // is not read as a clean one. Absent when Playwright ran no attempt.
           ...typeof last?.retry === "number" ? { retry: last.retry } : {},
-          // Cut to 2000 in `withEvidence`, after redaction.
+          // Cut to 2000 in `playwrightResults`, after redaction.
           error: last?.error?.message,
           errorSnippet: last?.error?.snippet
         }
