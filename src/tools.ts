@@ -950,7 +950,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "grep", description: "Search source files for a regular expression; returns matching lines.", inputSchema: obj({ pattern: s("JavaScript regular expression"), path: s("Repo-relative directory to search; default the root"), ignoreCase: { type: "boolean" } }, ["pattern"]) },
     { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
     { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
-    { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec, or in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one). Optionally narrow it: Playwright by --grep or project; pytest by test (the title path, e.g. TestClass › test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors.", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name"), test: s("Optional pytest title path of one test, scopes joined by ' › '") }, ["file"]) },
+    { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec, or in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one). Optionally narrow it: Playwright by --grep or project; pytest by test (the title path, e.g. TestClass › test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors; a failing Playwright test also carries what it printed (output).", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name"), test: s("Optional pytest title path of one test, scopes joined by ' › '") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
     { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) },
@@ -1052,6 +1052,7 @@ type ReportResult = {
   retry?: number;
   error?: { message?: string; snippet?: string };
   attachments?: ReportAttachment[];
+  stdout?: Array<{ text?: string; buffer?: string }>;
 };
 type SummarizedTest = {
   title: string;
@@ -1066,6 +1067,7 @@ type SummarizedTest = {
   errorContext?: string;
   errorContextTruncated?: boolean;
   errorContextOmitted?: true;
+  output?: string;
 };
 type Summary = { test: SummarizedTest; specFile: string; errorContextPath: string | null };
 
@@ -1131,11 +1133,13 @@ export async function playwrightResults(
       ...(title === test.title ? {} : { titleRedacted: true as const }),
       error: test.error === undefined ? undefined : redact(test.error).slice(0, 2000),
       errorSnippet: test.errorSnippet === undefined ? undefined : redact(test.errorSnippet).slice(0, 2000),
+      ...(test.output === undefined ? {} : { output: redact(test.output).slice(-TEST_OUTPUT_MAX_CHARS) }),
       ...(file === null ? {} : { file: redact(file), ...(redact(file) === file ? {} : { fileRedacted: true as const }) }),
       ...evidence,
     });
   }
-  // The last guard: still too large, drop errorContext from the latest results.
+  // The last guard: still too large, drop errorContext from the latest results,
+  // then their printed output.
   let size = jsonBytes(results);
   for (let i = results.length - 1; i >= 0 && size > RUN_TESTS_RESULT_MAX_BYTES; i--) {
     const r = results[i]!;
@@ -1144,7 +1148,23 @@ export async function playwrightResults(
     results[i] = { ...rest, errorContextOmitted: true };
     size = jsonBytes(results);
   }
+  for (let i = results.length - 1; i >= 0 && size > RUN_TESTS_RESULT_MAX_BYTES; i--) {
+    if (results[i]!.output === undefined) continue;
+    const { output: _dropped, ...rest } = results[i]!;
+    results[i] = rest;
+    size = jsonBytes(results);
+  }
   return results;
+}
+
+/** At most this much of a failing test's printed output, its tail. */
+export const TEST_OUTPUT_MAX_CHARS = 4000;
+
+function printed(stdout: ReportResult["stdout"]): string | undefined {
+  const text = (stdout ?? [])
+    .map((chunk) => chunk.text ?? (chunk.buffer ? Buffer.from(chunk.buffer, "base64").toString("utf8") : ""))
+    .join("");
+  return text.trim() === "" ? undefined : text;
 }
 
 function summarizeReport(report: unknown): Summary[] | null {
@@ -1169,6 +1189,10 @@ function summarizeReport(report: unknown): Summary[] | null {
           // Cut to 2000 in `playwrightResults`, after redaction.
           error: last?.error?.message,
           errorSnippet: last?.error?.snippet,
+          // What a failing test printed: an API test's probe of the response
+          // it got is the only way to see that response. Cut in
+          // `playwrightResults`, after redaction.
+          ...(failed && printed(last?.stdout) !== undefined ? { output: printed(last?.stdout) } : {}),
         },
       });
     }

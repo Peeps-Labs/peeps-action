@@ -15,6 +15,7 @@ import {
   makeRedactor,
   patchPaths,
   playwrightResults,
+  TEST_OUTPUT_MAX_CHARS,
   readErrorContext,
 } from "../src/tools";
 
@@ -326,7 +327,7 @@ test("readErrorContext reads only a regular error-context.md under an allowed ro
   assert.equal(await readErrorContext(path.join(ws, "missing/error-context.md"), noRedact, [ws]), null);
 });
 
-type Spec = { title: string; line: number; status: string; context?: string; error?: string };
+type Spec = { title: string; line: number; status: string; context?: string; error?: string; stdout?: string[] };
 
 /** Playwright's JSON report for one spec file, as `run_tests` parses it. */
 function report(rootDir: string | undefined, specFile: string, specs: Spec[], outputDir?: string) {
@@ -345,6 +346,7 @@ function report(rootDir: string | undefined, specFile: string, specs: Spec[], ou
             retry: 0,
             ...(s.status === "failed" ? { error: { message: s.error ?? `Error in ${s.title}`, snippet: s.error ?? `> ${s.line} | ${s.title}` } } : {}),
             attachments: s.context ? [{ name: "error-context", path: s.context, contentType: "text/markdown" }] : [],
+            ...(s.stdout ? { stdout: s.stdout.map((text) => ({ text })) } : {}),
           }],
         }],
       })),
@@ -380,6 +382,33 @@ test("errorContext has a budget across the whole result: 40 failures stay far un
   assert.equal(carried.length + omitted.length, 40);
   assert.ok(omitted.length > 0 && omitted.every((r) => r.errorContextOmitted === true));
   assert.equal(results[0]!.errorContext !== undefined, true);
+});
+
+test("a failing test carries what it printed, redacted and cut to its tail; a passing one does not", async (t) => {
+  const ws = await workspace(t);
+  const redact = makeRedactor({ API_TOKEN: "s3cr3t-token-value" });
+  const body = '{"items":[{"id":"RR-C10-0001"}],"nextCursor":"5"}';
+  const shown = (await playwrightResults(
+    report(path.join(ws, "e2e"), "api.spec.ts", [
+      { title: "probe", line: 3, status: "failed", stdout: ["status 200\n", `${body}\n`, "token s3cr3t-token-value\n"] },
+      { title: "passes", line: 9, status: "passed", stdout: ["noise\n"] },
+      { title: "silent", line: 12, status: "failed" },
+    ]),
+    envFor(ws),
+    redact,
+  ))!;
+  assert.equal(shown[0]!.output, `status 200\n${body}\ntoken [redacted]\n`);
+  assert.equal("output" in shown[1]!, false);
+  assert.equal("output" in shown[2]!, false);
+
+  const long = "x".repeat(TEST_OUTPUT_MAX_CHARS) + "END";
+  const cut = (await playwrightResults(
+    report(path.join(ws, "e2e"), "api.spec.ts", [{ title: "long", line: 1, status: "failed", stdout: [long] }]),
+    envFor(ws),
+    noRedact,
+  ))!;
+  assert.equal(cut[0]!.output!.length, TEST_OUTPUT_MAX_CHARS);
+  assert.ok(cut[0]!.output!.endsWith("END"));
 });
 
 test("a redacted title or file says so, and keeps its line", async (t) => {
