@@ -932,3 +932,16 @@ test("apply_patch takes a model's diff with miscounted hunks and no final newlin
   await toolsFor(ws).apply_patch!({ patch });
   assert.equal(await readFile(path.join(ws, "e2e/a.spec.ts"), "utf8"), "one\ninserted\ntwo\nthree\nfour\n");
 });
+
+test("apply_patch never drops the lines past an undercounted hunk header", async (t) => {
+  // Seen on the repo bench: a heal's header said +1,13 for 17 new lines, and
+  // git applied 13 of them without a word, cutting the final assertion off a
+  // poll loop. The truncated test then passed on a broken API.
+  const { ws } = await repo(t);
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "start\nend\n");
+  git(ws, "add", "-A");
+  git(ws, "commit", "-q", "-m", "two lines");
+  const patch = "--- a/e2e/a.spec.ts\n+++ b/e2e/a.spec.ts\n@@ -1,2 +1,3 @@\n start\n+poll\n+assert\n end\n";
+  await toolsFor(ws).apply_patch!({ patch });
+  assert.equal(await readFile(path.join(ws, "e2e/a.spec.ts"), "utf8"), "start\npoll\nassert\nend\n");
+});
