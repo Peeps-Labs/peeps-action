@@ -424,8 +424,15 @@ real Chromium and a local fake Peeps service. Rebuild before testing source chan
 
 **Releasing.** `ACTION_VERSION` in `src/version.ts` is reported to Peeps as
 `runnerInfo.actionVersion`, and Peeps decides from it what the runner supports.
-Set it to the tag being released (without the `v`), rebuild `dist/`, and tag
-that commit.
+To release, merge a change into `main` that sets it to the new version (without
+the `v`), renames the README's `## Unreleased` section to `## <version>`, and
+rebuilds `dist/`. Once CI passes on `main`, the Release workflow
+(`scripts/release.sh`) tags that commit `v<version>`, moves the major tag (`v1`)
+to it, and publishes the GitHub release with that section as its notes. Nothing
+is tagged by hand. A merge that leaves the version alone releases nothing, and
+a version with no README section, or older than the newest release, fails the
+workflow instead. If a run fails part-way, rerun it (or run the workflow by
+hand on `main`): each step checks before it acts.
 
 ## License
 

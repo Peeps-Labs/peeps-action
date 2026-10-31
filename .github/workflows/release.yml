@@ -1,0 +1,51 @@
+name: Release
+
+# Ships a release by itself once CI has passed on main: when src/version.ts
+# names a version with no tag yet, scripts/release.sh tags the commit, moves the
+# major tag (v1) to it and publishes the GitHub release from the README's notes
+# for that version. A push that leaves the version alone does nothing.
+#
+# It waits for CI rather than running on push, so a tag only ever lands on a
+# commit whose tests passed and whose dist/ matches src/.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Retries a release that failed part-way. Each step checks before it acts.
+  workflow_dispatch:
+
+# Creating and moving tags, and publishing the release.
+permissions:
+  contents: write
+
+# One release at a time, in order: a second run waits rather than racing the
+# first for the same tags.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The commit CI passed on, not whatever main is now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          bash scripts/release.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
