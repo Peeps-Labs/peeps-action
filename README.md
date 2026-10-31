@@ -370,7 +370,7 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
-## Unreleased
+## 1.5.0
 
 - Agent mode, Playwright: `run_tests` results name each spec's `file`
   relative to the repository root, and a failed result carries Playwright's
@@ -380,10 +380,15 @@ access token Peeps was given (Maintainer).
   through the job's secret masking, as pytest's did; a masked title carries
   `titleRedacted: true`, on both paths, and a masked `file` `fileRedacted: true`.
   `grep` match paths are masked too.
-- Release note: don't release this until Peeps' server matches redacted titles
-  ([PQA-2743](https://linear.app/peeps-ai/issue/PQA-2743), live on prod Peeps).
-  Until then, a Playwright heal of a test whose title holds a masked value
-  fails Peeps' exact-title match and reads as "the test did not run".
+- Agent mode: a failed `run_tests` run's summary carries the tail of what it
+  printed (masked, 4000 characters). In a pytest suite, failed results carry
+  the HTTP calls the test made (masked, at most three, 24 KB).
+- Results, pytest: a failing test's `test_end` carries the HTTP calls it made
+  (`httpExchanges`), masked on the runner, so failure analysis can read the
+  failing call.
+- Agent mode: `grep` reads Python files, and `apply_patch` takes a model's
+  diff whose hunk header undercounts its lines without dropping the lines past
+  the count.
 
 ## Development
 
