@@ -370,7 +370,7 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
-## Unreleased
+## 1.6.0
 
 - Run mode: when Peeps starts a run in an environment, the test process gets
   `PEEPS_ENVIRONMENT` (its name) and `PEEPS_BASE_URL` (its `BASE_URL`, when
