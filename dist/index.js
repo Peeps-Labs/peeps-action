@@ -1374,10 +1374,11 @@ async function ensureParentDirInside(workspace, abs) {
   }
   if (existing !== parent) await (0, import_promises6.mkdir)(parent, { recursive: true });
 }
+var GREP_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml|py|pyi|toml|ini|cfg)$/;
 async function patchPaths(runGit, patchFile) {
   let stdout;
   try {
-    ({ stdout } = await runGit(["apply", "--numstat", patchFile]));
+    ({ stdout } = await runGit(["apply", "--recount", "--numstat", patchFile]));
   } catch (error) {
     const e = error;
     throw new ToolError(`patch is not a valid diff: ${(e.stderr ?? e.message).slice(0, 500)}`);
@@ -1599,7 +1600,7 @@ function createToolServer(env) {
       const listed = await handlers.list_files({ path: str(args, "path", false) || "." });
       for (const rel of listed.files) {
         if (matches.length >= MAX_GREP_MATCHES) break;
-        if (!/\.(ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml)$/.test(rel)) continue;
+        if (!GREP_FILE.test(rel)) continue;
         let text;
         try {
           text = await (0, import_promises6.readFile)(jail(workspace, rel), "utf8");
@@ -1626,12 +1627,13 @@ function createToolServer(env) {
       const patch = str(args, "patch");
       const dir = await (0, import_promises6.mkdtemp)(import_node_path8.default.join((0, import_node_os4.tmpdir)(), "peeps-patch-"));
       const file = import_node_path8.default.join(dir, "change.patch");
-      await (0, import_promises6.writeFile)(file, patch, "utf8");
+      await (0, import_promises6.writeFile)(file, patch.endsWith("\n") ? patch : `${patch}
+`, "utf8");
       for (const touched of await patchPaths(runGit, file)) {
         jailForWrite(workspace, touched);
       }
       try {
-        await runGit(["apply", "--whitespace=nowarn", file]);
+        await runGit(["apply", "--recount", "--whitespace=nowarn", file]);
       } catch (error) {
         const e = error;
         throw new ToolError(`git apply failed: ${redact((e.stderr ?? e.message).slice(0, 2e3))}`);

@@ -904,3 +904,31 @@ test("a real hook that starts a lab run and prints peeps:pending comes back pend
   assert.equal(out.results, null);
   assert.match(out.outputTail, /queued tests\/test_a\.py::test_a/);
 });
+
+// ---------------------------------------------------------------------------
+// A Python suite and a model-written diff (repo bench, pytest API heals)
+// ---------------------------------------------------------------------------
+
+test("grep reads a pytest suite's Python and config files", async (t) => {
+  const { ws } = await repo(t);
+  await mkdir(path.join(ws, "tests/api"), { recursive: true });
+  await writeFile(path.join(ws, "tests/api/test_orders.py"), "assert created.status_code == 201\n");
+  await writeFile(path.join(ws, "pytest.ini"), "[pytest]\nstatus_code_marker = 1\n");
+  await writeFile(path.join(ws, "pyproject.toml"), "[tool.pytest.ini_options]\n");
+  const out = (await toolsFor(ws).grep!({ pattern: "status_code|ini_options" })) as {
+    matches: Array<{ path: string; line: number }>;
+  };
+  assert.deepEqual(out.matches.map((m) => m.path).sort(), ["pyproject.toml", "pytest.ini", "tests/api/test_orders.py"]);
+});
+
+test("apply_patch takes a model's diff with miscounted hunks and no final newline", async (t) => {
+  const { ws } = await repo(t);
+  await writeFile(path.join(ws, "e2e/a.spec.ts"), "one\ntwo\nthree\nfour\n");
+  git(ws, "add", "-A");
+  git(ws, "commit", "-q", "-m", "four lines");
+  // The header claims 6 lines where the hunk has 3, and the last line has no
+  // newline: git apply calls both a corrupt patch.
+  const patch = "--- a/e2e/a.spec.ts\n+++ b/e2e/a.spec.ts\n@@ -1,6 +1,7 @@\n one\n+inserted\n two\n three";
+  await toolsFor(ws).apply_patch!({ patch });
+  assert.equal(await readFile(path.join(ws, "e2e/a.spec.ts"), "utf8"), "one\ninserted\ntwo\nthree\nfour\n");
+});
