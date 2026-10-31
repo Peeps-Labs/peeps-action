@@ -22,6 +22,7 @@ import {
   type PytestCollection,
 } from "../src/pytest";
 import type { PlanEntry } from "../src/reporter";
+import { runPytestTool } from "../src/pytest-run-tool";
 
 const FIXTURE = path.join(__dirname, "fixtures", "pytest-suite");
 /** A non-browser suite: skips, measurements, saved frames, a broken fixture. */
@@ -767,6 +768,66 @@ test("with PEEPS_HTTP_BODIES=off a call reports no bodies", needsHttpClients, as
   } finally {
     delete process.env.PEEPS_HTTP_BODIES;
   }
+});
+
+test("run_tests gives a failed API test its HTTP calls, masked, and a passing one none", needsHttpClients, async () => {
+  const secret = "fleet-secret-0123456789";
+  process.env.FLEET_TOKEN = secret;
+  try {
+    const { root, suite } = workspace(API);
+    const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "e2e" });
+    const out = await runPytestTool(env, {
+      fileAbs: path.join(suite, "tests", "test_fleet.py"),
+      titlePath: null,
+      keyword: null,
+    });
+    const byTitle = Object.fromEntries(out.results!.map((r) => [r.title, r]));
+    const [post] = byTitle.test_work_order_is_queued!.httpExchanges!;
+    assert.equal(post!.status, 201);
+    assert.equal(JSON.parse(post!.responseBody!).state, "queued");
+    assert.equal(post!.requestHeaders.find((h) => h.name === "Authorization")?.value, "[masked]");
+    assert.equal(byTitle.test_lists_robots!.status, "passed");
+    assert.equal(byTitle.test_lists_robots!.httpExchanges, undefined);
+    assert.equal(JSON.stringify(out).includes(secret), false);
+    assert.equal(byTitle.test_api_down!.httpExchanges?.[0]?.status, null);
+    // The calls file lives in the run's scratch directory, never the checkout.
+    assert.equal(readdirSync(suite).includes("http-calls.json"), false);
+  } finally {
+    delete process.env.FLEET_TOKEN;
+  }
+});
+
+test("run_tests reports a retried test's calls only when its final attempt failed", needsPlugins, async () => {
+  if (!hasPlugins("requests")) return;
+  const { root, suite } = workspace(API);
+  writeFileSync(
+    path.join(suite, "tests", "test_retry.py"),
+    [
+      "import os, requests",
+      "def test_second_try_passes(fleet_url, tmp_path_factory):",
+      "    marker = os.path.join(str(tmp_path_factory.getbasetemp()), 'tried')",
+      "    requests.get(f'{fleet_url}/robots?try=' + str(os.path.exists(marker)))",
+      "    if not os.path.exists(marker):",
+      "        open(marker, 'w').close()",
+      "        assert False",
+      "def test_always_fails(fleet_url):",
+      "    requests.get(f'{fleet_url}/robots?n=always')",
+      "    assert False",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(path.join(suite, "pytest.ini"), "[pytest]\naddopts = --reruns 1\n");
+  const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "e2e" });
+  const out = await runPytestTool(env, {
+    fileAbs: path.join(suite, "tests", "test_retry.py"),
+    titlePath: null,
+    keyword: null,
+  });
+  const byTitle = Object.fromEntries(out.results!.map((r) => [r.title, r]));
+  assert.equal(byTitle.test_second_try_passes!.status, "passed");
+  assert.equal(byTitle.test_second_try_passes!.httpExchanges, undefined);
+  // The final attempt's own call, not the first attempt's as well.
+  assert.deepEqual(byTitle.test_always_fails!.httpExchanges!.map((x) => new URL(x.url).search), ["?n=always"]);
 });
 
 test("under pytest-xdist the evidence arrives once, attachments from the workers included", needsPlugins, async () => {

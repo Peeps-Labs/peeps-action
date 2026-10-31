@@ -1,7 +1,7 @@
 """The pytest side of peeps-action: loaded with ``-p peeps_pytest_plugin``.
 
-It does two things, each switched on by an environment variable the action
-sets, and nothing at all when neither is set:
+It does three things, each switched on by an environment variable the action
+sets, and nothing at all when none is set:
 
 ``PEEPS_COLLECT_OUT``
     After collection, write what pytest collected to that file as JSON: one
@@ -10,6 +10,10 @@ sets, and nothing at all when neither is set:
     that failed to collect, and whether pytest-playwright is loaded. It reads
     only what collection itself produced; it imports nothing of the
     repository's.
+
+``PEEPS_EVIDENCE_OUT``
+    For the action's ``run_tests`` tool (a heal running one test): write the
+    HTTP calls each failed test made to that file as JSON (``_LocalEvidence``).
 
 ``PEEPS_PLAN_FILE``
     While tests run, stream ``run_start`` / ``test_start`` / ``test_end`` /
@@ -103,6 +107,9 @@ MAX_HTTP_BODY_CHARS = 2000
 #: escapes included). The caps above bound characters, not bytes: a
 #: non-ASCII property or output can be 12 bytes a character once escaped.
 MAX_EVIDENCE_BYTES = 256 * 1024
+#: One failed test's HTTP calls in ``PEEPS_EVIDENCE_OUT``: they go into a
+#: model's tool result, so far less than a test_end may carry.
+MAX_LOCAL_EVIDENCE_BYTES = 24 * 1024
 
 #: The extensions Peeps accepts under a batch's ``data/`` (mirrors
 #: ``DATA_ATTACHMENT_EXTENSIONS`` in Peeps' artifacts route). Any other file
@@ -660,6 +667,85 @@ def bound_evidence(fields: Dict[str, Any], budget: int = MAX_EVIDENCE_BYTES) -> 
     return fields
 
 
+def phase_record(report: Any) -> Dict[str, Any]:
+    """One phase's report as ``settle`` and ``evidence_fields`` read it."""
+    failed = report.outcome in ("failed", "rerun")
+    evidence = getattr(report, EVIDENCE_ATTRIBUTE, None) or {}
+    properties_kept = evidence.get("propertiesKept", 0)
+    properties_from = evidence.get("propertiesFrom", 0)
+    sections_from = evidence.get("sectionsFrom", 0)
+    user_properties = list(getattr(report, "user_properties", None) or [])
+    return {
+        "when": report.when,
+        "outcome": report.outcome,
+        "wasxfail": hasattr(report, "wasxfail"),
+        "duration": getattr(report, "duration", 0) or 0,
+        "message": _crash_message(report),
+        "longrepr": report.longreprtext if failed else None,
+        # The rest is evidence for the final attempt's test_end.
+        "exception": evidence.get("exception"),
+        "skipReason": (
+            skip_reason(report.longrepr) if report.outcome == "skipped" else None
+        ),
+        # Set before the first attempt (at collection), then this
+        # attempt's own: never an earlier attempt's.
+        "properties": user_properties[:properties_kept]
+        + user_properties[properties_from:],
+        "attached": evidence.get("attached"),
+        "http": evidence.get("http"),
+        "sections": list(getattr(report, "sections", None) or [])[sections_from:],
+    }
+
+
+class _LocalEvidence:
+    """``PEEPS_EVIDENCE_OUT``: the HTTP calls each failed test made, written
+    to that file at session end for the action's ``run_tests`` tool, so a
+    heal reproducing an API test's failure sees the response that failed it
+    and not only the assertion. Nothing is sent anywhere.
+
+    The file is a JSON list, one entry per test whose final attempt failed
+    having made a call: ``{"nodeId", "httpExchanges", "httpExchangesOmitted"?,
+    "evidenceTrimmed"?}``, the calls as ``evidence_fields`` reports them, cut
+    to ``MAX_LOCAL_EVIDENCE_BYTES`` (bodies first, then the oldest calls)."""
+
+    def __init__(self, out: str) -> None:
+        self.out = out
+        self.phases: Dict[str, List[Dict[str, Any]]] = {}
+        self.found: Dict[str, Dict[str, Any]] = {}
+
+    def pytest_runtest_logreport(self, report: Any) -> None:
+        self.phases.setdefault(report.nodeid, []).append(phase_record(report))
+
+    def pytest_runtest_logfinish(self, nodeid: str, location: Any) -> None:
+        split = attempts(self.phases.pop(nodeid, []))
+        if not split or any(p["outcome"] == "rerun" for p in split[-1]):
+            # A retried attempt: the next one decides.
+            return
+        self.found.pop(nodeid, None)
+        final = split[-1]
+        if settle(final)["status"] != "failed":
+            return
+        try:
+            fields, _ = evidence_fields(final, "failed")
+            http = {
+                key: fields[key]
+                for key in ("httpExchanges", "httpExchangesOmitted")
+                if key in fields
+            }
+            if http.get("httpExchanges"):
+                self.found[nodeid] = bound_evidence(http, MAX_LOCAL_EVIDENCE_BYTES)
+        except Exception as error:  # pragma: no cover - defensive
+            print(f"[peeps] HTTP calls of {nodeid} not kept: {error!r}", flush=True)
+
+    def pytest_sessionfinish(self, session: Any) -> None:
+        entries = [{"nodeId": nodeid, **fields} for nodeid, fields in self.found.items()]
+        try:
+            with open(self.out, "w", encoding="utf-8") as handle:
+                json.dump(entries, handle)
+        except OSError as error:
+            print(f"[peeps] HTTP calls not written: {error!r}", flush=True)
+
+
 class _Streamer:
     def __init__(
         self,
@@ -713,35 +799,7 @@ class _Streamer:
         for name, value in getattr(report, "user_properties", None) or []:
             if name == OUTPUT_DIR_PROPERTY and isinstance(value, str):
                 self.output_dirs[report.nodeid] = value
-        phases = self.phases.setdefault(report.nodeid, [])
-        failed = report.outcome in ("failed", "rerun")
-        evidence = getattr(report, EVIDENCE_ATTRIBUTE, None) or {}
-        properties_kept = evidence.get("propertiesKept", 0)
-        properties_from = evidence.get("propertiesFrom", 0)
-        sections_from = evidence.get("sectionsFrom", 0)
-        user_properties = list(getattr(report, "user_properties", None) or [])
-        phases.append(
-            {
-                "when": report.when,
-                "outcome": report.outcome,
-                "wasxfail": hasattr(report, "wasxfail"),
-                "duration": getattr(report, "duration", 0) or 0,
-                "message": _crash_message(report),
-                "longrepr": report.longreprtext if failed else None,
-                # The rest is evidence for the final attempt's test_end.
-                "exception": evidence.get("exception"),
-                "skipReason": (
-                    skip_reason(report.longrepr) if report.outcome == "skipped" else None
-                ),
-                # Set before the first attempt (at collection), then this
-                # attempt's own: never an earlier attempt's.
-                "properties": user_properties[:properties_kept]
-                + user_properties[properties_from:],
-                "attached": evidence.get("attached"),
-                "http": evidence.get("http"),
-                "sections": list(getattr(report, "sections", None) or [])[sections_from:],
-            }
-        )
+        self.phases.setdefault(report.nodeid, []).append(phase_record(report))
 
     def pytest_runtest_logfinish(self, nodeid: str, location: Any) -> None:
         entry = self.runs.get(nodeid)
@@ -1384,6 +1442,11 @@ def pytest_configure(config: Any) -> None:
     if collect_out and not worker:
         config.pluginmanager.register(_Collector(collect_out), "peeps-collector")
     plan = os.environ.get("PEEPS_PLAN_FILE")
+    evidence_out = os.environ.get("PEEPS_EVIDENCE_OUT")
+    if evidence_out and not plan:
+        config.pluginmanager.register(_EvidenceRecorder(), "peeps-evidence")
+        if not worker:
+            config.pluginmanager.register(_LocalEvidence(evidence_out), "peeps-local-evidence")
     if plan:
         config.pluginmanager.register(_OutputDirRecorder(), "peeps-output-dirs")
         config.pluginmanager.register(_EvidenceRecorder(), "peeps-evidence")

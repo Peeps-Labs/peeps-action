@@ -10,7 +10,10 @@ import {
   parseJunitResults,
   pendingMarkerNote,
   pytestNodeArgument,
+  redactHttpCalls,
   runPytestTool,
+  withHttpCalls,
+  type HttpExchange,
   type PytestRunDeps,
 } from "../src/pytest-run-tool";
 
@@ -88,25 +91,28 @@ async function workspace(withHook: boolean) {
   return { workspace: ws, workingDirectory: ws, configPath: null } as unknown as RunnerEnv;
 }
 
-function fakeDeps(xml: string | null) {
+function fakeDeps(xml: string | null, httpCalls: string | null = null) {
   const calls: Array<{ via: string; cmd?: string; args: string[] }> = [];
   const writeJunit = async (args: string[]) => {
     const junit = args.find((a) => a.startsWith("--junitxml="))?.slice("--junitxml=".length) ?? args[0]!;
     if (xml !== null) await writeFile(junit, xml);
   };
+  const envs: Array<Record<string, string>> = [];
   const deps: PytestRunDeps = {
     run: async (cmd, args) => {
       calls.push({ via: "hook", cmd, args });
       await writeJunit(args);
       return { code: 1, output: "lab says hi" };
     },
-    pytest: async (args) => {
+    pytest: async (args, _cwd, extraEnv) => {
       calls.push({ via: "pytest", args });
+      envs.push(extraEnv);
       await writeJunit(args);
+      if (httpCalls !== null) await writeFile(extraEnv.PEEPS_EVIDENCE_OUT!, httpCalls);
       return { code: 0, output: "1 passed" };
     },
   };
-  return { deps, calls };
+  return { deps, calls, envs };
 }
 
 const ONE_PASS = `<testsuite><testcase classname="tests.test_a" name="test_up" file="tests/test_a.py"/></testsuite>`;
@@ -295,4 +301,110 @@ test("a .peeps/run-tests in the checkout runs only through a hook plan", async (
     deps,
   );
   assert.equal(calls[0]!.via, "pytest");
+});
+
+// ---------------------------------------------------------------------------
+// The HTTP calls a failed test made
+// ---------------------------------------------------------------------------
+
+function exchange(url: string, status: number | null, extra: Partial<HttpExchange> = {}): HttpExchange {
+  return { method: "GET", url, status, durationMs: 3, requestHeaders: [], responseHeaders: [], ...extra };
+}
+
+const TWO_FAILED = `<testsuite>
+<testcase classname="tests.test_a" name="test_up" file="tests/test_a.py"/>
+<testcase classname="tests.test_a.TestFleet" name="test_list[eu]" file="tests/test_a.py"><failure message="assert 404 == 200"/></testcase>
+<testcase classname="tests.test_a" name="test_down" file="tests/test_a.py"><failure message="boom"/></testcase>
+</testsuite>`;
+
+test("pytest runs with the plugin recording HTTP calls, and a failed test carries its own", async () => {
+  const env = await workspace(false);
+  const evidence = JSON.stringify([
+    {
+      nodeId: "tests/test_a.py::TestFleet::test_list[eu]",
+      httpExchanges: [exchange("http://api/robots?region=eu", 404, { responseBody: '{"error":"no region"}' })],
+      httpExchangesOmitted: 2,
+    },
+    // A passed test's calls never attach, even if a file says so.
+    { nodeId: "tests/test_a.py::test_up", httpExchanges: [exchange("http://api/up", 200)] },
+  ]);
+  const { deps, calls, envs } = fakeDeps(TWO_FAILED, evidence);
+  const out = await runPytestTool(
+    env,
+    { fileAbs: path.join(env.workspace, "tests/test_a.py"), titlePath: null, keyword: null },
+    deps,
+  );
+  assert.deepEqual(calls[0]!.args.slice(0, 2), ["-p", "peeps_pytest_plugin"]);
+  assert.match(envs[0]!.PEEPS_EVIDENCE_OUT!, /http-calls\.json$/);
+  assert.match(envs[0]!.PYTHONPATH!, /python/);
+  const [up, list, down] = out.results!;
+  assert.equal(up!.httpExchanges, undefined);
+  assert.equal(list!.httpExchanges?.[0]?.status, 404);
+  assert.equal(list!.httpExchanges?.[0]?.responseBody, '{"error":"no region"}');
+  assert.equal(list!.httpExchangesOmitted, 2);
+  assert.equal(down!.httpExchanges, undefined);
+});
+
+test("the customer's hook runs without the plugin, and its results carry no calls", async () => {
+  const env = await workspace(true);
+  const { deps, calls } = fakeDeps(TWO_FAILED, "[]");
+  const out = await runPytestTool(
+    env,
+    {
+      fileAbs: path.join(env.workspace, "tests/test_a.py"),
+      titlePath: null,
+      keyword: null,
+      hook: async (dir) => ({ kind: "ready", path: path.join(dir, "hook") }),
+    },
+    deps,
+  );
+  assert.equal(calls[0]!.via, "hook");
+  assert.ok(!calls[0]!.args.includes("peeps_pytest_plugin"));
+  assert.ok(out.results!.every((r) => r.httpExchanges === undefined));
+});
+
+test("calls attach by title path to failed results only, at most three, and a bad file adds nothing", () => {
+  const failed = (title: string) => ({ title, file: "t.py", status: "failed" as const });
+  const results = [failed("test_a"), failed("test_b"), failed("test_c"), failed("test_d"), failed("TestX › test_e[1]")];
+  const evidence = JSON.stringify([
+    ...["test_a", "test_b", "test_c", "test_d"].map((name) => ({
+      nodeId: `t.py::${name}`,
+      httpExchanges: [exchange(`http://api/${name}`, 500)],
+    })),
+    { nodeId: "t.py::TestX::test_e[1]", httpExchanges: [exchange("http://api/e", 500)], evidenceTrimmed: true },
+    { nodeId: "not a node id", httpExchanges: [exchange("http://api/x", 500)] },
+    { nodeId: "t.py::test_none", httpExchanges: [] },
+  ]);
+  const out = withHttpCalls(results, evidence);
+  assert.deepEqual(
+    out.map((r) => r.httpExchanges?.[0]?.url ?? null),
+    ["http://api/test_a", "http://api/test_b", "http://api/test_c", null, null],
+  );
+  assert.equal(withHttpCalls([failed("TestX › test_e[1]")], evidence)[0]!.evidenceTrimmed, true);
+  assert.deepEqual(withHttpCalls(results, null), results);
+  assert.deepEqual(withHttpCalls(results, "{not json"), results);
+  assert.deepEqual(withHttpCalls(results, '{"nodeId":"t.py::test_a"}'), results);
+});
+
+test("every value a secret could reach in a call is redacted, and only those", () => {
+  const redact = (text: string) => text.replaceAll("s3cret-value", "[redacted]");
+  const [out] = redactHttpCalls(
+    [
+      exchange("http://api/x?k=s3cret-value", 401, {
+        method: "POST",
+        requestHeaders: [{ name: "X-Key", value: "s3cret-value" }],
+        responseHeaders: [{ name: "X-Echo", value: "s3cret-value" }],
+        requestBody: '{"k":"s3cret-value"}',
+        responseBody: "denied s3cret-value",
+        error: "HTTPError: s3cret-value",
+      }),
+    ],
+    redact,
+  );
+  assert.ok(!JSON.stringify(out).includes("s3cret-value"));
+  assert.equal(out!.method, "POST");
+  assert.equal(out!.status, 401);
+  assert.equal(out!.requestHeaders[0]!.name, "X-Key");
+  // An absent body stays absent, never an empty string.
+  assert.ok(!("requestBody" in redactHttpCalls([exchange("http://api/y", 200)], redact)[0]!));
 });
