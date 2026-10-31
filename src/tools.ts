@@ -198,13 +198,20 @@ export async function ensureParentDirInside(workspace: string, abs: string): Pro
  * rather than risk mis-decoding a path this is about to security-check, that is
  * refused outright.
  */
+/**
+ * The files `grep` reads: source, config and docs of a Playwright or a pytest
+ * suite. A Python suite's tests and helpers were invisible to it before.
+ */
+const GREP_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml|py|pyi|toml|ini|cfg)$/;
+
 export async function patchPaths(
   runGit: (args: string[]) => Promise<{ stdout: string }>,
   patchFile: string,
 ): Promise<string[]> {
   let stdout: string;
   try {
-    ({ stdout } = await runGit(["apply", "--numstat", patchFile]));
+    // `--recount` as apply uses it: a model miscounts hunk lines.
+    ({ stdout } = await runGit(["apply", "--recount", "--numstat", patchFile]));
   } catch (error) {
     const e = error as { stderr?: string; message: string };
     throw new ToolError(`patch is not a valid diff: ${(e.stderr ?? e.message).slice(0, 500)}`);
@@ -576,7 +583,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       const listed = (await handlers.list_files!({ path: str(args, "path", false) || "." })) as { files: string[] };
       for (const rel of listed.files) {
         if (matches.length >= MAX_GREP_MATCHES) break;
-        if (!/\.(ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml)$/.test(rel)) continue;
+        if (!GREP_FILE.test(rel)) continue;
         let text: string;
         try {
           // Jailed rather than joined: `rel` comes from `list_files`, which
@@ -609,7 +616,8 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       const patch = str(args, "patch");
       const dir = await mkdtemp(path.join(tmpdir(), "peeps-patch-"));
       const file = path.join(dir, "change.patch");
-      await writeFile(file, patch, "utf8");
+      // A model's diff often ends without a newline, which git calls corrupt.
+      await writeFile(file, patch.endsWith("\n") ? patch : `${patch}\n`, "utf8");
       // Jail every path the patch touches, the same way `write_file` jails its
       // one path. Without this, `apply_patch` was the hole in the deny-list:
       // git refuses `..` and `.git` on its own, but `.env`, `.env.local` and
@@ -620,7 +628,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         jailForWrite(workspace, touched);
       }
       try {
-        await runGit(["apply", "--whitespace=nowarn", file]);
+        await runGit(["apply", "--recount", "--whitespace=nowarn", file]);
       } catch (error) {
         const e = error as { stderr?: string; message: string };
         // Redacted: `git apply` echoes patch context, which is file content.
