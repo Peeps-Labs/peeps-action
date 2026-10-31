@@ -370,6 +370,17 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
+## Unreleased
+
+- Run mode: when Peeps starts a run in an environment, the test process gets
+  `PEEPS_ENVIRONMENT` (its name) and `PEEPS_BASE_URL` (its `BASE_URL`, when
+  it has one), and `BASE_URL` too unless the workflow already sets it: a
+  workflow's own `BASE_URL` always wins, and the job log says which one runs.
+  No other variable or secret comes from Peeps. Read `process.env.BASE_URL` (or
+  `PEEPS_BASE_URL`) in `use.baseURL`, or map `PEEPS_ENVIRONMENT` to your own
+  settings. Needs a Peeps that sends the environment in the plan; with an older
+  one nothing changes.
+
 ## 1.5.0
 
 - Agent mode, Playwright: `run_tests` results name each spec's `file`
