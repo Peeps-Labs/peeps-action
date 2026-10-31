@@ -26,6 +26,7 @@ import type { PlanEntry } from "../src/reporter";
 const FIXTURE = path.join(__dirname, "fixtures", "pytest-suite");
 /** A non-browser suite: skips, measurements, saved frames, a broken fixture. */
 const CAMERA = path.join(__dirname, "fixtures", "pytest-camera");
+const API = path.join(__dirname, "fixtures", "pytest-api");
 
 /**
  * The interpreter the real-pytest tests use. CI installs pytest and sets
@@ -682,6 +683,90 @@ function assertCameraEvidence(received: Received, byNodeId: Record<string, PlanE
 test("a camera suite reports skip reasons, failures, measurements, output and saved files", needsPytest, async () => {
   const { received, byNodeId } = await runSuiteWith("", undefined, CAMERA);
   assertCameraEvidence(received, byNodeId);
+});
+
+const needsHttpClients = hasPlugins("requests", "httpx")
+  ? {}
+  : { skip: "no requests and httpx in the Python with pytest" };
+
+type Exchange = {
+  method: string;
+  url: string;
+  status: number | null;
+  durationMs: number;
+  requestHeaders: Array<{ name: string; value: string }>;
+  responseHeaders: Array<{ name: string; value: string }>;
+  requestBody?: string;
+  responseBody?: string;
+  error?: string;
+};
+
+test("an API suite's failing test reports its HTTP calls, masked", needsHttpClients, async () => {
+  const secret = "fleet-secret-0123456789";
+  process.env.FLEET_TOKEN = secret;
+  try {
+    const { received, byNodeId } = await runSuiteWith("", undefined, API);
+    const ends = testEnds(received, byNodeId);
+    const header = (headers: Exchange["requestHeaders"], name: string) =>
+      headers.find((h) => h.name.toLowerCase() === name)?.value;
+
+    // The renamed field: the call that came back, with its body.
+    const queued = ends.test_work_order_is_queued!;
+    assert.equal(queued.status, "failed");
+    const [post] = queued.httpExchanges as Exchange[];
+    assert.equal((queued.httpExchanges as Exchange[]).length, 1);
+    assert.equal(post!.method, "POST");
+    assert.match(post!.url, /^http:\/\/127\.0\.0\.1:\d+\/work-orders$/);
+    assert.equal(post!.status, 201);
+    assert.equal(typeof post!.durationMs, "number");
+    assert.equal(header(post!.requestHeaders, "authorization"), "[masked]");
+    assert.equal(header(post!.responseHeaders, "set-cookie"), "[masked]");
+    assert.equal(header(post!.responseHeaders, "location"), "/work-orders/wo_1");
+    // JSON fields masked by name, the rest as sent and received.
+    assert.deepEqual(JSON.parse(post!.requestBody!), {
+      robotId: "RR-C20-0007",
+      task: "Recalibrate lidar",
+      password: "[masked]",
+    });
+    assert.deepEqual(JSON.parse(post!.responseBody!), {
+      id: "wo_1",
+      robotId: "RR-C20-0007",
+      state: "queued",
+      token: "[masked]",
+    });
+
+    // A passing test reports no calls.
+    assert.equal("httpExchanges" in ends.test_lists_robots!, false);
+
+    // Sync and async httpx; a secret the job holds never leaves, wherever it was.
+    const secretEnd = ends.test_secret_never_leaves!;
+    const calls = secretEnd.httpExchanges as Exchange[];
+    assert.deepEqual(calls.map((c) => c.method), ["GET", "GET"]);
+    assert.match(calls[0]!.url, /\/robots\?api_key=\[masked\]&page=2$/);
+    assert.equal(header(calls[0]!.requestHeaders, "x-fleet-echo"), "[redacted]");
+    assert.equal(JSON.parse(calls[0]!.responseBody!).echo, "[redacted]");
+    assert.equal(JSON.stringify(received.events.get(byNodeId["tests/test_fleet.py::test_secret_never_leaves"]!.runId)).includes(secret), false);
+
+    // A call that never got an answer: no status, the error instead.
+    const [down] = ends.test_api_down!.httpExchanges as Exchange[];
+    assert.equal(down!.status, null);
+    assert.match(down!.error!, /ConnectionError/);
+  } finally {
+    delete process.env.FLEET_TOKEN;
+  }
+});
+
+test("with PEEPS_HTTP_BODIES=off a call reports no bodies", needsHttpClients, async () => {
+  process.env.PEEPS_HTTP_BODIES = "off";
+  try {
+    const { received, byNodeId } = await runSuiteWith("", undefined, API);
+    const [post] = testEnds(received, byNodeId).test_work_order_is_queued!.httpExchanges as Exchange[];
+    assert.equal(post!.status, 201);
+    assert.equal("requestBody" in post!, false);
+    assert.equal("responseBody" in post!, false);
+  } finally {
+    delete process.env.PEEPS_HTTP_BODIES;
+  }
 });
 
 test("under pytest-xdist the evidence arrives once, attachments from the workers included", needsPlugins, async () => {

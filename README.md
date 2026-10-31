@@ -106,6 +106,19 @@ they leave behind. Nothing needs changing for the first three:
   At most 20 files and 100 MB per test, 25 MB per file; files elsewhere, or
   under `.git`, `node_modules` or `.env*`, are refused and listed as omitted.
 
+- **HTTP calls** of a failed test, made with `requests` or `httpx` (sync or
+  async, `requests.get` and clients alike): method, URL, status, duration,
+  headers and bodies, the last 20 calls, the failing one usually last. A
+  passing test reports none. Before anything leaves the runner, a header,
+  query parameter, form or JSON field named like a credential
+  (`Authorization`, cookies, `token`, `password`, `api_key`, `secret`,
+  `session`…) shows `[masked]`, URL credentials are removed, and any value of
+  a secret-looking environment variable of the job (`*_TOKEN`, `*_SECRET`,
+  `*_KEY`, `*PASSWORD*`…) shows `[redacted]` wherever it appears. Bodies are
+  cut to 2,000 characters. When bodies carry personal data, set
+  `PEEPS_HTTP_BODIES: off` in the job's `env` and only the method, URL,
+  status and masked headers are reported.
+
 Under pytest-rerunfailures only the final attempt's evidence is reported;
 under pytest-xdist it is reported once, by the controller.
 
@@ -129,6 +142,15 @@ authoritative type is `PytestTestEndEvidence` in `src/pytest.ts`:
   "output": [{ "name": "Captured stdout call", "text": "..." }], // status "failed"
   "attachments": [{ "name": "frame.png", "path": "data/<runId>-evidence-frame.png", "size": 12345 }],
   "attachmentsOmitted": [{ "name": "hosts", "reason": "outside the workspace" }],
+  "httpExchanges": [{                              // status "failed"; the last 20
+    "method": "POST", "url": "https://api.example.com/work-orders?api_key=[masked]",
+    "status": 201, "durationMs": 42,               // status null when the call raised
+    "requestHeaders": [{ "name": "Authorization", "value": "[masked]" }],
+    "responseHeaders": [{ "name": "Content-Type", "value": "application/json" }],
+    "requestBody": "{...}", "responseBody": "{...}", // ≤ 2,000 chars; absent with PEEPS_HTTP_BODIES=off
+    "error": "ConnectionError: ..."                // only when the call raised
+  }],
+  "httpExchangesOmitted": 4,                        // earlier calls past the 20
   "evidenceTrimmed": true                          // only when cut to its 256 KB budget
 }
 ```
