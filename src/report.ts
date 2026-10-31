@@ -111,6 +111,8 @@ export async function executeAndReport(
     runs: PlanFile["runs"];
     batches: Array<{ batchId: string; batchNumber: number }>;
     selection?: { files: string[]; grep: string };
+    /** Run mode: the Peeps environment's variables (`environment.ts`). */
+    extraEnv?: Record<string, string>;
   },
 ): Promise<void> {
   const scratch = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-"));
@@ -119,7 +121,7 @@ export async function executeAndReport(
   const plan: PlanFile = { peepsUrl: env.peepsUrl, rootDir: input.rootDir, runs: input.runs };
   await writeFile(planFile, JSON.stringify(plan), { mode: 0o600 });
 
-  const exitCode = await runPlaywright(env, planFile, reportDir, input.selection);
+  const exitCode = await runPlaywright(env, planFile, reportDir, input.selection, input.extraEnv);
 
   let reportUploaded = false;
   for (const b of input.batches) {
@@ -145,6 +147,7 @@ async function runPlaywright(
   planFile: string,
   reportDir: string,
   selection?: { files: string[]; grep: string },
+  extraEnv: Record<string, string> = {},
 ): Promise<number> {
   const reporterPath = path.join(__dirname, "reporter.js");
   const args = ["playwright", "test", `--reporter=${reporterPath},list,html`];
@@ -170,6 +173,7 @@ async function runPlaywright(
         stdio: "inherit",
         env: {
           ...process.env,
+          ...extraEnv,
           CI: "1",
           PEEPS_PLAN_FILE: planFile,
           PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,

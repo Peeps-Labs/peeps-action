@@ -536,7 +536,7 @@ async function executeAndReport(env, peeps, input2) {
   const reportDir = import_node_path4.default.join(scratch, "report");
   const plan = { peepsUrl: env.peepsUrl, rootDir: input2.rootDir, runs: input2.runs };
   await (0, import_promises3.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
-  const exitCode = await runPlaywright(env, planFile, reportDir, input2.selection);
+  const exitCode = await runPlaywright(env, planFile, reportDir, input2.selection, input2.extraEnv);
   let reportUploaded = false;
   for (const b of input2.batches) {
     try {
@@ -555,7 +555,7 @@ async function executeAndReport(env, peeps, input2) {
   console.log(`[peeps] playwright exited with ${exitCode}`);
   if (exitCode !== 0) process.exitCode = exitCode;
 }
-async function runPlaywright(env, planFile, reportDir, selection) {
+async function runPlaywright(env, planFile, reportDir, selection, extraEnv = {}) {
   const reporterPath = import_node_path4.default.join(__dirname, "reporter.js");
   const args = ["playwright", "test", `--reporter=${reporterPath},list,html`];
   let capture;
@@ -576,6 +576,7 @@ async function runPlaywright(env, planFile, reportDir, selection) {
         stdio: "inherit",
         env: {
           ...process.env,
+          ...extraEnv,
           CI: "1",
           PEEPS_PLAN_FILE: planFile,
           PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,
@@ -648,6 +649,24 @@ async function requestPlan(peeps, sessionId, body) {
   }
 }
 
+// src/environment.ts
+function planEnvironmentVariables(planEnv, current) {
+  if (!planEnv) return { vars: {}, log: "" };
+  const vars = { PEEPS_ENVIRONMENT: planEnv.name };
+  if (!planEnv.baseUrl) {
+    return { vars, log: `[peeps] environment ${planEnv.name} (no BASE_URL in Peeps)` };
+  }
+  vars.PEEPS_BASE_URL = planEnv.baseUrl;
+  if (current.BASE_URL) {
+    return {
+      vars,
+      log: `[peeps] environment ${planEnv.name}; the workflow's BASE_URL runs, not ${planEnv.baseUrl} (also in PEEPS_BASE_URL)`
+    };
+  }
+  vars.BASE_URL = planEnv.baseUrl;
+  return { vars, log: `[peeps] environment ${planEnv.name}, BASE_URL ${planEnv.baseUrl}` };
+}
+
 // src/run.ts
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -675,11 +694,14 @@ async function runDispatched(env, peeps) {
   const files = [...new Set(plan.runs.map((r) => r.path))].map(
     (p) => import_node_path5.default.relative(env.workingDirectory, import_node_path5.default.join(env.workspace, p)).split(import_node_path5.default.sep).join("/")
   );
+  const environment = planEnvironmentVariables(plan.environment, process.env);
+  if (environment.log) console.log(environment.log);
   await executeAndReport(env, peeps, {
     rootDir,
     runs: plan.runs,
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
-    selection: { files, grep: grepFor(plan.runs.map((r) => r.titlePath)) }
+    selection: { files, grep: grepFor(plan.runs.map((r) => r.titlePath)) },
+    extraEnv: environment.vars
   });
 }
 
@@ -944,11 +966,14 @@ async function runPytestDispatched(env, peeps) {
     }
     return;
   }
+  const environment = planEnvironmentVariables(plan.environment, process.env);
+  if (environment.log) console.log(environment.log);
   await executePytestAndReport(env, peeps, {
     collection,
     byNodeId,
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
-    nodeIds
+    nodeIds,
+    extraEnv: environment.vars
   });
 }
 function nodeIdArgument(nodeId, rootDirAbs, cwd) {
@@ -989,6 +1014,7 @@ async function executePytestAndReport(env, peeps, input2) {
   const code = await spawnPytest(args, {
     cwd: env.workingDirectory,
     env: pytestEnv({
+      ...input2.extraEnv,
       PEEPS_PLAN_FILE: planFile,
       PEEPS_RESULTS_OUT: resultsFile,
       PEEPS_ARTIFACTS_DIR: artifactsDir,

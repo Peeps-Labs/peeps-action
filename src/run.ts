@@ -10,12 +10,15 @@ import { listTests } from "./inventory";
 import type { PeepsClient } from "./peeps";
 import { requestPlan } from "./plan";
 import type { PlanFile } from "./reporter";
+import { type PlanEnvironment, planEnvironmentVariables } from "./environment";
 import { executeAndReport, plannedTestsOf } from "./report";
 
 interface Plan {
   batchId: string;
   batchNumber: number;
   runs: PlanFile["runs"];
+  /** The Peeps environment the run was started in; absent from an older Peeps. */
+  environment?: PlanEnvironment | null;
 }
 
 function escapeRegex(value: string): string {
@@ -61,10 +64,13 @@ export async function runDispatched(env: RunnerEnv, peeps: PeepsClient): Promise
   const files = [...new Set(plan.runs.map((r) => r.path))].map((p) =>
     path.relative(env.workingDirectory, path.join(env.workspace, p)).split(path.sep).join("/"),
   );
+  const environment = planEnvironmentVariables(plan.environment, process.env);
+  if (environment.log) console.log(environment.log);
   await executeAndReport(env, peeps, {
     rootDir,
     runs: plan.runs,
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
     selection: { files, grep: grepFor(plan.runs.map((r) => r.titlePath)) },
+    extraEnv: environment.vars,
   });
 }

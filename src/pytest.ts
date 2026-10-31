@@ -31,6 +31,7 @@ import path from "node:path";
 import type { RunnerEnv } from "./env";
 import { gitBlobSha } from "./inventory";
 import type { PeepsClient } from "./peeps";
+import { type PlanEnvironment, planEnvironmentVariables } from "./environment";
 import { requestPlan } from "./plan";
 import type { PlanEntry } from "./reporter";
 import type { PlannedTest } from "./report";
@@ -402,6 +403,8 @@ interface Plan {
   batchId: string;
   batchNumber: number;
   runs: PlanEntry[];
+  /** The Peeps environment the run was started in; absent from an older Peeps. */
+  environment?: PlanEnvironment | null;
 }
 
 /** `run`: Peeps dispatched this job for one batch; run exactly its tests, by node id. */
@@ -430,11 +433,14 @@ export async function runPytestDispatched(env: RunnerEnv, peeps: PeepsClient): P
     }
     return;
   }
+  const environment = planEnvironmentVariables(plan.environment, process.env);
+  if (environment.log) console.log(environment.log);
   await executePytestAndReport(env, peeps, {
     collection,
     byNodeId,
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
     nodeIds,
+    extraEnv: environment.vars,
   });
 }
 
@@ -474,6 +480,8 @@ export async function executePytestAndReport(
     batches: Array<{ batchId: string; batchNumber: number; runIds?: string[] }>;
     /** Run only these (run mode); omitted runs the whole suite (report mode). */
     nodeIds?: string[];
+    /** Run mode: the Peeps environment's variables (`environment.ts`). */
+    extraEnv?: Record<string, string>;
   },
 ): Promise<void> {
   const scratch = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-"));
@@ -518,6 +526,7 @@ export async function executePytestAndReport(
   const code = await spawnPytest(args, {
     cwd: env.workingDirectory,
     env: pytestEnv({
+      ...input.extraEnv,
       PEEPS_PLAN_FILE: planFile,
       PEEPS_RESULTS_OUT: resultsFile,
       PEEPS_ARTIFACTS_DIR: artifactsDir,
