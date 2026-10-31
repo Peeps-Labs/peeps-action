@@ -37,7 +37,7 @@ import type { PlannedTest } from "./report";
 
 /** Where `peeps_pytest_plugin.py` lives: `<action>/python`, from src/ or dist/. */
 export const PLUGIN_DIR = path.join(__dirname, "..", "python");
-const PLUGIN = "peeps_pytest_plugin";
+export const PLUGIN = "peeps_pytest_plugin";
 
 /** One collected item, exactly as the plugin writes it (Peeps' runner contract). */
 export interface PytestItem {

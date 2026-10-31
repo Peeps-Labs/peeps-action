@@ -39,7 +39,15 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { RunnerEnv } from "./env";
-import { TITLE_PATH_SEPARATOR, configArgs, spawnPytest } from "./pytest";
+import {
+  PLUGIN,
+  PLUGIN_DIR,
+  TITLE_PATH_SEPARATOR,
+  configArgs,
+  pytestNodeIdToTest,
+  spawnPytest,
+  type PytestTestEndEvidence,
+} from "./pytest";
 
 /** The customer's hook, repo-relative. */
 export const RUN_TESTS_HOOK = ".peeps/run-tests";
@@ -53,7 +61,40 @@ export interface PytestToolResult {
   line?: number;
   status: "passed" | "failed" | "skipped";
   error?: string;
+  /**
+   * A failed test: the HTTP calls it made through `requests` or `httpx`,
+   * oldest first, as the plugin records them for a test_end
+   * (`PytestTestEndEvidence.httpExchanges`), cut to 24 KB. Only when pytest
+   * itself ran, never through the customer's hook.
+   */
+  httpExchanges?: HttpExchange[];
+  /** Earlier calls left out. */
+  httpExchangesOmitted?: number;
+  /** Set when the calls were cut to fit (bodies first, then the oldest). */
+  evidenceTrimmed?: true;
 }
+
+export type HttpExchange = NonNullable<PytestTestEndEvidence["httpExchanges"]>[number];
+
+/**
+ * `calls` with every value the job's secrets could reach redacted: the URL,
+ * each header's value, both bodies and the error. The plugin already masked
+ * credential-named fields; this is the same last pass every tool result gets.
+ */
+export function redactHttpCalls(calls: HttpExchange[], redact: (text: string) => string): HttpExchange[] {
+  return calls.map((x) => ({
+    ...x,
+    url: redact(x.url),
+    requestHeaders: x.requestHeaders.map((h) => ({ name: h.name, value: redact(h.value) })),
+    responseHeaders: x.responseHeaders.map((h) => ({ name: h.name, value: redact(h.value) })),
+    ...(x.requestBody !== undefined ? { requestBody: redact(x.requestBody) } : {}),
+    ...(x.responseBody !== undefined ? { responseBody: redact(x.responseBody) } : {}),
+    ...(x.error !== undefined ? { error: redact(x.error) } : {}),
+  }));
+}
+
+/** At most this many failed results carry their HTTP calls. */
+export const MAX_RESULTS_WITH_CALLS = 3;
 
 /**
  * The node id that selects one test: the module path relative to where pytest
@@ -192,7 +233,8 @@ const RUN_ENV = { CI: "1", PYTHONDONTWRITEBYTECODE: "1" };
 export interface PytestRunDeps {
   /** Runs a command and resolves with its exit code and the tail of its output. */
   run: (cmd: string, args: string[], cwd: string, timeoutMs: number) => Promise<{ code: number; output: string }>;
-  pytest: (args: string[], cwd: string) => Promise<{ code: number; output: string }>;
+  /** `extraEnv` on top of the job's environment. */
+  pytest: (args: string[], cwd: string, extraEnv: Record<string, string>) => Promise<{ code: number; output: string }>;
 }
 
 const defaultDeps: PytestRunDeps = {
@@ -217,9 +259,62 @@ const defaultDeps: PytestRunDeps = {
       });
     });
   },
-  pytest: (args, cwd) =>
-    spawnPytest(args, { cwd, env: { ...process.env, ...RUN_ENV }, capture: true }),
+  pytest: (args, cwd, extraEnv) =>
+    spawnPytest(args, { cwd, env: { ...process.env, ...RUN_ENV, ...extraEnv }, capture: true }),
 };
+
+/**
+ * The plugin, loaded only to record each failed test's HTTP calls: on
+ * `PYTHONPATH` ahead of the job's own, and `PEEPS_EVIDENCE_OUT` naming where
+ * it writes them. Nothing else of it runs (no plan, no collection output).
+ */
+function evidenceEnv(out: string): Record<string, string> {
+  const pythonPath = process.env.PYTHONPATH;
+  return {
+    PYTHONPATH: pythonPath ? `${PLUGIN_DIR}${path.delimiter}${pythonPath}` : PLUGIN_DIR,
+    PEEPS_EVIDENCE_OUT: out,
+  };
+}
+
+/**
+ * `results` with each failed test's HTTP calls from the plugin's file,
+ * matched by title path, the first `MAX_RESULTS_WITH_CALLS` failed results
+ * only. A file that is missing or unreadable adds nothing.
+ */
+export function withHttpCalls(results: PytestToolResult[], evidenceJson: string | null): PytestToolResult[] {
+  if (evidenceJson === null) return results;
+  let entries: unknown;
+  try {
+    entries = JSON.parse(evidenceJson);
+  } catch {
+    return results;
+  }
+  if (!Array.isArray(entries)) return results;
+  const byTitle = new Map<string, Record<string, unknown>>();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object" || typeof entry.nodeId !== "string") continue;
+    if (!Array.isArray(entry.httpExchanges) || entry.httpExchanges.length === 0) continue;
+    try {
+      byTitle.set(pytestNodeIdToTest(entry.nodeId).titlePath, entry);
+    } catch {
+      // Not a `file::test` node id: no result is named by it.
+    }
+  }
+  let given = 0;
+  return results.map((result) => {
+    const entry = result.status === "failed" ? byTitle.get(result.title) : undefined;
+    if (!entry || given === MAX_RESULTS_WITH_CALLS) return result;
+    given++;
+    return {
+      ...result,
+      httpExchanges: entry.httpExchanges as HttpExchange[],
+      ...(typeof entry.httpExchangesOmitted === "number" && entry.httpExchangesOmitted > 0
+        ? { httpExchangesOmitted: entry.httpExchangesOmitted }
+        : {}),
+      ...(entry.evidenceTrimmed === true ? { evidenceTrimmed: true as const } : {}),
+    };
+  });
+}
 
 /**
  * Run one module, or one test in it, and report each JUnit testcase.
@@ -244,6 +339,7 @@ export async function runPytestTool(
   const target = pytestNodeArgument(rel, input.titlePath, browser);
   const dir = await mkdtemp(path.join(tmpdir(), "peeps-pytest-"));
   const junit = path.join(dir, "junit.xml");
+  const evidence = path.join(dir, "http-calls.json");
   const started = Date.now();
   try {
     const plan: HookPlan = input.hook ? await input.hook(dir) : { kind: "none" };
@@ -263,6 +359,8 @@ export async function runPytestTool(
       ? await deps.run(hook, [junit, target], env.workingDirectory, RUN_TESTS_TIMEOUT_MS)
       : await deps.pytest(
           [
+            "-p",
+            PLUGIN,
             ...configArgs(env),
             `--junitxml=${junit}`,
             "-o",
@@ -273,12 +371,21 @@ export async function runPytestTool(
             target,
           ],
           env.workingDirectory,
+          evidenceEnv(evidence),
         );
     let xml: string | null = null;
     try {
       xml = await readFile(junit, "utf8");
     } catch {
       // No JUnit: pytest or the hook failed before writing one.
+    }
+    let calls: string | null = null;
+    if (!hook) {
+      try {
+        calls = await readFile(evidence, "utf8");
+      } catch {
+        // No file: pytest stopped before the session ended.
+      }
     }
     // A verdict wins: the marker means something only when no JUnit came back.
     // Output cut to its tail may start mid-line, so that first line is no line;
@@ -293,7 +400,7 @@ export async function runPytestTool(
       ranWith: hook ? RUN_TESTS_HOOK : "pytest",
       pending: note !== null,
       pendingNote: note ? note : null,
-      results: xml === null ? null : parseJunitResults(xml, repoRel),
+      results: xml === null ? null : withHttpCalls(parseJunitResults(xml, repoRel), calls),
       outputTail: ran.output.slice(-8000),
     };
   } finally {

@@ -1143,6 +1143,18 @@ var import_node_os3 = require("node:os");
 var import_node_path7 = __toESM(require("node:path"));
 var RUN_TESTS_HOOK = ".peeps/run-tests";
 var RUN_TESTS_TIMEOUT_MS = 90 * 60 * 1e3;
+function redactHttpCalls(calls, redact) {
+  return calls.map((x) => ({
+    ...x,
+    url: redact(x.url),
+    requestHeaders: x.requestHeaders.map((h) => ({ name: h.name, value: redact(h.value) })),
+    responseHeaders: x.responseHeaders.map((h) => ({ name: h.name, value: redact(h.value) })),
+    ...x.requestBody !== void 0 ? { requestBody: redact(x.requestBody) } : {},
+    ...x.responseBody !== void 0 ? { responseBody: redact(x.responseBody) } : {},
+    ...x.error !== void 0 ? { error: redact(x.error) } : {}
+  }));
+}
+var MAX_RESULTS_WITH_CALLS = 3;
 function pytestNodeArgument(fileRelativeToCwd, titlePath, browser = null) {
   if (!titlePath) return fileRelativeToCwd;
   const scopes = titlePath.split(TITLE_PATH_SEPARATOR);
@@ -1238,8 +1250,46 @@ var defaultDeps = {
       });
     });
   },
-  pytest: (args, cwd) => spawnPytest(args, { cwd, env: { ...process.env, ...RUN_ENV }, capture: true })
+  pytest: (args, cwd, extraEnv) => spawnPytest(args, { cwd, env: { ...process.env, ...RUN_ENV, ...extraEnv }, capture: true })
 };
+function evidenceEnv(out) {
+  const pythonPath = process.env.PYTHONPATH;
+  return {
+    PYTHONPATH: pythonPath ? `${PLUGIN_DIR}${import_node_path7.default.delimiter}${pythonPath}` : PLUGIN_DIR,
+    PEEPS_EVIDENCE_OUT: out
+  };
+}
+function withHttpCalls(results, evidenceJson) {
+  if (evidenceJson === null) return results;
+  let entries;
+  try {
+    entries = JSON.parse(evidenceJson);
+  } catch {
+    return results;
+  }
+  if (!Array.isArray(entries)) return results;
+  const byTitle = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object" || typeof entry.nodeId !== "string") continue;
+    if (!Array.isArray(entry.httpExchanges) || entry.httpExchanges.length === 0) continue;
+    try {
+      byTitle.set(pytestNodeIdToTest(entry.nodeId).titlePath, entry);
+    } catch {
+    }
+  }
+  let given = 0;
+  return results.map((result) => {
+    const entry = result.status === "failed" ? byTitle.get(result.title) : void 0;
+    if (!entry || given === MAX_RESULTS_WITH_CALLS) return result;
+    given++;
+    return {
+      ...result,
+      httpExchanges: entry.httpExchanges,
+      ...typeof entry.httpExchangesOmitted === "number" && entry.httpExchangesOmitted > 0 ? { httpExchangesOmitted: entry.httpExchangesOmitted } : {},
+      ...entry.evidenceTrimmed === true ? { evidenceTrimmed: true } : {}
+    };
+  });
+}
 async function runPytestTool(env, input2, deps = defaultDeps) {
   const rel = import_node_path7.default.relative(env.workingDirectory, input2.fileAbs).split(import_node_path7.default.sep).join("/");
   const repoRel = import_node_path7.default.relative(env.workspace, input2.fileAbs).split(import_node_path7.default.sep).join("/");
@@ -1247,6 +1297,7 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
   const target = pytestNodeArgument(rel, input2.titlePath, browser);
   const dir = await (0, import_promises5.mkdtemp)(import_node_path7.default.join((0, import_node_os3.tmpdir)(), "peeps-pytest-"));
   const junit = import_node_path7.default.join(dir, "junit.xml");
+  const evidence = import_node_path7.default.join(dir, "http-calls.json");
   const started = Date.now();
   try {
     const plan = input2.hook ? await input2.hook(dir) : { kind: "none" };
@@ -1264,6 +1315,8 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
     const hook = plan.kind === "ready" ? plan.path : null;
     const ran = hook ? await deps.run(hook, [junit, target], env.workingDirectory, RUN_TESTS_TIMEOUT_MS) : await deps.pytest(
       [
+        "-p",
+        PLUGIN,
         ...configArgs(env),
         `--junitxml=${junit}`,
         "-o",
@@ -1273,12 +1326,20 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
         "--",
         target
       ],
-      env.workingDirectory
+      env.workingDirectory,
+      evidenceEnv(evidence)
     );
     let xml = null;
     try {
       xml = await (0, import_promises5.readFile)(junit, "utf8");
     } catch {
+    }
+    let calls = null;
+    if (!hook) {
+      try {
+        calls = await (0, import_promises5.readFile)(evidence, "utf8");
+      } catch {
+      }
     }
     const firstBreak = ran.output.indexOf("\n");
     const whole = ran.output.length < OUTPUT_TAIL_CHARS ? ran.output : firstBreak < 0 ? "" : ran.output.slice(firstBreak + 1);
@@ -1289,7 +1350,7 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
       ranWith: hook ? RUN_TESTS_HOOK : "pytest",
       pending: note !== null,
       pendingNote: note ? note : null,
-      results: xml === null ? null : parseJunitResults(xml, repoRel),
+      results: xml === null ? null : withHttpCalls(parseJunitResults(xml, repoRel), calls),
       outputTail: ran.output.slice(-8e3)
     };
   } finally {
@@ -1685,7 +1746,8 @@ function createToolServer(env) {
               ...title === r.title ? {} : { titleRedacted: true },
               file: file2,
               ...file2 === r.file ? {} : { fileRedacted: true },
-              ...r.error ? { error: redact(r.error) } : {}
+              ...r.error ? { error: redact(r.error) } : {},
+              ...r.httpExchanges ? { httpExchanges: redactHttpCalls(r.httpExchanges, redact) } : {}
             };
           }) ?? null,
           outputTail: redact(ran.outputTail)
@@ -1886,7 +1948,7 @@ function createToolServer(env) {
     { name: "grep", description: "Search source files for a regular expression; returns matching lines.", inputSchema: obj({ pattern: s("JavaScript regular expression"), path: s("Repo-relative directory to search; default the root"), ignoreCase: { type: "boolean" } }, ["pattern"]) },
     { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
     { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
-    { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec, or in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one). Optionally narrow it: Playwright by --grep or project; pytest by test (the title path, e.g. TestClass \u203A test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors; a failing Playwright test also carries what it printed (output).", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name"), test: s("Optional pytest title path of one test, scopes joined by ' \u203A '") }, ["file"]) },
+    { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec, or in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one). Optionally narrow it: Playwright by --grep or project; pytest by test (the title path, e.g. TestClass \u203A test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors; a failing Playwright test also carries what it printed (output), and a failing pytest test the HTTP calls it made through requests or httpx (httpExchanges, the last one usually the failing call).", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name"), test: s("Optional pytest title path of one test, scopes joined by ' \u203A '") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
     { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) }

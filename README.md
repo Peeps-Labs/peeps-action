@@ -316,6 +316,15 @@ sent; failures past that, or whose file is over 1 MB, get
 runner advertises these to Peeps as the capabilities `result_files` and
 `error_context`.
 
+**What `run_tests` reports for pytest.** When pytest itself runs (not your
+`.peeps/run-tests` hook), a failed result also carries the HTTP calls the test
+made with `requests` or `httpx`, as `httpExchanges` (and `httpExchangesOmitted`),
+the same calls and masking as a pytest test's evidence above, so a heal sees the
+response that failed the test. Each test's calls are cut to 24 KB (bodies
+first, then the oldest calls; `evidenceTrimmed` says so), and at most three
+failed results carry them. The action loads its plugin for this with
+`-p peeps_pytest_plugin`; your hook's runs carry no calls.
+
 **Running the workflow by hand.** `mode: inventory` needs no session id:
 
 ```bash
