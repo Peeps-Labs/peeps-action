@@ -665,9 +665,32 @@ export interface PytestTestEndEvidence {
   /** Files not uploaded, and why (outside the workspace, over a cap…); at most 20 listed. */
   attachmentsOmitted?: Array<{ name: string; reason: string }>;
   /**
+   * Status `failed`: the HTTP calls the test made through `requests` or
+   * `httpx`, oldest first, the last 20. Masked on the runner: credential-named
+   * headers, query, form and JSON fields read `[masked]`, URL credentials are
+   * removed, and the job's secret-looking environment values read
+   * `[redacted]`. Bodies are at most 2,000 chars, absent with
+   * `PEEPS_HTTP_BODIES=off`.
+   */
+  httpExchanges?: Array<{
+    method: string;
+    url: string;
+    /** Null when the call raised before a response. */
+    status: number | null;
+    durationMs: number;
+    requestHeaders: Array<{ name: string; value: string }>;
+    responseHeaders: Array<{ name: string; value: string }>;
+    requestBody?: string;
+    responseBody?: string;
+    /** `ExceptionType: message` when the call raised. */
+    error?: string;
+  }>;
+  /** Earlier calls past the 20 kept, or dropped to fit the budget. */
+  httpExchangesOmitted?: number;
+  /**
    * Set when the evidence exceeded its 256 KB budget (as sent, JSON-escaped)
-   * and was cut: output first, then properties from the end, then most of
-   * the traceback.
+   * and was cut: output first, then HTTP bodies and the oldest calls, then
+   * properties from the end, then most of the traceback.
    */
   evidenceTrimmed?: true;
 }
