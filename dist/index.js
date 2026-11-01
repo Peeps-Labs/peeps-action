@@ -1781,11 +1781,13 @@ function createToolServer(env) {
       }
       const abs = jail(workspace, file);
       const rel = import_node_path8.default.relative(env.workingDirectory, abs).split(import_node_path8.default.sep).join("/");
+      const project = typeof args.project === "string" && args.project ? args.project : null;
+      const owners = project ? teardownOwners(await projectGraph(env), project) : [];
       const cmd = ["playwright", "test", "--reporter=json"];
-      if (typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
-      if (typeof args.project === "string" && args.project) cmd.push("--project", args.project);
+      if (owners.length === 0 && typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
+      for (const p of owners.length > 0 ? owners : project ? [project] : []) cmd.push("--project", p);
       if (env.configPath) cmd.push("--config", env.configPath);
-      cmd.push("--", rel);
+      if (owners.length === 0) cmd.push("--", rel);
       const started = Date.now();
       const { code, stdout, stderr } = await runCapture("npx", cmd, env.workingDirectory, 10 * 60 * 1e3);
       let report = null;
@@ -1798,7 +1800,10 @@ function createToolServer(env) {
         durationMs: Date.now() - started,
         results: await playwrightResults(report, env, redact),
         stderr: redact(stderr.slice(-8e3)),
-        stdoutTail: report ? void 0 : redact(stdout.slice(-4e3))
+        stdoutTail: report ? void 0 : redact(stdout.slice(-4e3)),
+        // Says the run was wider than asked, and why, so the results of the
+        // owner's tests are not read as the target's.
+        ...owners.length > 0 ? { ranUnder: { projects: owners.map(redact), reason: "teardown" } } : {}
       };
     },
     async git_status() {
@@ -2128,6 +2133,62 @@ function summarizeReport(report) {
   for (const suite of report.suites) walk2(suite, [], true);
   return tests;
 }
+var GRAPH_MARKER = "peeps:project-graph:";
+var PROJECT_GRAPH_REPORTER = `
+class PeepsProjectGraph {
+  printsToStdio() { return true; }
+  onBegin(config) {
+    const projects = config.projects.map((p) => ({ name: p.name, dependencies: p.dependencies || [], teardown: p.teardown || null }));
+    process.stdout.write("\\n" + ${JSON.stringify(GRAPH_MARKER)} + JSON.stringify(projects) + "\\n");
+  }
+}
+module.exports = PeepsProjectGraph;
+`;
+async function projectGraph(env, run = runCapture) {
+  let dir = null;
+  try {
+    dir = await (0, import_promises6.mkdtemp)(import_node_path8.default.join((0, import_node_os4.tmpdir)(), "peeps-graph-"));
+    const reporter = import_node_path8.default.join(dir, "graph-reporter.cjs");
+    await (0, import_promises6.writeFile)(reporter, PROJECT_GRAPH_REPORTER);
+    const cmd = ["playwright", "test", "--list", `--reporter=${reporter}`];
+    if (env.configPath) cmd.push("--config", env.configPath);
+    const { stdout } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1e3);
+    const line = stdout.split("\n").find((l) => l.startsWith(GRAPH_MARKER));
+    if (!line) return null;
+    const parsed = JSON.parse(line.slice(GRAPH_MARKER.length));
+    if (!Array.isArray(parsed)) return null;
+    return parsed.flatMap((p) => {
+      if (typeof p !== "object" || p === null || typeof p.name !== "string") return [];
+      const { name, dependencies, teardown } = p;
+      return [{
+        name,
+        dependencies: Array.isArray(dependencies) ? dependencies.filter((d) => typeof d === "string") : [],
+        teardown: typeof teardown === "string" ? teardown : null
+      }];
+    });
+  } catch {
+    return null;
+  } finally {
+    if (dir) await (0, import_promises6.rm)(dir, { recursive: true, force: true }).catch(() => {
+    });
+  }
+}
+function teardownOwners(graph, project) {
+  if (!graph) return [];
+  const ownersOf = (name) => graph.filter((p) => p.teardown === name).map((p) => p.name);
+  const roots = /* @__PURE__ */ new Set();
+  const seen = /* @__PURE__ */ new Set([project]);
+  const visit = (name) => {
+    for (const owner of ownersOf(name)) {
+      if (seen.has(owner)) continue;
+      seen.add(owner);
+      if (ownersOf(owner).length > 0) visit(owner);
+      else roots.add(owner);
+    }
+  };
+  visit(project);
+  return [...roots];
+}
 function runCapture(cmd, args, cwd, timeoutMs) {
   return new Promise((resolve) => {
     const child = (0, import_node_child_process4.spawn)(cmd, args, { cwd, env: { ...process.env, CI: "1" }, stdio: ["ignore", "pipe", "pipe"] });
@@ -2144,7 +2205,7 @@ function runCapture(cmd, args, cwd, timeoutMs) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.6.0";
+var ACTION_VERSION = "1.7.0";
 
 // src/agent.ts
 var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process5.execFile);

@@ -387,6 +387,78 @@ test("run_tests names each result's file repo-relative, and a failed one carries
   assert.equal("errorContext" in passes!, false);
 });
 
+/**
+ * A cleanup that only works after its parent: `parent` (after `login`) signs
+ * in by writing a state file, and its teardown `cleanup` reads it, as EYODF's
+ * DOG-75 and DOG-76 do. Run alone, `cleanup` has no state and fails, as a heal
+ * of EYR-20 did three times on the login page.
+ */
+async function teardownChain(t: TestContext) {
+  const { ws } = await repo(t);
+  await symlink(path.resolve(__dirname, "../node_modules"), path.join(ws, "node_modules"), "dir");
+  await writeFile(
+    path.join(ws, "pw.config.ts"),
+    'import { defineConfig } from "@playwright/test";\n' +
+      "export default defineConfig({ testDir: \"./pw\", workers: 1, outputDir: \"./results\", projects: [\n" +
+      '  { name: "login", testMatch: "login.spec.ts" },\n' +
+      '  { name: "parent", testMatch: "parent.spec.ts", dependencies: ["login"], teardown: "cleanup" },\n' +
+      '  { name: "cleanup", testMatch: "cleanup/*.spec.ts" },\n' +
+      '  { name: "solo", testMatch: "solo.spec.ts" },\n' +
+      "] });\n",
+  );
+  await mkdir(path.join(ws, "pw/cleanup"), { recursive: true });
+  const spec = (body: string) => 'import { test, expect } from "@playwright/test";\nimport fs from "node:fs";\n' + body;
+  await writeFile(path.join(ws, "pw/login.spec.ts"), spec('test("Log in", async () => { fs.writeFileSync("signed-in", "1"); });\n'));
+  await writeFile(
+    path.join(ws, "pw/parent.spec.ts"),
+    spec('test("Add an environment", async () => { expect(fs.existsSync("signed-in")).toBe(true); fs.writeFileSync("state.json", "{}"); });\n'),
+  );
+  await writeFile(
+    path.join(ws, "pw/cleanup/remove.spec.ts"),
+    spec(
+      'test("Cleanup: Add an environment", async () => { expect(fs.existsSync("state.json"), "landed on the login page").toBe(true); });\n' +
+        'test("Cleanup: another", async () => {});\n',
+    ),
+  );
+  await writeFile(path.join(ws, "pw/solo.spec.ts"), spec('test("Solo one", async () => {});\ntest("Solo two", async () => {});\n'));
+  const env = { workspace: ws, workingDirectory: ws, configPath: "pw.config.ts", platform: "github" } as unknown as RunnerEnv;
+  return { ws, tools: createToolServer(env).handlers };
+}
+
+type TeardownRun = { results: Array<{ title: string; status: string }>; ranUnder?: { projects: string[]; reason: string } };
+
+test("run_tests of a teardown project runs it after its parent and the parent's dependencies", async (t) => {
+  const { tools } = await teardownChain(t);
+  const out = (await tools.run_tests!({
+    file: "pw/cleanup/remove.spec.ts",
+    grep: "Cleanup: Add an environment",
+    project: "cleanup",
+  })) as TeardownRun;
+  const status = Object.fromEntries(out.results.map((r) => [r.title, r.status]));
+  assert.equal(status["Cleanup: Add an environment"], "passed", JSON.stringify(out).slice(0, 3000));
+  assert.equal(status["Log in"], "passed");
+  assert.equal(status["Add an environment"], "passed");
+  // The teardown's own tests run whole: the parent cannot be narrowed by them.
+  assert.equal(status["Cleanup: another"], "passed");
+  assert.deepEqual(out.ranUnder, { projects: ["parent"], reason: "teardown" });
+});
+
+test("run_tests of a project that is no teardown keeps the file and grep", async (t) => {
+  const { tools } = await teardownChain(t);
+  const out = (await tools.run_tests!({ file: "pw/solo.spec.ts", grep: "Solo one", project: "solo" })) as TeardownRun;
+  assert.deepEqual(out.results.map((r) => [r.title, r.status]), [["Solo one", "passed"]], JSON.stringify(out).slice(0, 2000));
+  assert.equal("ranUnder" in out, false);
+});
+
+test("run_tests of a teardown falls back to the project alone when the config cannot be listed", async (t) => {
+  const { ws, tools } = await teardownChain(t);
+  // A config that does not load: the run fails as it did before, with Playwright's own error.
+  await writeFile(path.join(ws, "pw.config.ts"), "throw new Error('config does not load');\n");
+  const out = (await tools.run_tests!({ file: "pw/cleanup/remove.spec.ts", project: "cleanup" })) as TeardownRun & { exitCode: number };
+  assert.notEqual(out.exitCode, 0);
+  assert.equal("ranUnder" in out, false);
+});
+
 test("run_tests redacts a secret in a Playwright result's title, error and snippet", async (t) => {
   const { ws } = await repo(t);
   await symlink(path.resolve(__dirname, "../node_modules"), path.join(ws, "node_modules"), "dir");
