@@ -34,7 +34,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -703,13 +703,21 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       // found" — a confusing success. Re-express it relative to the cwd.
       const abs = jail(workspace, file);
       const rel = path.relative(env.workingDirectory, abs).split(path.sep).join("/");
+      const project = typeof args.project === "string" && args.project ? args.project : null;
+      // A teardown runs only after the project it tears down: alone it starts
+      // from nothing (no sign-in, no record to remove), so every heal of a
+      // cleanup failed where the cleanup never fails in CI. It runs under its
+      // owner instead, which brings the owner's dependencies too. Nothing may
+      // narrow that run: a file or grep that leaves the owner out drops it,
+      // and Playwright then runs the teardown alone again.
+      const owners = project ? teardownOwners(await projectGraph(env), project) : [];
       const cmd = ["playwright", "test", "--reporter=json"];
-      if (typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
-      if (typeof args.project === "string" && args.project) cmd.push("--project", args.project);
+      if (owners.length === 0 && typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
+      for (const p of owners.length > 0 ? owners : project ? [project] : []) cmd.push("--project", p);
       if (env.configPath) cmd.push("--config", env.configPath);
       // `--` last, so a path that begins with a dash is a file argument and not
       // an option Playwright would honour.
-      cmd.push("--", rel);
+      if (owners.length === 0) cmd.push("--", rel);
       const started = Date.now();
       const { code, stdout, stderr } = await runCapture("npx", cmd, env.workingDirectory, 10 * 60 * 1000);
       let report: unknown = null;
@@ -724,6 +732,9 @@ export function createToolServer(env: RunnerEnv): ToolServer {
         results: await playwrightResults(report, env, redact),
         stderr: redact(stderr.slice(-8000)),
         stdoutTail: report ? undefined : redact(stdout.slice(-4000)),
+        // Says the run was wider than asked, and why, so the results of the
+        // owner's tests are not read as the target's.
+        ...(owners.length > 0 ? { ranUnder: { projects: owners.map(redact), reason: "teardown" as const } } : {}),
       };
     },
 
@@ -1209,6 +1220,92 @@ function summarizeReport(report: unknown): Summary[] | null {
   };
   for (const suite of (report as { suites: unknown[] }).suites) walk(suite as never, [], true);
   return tests;
+}
+
+/** A Playwright project as its config resolves it: what it waits on, and what tears it down. */
+export interface ProjectEdges {
+  name: string;
+  dependencies: string[];
+  teardown: string | null;
+}
+
+/** Starts the line the graph reporter prints its projects on. */
+const GRAPH_MARKER = "peeps:project-graph:";
+
+/**
+ * Prints each project's edges from `onBegin`. Playwright's JSON report leaves
+ * `dependencies` and `teardown` out of its config, so a reporter of the
+ * action's own reads them from the resolved config. CommonJS, so it loads
+ * whatever module type the customer's package declares.
+ */
+const PROJECT_GRAPH_REPORTER = `
+class PeepsProjectGraph {
+  printsToStdio() { return true; }
+  onBegin(config) {
+    const projects = config.projects.map((p) => ({ name: p.name, dependencies: p.dependencies || [], teardown: p.teardown || null }));
+    process.stdout.write("\\n" + ${JSON.stringify(GRAPH_MARKER)} + JSON.stringify(projects) + "\\n");
+  }
+}
+module.exports = PeepsProjectGraph;
+`;
+
+/**
+ * The config's projects and their edges, from a `--list` run (nothing is
+ * executed but the config itself), or null when the config does not list:
+ * the caller then runs as it was asked.
+ */
+export async function projectGraph(
+  env: RunnerEnv,
+  run: typeof runCapture = runCapture,
+): Promise<ProjectEdges[] | null> {
+  let dir: string | null = null;
+  try {
+    dir = await mkdtemp(path.join(tmpdir(), "peeps-graph-"));
+    const reporter = path.join(dir, "graph-reporter.cjs");
+    await writeFile(reporter, PROJECT_GRAPH_REPORTER);
+    const cmd = ["playwright", "test", "--list", `--reporter=${reporter}`];
+    if (env.configPath) cmd.push("--config", env.configPath);
+    const { stdout } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1000);
+    const line = stdout.split("\n").find((l) => l.startsWith(GRAPH_MARKER));
+    if (!line) return null;
+    const parsed = JSON.parse(line.slice(GRAPH_MARKER.length)) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed.flatMap((p): ProjectEdges[] => {
+      if (typeof p !== "object" || p === null || typeof (p as ProjectEdges).name !== "string") return [];
+      const { name, dependencies, teardown } = p as ProjectEdges;
+      return [{
+        name,
+        dependencies: Array.isArray(dependencies) ? dependencies.filter((d): d is string => typeof d === "string") : [],
+        teardown: typeof teardown === "string" ? teardown : null,
+      }];
+    });
+  } catch {
+    return null;
+  } finally {
+    if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * The projects to select so `project` runs where it runs in CI: when it is a
+ * teardown, the projects it tears down (an owner that is itself a teardown is
+ * replaced by its own owners); otherwise none, and the run stays as asked.
+ */
+export function teardownOwners(graph: ProjectEdges[] | null, project: string): string[] {
+  if (!graph) return [];
+  const ownersOf = (name: string) => graph.filter((p) => p.teardown === name).map((p) => p.name);
+  const roots = new Set<string>();
+  const seen = new Set<string>([project]);
+  const visit = (name: string) => {
+    for (const owner of ownersOf(name)) {
+      if (seen.has(owner)) continue;
+      seen.add(owner);
+      if (ownersOf(owner).length > 0) visit(owner);
+      else roots.add(owner);
+    }
+  };
+  visit(project);
+  return [...roots];
 }
 
 function runCapture(cmd: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {

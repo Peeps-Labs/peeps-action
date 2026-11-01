@@ -316,6 +316,13 @@ sent; failures past that, or whose file is over 1 MB, get
 runner advertises these to Peeps as the capabilities `result_files` and
 `error_context`.
 
+**A teardown project runs under its owner.** When `project` names a
+Playwright teardown (a cleanup another project lists as its `teardown`),
+`run_tests` selects the project it tears down instead, so the teardown starts
+from the state it has in CI. That run has no file or `grep` filter, its
+`results` hold every test of the chain, and the answer carries
+`ranUnder: { projects, reason: "teardown" }`.
+
 **What `run_tests` reports for pytest.** When pytest itself runs (not your
 `.peeps/run-tests` hook), a failed result also carries the HTTP calls the test
 made with `requests` or `httpx`, as `httpExchanges` (and `httpExchangesOmitted`),
@@ -369,6 +376,17 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## 1.7.0
+
+- Agent mode: `run_tests` of a Playwright teardown project runs it the way CI
+  does, after the project it tears down and that project's dependencies. Run
+  alone, a teardown starts from nothing (no sign-in state, nothing to clean
+  up), so a heal of a cleanup test failed every time it checked a fix. The
+  run selects the owning projects with no file or `grep` filter, since either
+  would drop the owner, and the answer says so as `ranUnder: { projects,
+  reason: "teardown" }`. Every test of the chain is in `results`. A config
+  that cannot be listed runs the project alone, as before.
 
 ## 1.6.0
 
