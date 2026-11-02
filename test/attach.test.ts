@@ -97,7 +97,7 @@ async function fakePeeps(t: TestContext, behaviour: PeepsBehaviour) {
 function jobEnv(root: string, peepsUrl: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const name of Object.keys(env)) {
-    if (/^(?:GITHUB_|GITLAB_|CI_|ACTIONS_|INPUT_|PEEPS_|PLAYWRIGHT_)/.test(name)) delete env[name];
+    if (/^(?:GITHUB_|GITLAB_|CI_|ACTIONS_|INPUT_|PEEPS_|PLAYWRIGHT_)/.test(name) && name !== "PLAYWRIGHT_BROWSERS_PATH") delete env[name];
   }
   return {
     ...env,
