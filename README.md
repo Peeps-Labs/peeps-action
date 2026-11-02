@@ -413,7 +413,7 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
-## Unreleased
+## 1.8.0
 
 - New modes `attach-start` and `attach-finish` report a workflow's own
   Playwright run, its command and reporters unchanged (see "Keep your own test
