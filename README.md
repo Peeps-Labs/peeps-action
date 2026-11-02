@@ -192,7 +192,7 @@ HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
 
 | Input | Required | What it is |
 | --- | --- | --- |
-| `mode` | no, defaults to `ci` | `inventory`, `run`, `report`, `agent`, or `ci` |
+| `mode` | no, defaults to `ci` | `inventory`, `run`, `report`, `agent`, `ci`, `attach-start` or `attach-finish` |
 | `session-id` | for `run` and `agent` | The session id Peeps passes on dispatch. Unused by `inventory` and `report` |
 | `config` | no | Playwright config path, relative to `working-directory` (pytest: the ini file, passed as `-c`) |
 | `working-directory` | no | Where to run Playwright or pytest, relative to the repository root |
@@ -206,6 +206,8 @@ HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
 | `run` | the tests Peeps asked for, reported live |
 | `report` | this workflow's own test run, reported live |
 | `agent` | a tool server for a Peeps agent session; every call is echoed to the job log. `run_tests` runs Playwright, or pytest (or your `.peeps/run-tests` hook) in a pytest suite |
+| `attach-start` | nothing: writes a config beside yours that adds the Peeps reporter to your reporters, and exports its path as `PEEPS_ATTACH_CONFIG` |
+| `attach-finish` | nothing: uploads your run's HTML report and closes the run's batches |
 
 `ci` is the default and means `report`. Peeps names the mode explicitly on every
 dispatch it makes.
@@ -215,6 +217,40 @@ because that run is the freshest list of tests there is. The default branch is
 read from the event payload, so this works whatever yours is called.
 
 ## Common setups
+
+**Keep your own test command and reporters (attach).** `report` runs
+Playwright itself, with its own reporters. When your workflow already runs
+the tests its way (a script, a JUnit or Zephyr reporter, a gate on the
+result), attach Peeps to that step instead. Your command and config are not
+changed; your step adds `--config "$PEEPS_ATTACH_CONFIG"` when it is set:
+
+```yaml
+      - uses: Peeps-Labs/peeps-action@v1
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          mode: attach-start
+          working-directory: e2e
+      - run: npx playwright test ${PEEPS_ATTACH_CONFIG:+--config "$PEEPS_ATTACH_CONFIG"}
+        working-directory: e2e
+      - uses: Peeps-Labs/peeps-action@v1
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          mode: attach-finish
+```
+
+The wrapper config loads yours unchanged and appends the Peeps reporter, so
+every reporter you configured still runs. Inside your run, the reporter plans
+it with Peeps from the tests Playwright is about to execute and streams the
+results; the job still needs `id-token: write`. Neither attach step ever fails
+the job, and the reporter never throws into your run: with Peeps unreachable,
+failing or hanging, your run ends with the same result and your reporters see
+the same tests (planning gives up after 60 seconds, the last results after
+another 60). Attach does not change your capture settings: Peeps gets the
+screenshots, video and traces your config already records, in the HTML report
+your config writes. A run without an `html` reporter reports results only.
 
 **Keep the container image on your Playwright version.** The
 `mcr.microsoft.com/playwright:vX-jammy` image carries only Playwright X's
@@ -376,6 +412,14 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## Unreleased
+
+- New modes `attach-start` and `attach-finish` report a workflow's own
+  Playwright run, its command and reporters unchanged (see "Keep your own test
+  command and reporters"). Neither can fail the job: an error, an unreadable
+  environment, or a Peeps that is down, answers 5xx or never answers is a
+  warning in the log.
 
 ## 1.7.0
 

@@ -45,10 +45,10 @@ This is more than "test results". Concretely:
 
 | Sent to Peeps | When |
 | --- | --- |
-| The **full source of every spec file** Playwright lists (pytest: every test module it collects) | `inventory`, and every `report`/`run` |
-| The Playwright test list: files, titles, projects, tags (pytest: node ids, browsers, lines, markers) | `inventory`, `report`, `run` |
-| Test results, timings, errors and stack traces, and which attempt each result was (its retry index, from Playwright or pytest-rerunfailures) | `report`, `run` |
-| The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run` |
+| The **full source of every spec file** Playwright lists (pytest: every test module it collects) | `inventory`, and every `report`/`run`/attached run |
+| The Playwright test list: files, titles, projects, tags (pytest: node ids, browsers, lines, markers) | `inventory`, `report`, `run`, attached runs (files, titles, projects) |
+| Test results, timings, errors and stack traces, and which attempt each result was (its retry index, from Playwright or pytest-rerunfailures) | `report`, `run`, attached runs |
+| The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run`, and `attach-finish` (the directory your `html` reporter wrote) |
 | pytest only: skip reasons, `record_property` values, a failed test's captured stdout/stderr/log output, and the files a test saves in `peeps_artifacts_dir` or attaches with `record_property("peeps_attachment", path)` (only from inside the repository or pytest's temporary directory) | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
@@ -70,7 +70,8 @@ recording is never enabled by this action. Screenshots and video show page
 content. A trace records HTTP requests and responses, which means headers,
 cookies and bearer tokens your tests obtained against your app. Nothing
 redacts the report before upload. If that is not acceptable, turn tracing off
-for the Peeps job, or do not run `report`/`run` modes.
+for the Peeps job, or do not run `report`/`run` modes. Attach modes enable
+nothing: an attached run uploads what your own config captured.
 
 **`BASE_URL` is sent verbatim** and is deliberately not masked, because masking
 it would mangle every URL in every result. A `BASE_URL` of the form
