@@ -2205,7 +2205,7 @@ function runCapture(cmd, args, cwd, timeoutMs) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.7.0";
+var ACTION_VERSION = "1.8.0";
 
 // src/agent.ts
 var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process5.execFile);
