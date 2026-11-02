@@ -7,6 +7,9 @@
  *   run         run the tests Peeps asked for and report them
  *   report      run this workflow's own tests and report them
  *   agent       host tools for a Peeps agent session
+ *   attach-start, attach-finish
+ *               report the workflow's own Playwright run, its command and
+ *               reporters unchanged (`attach.ts`); never fail the job
  *   ci          the default; means `report`. A workflow_dispatch from Peeps
  *               always names its mode explicitly, so there is nothing to
  *               decide from the event here.
@@ -18,6 +21,13 @@ import { PeepsClient } from "./peeps";
 import { runReport } from "./report";
 import { runDispatched } from "./run";
 import { runAgent } from "./agent";
+import {
+  ATTACH_FINISH_DEADLINE_MS,
+  ATTACH_START_DEADLINE_MS,
+  runAttachFinish,
+  runAttachStart,
+  runAttachStep,
+} from "./attach";
 import { warnIfBrowsersMissing } from "./browser-check";
 import {
   resolveFramework,
@@ -36,6 +46,21 @@ function onDefaultBranch(env: RunnerEnv): boolean {
 }
 
 async function main(): Promise<void> {
+  // The attach steps sit in the customer's own workflow, around their own test step, so
+  // nothing in them may fail the job: not even an environment Peeps cannot read.
+  const requested = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
+  if (requested === "attach-start" || requested === "attach-finish") {
+    const deadline = Number(process.env.PEEPS_ATTACH_DEADLINE_MS) ||
+      (requested === "attach-start" ? ATTACH_START_DEADLINE_MS : ATTACH_FINISH_DEADLINE_MS);
+    await runAttachStep(async () => {
+      const env = readRunnerEnv();
+      if (requested === "attach-start") await runAttachStart(env);
+      else await runAttachFinish(env, new PeepsClient(env));
+    }, deadline);
+    // A request Peeps never answered would otherwise hold the step open.
+    process.exit(0);
+  }
+
   const env = readRunnerEnv();
   const peeps = new PeepsClient(env);
   // `ci` means `report`: a push or pull request reports its own run, and on the

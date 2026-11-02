@@ -209,7 +209,7 @@ async function* walk(dir: string, rel = ""): AsyncGenerator<{ abs: string; rel: 
 }
 
 /** Upload every file of the HTML report; returns how many landed. */
-async function uploadReport(peeps: PeepsClient, batchId: string, reportDir: string): Promise<number> {
+export async function uploadReport(peeps: PeepsClient, batchId: string, reportDir: string): Promise<number> {
   let uploaded = 0;
   for await (const file of walk(reportDir)) {
     const info = await stat(file.abs);

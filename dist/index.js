@@ -220,9 +220,9 @@ function expiryOf(token) {
   }
 }
 var PeepsHttpError = class extends Error {
-  constructor(path9, status, body) {
-    super(`Peeps ${path9} \u2192 ${status}: ${body.slice(0, 500)}`);
-    this.path = path9;
+  constructor(path10, status, body) {
+    super(`Peeps ${path10} \u2192 ${status}: ${body.slice(0, 500)}`);
+    this.path = path10;
     this.status = status;
     this.body = body;
     this.name = "PeepsHttpError";
@@ -289,11 +289,11 @@ var PeepsClient = class {
     );
   }
   /** Raw upload (artifacts). Retries transient failures a couple of times. */
-  async postBytes(path9, bytes) {
+  async postBytes(path10, bytes) {
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await fetch(`${this.env.peepsUrl}${path9}`, {
+        const response = await fetch(`${this.env.peepsUrl}${path10}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${await this.token()}`,
@@ -307,9 +307,9 @@ var PeepsClient = class {
         if (response.ok) return;
         const text = await response.text();
         if (response.status < 500 && response.status !== 408 && response.status !== 429) {
-          throw new Error(`Peeps ${path9} \u2192 ${response.status}: ${text.slice(0, 300)}`);
+          throw new Error(`Peeps ${path10} \u2192 ${response.status}: ${text.slice(0, 300)}`);
         }
-        lastError = new Error(`Peeps ${path9} \u2192 ${response.status}`);
+        lastError = new Error(`Peeps ${path10} \u2192 ${response.status}`);
       } catch (error) {
         lastError = error;
       }
@@ -318,8 +318,8 @@ var PeepsClient = class {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
   /** GET that treats 204 as "nothing" (long-poll idle) instead of an error. */
-  async getOrNull(path9) {
-    const response = await fetch(`${this.env.peepsUrl}${path9}`, {
+  async getOrNull(path10) {
+    const response = await fetch(`${this.env.peepsUrl}${path10}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -330,12 +330,12 @@ var PeepsClient = class {
     if (response.status === 204) return null;
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path9, response.status, text);
+      throw new PeepsHttpError(path10, response.status, text);
     }
     return JSON.parse(text);
   }
-  async get(path9) {
-    const response = await fetch(`${this.env.peepsUrl}${path9}`, {
+  async get(path10) {
+    const response = await fetch(`${this.env.peepsUrl}${path10}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -344,12 +344,12 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path9, response.status, text);
+      throw new PeepsHttpError(path10, response.status, text);
     }
     return JSON.parse(text);
   }
-  async post(path9, body) {
-    const response = await fetch(`${this.env.peepsUrl}${path9}`, {
+  async post(path10, body) {
+    const response = await fetch(`${this.env.peepsUrl}${path10}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${await this.token()}`,
@@ -361,7 +361,7 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path9, response.status, text);
+      throw new PeepsHttpError(path10, response.status, text);
     }
     return text ? JSON.parse(text) : {};
   }
@@ -2308,6 +2308,126 @@ function playwrightJob(env) {
   }
 }
 
+// src/attach.ts
+var import_node_crypto5 = require("node:crypto");
+var import_promises8 = require("node:fs/promises");
+var import_node_os5 = require("node:os");
+var import_node_path9 = __toESM(require("node:path"));
+var import_node_url2 = require("node:url");
+var ATTACH_STATE_FILE = "state.json";
+var CONFIG_RECORD = "config-path";
+async function exportVariables(vars) {
+  const file = process.env.GITHUB_ENV;
+  const lines = Object.entries(vars).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
+  if (!file) {
+    console.log(`[peeps] GITHUB_ENV is not set; export these yourself:
+${lines}`);
+    return;
+  }
+  await (0, import_promises8.appendFile)(file, lines);
+}
+function attachConfigSource(input2) {
+  const load = !input2.original ? "const loaded = {};" : input2.esm ? `import * as loaded from ${JSON.stringify((0, import_node_url2.pathToFileURL)(input2.original).href)};` : `const loaded = await require(${JSON.stringify(input2.original)});`;
+  const body = `
+const config = await (loaded && typeof loaded === "object" && "default" in loaded ? loaded.default : loaded);
+if (!config || typeof config !== "object") throw new Error("Playwright config must export a single object");
+const reporters = config.reporter === undefined
+  ? [[process.env.CI ? "dot" : "list"]]
+  : typeof config.reporter === "string"
+    ? [[config.reporter]]
+    : config.reporter;
+const withPeeps = {
+  ...config,
+  reporter: [...reporters, [${JSON.stringify(input2.reporterPath)}, { attachDir: ${JSON.stringify(input2.stateDir)} }]],
+};
+`;
+  return input2.esm ? `import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+${load}
+${body}
+export default withPeeps;
+` : `module.exports = (async () => {
+${load}
+${body}
+return { default: withPeeps };
+})();
+`;
+}
+async function runAttachStart(env) {
+  const stateDir = import_node_path9.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os5.tmpdir)(), `peeps-attach-${(0, import_node_crypto5.randomUUID)()}`);
+  await (0, import_promises8.mkdir)(stateDir, { recursive: true, mode: 448 });
+  const { dir, file } = await configLocation(env);
+  const esm = file ? await isModule(file) : false;
+  const configPath = import_node_path9.default.join(dir, `.peeps-attach-${(0, import_node_crypto5.randomUUID)()}.config.${esm ? "mjs" : "cjs"}`);
+  const reporterPath = import_node_path9.default.join(__dirname, "reporter.js");
+  try {
+    await (0, import_promises8.writeFile)(configPath, attachConfigSource({ original: file, esm, reporterPath, stateDir }), {
+      flag: "wx",
+      mode: 384
+    });
+  } catch (error) {
+    if (error.code !== "EEXIST") await (0, import_promises8.unlink)(configPath).catch(() => {
+    });
+    throw error;
+  }
+  await (0, import_promises8.writeFile)(import_node_path9.default.join(stateDir, CONFIG_RECORD), configPath, { mode: 384 });
+  await exportVariables({
+    PEEPS_ATTACH_CONFIG: configPath,
+    PEEPS_ATTACH_DIR: stateDir,
+    PEEPS_API_URL: env.peepsUrl
+  });
+  console.log(`[peeps] attach: the run reports to Peeps when Playwright is given --config ${configPath}`);
+}
+async function runAttachFinish(_env, peeps) {
+  const stateDir = process.env.PEEPS_ATTACH_DIR;
+  if (!stateDir) {
+    console.log("[peeps] attach: no PEEPS_ATTACH_DIR (attach-start did not run); nothing to finish");
+    return;
+  }
+  const configPath = await (0, import_promises8.readFile)(import_node_path9.default.join(stateDir, CONFIG_RECORD), "utf8").catch(() => null);
+  if (configPath) await (0, import_promises8.unlink)(configPath).catch(() => {
+  });
+  const raw = await (0, import_promises8.readFile)(import_node_path9.default.join(stateDir, ATTACH_STATE_FILE), "utf8").catch(() => null);
+  if (!raw) {
+    console.log("[peeps] attach: the run planned nothing with Peeps (no tests ran, or Peeps was unreachable)");
+    return;
+  }
+  const state = JSON.parse(raw);
+  for (const b of state.batches) {
+    let reportUploaded = false;
+    if (state.reportDir) {
+      try {
+        const uploaded = await uploadReport(peeps, b.batchId, state.reportDir);
+        reportUploaded = uploaded > 0;
+        console.log(`[peeps] uploaded ${uploaded} report file(s) for batch ${b.batchNumber}`);
+      } catch (error) {
+        console.log(`[peeps] report upload failed for batch ${b.batchId}: ${String(error)}`);
+      }
+    }
+    try {
+      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded });
+    } catch (error) {
+      console.log(`[peeps] could not complete batch ${b.batchId}: ${String(error)}`);
+    }
+  }
+}
+var ATTACH_START_DEADLINE_MS = 6e4;
+var ATTACH_FINISH_DEADLINE_MS = 8 * 6e4;
+async function runAttachStep(step, deadlineMs) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`gave up after ${deadlineMs / 1e3}s without an answer from Peeps`)), deadlineMs);
+  });
+  try {
+    await Promise.race([step(), expired]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`::warning::Peeps could not report this run: ${message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // src/browser-check.ts
 var import_node_child_process6 = require("node:child_process");
 var import_node_fs4 = require("node:fs");
@@ -2391,6 +2511,16 @@ function onDefaultBranch(env) {
   return env.ref === "refs/heads/main" || env.ref === "refs/heads/master";
 }
 async function main() {
+  const requested = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
+  if (requested === "attach-start" || requested === "attach-finish") {
+    const deadline = Number(process.env.PEEPS_ATTACH_DEADLINE_MS) || (requested === "attach-start" ? ATTACH_START_DEADLINE_MS : ATTACH_FINISH_DEADLINE_MS);
+    await runAttachStep(async () => {
+      const env2 = readRunnerEnv();
+      if (requested === "attach-start") await runAttachStart(env2);
+      else await runAttachFinish(env2, new PeepsClient(env2));
+    }, deadline);
+    process.exit(0);
+  }
   const env = readRunnerEnv();
   const peeps = new PeepsClient(env);
   const mode = env.mode === "ci" ? "report" : env.mode;
