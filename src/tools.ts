@@ -39,6 +39,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { RunnerEnv } from "./env";
+import { jsonReportTarget } from "./playwright-json";
 import { resolveFramework } from "./pytest";
 import { RUN_TESTS_HOOK, redactHttpCalls, runPytestTool } from "./pytest-run-tool";
 
@@ -719,13 +720,17 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       // an option Playwright would honour.
       if (owners.length === 0) cmd.push("--", rel);
       const started = Date.now();
-      const { code, stdout, stderr } = await runCapture("npx", cmd, env.workingDirectory, 10 * 60 * 1000);
+      const target = await jsonReportTarget();
+      let run: { code: number; stdout: string; stderr: string };
       let report: unknown = null;
       try {
-        report = JSON.parse(stdout);
-      } catch {
-        // Not JSON: Playwright failed before running (config error, syntax error).
+        run = await runCapture("npx", cmd, env.workingDirectory, 10 * 60 * 1000, target.env);
+        // No report: Playwright failed before running (config error, syntax error).
+        report = await target.read(run.stdout);
+      } finally {
+        await target.cleanup();
       }
+      const { code, stdout, stderr } = run;
       return {
         exitCode: code,
         durationMs: Date.now() - started,
@@ -1308,9 +1313,15 @@ export function teardownOwners(graph: ProjectEdges[] | null, project: string): s
   return [...roots];
 }
 
-function runCapture(cmd: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
+function runCapture(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  extraEnv: Record<string, string> = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd, env: { ...process.env, CI: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { cwd, env: { ...process.env, CI: "1", ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
