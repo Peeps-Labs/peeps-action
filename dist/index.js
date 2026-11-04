@@ -690,18 +690,27 @@ async function requestPlan(peeps, sessionId, body) {
 }
 
 // src/environment.ts
-function forLog(text) {
-  return text.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/https?:\/\/[^@\s/]+@/g, (prefix) => `${prefix.split("//")[0]}//***@`);
+function nameForLog(name) {
+  return name.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ");
+}
+function urlForLog(baseUrl) {
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "<unreadable URL>";
+    return url.pathname === "/" ? url.origin : `${url.origin}${url.pathname}`;
+  } catch {
+    return "<unreadable URL>";
+  }
 }
 function planEnvironmentVariables(planEnv, current) {
   if (!planEnv) return { vars: {}, log: "" };
   const vars = { PEEPS_ENVIRONMENT: planEnv.name };
-  const name = forLog(planEnv.name);
+  const name = nameForLog(planEnv.name);
   if (!planEnv.baseUrl) {
     return { vars, log: `[peeps] environment ${name} (no BASE_URL in Peeps)` };
   }
   vars.PEEPS_BASE_URL = planEnv.baseUrl;
-  const url = forLog(planEnv.baseUrl);
+  const url = urlForLog(planEnv.baseUrl);
   if (current.BASE_URL) {
     return {
       vars,

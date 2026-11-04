@@ -15,13 +15,26 @@ export interface PlanEnvironment {
 }
 
 /**
- * For the job log, which may be public: a control character in a name could
- * start a workflow command on a line of its own, and a URL's credentials stay out.
+ * A name for the job log, which may be public: a control character could start
+ * a workflow command on a line of its own.
  */
-function forLog(text: string): string {
-  return text
-    .replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ")
-    .replace(/https?:\/\/[^@\s/]+@/g, (prefix) => `${prefix.split("//")[0]}//***@`);
+function nameForLog(name: string): string {
+  return name.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ");
+}
+
+/**
+ * A URL for the job log: parsed, not pattern-matched, so credentials can't slip
+ * past however they are spelled. Query and fragment stay out too. The test
+ * process still gets the value Peeps sent.
+ */
+function urlForLog(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "<unreadable URL>";
+    return url.pathname === "/" ? url.origin : `${url.origin}${url.pathname}`;
+  } catch {
+    return "<unreadable URL>";
+  }
 }
 
 export function planEnvironmentVariables(
@@ -30,12 +43,12 @@ export function planEnvironmentVariables(
 ): { vars: Record<string, string>; log: string } {
   if (!planEnv) return { vars: {}, log: "" };
   const vars: Record<string, string> = { PEEPS_ENVIRONMENT: planEnv.name };
-  const name = forLog(planEnv.name);
+  const name = nameForLog(planEnv.name);
   if (!planEnv.baseUrl) {
     return { vars, log: `[peeps] environment ${name} (no BASE_URL in Peeps)` };
   }
   vars.PEEPS_BASE_URL = planEnv.baseUrl;
-  const url = forLog(planEnv.baseUrl);
+  const url = urlForLog(planEnv.baseUrl);
   if (current.BASE_URL) {
     return {
       vars,

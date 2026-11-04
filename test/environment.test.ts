@@ -55,13 +55,31 @@ test("a line break in the name can't start a line of its own in the job log", ()
   }
 });
 
-test("a URL's credentials stay out of the job log, and reach the test process", () => {
-  const url = "https://user:hunter2@qa.example.com";
-  for (const current of [{}, { BASE_URL: "https://mine.example.com" }]) {
-    const { vars, log } = planEnvironmentVariables({ name: "qa", baseUrl: url }, current);
-    assert.doesNotMatch(log, /hunter2/);
-    assert.match(log, /https:\/\/\*\*\*@qa\.example\.com/);
-    assert.equal(vars.PEEPS_BASE_URL, url);
+test("a URL's secrets stay out of the job log, and reach the test process", () => {
+  for (const url of [
+    "https://user:hunter2@qa.example.com/app?token=hunter2#hunter2",
+    "https://user:p@hunter2@qa.example.com/app",
+    "HTTPS://user:hunter2@qa.example.com/app",
+    "https://us\ter:hunter2@qa.example.com/app",
+    "https://user:hun\nter2@qa.example.com/app",
+  ]) {
+    for (const current of [{}, { BASE_URL: "https://mine.example.com" }]) {
+      const { vars, log } = planEnvironmentVariables({ name: "qa", baseUrl: url }, current);
+      assert.doesNotMatch(log, /hunter2|hun|ter2/);
+      assert.match(log, /https:\/\/qa\.example\.com\/app/);
+      assert.equal(vars.PEEPS_BASE_URL, url);
+    }
+  }
+});
+
+test("logs a plain URL as it is, and a placeholder for one it can't read", () => {
+  const plain = planEnvironmentVariables({ name: "qa", baseUrl: "https://qa.example.com" }, {});
+  assert.equal(plain.log, "[peeps] environment qa, BASE_URL https://qa.example.com");
+  for (const url of ["not a url secret", "ftp://user:secret@qa.example.com"]) {
+    const { vars, log } = planEnvironmentVariables({ name: "qa", baseUrl: url }, {});
+    assert.doesNotMatch(log, /secret/);
+    assert.match(log, /<unreadable URL>/);
+    assert.equal(vars.BASE_URL, url);
   }
 });
 
