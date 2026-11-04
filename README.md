@@ -413,7 +413,7 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
-## Unreleased
+## 1.8.1
 
 - Playwright's JSON report (the test list for inventory, report and run, and
   agent mode's `run_tests` results) is read from a file instead of stdout. A
