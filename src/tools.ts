@@ -56,6 +56,8 @@ export type ToolHandler = (args: Record<string, unknown>) => Promise<unknown>;
 export interface ToolServer {
   specs: ToolSpec[];
   handlers: Record<string, ToolHandler>;
+  /** What every process `run_tests` starts gets on top of the job's environment. */
+  setTestEnv: (vars: Record<string, string>) => void;
 }
 
 const MAX_FILE_BYTES = 512 * 1024;
@@ -503,6 +505,12 @@ export function createToolServer(env: RunnerEnv): ToolServer {
   const workspace = env.workspace;
   const redact = makeRedactor(process.env);
 
+  // The Peeps environment, known only once the session has attached. Handed to
+  // each test process and never written to `process.env`: the redactor masks
+  // the job's environment values, and an environment called "production" is
+  // not a secret to cut out of test titles.
+  let testEnv: Record<string, string> = {};
+
   /**
    * Every git call here goes through this, so each one carries
    * `-c safe.directory=<workspace>`.
@@ -650,6 +658,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
           titlePath: typeof args.test === "string" && args.test ? args.test : null,
           keyword: typeof args.grep === "string" && args.grep ? args.grep : null,
           browser: typeof args.project === "string" && args.project ? args.project : null,
+          extraEnv: testEnv,
           hook: async (scratchDir) => {
             const sha = await commitUnderTest;
             if (!sha) return { kind: "none" };
@@ -711,7 +720,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       // owner instead, which brings the owner's dependencies too. Nothing may
       // narrow that run: a file or grep that leaves the owner out drops it,
       // and Playwright then runs the teardown alone again.
-      const owners = project ? teardownOwners(await projectGraph(env), project) : [];
+      const owners = project ? teardownOwners(await projectGraph(env, runCapture, testEnv), project) : [];
       const cmd = ["playwright", "test", "--reporter=json"];
       if (owners.length === 0 && typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
       for (const p of owners.length > 0 ? owners : project ? [project] : []) cmd.push("--project", p);
@@ -724,7 +733,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       let run: { code: number; stdout: string; stderr: string };
       let report: unknown = null;
       try {
-        run = await runCapture("npx", cmd, env.workingDirectory, 10 * 60 * 1000, target.env);
+        run = await runCapture("npx", cmd, env.workingDirectory, 10 * 60 * 1000, { ...testEnv, ...target.env });
         // No report: Playwright failed before running (config error, syntax error).
         report = await target.read(run.stdout);
       } finally {
@@ -981,7 +990,13 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) },
   ];
 
-  return { specs, handlers };
+  return {
+    specs,
+    handlers,
+    setTestEnv: (vars) => {
+      testEnv = vars;
+    },
+  };
 }
 
 function obj(properties: Record<string, unknown>, required: string[]): Record<string, unknown> {
@@ -1262,6 +1277,7 @@ module.exports = PeepsProjectGraph;
 export async function projectGraph(
   env: RunnerEnv,
   run: typeof runCapture = runCapture,
+  extraEnv: Record<string, string> = {},
 ): Promise<ProjectEdges[] | null> {
   let dir: string | null = null;
   try {
@@ -1270,7 +1286,7 @@ export async function projectGraph(
     await writeFile(reporter, PROJECT_GRAPH_REPORTER);
     const cmd = ["playwright", "test", "--list", `--reporter=${reporter}`];
     if (env.configPath) cmd.push("--config", env.configPath);
-    const { stdout } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1000);
+    const { stdout } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1000, extraEnv);
     const line = stdout.split("\n").find((l) => l.startsWith(GRAPH_MARKER));
     if (!line) return null;
     const parsed = JSON.parse(line.slice(GRAPH_MARKER.length)) as unknown;

@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { readRunnerEnv, type RunnerEnv } from "../src/env";
+import { planEnvironmentVariables } from "../src/environment";
 import { PeepsClient } from "../src/peeps";
 import {
   artifactName,
@@ -23,6 +24,7 @@ import {
 } from "../src/pytest";
 import type { PlanEntry } from "../src/reporter";
 import { runPytestTool } from "../src/pytest-run-tool";
+import { createToolServer } from "../src/tools";
 
 const FIXTURE = path.join(__dirname, "fixtures", "pytest-suite");
 /** A non-browser suite: skips, measurements, saved frames, a broken fixture. */
@@ -794,6 +796,35 @@ test("run_tests gives a failed API test its HTTP calls, masked, and a passing on
     assert.equal(readdirSync(suite).includes("http-calls.json"), false);
   } finally {
     delete process.env.FLEET_TOKEN;
+  }
+});
+
+test("run_tests gives real pytest the environment, and a title naming it comes back whole", needsPytest, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "peeps-pytest-"));
+  mkdirSync(path.join(root, "tests"));
+  const url = "https://staging.example.com";
+  writeFileSync(
+    path.join(root, "tests", "test_env.py"),
+    "import os\n\ndef test_production_banner():\n" +
+      '    assert os.environ["PEEPS_ENVIRONMENT"] == "production"\n' +
+      `    assert os.environ["PEEPS_BASE_URL"] == "${url}"\n` +
+      `    assert os.environ["BASE_URL"] == "${url}"\n`,
+  );
+  const previous = process.env.BASE_URL;
+  delete process.env.BASE_URL;
+  try {
+    const env = { workspace: root, workingDirectory: root, configPath: null, framework: "pytest", platform: "github" } as unknown as RunnerEnv;
+    const server = createToolServer(env);
+    server.setTestEnv(planEnvironmentVariables({ name: "production", baseUrl: url }, process.env).vars);
+    const out = (await server.handlers.run_tests!({ file: "tests/test_env.py" })) as {
+      ranWith: string;
+      results: Array<{ title: string; status: string; titleRedacted?: boolean }>;
+    };
+    assert.equal(out.ranWith, "pytest");
+    assert.deepEqual(out.results.map((r) => [r.title, r.status, "titleRedacted" in r]), [["test_production_banner", "passed", false]], JSON.stringify(out).slice(0, 2000));
+    assert.equal(process.env.PEEPS_ENVIRONMENT, undefined);
+  } finally {
+    if (previous !== undefined) process.env.BASE_URL = previous;
   }
 });
 

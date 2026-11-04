@@ -91,6 +91,12 @@ agent that writes one of them and runs tests runs code with the job's full
 environment. No arrangement of path checks changes that, and we have
 not tried to pretend it does.
 
+**Peeps can choose where your tests point.** When a run or a session names a
+Peeps environment, the test processes get `PEEPS_ENVIRONMENT`, and when it has a
+`BASE_URL`, `PEEPS_BASE_URL`, and `BASE_URL` too unless your workflow sets one.
+Those tests run with the job's own secrets, such as a login. A `BASE_URL` your
+workflow sets always wins, and the job log says which URL runs.
+
 The limits that do exist are guardrails against mistakes, not a sandbox:
 
 - Paths resolve inside the workspace. `..` and absolute paths are refused, as
