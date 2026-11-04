@@ -55,6 +55,14 @@ test("a line break in the name can't start a line of its own in the job log", ()
   }
 });
 
+test("a name can't carry a legacy workflow command into the job log", () => {
+  const name = "QA##[error]INJECTED ##[warning]AGAIN";
+  const { vars, log } = planEnvironmentVariables({ name, baseUrl: null }, {});
+  assert.doesNotMatch(log, /##\[/);
+  assert.match(log, /QA/);
+  assert.equal(vars.PEEPS_ENVIRONMENT, name);
+});
+
 test("a URL's secrets stay out of the job log, and reach the test process", () => {
   for (const url of [
     "https://user:hunter2@qa.example.com/app?token=hunter2#hunter2",

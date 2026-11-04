@@ -98,11 +98,17 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void
  * Anything else fails the job before a test runs: read as "none", a heal would
  * verify against whatever the workflow points at and report that it passed.
  * The value stays out of the message: Peeps sent it, and this goes to the log.
+ * A NUL counts as unreadable: `spawn` refuses one, and its error prints the value.
  */
 function attachEnvironment(value: unknown): PlanEnvironment | null {
   if (value === undefined || value === null) return null;
   const { name, baseUrl } = value as Partial<PlanEnvironment>;
-  if (typeof name === "string" && name && (typeof baseUrl === "string" || baseUrl === null)) {
+  if (
+    typeof name === "string" &&
+    name &&
+    !name.includes("\0") &&
+    (baseUrl === null || (typeof baseUrl === "string" && !baseUrl.includes("\0")))
+  ) {
     return { name, baseUrl };
   }
   throw new Error("Peeps named an environment this action cannot read; stopping before any test runs");

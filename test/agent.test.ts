@@ -244,3 +244,23 @@ for (const environment of ["staging", 7, 0, "", true, false, [], {}, { name: "st
     assert.deepEqual(session.delivered, []);
   });
 }
+
+// A NUL can't go in a process's environment: `spawn` would refuse it, and its
+// error prints the value, credentials and all.
+for (const environment of [
+  { name: "staging", baseUrl: "https://user:SECRET@qa.example.com/\u0000" },
+  { name: "stag\u0000ing", baseUrl: null },
+]) {
+  test(`a NUL in an environment stops the job, and the message doesn't echo it (${JSON.stringify(environment)})`, async (t) => {
+    workflowBaseUrl(t);
+    t.mock.method(console, "log", () => {});
+    const session = sessionAnswering({ environment });
+    await assert.rejects(runAgent(await hookJob(t), session.peeps), (err: Error) => {
+      assert.match(err.message, /environment/);
+      assert.doesNotMatch(err.message, /SECRET|stag\u0000ing/);
+      return true;
+    });
+    assert.equal(session.polls(), 0);
+    assert.deepEqual(session.delivered, []);
+  });
+}

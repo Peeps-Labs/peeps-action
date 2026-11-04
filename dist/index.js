@@ -691,7 +691,7 @@ async function requestPlan(peeps, sessionId, body) {
 
 // src/environment.ts
 function nameForLog(name) {
-  return name.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ");
+  return name.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/##\[/g, "## [");
 }
 function urlForLog(baseUrl) {
   if (baseUrl.includes("@")) return "<unreadable URL>";
@@ -2342,7 +2342,7 @@ async function runAgent(env, peeps) {
 function attachEnvironment(value) {
   if (value === void 0 || value === null) return null;
   const { name, baseUrl } = value;
-  if (typeof name === "string" && name && (typeof baseUrl === "string" || baseUrl === null)) {
+  if (typeof name === "string" && name && !name.includes("\0") && (baseUrl === null || typeof baseUrl === "string" && !baseUrl.includes("\0"))) {
     return { name, baseUrl };
   }
   throw new Error("Peeps named an environment this action cannot read; stopping before any test runs");

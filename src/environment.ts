@@ -16,10 +16,11 @@ export interface PlanEnvironment {
 
 /**
  * A name for the job log, which may be public: a control character could start
- * a workflow command on a line of its own.
+ * a workflow command on a line of its own, and GitHub's legacy `##[` command
+ * works anywhere in a line.
  */
 function nameForLog(name: string): string {
-  return name.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ");
+  return name.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/##\[/g, "## [");
 }
 
 /**
