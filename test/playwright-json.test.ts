@@ -13,7 +13,9 @@ const modules = process.env.PEEPS_CAPTURE_TEST_MODULES ?? path.resolve(__dirname
 
 test("parseJsonReport skips lines a config printed before the report", () => {
   assert.deepEqual(parseJsonReport('{"a":1}'), { a: 1 });
-  assert.deepEqual(parseJsonReport('◇ injected env (0) from .env // tip: …\n{\n  "a": 1\n}\n'), { a: 1 });
+  assert.deepEqual(parseJsonReport('◇ injected env (0) from .env // tip: …\n{\n  "suites": []\n}\n'), { suites: [] });
+  // A config's own object after its log line is not a report: the caller keeps stdout instead.
+  assert.equal(parseJsonReport('loading config\n{\n  "a": 1\n}\n'), null);
   assert.equal(parseJsonReport("Error: no tests found"), null);
   assert.equal(parseJsonReport(""), null);
 });

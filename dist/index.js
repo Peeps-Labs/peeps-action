@@ -168,7 +168,8 @@ function parseJsonReport(text) {
     const start = text.search(/^\{/m);
     if (start <= 0) return null;
     try {
-      return JSON.parse(text.slice(start));
+      const report = JSON.parse(text.slice(start));
+      return report && typeof report === "object" && Array.isArray(report.suites) ? report : null;
     } catch {
       return null;
     }

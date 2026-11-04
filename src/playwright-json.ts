@@ -39,11 +39,13 @@ export function parseJsonReport(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch {
-    // The report starts on its own line with `{`; whatever came first is someone's log.
+    // The report starts on its own line with `{`; whatever came first is someone's log. A
+    // config can print an object of its own there too, so only a report (it has `suites`) counts.
     const start = text.search(/^\{/m);
     if (start <= 0) return null;
     try {
-      return JSON.parse(text.slice(start));
+      const report: unknown = JSON.parse(text.slice(start));
+      return report && typeof report === "object" && Array.isArray((report as { suites?: unknown }).suites) ? report : null;
     } catch {
       return null;
     }
