@@ -694,6 +694,7 @@ function nameForLog(name) {
   return name.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ");
 }
 function urlForLog(baseUrl) {
+  if (baseUrl.includes("@")) return "<unreadable URL>";
   try {
     const url = new URL(baseUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") return "<unreadable URL>";

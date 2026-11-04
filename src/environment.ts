@@ -23,11 +23,14 @@ function nameForLog(name: string): string {
 }
 
 /**
- * A URL for the job log: parsed, not pattern-matched, so credentials can't slip
- * past however they are spelled. Query and fragment stay out too. The test
- * process still gets the value Peeps sent.
+ * A URL for the job log, so credentials can't slip past however they are
+ * spelled. Any `@` hides the whole URL: a `/` or `\` in a password parses as a
+ * path, so a parser can't tell where the secret ends, and this is only a log
+ * line. Query and fragment stay out too. The test process still gets the value
+ * Peeps sent.
  */
 function urlForLog(baseUrl: string): string {
+  if (baseUrl.includes("@")) return "<unreadable URL>";
   try {
     const url = new URL(baseUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") return "<unreadable URL>";

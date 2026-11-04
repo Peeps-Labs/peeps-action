@@ -62,14 +62,28 @@ test("a URL's secrets stay out of the job log, and reach the test process", () =
     "HTTPS://user:hunter2@qa.example.com/app",
     "https://us\ter:hunter2@qa.example.com/app",
     "https://user:hun\nter2@qa.example.com/app",
+    // A `/` or `\` in the credentials parses as a path, so these read as a
+    // host called `user` or `hunter2` with the secret after it.
+    "https://user:123/hunter2@qa.example.com",
+    "https://hun/ter2@qa.example.com",
+    "https://hunter2\\@qa.example.com",
   ]) {
     for (const current of [{}, { BASE_URL: "https://mine.example.com" }]) {
       const { vars, log } = planEnvironmentVariables({ name: "qa", baseUrl: url }, current);
-      assert.doesNotMatch(log, /hunter2|hun|ter2/);
-      assert.match(log, /https:\/\/qa\.example\.com\/app/);
+      assert.doesNotMatch(log, /hunter2|hun|ter2|user/);
+      assert.match(log, /<unreadable URL>/);
       assert.equal(vars.PEEPS_BASE_URL, url);
     }
   }
+});
+
+test("a query and fragment stay out of the job log", () => {
+  const { log } = planEnvironmentVariables(
+    { name: "qa", baseUrl: "https://qa.example.com/app?token=hunter2#hunter2" },
+    {},
+  );
+  assert.doesNotMatch(log, /hunter2/);
+  assert.match(log, /BASE_URL https:\/\/qa\.example\.com\/app$/);
 });
 
 test("logs a plain URL as it is, and a placeholder for one it can't read", () => {
