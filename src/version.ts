@@ -10,4 +10,4 @@
  *
  * `package.json`'s version is not used: it has never tracked the tags.
  */
-export const ACTION_VERSION = "1.9.0";
+export const ACTION_VERSION = "1.10.0";

@@ -622,6 +622,24 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
+## 1.10.0
+
+- `framework: appium`: run Appium tests written with WebdriverIO (mocha, TypeScript or
+  JavaScript) on an Android emulator or iOS simulator in your own CI, and report them
+  to Peeps. `auto` picks it when the working directory holds a `wdio.conf.*` and no
+  Playwright config. Inventory lists the tests without starting a device; run mode
+  runs exactly the tests Peeps planned (by file and title), each capability only on
+  its own specs.
+- A failed Appium test sends its failure, the context it was in (`NATIVE_APP` or a
+  `WEBVIEW_…`), a screenshot and the page source. Page source is uploaded as a file
+  and never rendered.
+- Agent mode: `run_tests` runs Appium suites too, in the environment Peeps names, and
+  with `device-tools: true` a Peeps agent can read the screen, tap, type, scroll and
+  switch into WebViews on the job's device. Typed text is never echoed, and values in
+  the job's environment are masked from what the tools return.
+- A cancelled job removes the temporary WebdriverIO config and stops WebdriverIO and
+  Appium; `git_commit_push` never stages that config.
+
 ## 1.9.0
 
 - Agent mode: when Peeps names an environment for a session, every test process
