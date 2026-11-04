@@ -99,8 +99,9 @@ function fakeDeps(xml: string | null, httpCalls: string | null = null) {
   };
   const envs: Array<Record<string, string>> = [];
   const deps: PytestRunDeps = {
-    run: async (cmd, args) => {
+    run: async (cmd, args, _cwd, _timeoutMs, extraEnv) => {
       calls.push({ via: "hook", cmd, args });
+      envs.push(extraEnv);
       await writeJunit(args);
       return { code: 1, output: "lab says hi" };
     },
@@ -159,6 +160,60 @@ test("an executable .peeps/run-tests runs instead, with the JUnit path and the n
   assert.equal(out.exitCode, 1);
   assert.equal(out.ranWith, ".peeps/run-tests");
   assert.equal(out.results?.[0]?.status, "passed");
+});
+
+test("pytest gets the environment on top of its evidence variables", async () => {
+  const env = await workspace(false);
+  const { deps, envs } = fakeDeps(ONE_PASS);
+  await runPytestTool(
+    env,
+    {
+      fileAbs: path.join(env.workspace, "tests/test_a.py"),
+      titlePath: "test_up",
+      keyword: null,
+      extraEnv: { PEEPS_ENVIRONMENT: "production", PEEPS_BASE_URL: "https://x.example.com", BASE_URL: "https://x.example.com" },
+    },
+    deps,
+  );
+  assert.equal(envs[0]!.PEEPS_ENVIRONMENT, "production");
+  assert.equal(envs[0]!.PEEPS_BASE_URL, "https://x.example.com");
+  assert.equal(envs[0]!.BASE_URL, "https://x.example.com");
+  assert.match(envs[0]!.PEEPS_EVIDENCE_OUT!, /http-calls\.json$/);
+  assert.match(envs[0]!.PYTHONPATH!, /python/);
+});
+
+test("the customer's hook gets the environment", async () => {
+  const env = await workspace(true);
+  const { deps, calls, envs } = fakeDeps(ONE_PASS);
+  await runPytestTool(
+    env,
+    {
+      fileAbs: path.join(env.workspace, "tests/test_a.py"),
+      titlePath: "test_up",
+      keyword: null,
+      extraEnv: { PEEPS_ENVIRONMENT: "production" },
+      hook: async (scratch) => ({ kind: "ready", path: path.join(scratch, "run-tests") }),
+    },
+    deps,
+  );
+  assert.equal(calls[0]!.via, "hook");
+  assert.deepEqual(envs[0], { PEEPS_ENVIRONMENT: "production" });
+});
+
+test("with no environment given, the hook gets nothing extra", async () => {
+  const env = await workspace(false);
+  const { deps, envs } = fakeDeps(ONE_PASS);
+  await runPytestTool(
+    env,
+    {
+      fileAbs: path.join(env.workspace, "tests/test_a.py"),
+      titlePath: "test_up",
+      keyword: null,
+      hook: async (scratch) => ({ kind: "ready", path: path.join(scratch, "run-tests") }),
+    },
+    deps,
+  );
+  assert.deepEqual(envs[0], {});
 });
 
 test("a hook that differs from the commit under test is not run", async () => {

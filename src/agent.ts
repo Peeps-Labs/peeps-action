@@ -12,6 +12,7 @@ import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { RunnerEnv } from "./env";
+import { type PlanEnvironment, planEnvironmentVariables } from "./environment";
 import type { PeepsClient } from "./peeps";
 import { resolveFramework } from "./pytest";
 import { createToolServer } from "./tools";
@@ -29,7 +30,7 @@ interface Call {
 export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void> {
   if (!env.sessionId) throw new Error("`session-id` is required in agent mode (Peeps passes it)");
   const server = createToolServer(env);
-  const attach = await peeps.post<{ sessionId: string; kind: string; expiresAt: string }>(
+  const attach = await peeps.post<{ sessionId: string; kind: string; expiresAt: string; environment?: unknown }>(
     `/api/v1/bridge/sessions/${env.sessionId}/attach`,
     {
       tools: server.specs,
@@ -38,6 +39,9 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void
   );
   const expiresAt = new Date(attach.expiresAt).getTime();
   console.log(`[peeps] agent session ${attach.sessionId} (${attach.kind}) attached; ${server.specs.length} tools; cap ${attach.expiresAt}`);
+  const environment = planEnvironmentVariables(attachEnvironment(attach.environment), process.env);
+  if (environment.log) console.log(environment.log);
+  server.setTestEnv(environment.vars);
 
   let transportErrors = 0;
   let handled = 0;
@@ -89,6 +93,28 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void
 }
 
 /**
+ * The Peeps environment the attach answer names, or null when it names none (a
+ * run that named none, or a server older than the field: the workflow chooses).
+ * Anything else fails the job before a test runs: read as "none", a heal would
+ * verify against whatever the workflow points at and report that it passed.
+ * The value stays out of the message: Peeps sent it, and this goes to the log.
+ * A NUL counts as unreadable: `spawn` refuses one, and its error prints the value.
+ */
+function attachEnvironment(value: unknown): PlanEnvironment | null {
+  if (value === undefined || value === null) return null;
+  const { name, baseUrl } = value as Partial<PlanEnvironment>;
+  if (
+    typeof name === "string" &&
+    name &&
+    !name.includes("\0") &&
+    (baseUrl === null || (typeof baseUrl === "string" && !baseUrl.includes("\0")))
+  ) {
+    return { name, baseUrl };
+  }
+  throw new Error("Peeps named an environment this action cannot read; stopping before any test runs");
+}
+
+/**
  * What the runner tells Peeps about itself when it attaches.
  *
  * `sha` is the sha the workflow ran from (GITHUB_SHA / CI_COMMIT_SHA). When
@@ -115,8 +141,9 @@ export async function runnerInfoFor(env: RunnerEnv): Promise<Record<string, unkn
     // `paths` and commits only those files (PQA-2695). On a Playwright job,
     // `result_files`: each run_tests result's `file` is the repo-relative spec
     // it came from (PQA-2733); `error_context`: a failed one carries
-    // Playwright's error-context.md as `errorContext` (PQA-2737).
-    capabilities: ["commit_paths", ...(playwrightJob(env) ? ["result_files", "error_context"] : [])],
+    // Playwright's error-context.md as `errorContext` (PQA-2737). `environment`:
+    // run_tests applies the environment the attach answer names (PQA-3033).
+    capabilities: ["commit_paths", "environment", ...(playwrightJob(env) ? ["result_files", "error_context"] : [])],
   };
   try {
     // `-c safe.directory`: inside the Playwright container the checkout is

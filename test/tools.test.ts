@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { RunnerEnv } from "../src/env";
+import { planEnvironmentVariables } from "../src/environment";
 import {
+  createToolServer,
   ERROR_CONTEXT_MAX_BYTES,
   ERROR_CONTEXT_MAX_READ_BYTES,
   ERROR_CONTEXT_TOTAL_BYTES,
@@ -15,6 +17,7 @@ import {
   makeRedactor,
   patchPaths,
   playwrightResults,
+  projectGraph,
   TEST_OUTPUT_MAX_CHARS,
   readErrorContext,
 } from "../src/tools";
@@ -515,4 +518,101 @@ test("an error-context.md over 1 MB is marked omitted, not dropped silently", as
   ))!;
   assert.equal(results[0]!.errorContextOmitted, true);
   assert.equal("errorContext" in results[0]!, false);
+});
+
+// ---------------------------------------------------------------------------
+// The environment Peeps names at attach, on the Playwright paths (PQA-3033)
+// ---------------------------------------------------------------------------
+
+const PEEPS_URL = "https://prod.example.com";
+
+test("projectGraph lists with the extra environment it is given", async () => {
+  const seen: Array<Record<string, string> | undefined> = [];
+  const graph = await projectGraph(
+    { workingDirectory: WS, configPath: null } as unknown as RunnerEnv,
+    async (_cmd, _args, _cwd, _timeoutMs, extraEnv) => {
+      seen.push(extraEnv);
+      return { code: 0, stderr: "", stdout: 'peeps:project-graph:[{"name":"a"}]\n' };
+    },
+    { BASE_URL: PEEPS_URL },
+  );
+  assert.deepEqual(graph, [{ name: "a", dependencies: [], teardown: null }]);
+  assert.deepEqual(seen, [{ BASE_URL: PEEPS_URL }]);
+});
+
+/**
+ * A real Playwright job: the config records what each process that loads it
+ * was started with, and the one test's title is what its worker was.
+ */
+async function environmentJob(t: { after: (fn: () => Promise<void>) => void }) {
+  const ws = await workspace(t);
+  await symlink(path.resolve(__dirname, "../node_modules"), path.join(ws, "node_modules"), "dir");
+  await writeFile(
+    path.join(ws, "pw.config.ts"),
+    'import fs from "node:fs";\nimport { defineConfig } from "@playwright/test";\n' +
+      'const { BASE_URL, PEEPS_BASE_URL, PEEPS_ENVIRONMENT } = process.env;\n' +
+      'fs.appendFileSync("seen.log", `${process.argv.includes("--list") ? "list" : "run"} ${BASE_URL} ${PEEPS_BASE_URL} ${PEEPS_ENVIRONMENT}\\n`);\n' +
+      'export default defineConfig({ testDir: "./pw", workers: 1, outputDir: "./results", projects: [{ name: "only" }] });\n',
+  );
+  await mkdir(path.join(ws, "pw"));
+  await writeFile(
+    path.join(ws, "pw/banner.spec.ts"),
+    'import { test } from "@playwright/test";\ntest(`banner on ${process.env.PEEPS_ENVIRONMENT} at ${process.env.BASE_URL}`, async () => {});\n',
+  );
+  const env = { workspace: ws, workingDirectory: ws, configPath: "pw.config.ts", platform: "github" } as unknown as RunnerEnv;
+  const seen = async () => [...new Set((await readFile(path.join(ws, "seen.log"), "utf8")).trim().split("\n"))].sort();
+  return { server: createToolServer(env), seen };
+}
+
+type EnvironmentRun = { results: Array<{ title: string; status: string; titleRedacted?: boolean }> };
+
+/** Runs with no `BASE_URL` of the workflow's, or with `workflow`'s. */
+function workflowBaseUrl(t: { after: (fn: () => void) => void }, workflow?: string) {
+  const previous = process.env.BASE_URL;
+  if (workflow) process.env.BASE_URL = workflow;
+  else delete process.env.BASE_URL;
+  t.after(() => {
+    if (previous === undefined) delete process.env.BASE_URL;
+    else process.env.BASE_URL = previous;
+  });
+}
+
+test("run_tests gives the environment to the Playwright run and the --list before it, and titles come back whole", async (t) => {
+  workflowBaseUrl(t);
+  const { server, seen } = await environmentJob(t);
+  server.setTestEnv(planEnvironmentVariables({ name: "production", baseUrl: PEEPS_URL }, process.env).vars);
+  const out = (await server.handlers.run_tests!({ file: "pw/banner.spec.ts", project: "only" })) as EnvironmentRun;
+  assert.deepEqual(
+    out.results.map((r) => [r.title, r.status, "titleRedacted" in r]),
+    [[`banner on production at ${PEEPS_URL}`, "passed", false]],
+    JSON.stringify(out).slice(0, 2000),
+  );
+  assert.deepEqual(await seen(), [
+    `list ${PEEPS_URL} ${PEEPS_URL} production`,
+    `run ${PEEPS_URL} ${PEEPS_URL} production`,
+  ]);
+  assert.equal(process.env.PEEPS_ENVIRONMENT, undefined);
+  assert.equal(process.env.PEEPS_BASE_URL, undefined);
+  assert.equal(process.env.BASE_URL, undefined);
+});
+
+test("run_tests keeps the workflow's BASE_URL on the Playwright run and the --list", async (t) => {
+  const workflow = "https://pr-12.preview.example.com";
+  workflowBaseUrl(t, workflow);
+  const { server, seen } = await environmentJob(t);
+  server.setTestEnv(planEnvironmentVariables({ name: "staging", baseUrl: PEEPS_URL }, process.env).vars);
+  const out = (await server.handlers.run_tests!({ file: "pw/banner.spec.ts", project: "only" })) as EnvironmentRun;
+  assert.deepEqual(out.results.map((r) => r.title), [`banner on staging at ${workflow}`], JSON.stringify(out).slice(0, 2000));
+  assert.deepEqual(await seen(), [
+    `list ${workflow} ${PEEPS_URL} staging`,
+    `run ${workflow} ${PEEPS_URL} staging`,
+  ]);
+});
+
+test("run_tests with no environment set adds nothing to the Playwright run", async (t) => {
+  workflowBaseUrl(t);
+  const { server, seen } = await environmentJob(t);
+  const out = (await server.handlers.run_tests!({ file: "pw/banner.spec.ts", project: "only" })) as EnvironmentRun;
+  assert.deepEqual(out.results.map((r) => r.title), ["banner on undefined at undefined"], JSON.stringify(out).slice(0, 2000));
+  assert.deepEqual(await seen(), ["list undefined undefined undefined", "run undefined undefined undefined"]);
 });

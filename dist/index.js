@@ -690,21 +690,36 @@ async function requestPlan(peeps, sessionId, body) {
 }
 
 // src/environment.ts
+function nameForLog(name) {
+  return name.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/##\[/g, "## [");
+}
+function urlForLog(baseUrl) {
+  if (baseUrl.includes("@")) return "<unreadable URL>";
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "<unreadable URL>";
+    return url.pathname === "/" ? url.origin : `${url.origin}${url.pathname}`;
+  } catch {
+    return "<unreadable URL>";
+  }
+}
 function planEnvironmentVariables(planEnv, current) {
   if (!planEnv) return { vars: {}, log: "" };
   const vars = { PEEPS_ENVIRONMENT: planEnv.name };
+  const name = nameForLog(planEnv.name);
   if (!planEnv.baseUrl) {
-    return { vars, log: `[peeps] environment ${planEnv.name} (no BASE_URL in Peeps)` };
+    return { vars, log: `[peeps] environment ${name} (no BASE_URL in Peeps)` };
   }
   vars.PEEPS_BASE_URL = planEnv.baseUrl;
+  const url = urlForLog(planEnv.baseUrl);
   if (current.BASE_URL) {
     return {
       vars,
-      log: `[peeps] environment ${planEnv.name}; the workflow's BASE_URL runs, not ${planEnv.baseUrl} (also in PEEPS_BASE_URL)`
+      log: `[peeps] environment ${name}; the workflow's BASE_URL runs, not ${url} (also in PEEPS_BASE_URL)`
     };
   }
   vars.BASE_URL = planEnv.baseUrl;
-  return { vars, log: `[peeps] environment ${planEnv.name}, BASE_URL ${planEnv.baseUrl}` };
+  return { vars, log: `[peeps] environment ${name}, BASE_URL ${url}` };
 }
 
 // src/run.ts
@@ -1295,10 +1310,10 @@ function parseJunitResults(xml, requestedFile = null) {
 }
 var RUN_ENV = { CI: "1", PYTHONDONTWRITEBYTECODE: "1" };
 var defaultDeps = {
-  run: async (cmd, args, cwd, timeoutMs) => {
+  run: async (cmd, args, cwd, timeoutMs, extraEnv) => {
     const { spawn: spawn4 } = await import("node:child_process");
     return new Promise((resolve) => {
-      const child = spawn4(cmd, args, { cwd, env: { ...process.env, ...RUN_ENV }, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn4(cmd, args, { cwd, env: { ...process.env, ...RUN_ENV, ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       const keep = (chunk) => {
         output = (output + chunk.toString("utf8")).slice(-OUTPUT_TAIL_CHARS);
@@ -1360,6 +1375,7 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
   const rel = import_node_path8.default.relative(env.workingDirectory, input2.fileAbs).split(import_node_path8.default.sep).join("/");
   const repoRel = import_node_path8.default.relative(env.workspace, input2.fileAbs).split(import_node_path8.default.sep).join("/");
   const browser = input2.browser ?? null;
+  const extraEnv = input2.extraEnv ?? {};
   const target = pytestNodeArgument(rel, input2.titlePath, browser);
   const dir = await (0, import_promises6.mkdtemp)(import_node_path8.default.join((0, import_node_os4.tmpdir)(), "peeps-pytest-"));
   const junit = import_node_path8.default.join(dir, "junit.xml");
@@ -1379,7 +1395,7 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
       };
     }
     const hook = plan.kind === "ready" ? plan.path : null;
-    const ran = hook ? await deps.run(hook, [junit, target], env.workingDirectory, RUN_TESTS_TIMEOUT_MS) : await deps.pytest(
+    const ran = hook ? await deps.run(hook, [junit, target], env.workingDirectory, RUN_TESTS_TIMEOUT_MS, extraEnv) : await deps.pytest(
       [
         "-p",
         PLUGIN,
@@ -1393,7 +1409,7 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
         target
       ],
       env.workingDirectory,
-      evidenceEnv(evidence)
+      { ...extraEnv, ...evidenceEnv(evidence) }
     );
     let xml = null;
     try {
@@ -1672,6 +1688,7 @@ var SAFE_ENV_KEYS = /* @__PURE__ */ new Set(["PATH", "HOME", "PWD", "SHELL", "LA
 function createToolServer(env) {
   const workspace = env.workspace;
   const redact = makeRedactor(process.env);
+  let testEnv = {};
   const runGit = (args, options = {}) => execFileAsync2("git", ["-c", `safe.directory=${workspace}`, ...args], {
     cwd: workspace,
     ...options
@@ -1779,6 +1796,7 @@ function createToolServer(env) {
           titlePath: typeof args.test === "string" && args.test ? args.test : null,
           keyword: typeof args.grep === "string" && args.grep ? args.grep : null,
           browser: typeof args.project === "string" && args.project ? args.project : null,
+          extraEnv: testEnv,
           hook: async (scratchDir) => {
             const sha = await commitUnderTest;
             if (!sha) return { kind: "none" };
@@ -1822,7 +1840,7 @@ function createToolServer(env) {
       const abs = jail(workspace, file);
       const rel = import_node_path9.default.relative(env.workingDirectory, abs).split(import_node_path9.default.sep).join("/");
       const project = typeof args.project === "string" && args.project ? args.project : null;
-      const owners = project ? teardownOwners(await projectGraph(env), project) : [];
+      const owners = project ? teardownOwners(await projectGraph(env, runCapture, testEnv), project) : [];
       const cmd = ["playwright", "test", "--reporter=json"];
       if (owners.length === 0 && typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
       for (const p of owners.length > 0 ? owners : project ? [project] : []) cmd.push("--project", p);
@@ -1833,7 +1851,7 @@ function createToolServer(env) {
       let run;
       let report = null;
       try {
-        run = await runCapture("npx", cmd, env.workingDirectory, 10 * 60 * 1e3, target.env);
+        run = await runCapture("npx", cmd, env.workingDirectory, 10 * 60 * 1e3, { ...testEnv, ...target.env });
         report = await target.read(run.stdout);
       } finally {
         await target.cleanup();
@@ -2028,7 +2046,13 @@ function createToolServer(env) {
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
     { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) }
   ];
-  return { specs, handlers };
+  return {
+    specs,
+    handlers,
+    setTestEnv: (vars) => {
+      testEnv = vars;
+    }
+  };
 }
 function obj(properties, required) {
   return { type: "object", properties, required, additionalProperties: false };
@@ -2188,7 +2212,7 @@ class PeepsProjectGraph {
 }
 module.exports = PeepsProjectGraph;
 `;
-async function projectGraph(env, run = runCapture) {
+async function projectGraph(env, run = runCapture, extraEnv = {}) {
   let dir = null;
   try {
     dir = await (0, import_promises7.mkdtemp)(import_node_path9.default.join((0, import_node_os5.tmpdir)(), "peeps-graph-"));
@@ -2196,7 +2220,7 @@ async function projectGraph(env, run = runCapture) {
     await (0, import_promises7.writeFile)(reporter, PROJECT_GRAPH_REPORTER);
     const cmd = ["playwright", "test", "--list", `--reporter=${reporter}`];
     if (env.configPath) cmd.push("--config", env.configPath);
-    const { stdout } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1e3);
+    const { stdout } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1e3, extraEnv);
     const line = stdout.split("\n").find((l) => l.startsWith(GRAPH_MARKER));
     if (!line) return null;
     const parsed = JSON.parse(line.slice(GRAPH_MARKER.length));
@@ -2249,7 +2273,7 @@ function runCapture(cmd, args, cwd, timeoutMs, extraEnv = {}) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.8.1";
+var ACTION_VERSION = "1.9.0";
 
 // src/agent.ts
 var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process5.execFile);
@@ -2265,6 +2289,9 @@ async function runAgent(env, peeps) {
   );
   const expiresAt = new Date(attach.expiresAt).getTime();
   console.log(`[peeps] agent session ${attach.sessionId} (${attach.kind}) attached; ${server.specs.length} tools; cap ${attach.expiresAt}`);
+  const environment = planEnvironmentVariables(attachEnvironment(attach.environment), process.env);
+  if (environment.log) console.log(environment.log);
+  server.setTestEnv(environment.vars);
   let transportErrors = 0;
   let handled = 0;
   for (; ; ) {
@@ -2312,6 +2339,14 @@ async function runAgent(env, peeps) {
     }
   }
 }
+function attachEnvironment(value) {
+  if (value === void 0 || value === null) return null;
+  const { name, baseUrl } = value;
+  if (typeof name === "string" && name && !name.includes("\0") && (baseUrl === null || typeof baseUrl === "string" && !baseUrl.includes("\0"))) {
+    return { name, baseUrl };
+  }
+  throw new Error("Peeps named an environment this action cannot read; stopping before any test runs");
+}
 async function runnerInfoFor(env) {
   const info = {
     workingDirectory: env.workingDirectory,
@@ -2325,8 +2360,9 @@ async function runnerInfoFor(env) {
     // `paths` and commits only those files (PQA-2695). On a Playwright job,
     // `result_files`: each run_tests result's `file` is the repo-relative spec
     // it came from (PQA-2733); `error_context`: a failed one carries
-    // Playwright's error-context.md as `errorContext` (PQA-2737).
-    capabilities: ["commit_paths", ...playwrightJob(env) ? ["result_files", "error_context"] : []]
+    // Playwright's error-context.md as `errorContext` (PQA-2737). `environment`:
+    // run_tests applies the environment the attach answer names (PQA-3033).
+    capabilities: ["commit_paths", "environment", ...playwrightJob(env) ? ["result_files", "error_context"] : []]
   };
   try {
     const { stdout } = await execFileAsync3(

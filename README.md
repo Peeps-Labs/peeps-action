@@ -292,7 +292,8 @@ there and the job fails. If you take fork contributions, filter the trigger:
 **pytest tests that need lab hardware.** In `agent` mode, `run_tests` runs the
 one test a Peeps heal is fixing. For a pytest suite it runs pytest on the runner,
 unless your repository has an executable `.peeps/run-tests`. Then Peeps runs that
-instead, from the working directory and with the job's environment:
+instead, from the working directory and with the job's environment (and the
+Peeps environment's variables, when the session names one):
 
 ```bash
 .peeps/run-tests <junit-path> <node-id>...
@@ -412,6 +413,19 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## 1.9.0
+
+- Agent mode: when Peeps names an environment for a session, every test process
+  `run_tests` starts gets the same variables run mode gives: `PEEPS_ENVIRONMENT`,
+  and when the environment has a `BASE_URL`, `PEEPS_BASE_URL`, and `BASE_URL` too
+  unless the workflow already sets it. That covers Playwright, its `--list`,
+  pytest and your `.peeps/run-tests` hook, so a heal reproduces and verifies a
+  failure in the environment it failed in. A workflow's own `BASE_URL` still wins,
+  and the job log says which one runs. With an older Peeps, or a run that named no
+  environment, nothing changes.
+- The job log's environment line no longer carries control characters from an
+  environment's name, or credentials from its URL, in either mode.
 
 ## 1.8.1
 

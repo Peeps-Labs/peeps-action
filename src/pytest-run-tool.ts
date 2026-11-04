@@ -16,7 +16,8 @@
  *
  *     .peeps/run-tests <junit-path> <node-id>...
  *
- * from the working directory, with the job's environment. It must write a
+ * from the working directory, with the job's environment and the session's
+ * Peeps environment, when Peeps names one. It must write a
  * JUnit file to `<junit-path>` (pytest's own `--junitxml` output works) and
  * may take as long as the lab does, up to the tool's timeout. Its exit code is
  * reported but not trusted: the JUnit file is the verdict. The hook is the
@@ -231,17 +232,23 @@ export type HookPlan = { kind: "none" } | { kind: "changed" } | { kind: "ready";
 const RUN_ENV = { CI: "1", PYTHONDONTWRITEBYTECODE: "1" };
 
 export interface PytestRunDeps {
-  /** Runs a command and resolves with its exit code and the tail of its output. */
-  run: (cmd: string, args: string[], cwd: string, timeoutMs: number) => Promise<{ code: number; output: string }>;
+  /** Runs a command, with `extraEnv` on top of the job's environment, and resolves with its exit code and the tail of its output. */
+  run: (
+    cmd: string,
+    args: string[],
+    cwd: string,
+    timeoutMs: number,
+    extraEnv: Record<string, string>,
+  ) => Promise<{ code: number; output: string }>;
   /** `extraEnv` on top of the job's environment. */
   pytest: (args: string[], cwd: string, extraEnv: Record<string, string>) => Promise<{ code: number; output: string }>;
 }
 
 const defaultDeps: PytestRunDeps = {
-  run: async (cmd, args, cwd, timeoutMs) => {
+  run: async (cmd, args, cwd, timeoutMs, extraEnv) => {
     const { spawn } = await import("node:child_process");
     return new Promise((resolve) => {
-      const child = spawn(cmd, args, { cwd, env: { ...process.env, ...RUN_ENV }, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(cmd, args, { cwd, env: { ...process.env, ...RUN_ENV, ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       const keep = (chunk: Buffer) => {
         output = (output + chunk.toString("utf8")).slice(-OUTPUT_TAIL_CHARS);
@@ -328,6 +335,8 @@ export async function runPytestTool(
     keyword: string | null;
     /** The Playwright browser a pytest-playwright test ran in, if any. */
     browser?: string | null;
+    /** On top of the job's environment, for pytest and the hook alike. */
+    extraEnv?: Record<string, string>;
     /** Finds the customer's hook, copying it into the run's scratch directory. */
     hook?: (scratchDir: string) => Promise<HookPlan>;
   },
@@ -336,6 +345,7 @@ export async function runPytestTool(
   const rel = path.relative(env.workingDirectory, input.fileAbs).split(path.sep).join("/");
   const repoRel = path.relative(env.workspace, input.fileAbs).split(path.sep).join("/");
   const browser = input.browser ?? null;
+  const extraEnv = input.extraEnv ?? {};
   const target = pytestNodeArgument(rel, input.titlePath, browser);
   const dir = await mkdtemp(path.join(tmpdir(), "peeps-pytest-"));
   const junit = path.join(dir, "junit.xml");
@@ -356,7 +366,7 @@ export async function runPytestTool(
     }
     const hook = plan.kind === "ready" ? plan.path : null;
     const ran = hook
-      ? await deps.run(hook, [junit, target], env.workingDirectory, RUN_TESTS_TIMEOUT_MS)
+      ? await deps.run(hook, [junit, target], env.workingDirectory, RUN_TESTS_TIMEOUT_MS, extraEnv)
       : await deps.pytest(
           [
             "-p",
@@ -371,7 +381,7 @@ export async function runPytestTool(
             target,
           ],
           env.workingDirectory,
-          evidenceEnv(evidence),
+          { ...extraEnv, ...evidenceEnv(evidence) },
         );
     let xml: string | null = null;
     try {
