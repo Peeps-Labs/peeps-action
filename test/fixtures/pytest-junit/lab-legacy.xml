@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="2" skipped="0" tests="9" time="0.035" timestamp="2026-10-28T22:24:49.478570-07:00" hostname="runner"><testcase classname="" name="tests.coverage.streaming.test_03_codec" file="tests/coverage/streaming/test_03_codec.py" time="0.000"><error message="collection failure">ImportError while importing test module '/repo/tests/coverage/streaming/test_03_codec.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/coverage/streaming/test_03_codec.py:3: in &lt;module&gt;
+    from labkit.camera_models import hevc_capable_for_model
+E   ImportError: cannot import name 'hevc_capable_for_model' from 'labkit.camera_models' (/repo/labkit/camera_models.py)</error></testcase><testcase classname="tests.coverage.firmware.test_01_upgrade" name="test_upgrade_reaches_target" file="tests/coverage/firmware/test_01_upgrade.py" line="9" time="0.000"><properties><property name="expected" value="v2026.10.27.2-arnold-4k" /><property name="actual" value="v2026.10.27.2-arnold-4k" /></properties><system-out>--------------------------------- Captured Out ---------------------------------
+
+</system-out></testcase><testcase classname="tests.coverage.firmware.test_01_upgrade" name="test_upgrade_reboots_twice" file="tests/coverage/firmware/test_01_upgrade.py" line="16" time="0.000"><properties><property name="expected" value="3" /><property name="actual" value="3" /></properties><system-out>--------------------------------- Captured Out ---------------------------------
+
+</system-out></testcase><testcase classname="tests.coverage.firmware.test_01_upgrade" name="test_settings_persist_across_upgrade" file="tests/coverage/firmware/test_01_upgrade.py" line="24" time="0.000"><properties><property name="expected" value="70" /><property name="actual" value="70" /></properties><system-out>--------------------------------- Captured Out ---------------------------------
+
+</system-out></testcase><testcase classname="tests.coverage.firmware.test_01_upgrade" name="test_reboot_keeps_focus" file="tests/coverage/firmware/test_01_upgrade.py" line="31" time="0.000"><failure message="AssertionError: focus drifted after reboot&#10;assert (3 % 3) != 0">tests/coverage/firmware/test_01_upgrade.py:35: in test_reboot_keeps_focus
+    assert run % 3 != 0, "focus drifted after reboot"
+E   AssertionError: focus drifted after reboot
+E   assert (3 % 3) != 0</failure><system-out>--------------------------------- Captured Out ---------------------------------
+
+</system-out></testcase><testcase classname="tests.coverage.image.test_02_image_settings" name="test_brightness_sweep_is_monotonic" file="tests/coverage/image/test_02_image_settings.py" line="5" time="0.000"><properties><property name="expected" value="[30, 50, 70, 90, 111]" /><property name="actual" value="[30, 50, 70, 90, 110]" /></properties><failure message="assert [30, 50, 70, 90, 110] == [30, 50, 70, 90, 111]&#10;  &#10;  At index 4 diff: 110 != 111&#10;  Use -v to get more diff">tests/coverage/image/test_02_image_settings.py:13: in test_brightness_sweep_is_monotonic
+    assert expect(expected, readings) == expected
+E   assert [30, 50, 70, 90, 110] == [30, 50, 70, 90, 111]
+E     
+E     At index 4 diff: 110 != 111
+E     Use -v to get more diff</failure><system-out>--------------------------------- Captured Out ---------------------------------
+
+</system-out></testcase><testcase classname="tests.coverage.image.test_02_image_settings" name="test_settings_change_the_frame" file="tests/coverage/image/test_02_image_settings.py" line="15" time="0.000"><system-out>--------------------------------- Captured Out ---------------------------------
+
+</system-out></testcase><testcase classname="tests.coverage.image.test_02_image_settings" name="test_zoom_only_on_zoom_models" file="tests/coverage/image/test_02_image_settings.py" line="21" time="0.000"><system-out>--------------------------------- Captured Out ---------------------------------
+
+</system-out></testcase><testcase classname="tests.coverage.storage.test_04_retention" name="test_storage_days_is_positive" file="tests/coverage/storage/test_04_retention.py" line="5" time="0.000"><system-out>--------------------------------- Captured Out ---------------------------------
+
+</system-out></testcase></testsuite></testsuites>

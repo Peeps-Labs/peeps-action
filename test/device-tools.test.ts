@@ -710,3 +710,26 @@ test("pngSize reads the IHDR and refuses what is not a PNG", () => {
   assert.deepEqual(pngSize(fakePng(390, 844)), { width: 390, height: 844 });
   assert.equal(pngSize(Buffer.from("not a png at all, really not")), null);
 });
+
+test("the device session reads the WebdriverIO config in the session's Peeps environment, and keeps its credentialed URL out of the job log", async (t) => {
+  const lines = t.mock.method(console, "log", () => {});
+  const secretUrl = "https://user:p@ss@staging.example.com/app";
+  let seen: Record<string, string> | undefined;
+  const host = createDeviceTools(env(), {
+    deps: {
+      readCapabilities: async (extraEnv) => {
+        seen = extraEnv;
+        throw new Error(`config failed to load against ${secretUrl}`);
+      },
+      startAppium: async () => assert.fail("not started"),
+    },
+  });
+  host.start({ PEEPS_ENVIRONMENT: "staging", PEEPS_BASE_URL: secretUrl, BASE_URL: secretUrl });
+  // Peeps sent the URL, so the tool result may carry it; the job log may not.
+  assert.match(textOf(await host.handlers.device_back!({})), /could not start/);
+  await host.close("test over");
+  assert.deepEqual(seen, { PEEPS_ENVIRONMENT: "staging", PEEPS_BASE_URL: secretUrl, BASE_URL: secretUrl });
+  const logged = lines.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(logged, /device session could not start: config failed to load against <unreadable URL>/);
+  assert.equal(logged.includes("p@ss"), false);
+});

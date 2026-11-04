@@ -32,13 +32,17 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { constants, createReadStream } from "node:fs";
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { runAppiumTests, type WdioRunner } from "./appium";
 import type { RunnerEnv } from "./env";
+import { jsonReportTarget } from "./playwright-json";
 import { resolveFramework } from "./pytest";
+import { RUN_TESTS_HOOK, redactHttpCalls, runPytestTool } from "./pytest-run-tool";
 
 const execFileAsync = promisify(execFile);
 
@@ -53,6 +57,8 @@ export type ToolHandler = (args: Record<string, unknown>) => Promise<unknown>;
 export interface ToolServer {
   specs: ToolSpec[];
   handlers: Record<string, ToolHandler>;
+  /** What every process `run_tests` starts gets on top of the job's environment. */
+  setTestEnv: (vars: Record<string, string>) => void;
 }
 
 const MAX_FILE_BYTES = 512 * 1024;
@@ -61,7 +67,8 @@ const MAX_GREP_MATCHES = 500;
 const MAX_PATTERN_CHARS = 500;
 const DENY_SEGMENTS = new Set([".git", "node_modules"]);
 
-class ToolError extends Error {}
+/** A refusal the agent sees as the tool's error: a clear message, nothing raw. */
+export class ToolError extends Error {}
 
 function str(args: Record<string, unknown>, key: string, required = true): string {
   const v = args[key];
@@ -100,6 +107,12 @@ export function jailForWrite(workspace: string, relative: string): string {
   const rel = path.relative(workspace, abs).split(path.sep).join("/");
   if (isCiConfiguration(rel)) {
     throw new ToolError(`workflow files are not writable by Peeps: ${relative}`);
+  }
+  // The customer's own hooks (`.peeps/run-tests` runs a heal's verification):
+  // a heal that could rewrite them could change what verifies it.
+  const folded = rel.toLowerCase();
+  if (folded === ".peeps" || folded.startsWith(".peeps/")) {
+    throw new ToolError(`.peeps/ holds your own hooks and is not writable by Peeps: ${relative}`);
   }
   return abs;
 }
@@ -189,13 +202,20 @@ export async function ensureParentDirInside(workspace: string, abs: string): Pro
  * rather than risk mis-decoding a path this is about to security-check, that is
  * refused outright.
  */
+/**
+ * The files `grep` reads: source, config and docs of a Playwright or a pytest
+ * suite. A Python suite's tests and helpers were invisible to it before.
+ */
+const GREP_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml|py|pyi|toml|ini|cfg)$/;
+
 export async function patchPaths(
   runGit: (args: string[]) => Promise<{ stdout: string }>,
   patchFile: string,
 ): Promise<string[]> {
   let stdout: string;
   try {
-    ({ stdout } = await runGit(["apply", "--numstat", patchFile]));
+    // `--recount` as apply uses it: a model miscounts hunk lines.
+    ({ stdout } = await runGit(["apply", "--recount", "--numstat", patchFile]));
   } catch (error) {
     const e = error as { stderr?: string; message: string };
     throw new ToolError(`patch is not a valid diff: ${(e.stderr ?? e.message).slice(0, 500)}`);
@@ -227,6 +247,203 @@ function renameSides(field: string): string[] {
   }
   const [oldPath = "", newPath = ""] = field.split(" => ");
   return [oldPath, newPath];
+}
+
+/**
+ * One changed file in `git_status`'s `files`.
+ *
+ * `kind` says what is in the working tree at `path` now: a regular `file`,
+ * nothing (`deleted`), a `symlink`, something `other` (a directory, e.g. a
+ * nested repository), or a path the tools may not touch (`off_limits`, e.g.
+ * `.env.local`: listed so the change is visible, never hashed).
+ *
+ * No symlink is followed, as the last component or as a leading directory: it
+ * can point anywhere on the runner, and git does not look through one either.
+ * A path under a symlinked directory is `symlink`, or `off_limits` when that
+ * directory leads out of the workspace.
+ *
+ * `sha256` is the lowercase hex sha256 of a `file`'s bytes, and null for every
+ * other kind. A `file` can also have a null `sha256`, with `reason` saying why
+ * (unreadable, over the size cap, past the time budget). `from` is a rename's
+ * or copy's source.
+ */
+export interface ChangedFile {
+  path: string;
+  /** git's porcelain XY code, e.g. `??`, ` M`, `D `, `R `. */
+  status: string;
+  kind: "file" | "deleted" | "symlink" | "other" | "off_limits";
+  sha256: string | null;
+  from?: string;
+  reason?: string;
+}
+
+type RunGit = (
+  args: string[],
+  options?: { maxBuffer?: number; timeout?: number },
+) => Promise<{ stdout: string }>;
+
+/** Larger files are listed but not hashed. The agent's own writes are capped at 512 KB. */
+const MAX_HASH_BYTES = 5 * 1024 * 1024;
+/** Peeps gives `git_status` 60 s; the digests get a third of it. */
+const DIGEST_BUDGET_MS = 20_000;
+
+/**
+ * Every changed file, one entry per file, for Peeps to check the writes it
+ * made against what is really in the tree (and to refuse a change it cannot
+ * account for, such as a file a test run rewrote).
+ *
+ * `-z` so paths arrive unquoted and exact, and `--untracked-files=all` so a
+ * new directory is listed file by file rather than collapsed to `dir/`.
+ *
+ * Throws only when the listing itself fails (too big for its buffer, or too
+ * slow); `git_status` then leaves `files` out. Each file's digest is best
+ * effort.
+ */
+export async function changedFilesWithDigests(
+  workspace: string,
+  runGit: RunGit,
+  limits: { maxHashBytes?: number; budgetMs?: number } = {},
+): Promise<{ files: ChangedFile[]; truncated: boolean }> {
+  const started = Date.now();
+  const { stdout } = await runGit(
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    { maxBuffer: 8 * 1024 * 1024, timeout: DIGEST_BUDGET_MS },
+  );
+  const fields = stdout.split("\0");
+  const files: ChangedFile[] = [];
+  let truncated = false;
+  const realWorkspace = await realpath(workspace);
+  const hashing = {
+    maxBytes: limits.maxHashBytes ?? MAX_HASH_BYTES,
+    outOfTime: () => Date.now() - started >= (limits.budgetMs ?? DIGEST_BUDGET_MS),
+  };
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i]!;
+    if (field.length < 4) continue;
+    if (files.length >= MAX_LIST) {
+      truncated = true;
+      break;
+    }
+    const status = field.slice(0, 2);
+    const entry: ChangedFile = { path: field.slice(3), status, kind: "other", sha256: null };
+    // A rename or copy is followed by its source, as its own field.
+    if (status.includes("R") || status.includes("C")) entry.from = fields[++i];
+    Object.assign(entry, await digestOf(workspace, realWorkspace, entry.path, hashing));
+    files.push(entry);
+  }
+  return { files, truncated };
+}
+
+function errorCode(error: unknown): string {
+  return (error as { code?: string }).code ?? String(error).slice(0, 100);
+}
+
+async function digestOf(
+  workspace: string,
+  realWorkspace: string,
+  relative: string,
+  hashing: { maxBytes: number; outOfTime: () => boolean },
+): Promise<Pick<ChangedFile, "kind" | "sha256" | "reason">> {
+  let abs: string;
+  try {
+    abs = jail(workspace, relative);
+  } catch {
+    return { kind: "off_limits", sha256: null };
+  }
+  // `jail` is lexical and `lstat` follows symlinks in the leading
+  // directories, so resolve the parent and require it to be exactly where the
+  // path says: otherwise a directory replaced by a symlink would have a file
+  // outside the workspace hashed under this path.
+  const parent = path.dirname(abs);
+  let realParent: string;
+  try {
+    realParent = await realpath(parent);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "deleted", sha256: null };
+    return { kind: "other", sha256: null, reason: `parent unreadable: ${code}` };
+  }
+  const resolved = path.relative(realWorkspace, realParent);
+  if (resolved !== path.relative(workspace, parent)) {
+    return resolved.startsWith("..") || path.isAbsolute(resolved)
+      ? { kind: "off_limits", sha256: null, reason: "under a symlinked directory that leads out of the workspace" }
+      : { kind: "symlink", sha256: null, reason: "under a symlinked directory" };
+  }
+  let info;
+  try {
+    info = await lstat(abs);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT") return { kind: "deleted", sha256: null };
+    return { kind: "other", sha256: null, reason: `unreadable: ${code}` };
+  }
+  if (info.isSymbolicLink()) return { kind: "symlink", sha256: null };
+  if (!info.isFile()) return { kind: "other", sha256: null };
+  if (info.size > hashing.maxBytes) {
+    return { kind: "file", sha256: null, reason: `larger than ${hashing.maxBytes} bytes` };
+  }
+  if (hashing.outOfTime()) return { kind: "file", sha256: null, reason: "time budget for digests spent" };
+  try {
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(abs)) hash.update(chunk as Buffer);
+    return { kind: "file", sha256: hash.digest("hex") };
+  } catch (error) {
+    return { kind: "file", sha256: null, reason: `unreadable: ${errorCode(error)}` };
+  }
+}
+
+const MAX_COMMIT_PATHS = 200;
+
+/**
+ * `git_commit_push`'s `paths`, checked and normalized to repo-relative form.
+ *
+ * Each goes through the same jail as a write (no `..`, absolute paths, `.git`,
+ * `node_modules`, `.env*` or CI configuration), and no symlink: neither the
+ * path itself nor any directory above it, since committing through one would
+ * commit something other than the file the path names. A directory is
+ * refused too: `git add` would take everything under it. Any bad path
+ * refuses the whole call.
+ */
+export async function commitPaths(workspace: string, value: unknown): Promise<string[]> {
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > MAX_COMMIT_PATHS ||
+    !value.every((p) => typeof p === "string" && p.length > 0)
+  ) {
+    throw new ToolError(`argument "paths" must be an array of 1 to ${MAX_COMMIT_PATHS} non-empty strings`);
+  }
+  const realWorkspace = await realpath(workspace);
+  const out = new Set<string>();
+  for (const relative of value as string[]) {
+    // `jail` re-roots a leading slash; here an absolute path is a caller bug
+    // to refuse, not a path to guess at.
+    if (path.isAbsolute(relative) || /^[\\/]/.test(relative) || /^[A-Za-z]:/.test(relative)) {
+      throw new ToolError(`path must be repo-relative, not absolute: ${relative}`);
+    }
+    const abs = jailForWrite(workspace, relative);
+    const info = await lstat(abs).catch(() => null);
+    if (info?.isSymbolicLink()) throw new ToolError(`path is a symlink: ${relative}`);
+    if (info?.isDirectory()) throw new ToolError(`path is a directory, not a file: ${relative}`);
+    // The path itself if it exists, else the deepest directory above it that
+    // does, must resolve to exactly where the path says. Otherwise a symlinked
+    // directory is in the way, or (on a case-insensitive filesystem) the path
+    // names an existing file in another case.
+    let existing = info ? abs : path.dirname(abs);
+    for (;;) {
+      const found = await lstat(existing).then(() => true, () => false);
+      if (found || path.dirname(existing) === existing) break;
+      existing = path.dirname(existing);
+    }
+    const real = await realpath(existing).catch(() => null);
+    if (real === null || path.relative(realWorkspace, real) !== path.relative(workspace, existing)) {
+      throw new ToolError(
+        `path does not resolve to itself (it is under a symlinked directory, or differs in case): ${relative}`,
+      );
+    }
+    out.add(path.relative(workspace, abs).split(path.sep).join("/"));
+  }
+  return [...out];
 }
 
 /**
@@ -294,6 +511,12 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
   const workspace = env.workspace;
   const redact = makeRedactor(process.env);
 
+  // The Peeps environment, known only once the session has attached. Handed to
+  // each test process and never written to `process.env`: the redactor masks
+  // the job's environment values, and an environment called "production" is
+  // not a secret to cut out of test titles.
+  let testEnv: Record<string, string> = {};
+
   /**
    * Every git call here goes through this, so each one carries
    * `-c safe.directory=<workspace>`.
@@ -307,11 +530,20 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
    * Peeps run forever. A per-invocation `-c` trusts exactly this path for
    * exactly this process.
    */
-  const runGit = (args: string[], options: { maxBuffer?: number } = {}) =>
+  const runGit = (args: string[], options: { maxBuffer?: number; timeout?: number } = {}) =>
     execFileAsync("git", ["-c", `safe.directory=${workspace}`, ...args], {
       cwd: workspace,
       ...options,
     });
+
+  // The commit under test, read before any tool can move HEAD:
+  // `git_commit_push` commits before it pushes (and keeps the commit when the
+  // push fails), so HEAD alone would let a heal's own commit vouch for a
+  // `.peeps/run-tests` it rewrote.
+  const commitUnderTest: Promise<string | null> = runGit(["rev-parse", "HEAD"]).then(
+    (r) => r.stdout.trim() || null,
+    () => null,
+  );
 
   const handlers: Record<string, ToolHandler> = {
     async read_file(args) {
@@ -366,7 +598,7 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
       const listed = (await handlers.list_files!({ path: str(args, "path", false) || "." })) as { files: string[] };
       for (const rel of listed.files) {
         if (matches.length >= MAX_GREP_MATCHES) break;
-        if (!/\.(ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml)$/.test(rel)) continue;
+        if (!GREP_FILE.test(rel)) continue;
         let text: string;
         try {
           // Jailed rather than joined: `rel` comes from `list_files`, which
@@ -378,7 +610,7 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
         }
         const lines = text.split("\n");
         for (let i = 0; i < lines.length && matches.length < MAX_GREP_MATCHES; i++) {
-          if (pattern.test(lines[i]!)) matches.push({ path: rel, line: i + 1, text: redact(lines[i]!.slice(0, 300)) });
+          if (pattern.test(lines[i]!)) matches.push({ path: redact(rel), line: i + 1, text: redact(lines[i]!.slice(0, 300)) });
         }
       }
       return { matches, truncated: matches.length >= MAX_GREP_MATCHES };
@@ -399,7 +631,8 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
       const patch = str(args, "patch");
       const dir = await mkdtemp(path.join(tmpdir(), "peeps-patch-"));
       const file = path.join(dir, "change.patch");
-      await writeFile(file, patch, "utf8");
+      // A model's diff often ends without a newline, which git calls corrupt.
+      await writeFile(file, patch.endsWith("\n") ? patch : `${patch}\n`, "utf8");
       // Jail every path the patch touches, the same way `write_file` jails its
       // one path. Without this, `apply_patch` was the hole in the deny-list:
       // git refuses `..` and `.git` on its own, but `.env`, `.env.local` and
@@ -410,7 +643,7 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
         jailForWrite(workspace, touched);
       }
       try {
-        await runGit(["apply", "--whitespace=nowarn", file]);
+        await runGit(["apply", "--recount", "--whitespace=nowarn", file]);
       } catch (error) {
         const e = error as { stderr?: string; message: string };
         // Redacted: `git apply` echoes patch context, which is file content.
@@ -425,6 +658,60 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
 
     async run_tests(args) {
       const file = str(args, "file");
+      if (resolveFramework(env) === "pytest") {
+        const ran = await runPytestTool(env, {
+          fileAbs: jail(workspace, file),
+          titlePath: typeof args.test === "string" && args.test ? args.test : null,
+          keyword: typeof args.grep === "string" && args.grep ? args.grep : null,
+          browser: typeof args.project === "string" && args.project ? args.project : null,
+          extraEnv: testEnv,
+          hook: async (scratchDir) => {
+            const sha = await commitUnderTest;
+            if (!sha) return { kind: "none" };
+            const listed = await runGit(["ls-tree", sha, "--", RUN_TESTS_HOOK]);
+            if (!listed.stdout.startsWith("100755 blob ")) return { kind: "none" };
+            // The agent's writes are refused under .peeps/; this catches one
+            // that reached it another way (through a symlink, say), since a
+            // hook may read its own files from the checkout.
+            try {
+              await runGit(["diff", "--quiet", sha, "--", ".peeps"]);
+              const untracked = await runGit(["ls-files", "--others", "--", ".peeps"]);
+              if (untracked.stdout.trim() !== "") return { kind: "changed" };
+            } catch {
+              return { kind: "changed" };
+            }
+            // What runs is a copy out of the commit, so nothing written to the
+            // checkout after that check reaches it.
+            const archive = path.join(scratchDir, "peeps.tar");
+            const copy = path.join(scratchDir, "hook");
+            await mkdir(copy);
+            await runGit(["archive", "--format=tar", "-o", archive, sha, ".peeps"]);
+            await execFileAsync("tar", ["-xf", archive, "-C", copy]);
+            return { kind: "ready", path: path.join(copy, RUN_TESTS_HOOK) };
+          },
+        });
+        return {
+          ...ran,
+          // Redacted whole, then cut, so no secret is split past the redactor.
+          pendingNote: ran.pendingNote === null ? null : redact(ran.pendingNote).slice(0, 500),
+          results:
+            ran.results?.map((r) => {
+              const title = redact(r.title);
+              const file = redact(r.file);
+              // A changed title or file says so, so Peeps knows it is not the real name.
+              return {
+                ...r,
+                title,
+                ...(title === r.title ? {} : { titleRedacted: true }),
+                file,
+                ...(file === r.file ? {} : { fileRedacted: true }),
+                ...(r.error ? { error: redact(r.error) } : {}),
+                ...(r.httpExchanges ? { httpExchanges: redactHttpCalls(r.httpExchanges, redact) } : {}),
+              };
+            }) ?? null,
+          outputTail: redact(ran.outputTail),
+        };
+      }
       // `file` arrives repo-relative and is jailed against the workspace, but
       // Playwright runs with `workingDirectory` as its cwd. In any monorepo
       // those differ, and passing the repo-relative path straight through made
@@ -432,37 +719,52 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
       // found" — a confusing success. Re-express it relative to the cwd.
       const abs = jail(workspace, file);
       // An Appium suite runs under WebdriverIO, through the same wrapper
-      // config `run` mode uses, and answers in this same shape. A pytest
-      // repository keeps the Playwright path below, as it always had.
+      // config `run` mode uses, and answers in this same shape, in the
+      // session's Peeps environment like every other test process.
       if (resolveFramework(env) === "appium") {
         return runAppiumTests(
           env,
-          { file: abs, grep: typeof args.grep === "string" && args.grep ? args.grep : undefined },
+          { file: abs, grep: typeof args.grep === "string" && args.grep ? args.grep : undefined, extraEnv: testEnv },
           { redact, runner: deps.appiumRunner },
         );
       }
       const rel = path.relative(env.workingDirectory, abs).split(path.sep).join("/");
+      const project = typeof args.project === "string" && args.project ? args.project : null;
+      // A teardown runs only after the project it tears down: alone it starts
+      // from nothing (no sign-in, no record to remove), so every heal of a
+      // cleanup failed where the cleanup never fails in CI. It runs under its
+      // owner instead, which brings the owner's dependencies too. Nothing may
+      // narrow that run: a file or grep that leaves the owner out drops it,
+      // and Playwright then runs the teardown alone again.
+      const owners = project ? teardownOwners(await projectGraph(env, runCapture, testEnv), project) : [];
       const cmd = ["playwright", "test", "--reporter=json"];
-      if (typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
-      if (typeof args.project === "string" && args.project) cmd.push("--project", args.project);
+      if (owners.length === 0 && typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
+      for (const p of owners.length > 0 ? owners : project ? [project] : []) cmd.push("--project", p);
       if (env.configPath) cmd.push("--config", env.configPath);
       // `--` last, so a path that begins with a dash is a file argument and not
       // an option Playwright would honour.
-      cmd.push("--", rel);
+      if (owners.length === 0) cmd.push("--", rel);
       const started = Date.now();
-      const { code, stdout, stderr } = await runCapture("npx", cmd, env.workingDirectory, 10 * 60 * 1000);
+      const target = await jsonReportTarget();
+      let run: { code: number; stdout: string; stderr: string };
       let report: unknown = null;
       try {
-        report = JSON.parse(stdout);
-      } catch {
-        // Not JSON: Playwright failed before running (config error, syntax error).
+        run = await runCapture("npx", cmd, env.workingDirectory, 10 * 60 * 1000, { ...testEnv, ...target.env });
+        // No report: Playwright failed before running (config error, syntax error).
+        report = await target.read(run.stdout);
+      } finally {
+        await target.cleanup();
       }
+      const { code, stdout, stderr } = run;
       return {
         exitCode: code,
         durationMs: Date.now() - started,
-        results: summarizeReport(report),
+        results: await playwrightResults(report, env, redact),
         stderr: redact(stderr.slice(-8000)),
         stdoutTail: report ? undefined : redact(stdout.slice(-4000)),
+        // Says the run was wider than asked, and why, so the results of the
+        // owner's tests are not read as the target's.
+        ...(owners.length > 0 ? { ranUnder: { projects: owners.map(redact), reason: "teardown" as const } } : {}),
       };
     },
 
@@ -470,7 +772,26 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
       const { stdout } = await runGit(["status", "--porcelain"]);
       // Redacted like every other result: a path can carry a secret (a branch
       // or fixture named after one), and `git_diff` next door already did this.
-      return { changedFiles: stdout.trim().split("\n").filter(Boolean).map(redact) };
+      // As before, for every Peeps server that reads only this.
+      const changedFiles = stdout.trim().split("\n").filter(Boolean).map(redact);
+      // `files` is additive and must never cost a caller `changedFiles`: when
+      // the listing fails, it is left out and the failure said.
+      let digests;
+      try {
+        digests = await changedFilesWithDigests(workspace, runGit);
+      } catch (error) {
+        const e = error as { message?: string };
+        return { changedFiles, filesTruncated: true, filesError: redact(String(e.message ?? error).slice(0, 300)) };
+      }
+      return {
+        changedFiles,
+        files: digests.files.map((f) => ({
+          ...f,
+          path: redact(f.path),
+          ...(f.from === undefined ? {} : { from: redact(f.from) }),
+        })),
+        filesTruncated: digests.truncated,
+      };
     },
 
     async git_diff() {
@@ -483,12 +804,67 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
       const message = str(args, "message");
       const token = str(args, "token");
       if (!branch.startsWith("peeps/")) throw new ToolError("branch must start with peeps/");
+      // HEAD is read before this commit can move it (see `commitUnderTest`).
+      await commitUnderTest;
+      // Checked in full before anything is touched: one bad path refuses the
+      // call. They pass `jailForWrite`, so `.peeps/` (the customer's own
+      // hooks, which verify a heal) can never be listed.
+      const paths = args.paths === undefined ? null : await commitPaths(workspace, args.paths);
       const remote = await runGit(["remote", "get-url", "origin"]);
       const url = authenticatedPushUrl(remote.stdout, token, env.platform);
       // Via `runGit`, so these carry `-c safe.directory` like every other git
       // call: inside the Playwright container the checkout is owned by another
       // uid and git refuses to touch it without that.
       const git = (...a: string[]) => runGit(a);
+      // Literal pathspecs everywhere a listed path is passed: a `*` is a
+      // character, not a pattern, and `:(…)` is not magic.
+      const lit = (...a: string[]) => runGit(["--literal-pathspecs", ...a], { maxBuffer: 8 * 1024 * 1024 });
+      /** git's own words only, never the command line (it holds the workspace path). */
+      const gitSaid = (error: unknown) => {
+        const e = error as { stderr?: string; stdout?: string };
+        return redact(maskUrlCredentials(`${e.stderr ?? ""}${e.stdout ?? ""}`.trim())).slice(-500);
+      };
+
+      let skippedPaths: string[] = [];
+      let stage: string[] = [];
+      // What `git add` is given: paths in the tree or the index. A deletion
+      // already staged is in neither (git add would refuse it as unmatched),
+      // yet `commit --only` still commits it, matching it against HEAD.
+      let add: string[] = [];
+      if (paths !== null) {
+        try {
+          // Tracked = in the index OR in HEAD, so a deletion already staged
+          // (gone from both the tree and the index) still counts.
+          const tracked = new Set(
+            (await lit("ls-files", "-z", "--with-tree=HEAD", "--", ...paths)).stdout.split("\0").filter(Boolean),
+          );
+          const present = await Promise.all(
+            paths.map((p) => lstat(path.join(workspace, p)).then(() => true, () => false)),
+          );
+          const indexed = new Set(
+            (await lit("ls-files", "-z", "--", ...paths)).stdout.split("\0").filter(Boolean),
+          );
+          stage = paths.filter((p, i) => present[i] || tracked.has(p));
+          add = paths.filter((p, i) => present[i] || indexed.has(p));
+          // A listed path with nothing to stage: one the heal wrote and then
+          // removed. Dropped, and named, so a caller can tell it from a change.
+          skippedPaths = paths.filter((p) => !stage.includes(p));
+          if (stage.length > 0) {
+            const ignored = (await lit("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...stage))
+              .stdout.split("\0").filter(Boolean);
+            if (ignored.length > 0) {
+              throw new ToolError(`path is not committed because it is ignored by .gitignore: ${ignored.slice(0, 10).map(redact).join(", ")}`);
+            }
+          }
+        } catch (error) {
+          if (error instanceof ToolError) throw error;
+          throw new ToolError(`could not read the listed paths' state: ${gitSaid(error)}`);
+        }
+        if (stage.length === 0) {
+          throw new ToolError(`nothing to commit? none of the listed paths exists or is tracked: ${skippedPaths.slice(0, 10).map(redact).join(", ")}`);
+        }
+      }
+
       await git("config", "user.name", "peeps[bot]");
       await git(
         "config",
@@ -496,12 +872,84 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
         env.platform === "gitlab" ? "peeps-bot@noreply.peepsai.com" : "peeps[bot]@users.noreply.github.com",
       );
       await git("checkout", "-B", branch);
-      // Everything, except a temporary WebdriverIO config a cancelled run_tests
-      // may have left beside the customer's (`.peeps-<id>.wdio.conf.mts`).
-      await git("add", "-A", "--", ".", ":(exclude,glob)**/.peeps-*.wdio.conf.*");
-      const commit = await git("commit", "-m", message).catch((e: { stderr?: string }) => {
-        throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
-      });
+      let commit;
+      if (paths === null) {
+        // Everything, except a temporary WebdriverIO config a cancelled run_tests
+        // may have left beside the customer's (`.peeps-<id>.wdio.conf.mts`).
+        await git("add", "-A", "--", ".", ":(exclude,glob)**/.peeps-*.wdio.conf.*");
+        commit = await git("commit", "-m", message).catch((e: { stderr?: string }) => {
+          throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
+        });
+      } else {
+        // Undo this call's staging: the listed paths, and anything a hook or
+        // a pathspec added beside them.
+        const unstage = (extra: string[] = []) => lit("reset", "-q", "--", ...stage, ...extra).catch(() => undefined);
+        // The commit this call builds on, to undo back to: a post-commit hook
+        // can add commits of its own, so `HEAD~1` is not necessarily it.
+        const base = (await git("rev-parse", "HEAD")).stdout.trim();
+        try {
+          // `add -A` stages a listed deletion; `commit --only` commits those
+          // paths and nothing else already staged. The customer's hooks run.
+          if (add.length > 0) await lit("add", "-A", "--", ...add);
+          commit = await lit("commit", "-m", message, "--only", "--", ...stage);
+        } catch (error) {
+          await unstage();
+          const said = gitSaid(error);
+          if (/did not match/.test(said)) {
+            throw new ToolError(
+              `a listed path did not match a file git knows (a different case, or a file in a nested repository): ${said}`,
+            );
+          }
+          if (/nothing to commit|nothing added to commit|no changes added to commit/.test(said)) {
+            throw new ToolError(`nothing to commit? ${said}`);
+          }
+          throw new ToolError(
+            `git commit refused: ${said || "no output from git or a commit hook (a hook such as pre-commit may have failed)"}`,
+          );
+        }
+        // Before anything leaves the runner: the commit must hold the listed
+        // paths and nothing else. A pre-commit hook that runs `git add`, or a
+        // listed file that replaced a tracked folder (whose files' deletions
+        // the pathspec then matches), would otherwise be pushed.
+        const listed = new Set(stage);
+        // Everything between the base and HEAD, so a commit a hook added
+        // after ours is counted too.
+        let contains: string[] | null = null;
+        let oneCommit = false;
+        try {
+          oneCommit = (await git("rev-parse", "HEAD~1")).stdout.trim() === base;
+          contains = await commitContents(base);
+        } catch {
+          // Unknown contents are treated as unlisted ones.
+        }
+        const unlisted = (contains ?? []).filter((p) => !listed.has(p));
+        if (contains === null || unlisted.length > 0 || !oneCommit) {
+          await git("reset", "-q", "--soft", base).catch(() => undefined);
+          await unstage(unlisted);
+          if (contains === null) {
+            throw new ToolError("the commit could not be listed, so it is not pushed; the commit was undone");
+          }
+          if (unlisted.length > 0) {
+            throw new ToolError(
+              `the commit holds paths that were not listed: ${unlisted.slice(0, 10).map(redact).join(", ")}` +
+                `${unlisted.length > 10 ? ` and ${unlisted.length - 10} more` : ""}` +
+                " (a commit hook staged or committed them, or a listed file replaced a folder); nothing was pushed",
+            );
+          }
+          throw new ToolError("a commit hook made another commit after this one; both were undone and nothing was pushed");
+        }
+      }
+      // What the commit contains, read before the push so a failure here can
+      // never follow a push that happened. Relative to the workspace, the
+      // base `paths` uses.
+      let committed: string[] = [];
+      let committedPathsTruncated = false;
+      try {
+        committed = await commitContents();
+      } catch {
+        committedPathsTruncated = true;
+      }
+      if (committed.length > MAX_COMMIT_PATHS) committedPathsTruncated = true;
       // actions/checkout persists the job's GITHUB_TOKEN as an `http.extraheader`
       // Authorization header, which git sends INSTEAD of the credentials in the
       // URL — and that token is usually `contents: read`. Blank the header for
@@ -519,9 +967,34 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
         throw new ToolError(`git push refused: ${stderr.slice(-600)}`);
       });
       const sha = (await git("rev-parse", "HEAD")).stdout.trim();
-      return { branch, sha, summary: redact(commit.stdout.split("\n")[0] ?? "") };
+      return {
+        branch,
+        sha,
+        summary: redact(commit.stdout.split("\n")[0] ?? ""),
+        committedPaths: committed.slice(0, MAX_COMMIT_PATHS).map(redact),
+        ...(committedPathsTruncated ? { committedPathsTruncated: true } : {}),
+        ...(paths === null ? {} : { skippedPaths: skippedPaths.map(redact) }),
+      };
     },
   };
+
+  /**
+   * The paths HEAD's commit changes (or, with `since`, every commit after
+   * that one), relative to the workspace. git names them from the
+   * repository's top level; a workspace below it (rare)
+   * gets them re-based, so a path outside the workspace reads `../…`.
+   */
+  async function commitContents(since?: string): Promise<string[]> {
+    const prefix = (await runGit(["rev-parse", "--show-prefix"])).stdout.trim().replace(/\/+$/, "");
+    // `--no-renames`: a rename is its deletion and its addition, both named.
+    const { stdout } = await runGit(
+      since
+        ? ["diff", "--name-only", "--no-renames", "-z", since, "HEAD"]
+        : ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"],
+      { maxBuffer: 8 * 1024 * 1024 },
+    );
+    return stdout.split("\0").filter(Boolean).map((p) => (prefix ? path.posix.relative(prefix, p) : p));
+  }
 
   const specs: ToolSpec[] = [
     { name: "read_file", description: "Read a file in the repository (repo-relative path). Up to 512 KB.", inputSchema: obj({ path: s("Repo-relative path") }, ["path"]) },
@@ -529,13 +1002,19 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
     { name: "grep", description: "Search source files for a regular expression; returns matching lines.", inputSchema: obj({ pattern: s("JavaScript regular expression"), path: s("Repo-relative directory to search; default the root"), ignoreCase: { type: "boolean" } }, ["pattern"]) },
     { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
     { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
-    { name: "run_tests", description: "Run one spec file with the repository's own config (Playwright; WebdriverIO for an Appium suite); optionally filter by a grep regular expression over the test's full title, or by Playwright project. Returns per-test results and errors (Appium: plus a failure's evidence paths and page source).", inputSchema: obj({ file: s("Repo-relative spec path"), grep: s("Optional --grep regular expression"), project: s("Optional Playwright project name (ignored for Appium)") }, ["file"]) },
-    { name: "git_status", description: "Files changed in the working tree.", inputSchema: obj({}, []) },
+    { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec; in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one); in an Appium suite a WebdriverIO spec. Optionally narrow it: Playwright and Appium by grep (a regular expression over the test's full title), Playwright also by project; pytest by test (the title path, e.g. TestClass › test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors; a failing Playwright test also carries what it printed (output), a failing pytest test the HTTP calls it made through requests or httpx (httpExchanges, the last one usually the failing call), and a failing Appium test its evidence paths and page source.", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright or Appium --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name (ignored for Appium)"), test: s("Optional pytest title path of one test, scopes joined by ' › '") }, ["file"]) },
+    { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
-    { name: "git_commit_push", description: "Commit every change on a new peeps/* branch and push it, using the token Peeps provides for this call.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push") }, ["branch", "message", "token"]) },
+    { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) },
   ];
 
-  return { specs, handlers };
+  return {
+    specs,
+    handlers,
+    setTestEnv: (vars) => {
+      testEnv = vars;
+    },
+  };
 }
 
 function obj(properties: Record<string, unknown>, required: string[]): Record<string, unknown> {
@@ -545,20 +1024,234 @@ function s(description: string) {
   return { type: "string", description };
 }
 
-function summarizeReport(report: unknown) {
+/** What `error-context.md` a failed result carries, at most (PQA-2737). */
+export const ERROR_CONTEXT_MAX_BYTES = 16 * 1024;
+/** A larger `error-context.md` is left out: it is read whole or not at all. */
+export const ERROR_CONTEXT_MAX_READ_BYTES = 1024 * 1024;
+/**
+ * All the `errorContext` one `run_tests` answer carries. Peeps refuses a tool
+ * result over 512 KB whole, so 40 failures at 16 KB each would cost the agent
+ * every status; failures past this get `errorContextOmitted: true`.
+ */
+export const ERROR_CONTEXT_TOTAL_BYTES = 128 * 1024;
+/**
+ * A Playwright `run_tests` answer's `results`, serialized, at most: what
+ * remains over it after the budget (long control-character errors, say) is
+ * paid by dropping `errorContext` from the latest results.
+ */
+export const RUN_TESTS_RESULT_MAX_BYTES = 400 * 1024;
+
+/** A string's size as JSON sends it: control characters cost six bytes. */
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value));
+}
+
+/**
+ * Playwright's `error-context.md` for a failed test: the error, the test's
+ * source and, when the test had a page, the page's ARIA snapshot at the
+ * failure. Its path comes from the report, and a spec can attach any path as
+ * "error-context", so it is read only when it is a regular file (never a
+ * symlink) named `error-context.md` whose real path is inside one of
+ * `allowedRoots` (the workspace and the projects' output directories).
+ *
+ * Read whole and redacted whole, never a partial read (a secret cut by the
+ * read would reach the result as an unmasked prefix), so a file over
+ * `ERROR_CONTEXT_MAX_READ_BYTES` is "too_large". Playwright's "# Instructions"
+ * preamble, a prompt written for another assistant, is dropped. Then the text
+ * is cut to `ERROR_CONTEXT_MAX_BYTES` at a character boundary.
+ */
+export async function readErrorContext(
+  file: string,
+  redact: (text: string) => string,
+  allowedRoots: string[],
+): Promise<{ text: string; truncated: boolean } | "too_large" | null> {
+  if (path.basename(file) !== "error-context.md") return null;
+  let handle;
+  try {
+    if (!(await lstat(file)).isFile()) return null;
+    const real = await realpath(file);
+    const roots = await Promise.all(allowedRoots.map((r) => realpath(r).catch(() => null)));
+    const inside = roots.some((root) => {
+      if (root === null) return false;
+      const rel = path.relative(root, real);
+      return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+    });
+    if (!inside) return null;
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Checked again on what was opened, so a swap after the lstat is caught.
+    const info = await handle.stat();
+    if (!info.isFile()) return null;
+    if (info.size > ERROR_CONTEXT_MAX_READ_BYTES) return "too_large";
+    const raw = await handle.readFile();
+    if (raw.length > ERROR_CONTEXT_MAX_READ_BYTES) return "too_large";
+    let text = raw.toString("utf8");
+    if (text.startsWith("# Instructions\n")) {
+      const next = text.indexOf("\n# ");
+      // Nothing after the preamble: no context at all.
+      if (next === -1) return null;
+      text = text.slice(next + 1);
+    }
+    const bytes = Buffer.from(redact(text), "utf8");
+    if (bytes.length <= ERROR_CONTEXT_MAX_BYTES) return { text: bytes.toString("utf8"), truncated: false };
+    let end = ERROR_CONTEXT_MAX_BYTES;
+    // Back off continuation bytes (10xxxxxx) to the start of a character.
+    while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+    return { text: bytes.subarray(0, end).toString("utf8"), truncated: true };
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
+  }
+}
+
+type ReportAttachment = { name?: string; path?: string };
+type ReportResult = {
+  status: string;
+  retry?: number;
+  error?: { message?: string; snippet?: string };
+  attachments?: ReportAttachment[];
+  stdout?: Array<{ text?: string; buffer?: string }>;
+};
+type SummarizedTest = {
+  title: string;
+  titleRedacted?: true;
+  file?: string;
+  fileRedacted?: true;
+  line: number;
+  status: string;
+  retry?: number;
+  error?: string;
+  errorSnippet?: string;
+  errorContext?: string;
+  errorContextTruncated?: boolean;
+  errorContextOmitted?: true;
+  output?: string;
+};
+type Summary = { test: SummarizedTest; specFile: string; errorContextPath: string | null };
+
+/**
+ * The `results` of a Playwright `run_tests` answer, from its JSON report.
+ *
+ * - `title`, `error` and `errorSnippet` are redacted whole, then cut. A title
+ *   the redactor changed carries `titleRedacted: true`; with `file` and
+ *   `line` it still names its test.
+ * - `file` is the spec relative to the repository root (Playwright names it
+ *   relative to its rootDir, which says nothing about which spec ran in a
+ *   monorepo). Redacted like every path in a result; when that changed it,
+ *   `fileRedacted: true`. Left out when the report names no rootDir or the
+ *   spec lies outside the workspace.
+ * - A failed result carries its `errorContext` (see `readErrorContext`) while
+ *   `ERROR_CONTEXT_TOTAL_BYTES` lasts (counted as JSON sends it), with
+ *   `errorContextTruncated`; past it, or over the read cap, or dropped to keep
+ *   the answer under `RUN_TESTS_RESULT_MAX_BYTES`, `errorContextOmitted: true`.
+ */
+export async function playwrightResults(
+  report: unknown,
+  env: RunnerEnv,
+  redact: (text: string) => string,
+): Promise<SummarizedTest[] | null> {
+  const summaries = summarizeReport(report);
+  if (summaries === null) return null;
+  const config = (report as { config?: { rootDir?: string; projects?: Array<{ outputDir?: string }> } }).config;
+  const rootDir = config?.rootDir;
+  const outputDirs = (config?.projects ?? []).flatMap((p) => (typeof p.outputDir === "string" ? [p.outputDir] : []));
+  const allowedRoots = [env.workspace, ...outputDirs];
+  // Playwright reports real paths, and a workspace may be reached through a
+  // symlink (macOS's /var is /private/var), so both sides are made real.
+  const real = (p: string) => realpath(p).catch(() => p);
+  const workspace = await real(env.workspace);
+  let budget = ERROR_CONTEXT_TOTAL_BYTES;
+  const results: SummarizedTest[] = [];
+  // In order, so the budget goes to the first failures.
+  for (const { test, specFile, errorContextPath } of summaries) {
+    let file: string | null = null;
+    if (typeof rootDir === "string" && specFile !== "") {
+      const rel = path.relative(workspace, await real(path.resolve(rootDir, specFile)));
+      if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) file = rel.split(path.sep).join("/");
+    }
+    let evidence: Partial<SummarizedTest> = {};
+    if (errorContextPath !== null) {
+      const read = budget > 0 ? await readErrorContext(errorContextPath, redact, allowedRoots) : null;
+      if (read === "too_large") {
+        evidence = { errorContextOmitted: true };
+      } else if (read !== null && jsonBytes(read.text) <= budget) {
+        // Counted as sent: JSON escaping, not the raw bytes, meets the cap.
+        budget -= jsonBytes(read.text);
+        evidence = { errorContext: read.text, errorContextTruncated: read.truncated };
+      } else if (read !== null || budget <= 0) {
+        budget = 0;
+        evidence = { errorContextOmitted: true };
+      }
+    }
+    const title = redact(test.title);
+    results.push({
+      ...test,
+      // Redacted whole, then cut, so no secret is split past the redactor.
+      title,
+      ...(title === test.title ? {} : { titleRedacted: true as const }),
+      error: test.error === undefined ? undefined : redact(test.error).slice(0, 2000),
+      errorSnippet: test.errorSnippet === undefined ? undefined : redact(test.errorSnippet).slice(0, 2000),
+      ...(test.output === undefined ? {} : { output: redact(test.output).slice(-TEST_OUTPUT_MAX_CHARS) }),
+      ...(file === null ? {} : { file: redact(file), ...(redact(file) === file ? {} : { fileRedacted: true as const }) }),
+      ...evidence,
+    });
+  }
+  // The last guard: still too large, drop errorContext from the latest results,
+  // then their printed output.
+  let size = jsonBytes(results);
+  for (let i = results.length - 1; i >= 0 && size > RUN_TESTS_RESULT_MAX_BYTES; i--) {
+    const r = results[i]!;
+    if (r.errorContext === undefined) continue;
+    const { errorContext: _dropped, errorContextTruncated: _cut, ...rest } = r;
+    results[i] = { ...rest, errorContextOmitted: true };
+    size = jsonBytes(results);
+  }
+  for (let i = results.length - 1; i >= 0 && size > RUN_TESTS_RESULT_MAX_BYTES; i--) {
+    if (results[i]!.output === undefined) continue;
+    const { output: _dropped, ...rest } = results[i]!;
+    results[i] = rest;
+    size = jsonBytes(results);
+  }
+  return results;
+}
+
+/** At most this much of a failing test's printed output, its tail. */
+export const TEST_OUTPUT_MAX_CHARS = 4000;
+
+function printed(stdout: ReportResult["stdout"]): string | undefined {
+  const text = (stdout ?? [])
+    .map((chunk) => chunk.text ?? (chunk.buffer ? Buffer.from(chunk.buffer, "base64").toString("utf8") : ""))
+    .join("");
+  return text.trim() === "" ? undefined : text;
+}
+
+function summarizeReport(report: unknown): Summary[] | null {
   if (!report || typeof report !== "object" || !("suites" in report)) return null;
-  const tests: Array<{ title: string; file: string; line: number; status: string; error?: string; errorSnippet?: string }> = [];
-  const walk = (suite: { title: string; file?: string; specs?: Array<{ title: string; file: string; line: number; tests?: Array<{ results?: Array<{ status: string; error?: { message?: string; snippet?: string } }> }> }>; suites?: unknown[] }, titles: string[], isFile: boolean) => {
+  const tests: Summary[] = [];
+  const walk = (suite: { title: string; file?: string; specs?: Array<{ title: string; file: string; line: number; tests?: Array<{ results?: ReportResult[] }> }>; suites?: unknown[] }, titles: string[], isFile: boolean) => {
     const next = isFile ? titles : [...titles, suite.title];
     for (const spec of suite.specs ?? []) {
       const last = spec.tests?.[0]?.results?.at(-1);
+      const failed = last !== undefined && last.status !== "passed" && last.status !== "skipped";
+      const context = failed ? last.attachments?.find((a) => a.name === "error-context" && typeof a.path === "string") : undefined;
       tests.push({
-        title: [...next, spec.title].join(" › "),
-        file: spec.file,
-        line: spec.line,
-        status: last?.status ?? "unknown",
-        error: last?.error?.message?.slice(0, 2000),
-        errorSnippet: last?.error?.snippet?.slice(0, 2000),
+        specFile: typeof spec.file === "string" ? spec.file : "",
+        errorContextPath: context?.path ?? null,
+        test: {
+          title: [...next, spec.title].join(" › "),
+          line: spec.line,
+          status: last?.status ?? "unknown",
+          // The final attempt's index (0 = no retry), so a pass after a retry
+          // is not read as a clean one. Absent when Playwright ran no attempt.
+          ...(typeof last?.retry === "number" ? { retry: last.retry } : {}),
+          // Cut to 2000 in `playwrightResults`, after redaction.
+          error: last?.error?.message,
+          errorSnippet: last?.error?.snippet,
+          // What a failing test printed: an API test's probe of the response
+          // it got is the only way to see that response. Cut in
+          // `playwrightResults`, after redaction.
+          ...(failed && printed(last?.stdout) !== undefined ? { output: printed(last?.stdout) } : {}),
+        },
       });
     }
     for (const child of suite.suites ?? []) walk(child as never, next, false);
@@ -567,9 +1260,102 @@ function summarizeReport(report: unknown) {
   return tests;
 }
 
-function runCapture(cmd: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
+/** A Playwright project as its config resolves it: what it waits on, and what tears it down. */
+export interface ProjectEdges {
+  name: string;
+  dependencies: string[];
+  teardown: string | null;
+}
+
+/** Starts the line the graph reporter prints its projects on. */
+const GRAPH_MARKER = "peeps:project-graph:";
+
+/**
+ * Prints each project's edges from `onBegin`. Playwright's JSON report leaves
+ * `dependencies` and `teardown` out of its config, so a reporter of the
+ * action's own reads them from the resolved config. CommonJS, so it loads
+ * whatever module type the customer's package declares.
+ */
+const PROJECT_GRAPH_REPORTER = `
+class PeepsProjectGraph {
+  printsToStdio() { return true; }
+  onBegin(config) {
+    const projects = config.projects.map((p) => ({ name: p.name, dependencies: p.dependencies || [], teardown: p.teardown || null }));
+    process.stdout.write("\\n" + ${JSON.stringify(GRAPH_MARKER)} + JSON.stringify(projects) + "\\n");
+  }
+}
+module.exports = PeepsProjectGraph;
+`;
+
+/**
+ * The config's projects and their edges, from a `--list` run (nothing is
+ * executed but the config itself), or null when the config does not list:
+ * the caller then runs as it was asked.
+ */
+export async function projectGraph(
+  env: RunnerEnv,
+  run: typeof runCapture = runCapture,
+  extraEnv: Record<string, string> = {},
+): Promise<ProjectEdges[] | null> {
+  let dir: string | null = null;
+  try {
+    dir = await mkdtemp(path.join(tmpdir(), "peeps-graph-"));
+    const reporter = path.join(dir, "graph-reporter.cjs");
+    await writeFile(reporter, PROJECT_GRAPH_REPORTER);
+    const cmd = ["playwright", "test", "--list", `--reporter=${reporter}`];
+    if (env.configPath) cmd.push("--config", env.configPath);
+    const { stdout } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1000, extraEnv);
+    const line = stdout.split("\n").find((l) => l.startsWith(GRAPH_MARKER));
+    if (!line) return null;
+    const parsed = JSON.parse(line.slice(GRAPH_MARKER.length)) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed.flatMap((p): ProjectEdges[] => {
+      if (typeof p !== "object" || p === null || typeof (p as ProjectEdges).name !== "string") return [];
+      const { name, dependencies, teardown } = p as ProjectEdges;
+      return [{
+        name,
+        dependencies: Array.isArray(dependencies) ? dependencies.filter((d): d is string => typeof d === "string") : [],
+        teardown: typeof teardown === "string" ? teardown : null,
+      }];
+    });
+  } catch {
+    return null;
+  } finally {
+    if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * The projects to select so `project` runs where it runs in CI: when it is a
+ * teardown, the projects it tears down (an owner that is itself a teardown is
+ * replaced by its own owners); otherwise none, and the run stays as asked.
+ */
+export function teardownOwners(graph: ProjectEdges[] | null, project: string): string[] {
+  if (!graph) return [];
+  const ownersOf = (name: string) => graph.filter((p) => p.teardown === name).map((p) => p.name);
+  const roots = new Set<string>();
+  const seen = new Set<string>([project]);
+  const visit = (name: string) => {
+    for (const owner of ownersOf(name)) {
+      if (seen.has(owner)) continue;
+      seen.add(owner);
+      if (ownersOf(owner).length > 0) visit(owner);
+      else roots.add(owner);
+    }
+  };
+  visit(project);
+  return [...roots];
+}
+
+function runCapture(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  extraEnv: Record<string, string> = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd, env: { ...process.env, CI: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { cwd, env: { ...process.env, CI: "1", ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);

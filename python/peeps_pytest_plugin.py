@@ -1,7 +1,7 @@
 """The pytest side of peeps-action: loaded with ``-p peeps_pytest_plugin``.
 
-It does two things, each switched on by an environment variable the action
-sets, and nothing at all when neither is set:
+It does three things, each switched on by an environment variable the action
+sets, and nothing at all when none is set:
 
 ``PEEPS_COLLECT_OUT``
     After collection, write what pytest collected to that file as JSON: one
@@ -10,6 +10,10 @@ sets, and nothing at all when neither is set:
     that failed to collect, and whether pytest-playwright is loaded. It reads
     only what collection itself produced; it imports nothing of the
     repository's.
+
+``PEEPS_EVIDENCE_OUT``
+    For the action's ``run_tests`` tool (a heal running one test): write the
+    HTTP calls each failed test made to that file as JSON (``_LocalEvidence``).
 
 ``PEEPS_PLAN_FILE``
     While tests run, stream ``run_start`` / ``test_start`` / ``test_end`` /
@@ -34,7 +38,10 @@ Evidence on ``test_end``
     - ``attachments``: files the test saved in ``peeps_artifacts_dir`` or
       named with ``record_property("peeps_attachment", path)``, staged under
       ``PEEPS_ARTIFACTS_DIR/upload`` for the action to upload as
-      ``data/<runId>-evidence-<name>``.
+      ``data/<runId>-evidence-<name>``;
+    - ``httpExchanges``: the HTTP calls a failed test made through
+      ``requests`` or ``httpx``, the last ``MAX_HTTP_EXCHANGES``, masked
+      before they leave the runner (``_HttpRecorder``).
 
 Standard library only: this runs inside the customer's Python, whatever it has.
 """
@@ -49,10 +56,12 @@ import queue
 import re
 import shutil
 import stat
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -89,10 +98,18 @@ MAX_ATTACHMENT_BYTES_PER_TEST = 100 * 1024 * 1024
 MAX_ATTACHMENTS_PER_SESSION = 1000
 MAX_ATTACHMENT_BYTES_PER_SESSION = 1024 * 1024 * 1024
 MAX_OMITTED_LISTED = 20
+MAX_HTTP_EXCHANGES = 20
+MAX_HTTP_URL_CHARS = 2000
+MAX_HTTP_HEADERS = 40
+MAX_HTTP_HEADER_VALUE_CHARS = 500
+MAX_HTTP_BODY_CHARS = 2000
 #: The serialized evidence of one test_end, as ``_post`` encodes it (ASCII
 #: escapes included). The caps above bound characters, not bytes: a
 #: non-ASCII property or output can be 12 bytes a character once escaped.
 MAX_EVIDENCE_BYTES = 256 * 1024
+#: One failed test's HTTP calls in ``PEEPS_EVIDENCE_OUT``: they go into a
+#: model's tool result, so far less than a test_end may carry.
+MAX_LOCAL_EVIDENCE_BYTES = 24 * 1024
 
 #: The extensions Peeps accepts under a batch's ``data/`` (mirrors
 #: ``DATA_ATTACHMENT_EXTENSIONS`` in Peeps' artifacts route). Any other file
@@ -545,6 +562,8 @@ def evidence_fields(
         properties: [{name: str, value: str | number | bool | None}]
         propertiesOmitted: int           # over MAX_PROPERTIES
         output: [{name: str, text: str}] # status "failed": "Captured stdout call"...
+        httpExchanges: [exchange]        # status "failed": see _HttpRecorder.exchange
+        httpExchangesOmitted: int        # earlier calls past MAX_HTTP_EXCHANGES
     """
     fields: Dict[str, Any] = {}
     last = phases[-1] if phases else {}
@@ -575,6 +594,11 @@ def evidence_fields(
         ]
         if sections:
             fields["output"] = sections[-MAX_OUTPUT_SECTIONS:]
+        http = next((p["http"] for p in reversed(phases) if p.get("http")), None)
+        if http:
+            fields["httpExchanges"] = http["exchanges"]
+            if http.get("omitted"):
+                fields["httpExchangesOmitted"] = http["omitted"]
     properties: List[Dict[str, Any]] = []
     omitted = 0
     for pair in last.get("properties") or []:
@@ -605,8 +629,8 @@ def bound_evidence(fields: Dict[str, Any], budget: int = MAX_EVIDENCE_BYTES) -> 
     """``fields`` within ``budget`` bytes as ``_post`` sends them, so evidence
     can never push a run's events request past Peeps' 1 MB cap (a 413 is
     permanent, and would lose the result with the evidence). Gives up the
-    least useful first: output, then measurements from the end, then most of
-    the traceback; marks the event ``evidenceTrimmed``."""
+    least useful first: output, then HTTP bodies and the oldest calls, then
+    measurements from the end, then most of the traceback; marks the event ``evidenceTrimmed``."""
     if _encoded_size(fields) <= budget:
         return fields
     fields["evidenceTrimmed"] = True
@@ -616,6 +640,17 @@ def bound_evidence(fields: Dict[str, Any], budget: int = MAX_EVIDENCE_BYTES) -> 
             section["text"] = _trim_tail(section["text"], 1000)
         if _encoded_size(fields) > budget:
             del fields["output"]
+    exchanges = fields.get("httpExchanges")
+    if exchanges and _encoded_size(fields) > budget:
+        for exchange in exchanges:
+            exchange.pop("requestBody", None)
+            exchange.pop("responseBody", None)
+        while exchanges and _encoded_size(fields) > budget:
+            # The oldest first: the failing call is usually the last.
+            exchanges.pop(0)
+            fields["httpExchangesOmitted"] = fields.get("httpExchangesOmitted", 0) + 1
+        if not exchanges:
+            del fields["httpExchanges"]
     properties = fields.get("properties")
     while properties and _encoded_size(fields) > budget:
         properties.pop()
@@ -630,6 +665,85 @@ def bound_evidence(fields: Dict[str, Any], budget: int = MAX_EVIDENCE_BYTES) -> 
         # Only the file names are left, and they are bounded; never expected.
         return {"evidenceTrimmed": True}
     return fields
+
+
+def phase_record(report: Any) -> Dict[str, Any]:
+    """One phase's report as ``settle`` and ``evidence_fields`` read it."""
+    failed = report.outcome in ("failed", "rerun")
+    evidence = getattr(report, EVIDENCE_ATTRIBUTE, None) or {}
+    properties_kept = evidence.get("propertiesKept", 0)
+    properties_from = evidence.get("propertiesFrom", 0)
+    sections_from = evidence.get("sectionsFrom", 0)
+    user_properties = list(getattr(report, "user_properties", None) or [])
+    return {
+        "when": report.when,
+        "outcome": report.outcome,
+        "wasxfail": hasattr(report, "wasxfail"),
+        "duration": getattr(report, "duration", 0) or 0,
+        "message": _crash_message(report),
+        "longrepr": report.longreprtext if failed else None,
+        # The rest is evidence for the final attempt's test_end.
+        "exception": evidence.get("exception"),
+        "skipReason": (
+            skip_reason(report.longrepr) if report.outcome == "skipped" else None
+        ),
+        # Set before the first attempt (at collection), then this
+        # attempt's own: never an earlier attempt's.
+        "properties": user_properties[:properties_kept]
+        + user_properties[properties_from:],
+        "attached": evidence.get("attached"),
+        "http": evidence.get("http"),
+        "sections": list(getattr(report, "sections", None) or [])[sections_from:],
+    }
+
+
+class _LocalEvidence:
+    """``PEEPS_EVIDENCE_OUT``: the HTTP calls each failed test made, written
+    to that file at session end for the action's ``run_tests`` tool, so a
+    heal reproducing an API test's failure sees the response that failed it
+    and not only the assertion. Nothing is sent anywhere.
+
+    The file is a JSON list, one entry per test whose final attempt failed
+    having made a call: ``{"nodeId", "httpExchanges", "httpExchangesOmitted"?,
+    "evidenceTrimmed"?}``, the calls as ``evidence_fields`` reports them, cut
+    to ``MAX_LOCAL_EVIDENCE_BYTES`` (bodies first, then the oldest calls)."""
+
+    def __init__(self, out: str) -> None:
+        self.out = out
+        self.phases: Dict[str, List[Dict[str, Any]]] = {}
+        self.found: Dict[str, Dict[str, Any]] = {}
+
+    def pytest_runtest_logreport(self, report: Any) -> None:
+        self.phases.setdefault(report.nodeid, []).append(phase_record(report))
+
+    def pytest_runtest_logfinish(self, nodeid: str, location: Any) -> None:
+        split = attempts(self.phases.pop(nodeid, []))
+        if not split or any(p["outcome"] == "rerun" for p in split[-1]):
+            # A retried attempt: the next one decides.
+            return
+        self.found.pop(nodeid, None)
+        final = split[-1]
+        if settle(final)["status"] != "failed":
+            return
+        try:
+            fields, _ = evidence_fields(final, "failed")
+            http = {
+                key: fields[key]
+                for key in ("httpExchanges", "httpExchangesOmitted")
+                if key in fields
+            }
+            if http.get("httpExchanges"):
+                self.found[nodeid] = bound_evidence(http, MAX_LOCAL_EVIDENCE_BYTES)
+        except Exception as error:  # pragma: no cover - defensive
+            print(f"[peeps] HTTP calls of {nodeid} not kept: {error!r}", flush=True)
+
+    def pytest_sessionfinish(self, session: Any) -> None:
+        entries = [{"nodeId": nodeid, **fields} for nodeid, fields in self.found.items()]
+        try:
+            with open(self.out, "w", encoding="utf-8") as handle:
+                json.dump(entries, handle)
+        except OSError as error:
+            print(f"[peeps] HTTP calls not written: {error!r}", flush=True)
 
 
 class _Streamer:
@@ -650,6 +764,10 @@ class _Streamer:
         self.phases: Dict[str, List[Dict[str, Any]]] = {}
         self.output_dirs: Dict[str, str] = {}
         self.statuses: Dict[str, str] = {}
+        # How many attempts of each node id have ended: the next test_end's
+        # `retry`. Counted across logfinish calls, because
+        # pytest-rerunfailures 16 gives every attempt its own.
+        self.attempts_ended: Dict[str, int] = {}
         # One delivery thread, in order; drained at session finish.
         self.outbox: "queue.Queue[Any]" = queue.Queue()
         threading.Thread(
@@ -681,34 +799,7 @@ class _Streamer:
         for name, value in getattr(report, "user_properties", None) or []:
             if name == OUTPUT_DIR_PROPERTY and isinstance(value, str):
                 self.output_dirs[report.nodeid] = value
-        phases = self.phases.setdefault(report.nodeid, [])
-        failed = report.outcome in ("failed", "rerun")
-        evidence = getattr(report, EVIDENCE_ATTRIBUTE, None) or {}
-        properties_kept = evidence.get("propertiesKept", 0)
-        properties_from = evidence.get("propertiesFrom", 0)
-        sections_from = evidence.get("sectionsFrom", 0)
-        user_properties = list(getattr(report, "user_properties", None) or [])
-        phases.append(
-            {
-                "when": report.when,
-                "outcome": report.outcome,
-                "wasxfail": hasattr(report, "wasxfail"),
-                "duration": getattr(report, "duration", 0) or 0,
-                "message": _crash_message(report),
-                "longrepr": report.longreprtext if failed else None,
-                # The rest is evidence for the final attempt's test_end.
-                "exception": evidence.get("exception"),
-                "skipReason": (
-                    skip_reason(report.longrepr) if report.outcome == "skipped" else None
-                ),
-                # Set before the first attempt (at collection), then this
-                # attempt's own: never an earlier attempt's.
-                "properties": user_properties[:properties_kept]
-                + user_properties[properties_from:],
-                "attached": evidence.get("attached"),
-                "sections": list(getattr(report, "sections", None) or [])[sections_from:],
-            }
-        )
+        self.phases.setdefault(report.nodeid, []).append(phase_record(report))
 
     def pytest_runtest_logfinish(self, nodeid: str, location: Any) -> None:
         entry = self.runs.get(nodeid)
@@ -730,6 +821,8 @@ class _Streamer:
                 else settle(phases)
             )
             self.statuses[nodeid] = settled["status"]
+            retry = self.attempts_ended.get(nodeid, 0)
+            self.attempts_ended[nodeid] = retry + 1
             if entry is None:
                 if not retried:
                     print(
@@ -743,6 +836,9 @@ class _Streamer:
                 "testName": _test_name(nodeid),
                 "status": settled["status"],
                 "duration": int(round(sum(p["duration"] for p in phases) * 1000)),
+                # Which attempt this was, 0 for the first, as the Playwright
+                # reporter sends `result.retry`.
+                "retry": retry,
             }
             if settled.get("error"):
                 event["error"] = settled["error"][:4000]
@@ -895,6 +991,305 @@ class _OutputDirRecorder:
             item.user_properties.append((OUTPUT_DIR_PROPERTY, output))
 
 
+# ---------------------------------------------------------------------------
+# HTTP exchanges
+# ---------------------------------------------------------------------------
+
+MASKED = "[masked]"
+REDACTED = "[redacted]"
+
+#: A header, query parameter or JSON field whose value is never reported.
+_SENSITIVE_NAME = re.compile(
+    r"authori[sz]ation|cookie|token|secret|passw(or)?d|api[-_]?key|private|"
+    r"credential|session|signature|^x-amz-security|^(key|sig|code|pin|ssn)$",
+    re.IGNORECASE,
+)
+
+#: Environment variables whose values are secrets the job holds.
+_SECRET_ENV = re.compile(
+    r"TOKEN|SECRET|PASSW(OR)?D|API_?KEY|PRIVATE|CREDENTIAL|COOKIE|SESSION|_KEY$|^KEY$",
+    re.IGNORECASE,
+)
+
+
+def _bodies_enabled() -> bool:
+    """``PEEPS_HTTP_BODIES=off`` (a project whose bodies carry personal data)
+    reports each call's method, URL, status and masked headers, no bodies."""
+    return os.environ.get("PEEPS_HTTP_BODIES", "").strip().lower() not in ("0", "off", "false", "no")
+
+
+class _Masker:
+    """Masks what must not leave the runner: a sensitive header, parameter or
+    JSON field by its name, URL credentials, and any secret value the job's
+    environment holds, wherever it appears."""
+
+    def __init__(self, environ: Dict[str, str]) -> None:
+        values = sorted(
+            {v for k, v in environ.items() if v and len(v) >= 8 and _SECRET_ENV.search(k)},
+            key=len,
+            reverse=True,
+        )
+        self._secrets = re.compile("|".join(re.escape(v) for v in values)) if values else None
+
+    def text(self, value: str) -> str:
+        return self._secrets.sub(REDACTED, value) if self._secrets else value
+
+    def url(self, url: str) -> str:
+        try:
+            parts = urlsplit(url)
+            netloc = parts.netloc
+            if "@" in netloc:
+                netloc = f"{MASKED}@{netloc.rsplit('@', 1)[1]}"
+            query = urlencode(
+                [
+                    (k, MASKED if _SENSITIVE_NAME.search(k) else v)
+                    for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                ],
+                safe="[]",
+            )
+            url = urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+        except ValueError:
+            pass
+        return self.text(url)[:MAX_HTTP_URL_CHARS]
+
+    def headers(self, headers: Any) -> List[Dict[str, str]]:
+        out: List[Dict[str, str]] = []
+        try:
+            items = list(headers.items())
+        except Exception:
+            return out
+        for name, value in items[:MAX_HTTP_HEADERS]:
+            name = str(name)
+            shown = MASKED if _SENSITIVE_NAME.search(name) else self.text(str(value))
+            out.append({"name": name[:200], "value": shown[:MAX_HTTP_HEADER_VALUE_CHARS]})
+        return out
+
+    def _json(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                k: MASKED if isinstance(k, str) and _SENSITIVE_NAME.search(k) else self._json(v)
+                for k, v in value.items()
+            }
+        if isinstance(value, list):
+            return [self._json(v) for v in value]
+        return value
+
+    def body(self, raw: Any, content_type: str) -> Optional[str]:
+        """The body as text, JSON fields masked by name, capped; None for no
+        body, and only a size for one that is not text."""
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            text = raw
+        elif isinstance(raw, (bytes, bytearray)):
+            if not raw:
+                return None
+            try:
+                text = bytes(raw).decode("utf-8")
+            except UnicodeDecodeError:
+                return f"<{len(raw)} bytes, not text>"
+        else:
+            return "<streamed, not read>"
+        if not text:
+            return None
+        if "json" in content_type.lower() or text.lstrip()[:1] in ("{", "["):
+            try:
+                text = json.dumps(self._json(json.loads(text)), ensure_ascii=False)
+            except ValueError:
+                pass
+        elif "x-www-form-urlencoded" in content_type.lower():
+            text = urlencode(
+                [
+                    (k, MASKED if _SENSITIVE_NAME.search(k) else v)
+                    for k, v in parse_qsl(text, keep_blank_values=True)
+                ]
+            )
+        text = self.text(text)
+        if len(text) > MAX_HTTP_BODY_CHARS:
+            text = f"{text[:MAX_HTTP_BODY_CHARS]}… ({len(text)} chars)"
+        return text
+
+
+class _HttpRecorder:
+    """Records the HTTP calls a test makes through ``requests`` or ``httpx``,
+    from its setup to its teardown, so an API test's failure carries the call
+    that failed and what came back: the evidence an API test has instead of
+    a screenshot.
+
+    It wraps ``requests.Session.send`` and ``httpx.Client.send`` /
+    ``AsyncClient.send``, which every call of those libraries goes through
+    (``requests.get``, ``httpx.get`` and clients alike), once each library has
+    been imported by the tests; it never imports one itself. A wrapper
+    records only while a test runs, never changes the call, and never raises:
+    a recording that fails is dropped. Each exchange::
+
+        {method, url, status: int | None, durationMs: int,
+         requestHeaders: [{name, value}], responseHeaders: [{name, value}],
+         requestBody?: str, responseBody?: str,   # unless PEEPS_HTTP_BODIES=off
+         error?: str}                             # the call raised: "ConnectTimeout: ..."
+
+    masked by ``_Masker`` before it is kept."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._exchanges: Optional[List[Dict[str, Any]]] = None
+        self._omitted = 0
+        self._masker: Optional[_Masker] = None
+        self._wrapped: set = set()
+
+    def start(self) -> None:
+        self._install()
+        with self._lock:
+            self._exchanges = []
+            self._omitted = 0
+            self._masker = _Masker(dict(os.environ))
+
+    def stop(self) -> Dict[str, Any]:
+        with self._lock:
+            exchanges, omitted = self._exchanges or [], self._omitted
+            self._exchanges = None
+        return {"exchanges": exchanges, "omitted": omitted}
+
+    def _keep(self, exchange: Dict[str, Any]) -> None:
+        with self._lock:
+            if self._exchanges is None:
+                return
+            self._exchanges.append(exchange)
+            if len(self._exchanges) > MAX_HTTP_EXCHANGES:
+                self._exchanges.pop(0)
+                self._omitted += 1
+
+    def _recording(self) -> bool:
+        return self._exchanges is not None
+
+    def exchange(
+        self,
+        method: Any,
+        url: Any,
+        request_headers: Any,
+        request_body: Any,
+        started: float,
+        response: Any = None,
+        response_body: Any = None,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        masker = self._masker
+        if masker is None:
+            return
+        try:
+            entry: Dict[str, Any] = {
+                "method": str(method).upper()[:20],
+                "url": masker.url(str(url)),
+                "status": getattr(response, "status_code", None),
+                "durationMs": int(round((time.monotonic() - started) * 1000)),
+                "requestHeaders": masker.headers(request_headers),
+                "responseHeaders": masker.headers(getattr(response, "headers", None) or {}),
+            }
+            if _bodies_enabled():
+                headers = {h["name"].lower(): h["value"] for h in entry["requestHeaders"]}
+                body = masker.body(request_body, headers.get("content-type", ""))
+                if body is not None:
+                    entry["requestBody"] = body
+                if response is not None:
+                    content_type = str(getattr(response, "headers", {}).get("content-type", ""))
+                    body = masker.body(response_body, content_type)
+                    if body is not None:
+                        entry["responseBody"] = body
+            if error is not None:
+                entry["error"] = masker.text(f"{type(error).__name__}: {error}")[:MAX_MESSAGE_CHARS]
+            self._keep(entry)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    def _install(self) -> None:
+        requests = sys.modules.get("requests")
+        if requests is not None and "requests" not in self._wrapped:
+            self._wrapped.add("requests")
+            self._wrap_requests(requests)
+        httpx = sys.modules.get("httpx")
+        if httpx is not None and "httpx" not in self._wrapped:
+            self._wrapped.add("httpx")
+            self._wrap_httpx(httpx)
+
+    def _wrap_requests(self, requests: Any) -> None:
+        recorder = self
+        original = requests.Session.send
+
+        def send(session: Any, request: Any, **kwargs: Any) -> Any:
+            if not recorder._recording():
+                return original(session, request, **kwargs)
+            started = time.monotonic()
+            try:
+                response = original(session, request, **kwargs)
+            except BaseException as error:
+                recorder.exchange(request.method, request.url, request.headers, request.body, started, error=error)
+                raise
+            # A streamed response is the test's to read: never consume it.
+            # Otherwise `send` has already read it into `_content`.
+            body = "<streamed>" if kwargs.get("stream") else getattr(response, "_content", None)
+            recorder.exchange(
+                request.method, request.url, request.headers, request.body, started, response,
+                body if isinstance(body, (bytes, str)) else None,
+            )
+            return response
+
+        requests.Session.send = send
+
+    def _wrap_httpx(self, httpx: Any) -> None:
+        recorder = self
+
+        def read(message: Any, attribute: str) -> Any:
+            try:
+                return getattr(message, attribute)
+            except Exception:  # not read yet: a streamed body
+                return "<streamed>"
+
+        def record(request: Any, started: float, response: Any = None, error: Any = None) -> None:
+            body = None
+            if response is not None:
+                body = read(response, "content") if response.is_stream_consumed or response.is_closed else "<streamed>"
+            recorder.exchange(
+                request.method, request.url, request.headers, read(request, "content"), started,
+                response, body, error,
+            )
+
+        sync_send = httpx.Client.send
+
+        def send(client: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
+            if not recorder._recording():
+                return sync_send(client, request, *args, **kwargs)
+            started = time.monotonic()
+            try:
+                response = sync_send(client, request, *args, **kwargs)
+            except BaseException as error:
+                record(request, started, error=error)
+                raise
+            record(request, started, response)
+            return response
+
+        httpx.Client.send = send
+
+        async_send = httpx.AsyncClient.send
+
+        async def asend(client: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
+            if not recorder._recording():
+                return await async_send(client, request, *args, **kwargs)
+            started = time.monotonic()
+            try:
+                response = await async_send(client, request, *args, **kwargs)
+            except BaseException as error:
+                record(request, started, error=error)
+                raise
+            record(request, started, response)
+            return response
+
+        httpx.AsyncClient.send = asend
+
+
+#: One per process: an xdist worker records its own tests.
+HTTP_RECORDER = _HttpRecorder()
+
+
 #: The report attribute the recorder below leaves for the streamer. A plain
 #: dict of builtins, so it survives pytest-xdist's report serialization.
 EVIDENCE_ATTRIBUTE = "peeps_evidence"
@@ -925,6 +1320,7 @@ class _EvidenceRecorder:
         item._peeps_attached = []
         item._peeps_attached_count = 0
         item._peeps_attached_bytes = 0
+        HTTP_RECORDER.start()
         # Each attempt starts with empty artifacts directories, before any
         # fixture runs: an attempt that fails in setup, before it ever asks
         # for `peeps_artifacts_dir`, must not report the last attempt's files.
@@ -980,6 +1376,10 @@ class _EvidenceRecorder:
         }
         if call.when == "teardown" and getattr(item, "_peeps_attached", None):
             evidence["attached"] = list(item._peeps_attached)
+        if call.when == "teardown":
+            http = HTTP_RECORDER.stop()
+            if http["exchanges"]:
+                evidence["http"] = http
         excinfo = getattr(call, "excinfo", None)
         if report.failed and excinfo is not None:
             try:
@@ -1042,6 +1442,11 @@ def pytest_configure(config: Any) -> None:
     if collect_out and not worker:
         config.pluginmanager.register(_Collector(collect_out), "peeps-collector")
     plan = os.environ.get("PEEPS_PLAN_FILE")
+    evidence_out = os.environ.get("PEEPS_EVIDENCE_OUT")
+    if evidence_out and not plan:
+        config.pluginmanager.register(_EvidenceRecorder(), "peeps-evidence")
+        if not worker:
+            config.pluginmanager.register(_LocalEvidence(evidence_out), "peeps-local-evidence")
     if plan:
         config.pluginmanager.register(_OutputDirRecorder(), "peeps-output-dirs")
         config.pluginmanager.register(_EvidenceRecorder(), "peeps-evidence")

@@ -13,6 +13,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { RunnerEnv } from "./env";
+import { jsonReportTarget } from "./playwright-json";
 import type { PeepsClient } from "./peeps";
 
 const execFileAsync = promisify(execFile);
@@ -51,12 +52,19 @@ export function specFilesOf(list: PlaywrightList): string[] {
 export async function listTests(env: RunnerEnv): Promise<PlaywrightList> {
   const args = ["playwright", "test", "--list", "--reporter=json"];
   if (env.configPath) args.push("--config", env.configPath);
-  const { stdout } = await execFileAsync("npx", args, {
-    cwd: env.workingDirectory,
-    maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, CI: "1" },
-  });
-  return JSON.parse(stdout) as PlaywrightList;
+  const target = await jsonReportTarget();
+  try {
+    const { stdout } = await execFileAsync("npx", args, {
+      cwd: env.workingDirectory,
+      maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, CI: "1", ...target.env },
+    });
+    const list = await target.read(stdout);
+    if (!list) throw new Error("playwright test --list wrote no JSON report");
+    return list as PlaywrightList;
+  } finally {
+    await target.cleanup();
+  }
 }
 
 /**

@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { readRunnerEnv, type RunnerEnv } from "../src/env";
+import { planEnvironmentVariables } from "../src/environment";
 import { PeepsClient } from "../src/peeps";
 import {
   artifactName,
@@ -22,10 +23,13 @@ import {
   type PytestCollection,
 } from "../src/pytest";
 import type { PlanEntry } from "../src/reporter";
+import { runPytestTool } from "../src/pytest-run-tool";
+import { createToolServer } from "../src/tools";
 
 const FIXTURE = path.join(__dirname, "fixtures", "pytest-suite");
 /** A non-browser suite: skips, measurements, saved frames, a broken fixture. */
 const CAMERA = path.join(__dirname, "fixtures", "pytest-camera");
+const API = path.join(__dirname, "fixtures", "pytest-api");
 
 /**
  * The interpreter the real-pytest tests use. CI installs pytest and sets
@@ -341,6 +345,8 @@ test("a run streams one test_start/test_end per planned node id, pytest's outcom
     const base = "tests/shop/test_cart.py::";
     assert.equal(statusOf(`${base}test_opens[chromium]`).status, "passed");
     assert.equal(statusOf(`${base}test_opens[chromium]`).testName, "test_opens[chromium]");
+    // Without reruns every test_end is the first attempt.
+    assert.equal(statusOf(`${base}test_opens[chromium]`).retry, 0);
     assert.equal(statusOf(`${base}TestCart::test_quantity[chromium-2]`).status, "passed");
     const failed = statusOf(`${base}test_total_is_wrong`);
     assert.equal(failed.status, "failed");
@@ -486,9 +492,18 @@ test("with pytest-rerunfailures each attempt is a test_end and only the final on
     ],
   );
   assert.match(String(flaky[2]!.error), /first attempt/);
+  // Each test_end names its attempt, as the Playwright reporter's do.
+  assert.deepEqual(
+    flaky.filter((e) => e.type === "test_end").map((e) => (e as { retry?: unknown }).retry),
+    [0, 1],
+  );
   // A test that fails every attempt still fails.
   const wrong = received.events.get(byNodeId["tests/shop/test_cart.py::test_total_is_wrong"]!.runId) ?? [];
   assert.equal(wrong[2]!.status, "failed");
+  assert.deepEqual(
+    wrong.filter((e) => e.type === "test_end").map((e) => (e as { retry?: unknown }).retry),
+    [0, 1],
+  );
 });
 
 test("a pytest that cannot start still closes its batches and fails the job", async () => {
@@ -671,6 +686,179 @@ function assertCameraEvidence(received: Received, byNodeId: Record<string, PlanE
 test("a camera suite reports skip reasons, failures, measurements, output and saved files", needsPytest, async () => {
   const { received, byNodeId } = await runSuiteWith("", undefined, CAMERA);
   assertCameraEvidence(received, byNodeId);
+});
+
+const needsHttpClients = hasPlugins("requests", "httpx")
+  ? {}
+  : { skip: "no requests and httpx in the Python with pytest" };
+
+type Exchange = {
+  method: string;
+  url: string;
+  status: number | null;
+  durationMs: number;
+  requestHeaders: Array<{ name: string; value: string }>;
+  responseHeaders: Array<{ name: string; value: string }>;
+  requestBody?: string;
+  responseBody?: string;
+  error?: string;
+};
+
+test("an API suite's failing test reports its HTTP calls, masked", needsHttpClients, async () => {
+  const secret = "fleet-secret-0123456789";
+  process.env.FLEET_TOKEN = secret;
+  try {
+    const { received, byNodeId } = await runSuiteWith("", undefined, API);
+    const ends = testEnds(received, byNodeId);
+    const header = (headers: Exchange["requestHeaders"], name: string) =>
+      headers.find((h) => h.name.toLowerCase() === name)?.value;
+
+    // The renamed field: the call that came back, with its body.
+    const queued = ends.test_work_order_is_queued!;
+    assert.equal(queued.status, "failed");
+    const [post] = queued.httpExchanges as Exchange[];
+    assert.equal((queued.httpExchanges as Exchange[]).length, 1);
+    assert.equal(post!.method, "POST");
+    assert.match(post!.url, /^http:\/\/127\.0\.0\.1:\d+\/work-orders$/);
+    assert.equal(post!.status, 201);
+    assert.equal(typeof post!.durationMs, "number");
+    assert.equal(header(post!.requestHeaders, "authorization"), "[masked]");
+    assert.equal(header(post!.responseHeaders, "set-cookie"), "[masked]");
+    assert.equal(header(post!.responseHeaders, "location"), "/work-orders/wo_1");
+    // JSON fields masked by name, the rest as sent and received.
+    assert.deepEqual(JSON.parse(post!.requestBody!), {
+      robotId: "RR-C20-0007",
+      task: "Recalibrate lidar",
+      password: "[masked]",
+    });
+    assert.deepEqual(JSON.parse(post!.responseBody!), {
+      id: "wo_1",
+      robotId: "RR-C20-0007",
+      state: "queued",
+      token: "[masked]",
+    });
+
+    // A passing test reports no calls.
+    assert.equal("httpExchanges" in ends.test_lists_robots!, false);
+
+    // Sync and async httpx; a secret the job holds never leaves, wherever it was.
+    const secretEnd = ends.test_secret_never_leaves!;
+    const calls = secretEnd.httpExchanges as Exchange[];
+    assert.deepEqual(calls.map((c) => c.method), ["GET", "GET"]);
+    assert.match(calls[0]!.url, /\/robots\?api_key=\[masked\]&page=2$/);
+    assert.equal(header(calls[0]!.requestHeaders, "x-fleet-echo"), "[redacted]");
+    assert.equal(JSON.parse(calls[0]!.responseBody!).echo, "[redacted]");
+    assert.equal(JSON.stringify(received.events.get(byNodeId["tests/test_fleet.py::test_secret_never_leaves"]!.runId)).includes(secret), false);
+
+    // A call that never got an answer: no status, the error instead.
+    const [down] = ends.test_api_down!.httpExchanges as Exchange[];
+    assert.equal(down!.status, null);
+    assert.match(down!.error!, /ConnectionError/);
+  } finally {
+    delete process.env.FLEET_TOKEN;
+  }
+});
+
+test("with PEEPS_HTTP_BODIES=off a call reports no bodies", needsHttpClients, async () => {
+  process.env.PEEPS_HTTP_BODIES = "off";
+  try {
+    const { received, byNodeId } = await runSuiteWith("", undefined, API);
+    const [post] = testEnds(received, byNodeId).test_work_order_is_queued!.httpExchanges as Exchange[];
+    assert.equal(post!.status, 201);
+    assert.equal("requestBody" in post!, false);
+    assert.equal("responseBody" in post!, false);
+  } finally {
+    delete process.env.PEEPS_HTTP_BODIES;
+  }
+});
+
+test("run_tests gives a failed API test its HTTP calls, masked, and a passing one none", needsHttpClients, async () => {
+  const secret = "fleet-secret-0123456789";
+  process.env.FLEET_TOKEN = secret;
+  try {
+    const { root, suite } = workspace(API);
+    const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "e2e" });
+    const out = await runPytestTool(env, {
+      fileAbs: path.join(suite, "tests", "test_fleet.py"),
+      titlePath: null,
+      keyword: null,
+    });
+    const byTitle = Object.fromEntries(out.results!.map((r) => [r.title, r]));
+    const [post] = byTitle.test_work_order_is_queued!.httpExchanges!;
+    assert.equal(post!.status, 201);
+    assert.equal(JSON.parse(post!.responseBody!).state, "queued");
+    assert.equal(post!.requestHeaders.find((h) => h.name === "Authorization")?.value, "[masked]");
+    assert.equal(byTitle.test_lists_robots!.status, "passed");
+    assert.equal(byTitle.test_lists_robots!.httpExchanges, undefined);
+    assert.equal(JSON.stringify(out).includes(secret), false);
+    assert.equal(byTitle.test_api_down!.httpExchanges?.[0]?.status, null);
+    // The calls file lives in the run's scratch directory, never the checkout.
+    assert.equal(readdirSync(suite).includes("http-calls.json"), false);
+  } finally {
+    delete process.env.FLEET_TOKEN;
+  }
+});
+
+test("run_tests gives real pytest the environment, and a title naming it comes back whole", needsPytest, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "peeps-pytest-"));
+  mkdirSync(path.join(root, "tests"));
+  const url = "https://staging.example.com";
+  writeFileSync(
+    path.join(root, "tests", "test_env.py"),
+    "import os\n\ndef test_production_banner():\n" +
+      '    assert os.environ["PEEPS_ENVIRONMENT"] == "production"\n' +
+      `    assert os.environ["PEEPS_BASE_URL"] == "${url}"\n` +
+      `    assert os.environ["BASE_URL"] == "${url}"\n`,
+  );
+  const previous = process.env.BASE_URL;
+  delete process.env.BASE_URL;
+  try {
+    const env = { workspace: root, workingDirectory: root, configPath: null, framework: "pytest", platform: "github" } as unknown as RunnerEnv;
+    const server = createToolServer(env);
+    server.setTestEnv(planEnvironmentVariables({ name: "production", baseUrl: url }, process.env).vars);
+    const out = (await server.handlers.run_tests!({ file: "tests/test_env.py" })) as {
+      ranWith: string;
+      results: Array<{ title: string; status: string; titleRedacted?: boolean }>;
+    };
+    assert.equal(out.ranWith, "pytest");
+    assert.deepEqual(out.results.map((r) => [r.title, r.status, "titleRedacted" in r]), [["test_production_banner", "passed", false]], JSON.stringify(out).slice(0, 2000));
+    assert.equal(process.env.PEEPS_ENVIRONMENT, undefined);
+  } finally {
+    if (previous !== undefined) process.env.BASE_URL = previous;
+  }
+});
+
+test("run_tests reports a retried test's calls only when its final attempt failed", needsPlugins, async () => {
+  if (!hasPlugins("requests")) return;
+  const { root, suite } = workspace(API);
+  writeFileSync(
+    path.join(suite, "tests", "test_retry.py"),
+    [
+      "import os, requests",
+      "def test_second_try_passes(fleet_url, tmp_path_factory):",
+      "    marker = os.path.join(str(tmp_path_factory.getbasetemp()), 'tried')",
+      "    requests.get(f'{fleet_url}/robots?try=' + str(os.path.exists(marker)))",
+      "    if not os.path.exists(marker):",
+      "        open(marker, 'w').close()",
+      "        assert False",
+      "def test_always_fails(fleet_url):",
+      "    requests.get(f'{fleet_url}/robots?n=always')",
+      "    assert False",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(path.join(suite, "pytest.ini"), "[pytest]\naddopts = --reruns 1\n");
+  const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "e2e" });
+  const out = await runPytestTool(env, {
+    fileAbs: path.join(suite, "tests", "test_retry.py"),
+    titlePath: null,
+    keyword: null,
+  });
+  const byTitle = Object.fromEntries(out.results!.map((r) => [r.title, r]));
+  assert.equal(byTitle.test_second_try_passes!.status, "passed");
+  assert.equal(byTitle.test_second_try_passes!.httpExchanges, undefined);
+  // The final attempt's own call, not the first attempt's as well.
+  assert.deepEqual(byTitle.test_always_fails!.httpExchanges!.map((x) => new URL(x.url).search), ["?n=always"]);
 });
 
 test("under pytest-xdist the evidence arrives once, attachments from the workers included", needsPlugins, async () => {

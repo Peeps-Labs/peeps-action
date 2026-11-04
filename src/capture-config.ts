@@ -8,7 +8,7 @@ import type { RunnerEnv } from "./env";
 /** Same default-config discovery order as Playwright's CLI. */
 const CONFIG_EXTENSIONS = [".ts", ".js", ".mts", ".mjs", ".cts", ".cjs"];
 
-async function configLocation(env: RunnerEnv): Promise<{ dir: string; file?: string }> {
+export async function configLocation(env: RunnerEnv): Promise<{ dir: string; file?: string }> {
   // A child process resolves a relative --config from its real cwd (not a
   // symlink alias such as macOS /var -> /private/var). Match inventory's CLI.
   const cwd = await realpath(env.workingDirectory);
@@ -27,7 +27,7 @@ async function configLocation(env: RunnerEnv): Promise<{ dir: string; file?: str
 }
 
 /** Playwright classifies .ts/.js by the nearest package.json, not by syntax. */
-async function isModule(file: string): Promise<boolean> {
+export async function isModule(file: string): Promise<boolean> {
   if (/\.(mjs|mts)$/.test(file)) return true;
   if (/\.(cjs|cts)$/.test(file)) return false;
   let dir = path.dirname(file);

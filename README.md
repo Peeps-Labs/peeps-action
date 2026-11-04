@@ -106,6 +106,19 @@ they leave behind. Nothing needs changing for the first three:
   At most 20 files and 100 MB per test, 25 MB per file; files elsewhere, or
   under `.git`, `node_modules` or `.env*`, are refused and listed as omitted.
 
+- **HTTP calls** of a failed test, made with `requests` or `httpx` (sync or
+  async, `requests.get` and clients alike): method, URL, status, duration,
+  headers and bodies, the last 20 calls, the failing one usually last. A
+  passing test reports none. Before anything leaves the runner, a header,
+  query parameter, form or JSON field named like a credential
+  (`Authorization`, cookies, `token`, `password`, `api_key`, `secret`,
+  `session`…) shows `[masked]`, URL credentials are removed, and any value of
+  a secret-looking environment variable of the job (`*_TOKEN`, `*_SECRET`,
+  `*_KEY`, `*PASSWORD*`…) shows `[redacted]` wherever it appears. Bodies are
+  cut to 2,000 characters. When bodies carry personal data, set
+  `PEEPS_HTTP_BODIES: off` in the job's `env` and only the method, URL,
+  status and masked headers are reported.
+
 Under pytest-rerunfailures only the final attempt's evidence is reported;
 under pytest-xdist it is reported once, by the controller.
 
@@ -129,6 +142,15 @@ authoritative type is `PytestTestEndEvidence` in `src/pytest.ts`:
   "output": [{ "name": "Captured stdout call", "text": "..." }], // status "failed"
   "attachments": [{ "name": "frame.png", "path": "data/<runId>-evidence-frame.png", "size": 12345 }],
   "attachmentsOmitted": [{ "name": "hosts", "reason": "outside the workspace" }],
+  "httpExchanges": [{                              // status "failed"; the last 20
+    "method": "POST", "url": "https://api.example.com/work-orders?api_key=[masked]",
+    "status": 201, "durationMs": 42,               // status null when the call raised
+    "requestHeaders": [{ "name": "Authorization", "value": "[masked]" }],
+    "responseHeaders": [{ "name": "Content-Type", "value": "application/json" }],
+    "requestBody": "{...}", "responseBody": "{...}", // ≤ 2,000 chars; absent with PEEPS_HTTP_BODIES=off
+    "error": "ConnectionError: ..."                // only when the call raised
+  }],
+  "httpExchangesOmitted": 4,                        // earlier calls past the 20
   "evidenceTrimmed": true                          // only when cut to its 256 KB budget
 }
 ```
@@ -306,7 +328,10 @@ that allows). For an Appium suite two things differ from Playwright:
   source, saved on the runner) and `pageSource` (the screen it failed on,
   redacted, up to 20,000 characters, for at most three tests). Nothing is
   reported to a Peeps run: results are read from the reporter's local
-  record. Playwright's `project` argument is ignored.
+  record. Playwright's `project` argument is ignored. When Peeps names an
+  environment for the session, WebdriverIO gets the same variables as
+  Playwright's `run_tests` (`PEEPS_ENVIRONMENT`, `PEEPS_BASE_URL`, and
+  `BASE_URL` unless the workflow sets it), and so does `run` mode.
 - **Device tools**, with `device-tools: true` (GitLab:
   `PEEPS_DEVICE_TOOLS=true`). Peeps passes it on dispatch when its agent
   needs to look at the running app; it is off by default. (Peeps does not
@@ -314,8 +339,8 @@ that allows). For an Appium suite two things differ from Playwright:
   [docs/device-tools-server-half.md](docs/device-tools-server-half.md).) Right after the
   session attaches, the action reads your WebdriverIO config's first
   capability set (WebdriverIO's own config parser, with the job's
-  environment, so `"appium:app": process.env.APP_PATH` resolves as it does
-  under `wdio run`), starts the `appium` your working directory resolves
+  environment and the session's Peeps environment, so `"appium:app":
+  process.env.APP_PATH` resolves as it does under `run_tests`), starts the `appium` your working directory resolves
   (its `node_modules/.bin`, or a parent's, else one on `PATH`) on a free
   loopback port with its log (warnings and errors only, so no request
   bodies or typed text) in `$RUNNER_TEMP/peeps-appium-<port>.log`, and
@@ -373,7 +398,7 @@ HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
 
 | Input | Required | What it is |
 | --- | --- | --- |
-| `mode` | no, defaults to `ci` | `inventory`, `run`, `report`, `agent`, or `ci` |
+| `mode` | no, defaults to `ci` | `inventory`, `run`, `report`, `agent`, `ci`, `attach-start` or `attach-finish` |
 | `session-id` | for `run` and `agent` | The session id Peeps passes on dispatch. Unused by `inventory` and `report` |
 | `config` | no | Playwright config path, relative to `working-directory` (pytest: the ini file, passed as `-c`; Appium: the WebdriverIO config) |
 | `working-directory` | no | Where to run Playwright, pytest or WebdriverIO, relative to the repository root |
@@ -387,7 +412,9 @@ HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
 | `inventory` | `playwright test --list --reporter=json` (pytest: `pytest --collect-only`; Appium: a mocha load of the WebdriverIO specs), posted with the spec files |
 | `run` | the tests Peeps asked for, reported live |
 | `report` | this workflow's own test run, reported live |
-| `agent` | a tool server for a Peeps agent session; every call is echoed to the job log. For an Appium suite `run_tests` runs WebdriverIO, and with `device-tools: true` Appium and a device session serve the `device_*` tools |
+| `agent` | a tool server for a Peeps agent session; every call is echoed to the job log. `run_tests` runs Playwright, pytest (or your `.peeps/run-tests` hook) in a pytest suite, or WebdriverIO in an Appium suite, where `device-tools: true` also has Appium and a device session serve the `device_*` tools |
+| `attach-start` | nothing: writes a config beside yours that adds the Peeps reporter to your reporters, and exports its path as `PEEPS_ATTACH_CONFIG` |
+| `attach-finish` | nothing: uploads your run's HTML report and closes the run's batches |
 
 `ci` is the default and means `report`. Peeps names the mode explicitly on every
 dispatch it makes.
@@ -397,6 +424,47 @@ because that run is the freshest list of tests there is. The default branch is
 read from the event payload, so this works whatever yours is called.
 
 ## Common setups
+
+**Keep your own test command and reporters (attach).** `report` runs
+Playwright itself, with its own reporters. When your workflow already runs
+the tests its way (a script, a JUnit or Zephyr reporter, a gate on the
+result), attach Peeps to that step instead. Your command and config are not
+changed; your step adds `--config "$PEEPS_ATTACH_CONFIG"` when it is set:
+
+```yaml
+      - uses: Peeps-Labs/peeps-action@v1
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          mode: attach-start
+          working-directory: e2e
+      - run: npx playwright test ${PEEPS_ATTACH_CONFIG:+--config "$PEEPS_ATTACH_CONFIG"}
+        working-directory: e2e
+      - uses: Peeps-Labs/peeps-action@v1
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          mode: attach-finish
+```
+
+The wrapper config loads yours unchanged and appends the Peeps reporter, so
+every reporter you configured still runs. Inside your run, the reporter plans
+it with Peeps from the tests Playwright is about to execute and streams the
+results; the job still needs `id-token: write`. Neither attach step ever fails
+the job, and the reporter never throws into your run: with Peeps unreachable,
+failing or hanging, your run ends with the same result and your reporters see
+the same tests (planning gives up after 60 seconds, the last results after
+another 60). Attach does not change your capture settings: Peeps gets the
+screenshots, video and traces your config already records, in the HTML report
+your config writes. A run without an `html` reporter reports results only.
+
+**Keep the container image on your Playwright version.** The
+`mcr.microsoft.com/playwright:vX-jammy` image carries only Playwright X's
+browsers. Use the tag that matches the `@playwright/test` version in your
+lockfile, or add `npx playwright install --with-deps` after `npm ci`. When none
+of your Playwright's browsers are on the runner, the action prints a warning
+naming both versions before the tests start.
 
 **Tests in a subdirectory.** Point both inputs at it. `working-directory` is
 relative to the repository root, and `config` is relative to
@@ -427,6 +495,86 @@ there and the job fails. If you take fork contributions, filter the trigger:
     branches: [main]
     # fork PRs get no OIDC token; run Peeps on push instead
 ```
+
+**pytest tests that need lab hardware.** In `agent` mode, `run_tests` runs the
+one test a Peeps heal is fixing. For a pytest suite it runs pytest on the runner,
+unless your repository has an executable `.peeps/run-tests`. Then Peeps runs that
+instead, from the working directory and with the job's environment (and the
+Peeps environment's variables, when the session names one):
+
+```bash
+.peeps/run-tests <junit-path> <node-id>...
+```
+
+Write a JUnit file to `<junit-path>` (pytest's own `--junitxml` output works).
+That file is the verdict, not the exit code. Use the hook to send the run
+through your own lab service: build the test image from this checkout, reserve
+a device, run the node ids, and copy the JUnit back. Peeps never writes under
+`.peeps/`, and runs a copy of `.peeps/` taken from the commit under test (and
+only while the checkout's `.peeps/` still matches it), so a heal cannot change
+the hook. The copy lives outside the checkout, so find the
+repository from the working directory, not from the hook's own path. What the hook runs from the checkout, your tests and `conftest.py`
+included, a heal can change, as with Playwright. A run must finish within
+Peeps' tool timeout (10 minutes for a call the agent makes, 15 for the final
+verification).
+
+**A lab run longer than a heal can wait.** If your lab cannot finish in that
+time (a device reservation alone can take 30 minutes), the hook may start the
+run and return without a verdict: exit 0, write no JUnit file, and print a line
+that is exactly
+
+```text
+peeps:pending
+```
+
+optionally followed by a space and a note, such as the lab run's link
+(`peeps:pending https://lab.example.com/runs/42`). Print it last: Peeps reads
+only the tail of the hook's output. `run_tests` then returns `pending: true`,
+`results: null` and the note as `pendingNote`. A JUnit file always wins over the
+marker, a non-zero exit ignores it, and pytest's own output never counts.
+The healer then works from the failing run's recorded evidence, and Peeps opens
+the fix as a draft pull request on its `peeps/*` branch. Have the lab upload
+its JUnit for that fix to Peeps' results API (`POST /api/v1/projects/{project}/ci-results`)
+with `gitRef` set to that branch and `commitSha` to its head commit (both are
+in the draft's description): a passing test marks the pull request ready for
+review, a failing one closes it with the failure. The hook runs before Peeps
+commits, so it cannot know that branch or commit yet. The simplest setup has
+your own CI run the lab on pushes to `peeps/*` branches, where both are known,
+and the hook only print the marker.
+
+**What `run_tests` reports for Playwright.** In `agent` mode, each result
+names its spec as `file`, relative to the repository root (Playwright's own
+report names it relative to its `testDir`), and its `line`. `file` is left out
+when the spec lies outside the checkout or Playwright reports no `rootDir`.
+Titles, files, errors and snippets pass through the same secret masking as
+every tool result. A title the masking changed carries `titleRedacted: true`
+(pytest results carry the same flag), and a file `fileRedacted: true`, so Peeps
+knows the value is not the test's real name.
+A failed result also carries `errorContext`: Playwright's `error-context.md`
+for that test (the error, the test's source and, when the test had a page, the
+page's accessibility snapshot at the failure), without Playwright's
+"Instructions" preamble, masked, and cut to 16 KB (`errorContextTruncated`
+says whether it was cut). One answer carries at most 128 KB of it, counted as
+sent; failures past that, or whose file is over 1 MB, get
+`errorContextOmitted: true`, so narrow the run with `grep`. The
+runner advertises these to Peeps as the capabilities `result_files` and
+`error_context`.
+
+**A teardown project runs under its owner.** When `project` names a
+Playwright teardown (a cleanup another project lists as its `teardown`),
+`run_tests` selects the project it tears down instead, so the teardown starts
+from the state it has in CI. That run has no file or `grep` filter, its
+`results` hold every test of the chain, and the answer carries
+`ranUnder: { projects, reason: "teardown" }`.
+
+**What `run_tests` reports for pytest.** When pytest itself runs (not your
+`.peeps/run-tests` hook), a failed result also carries the HTTP calls the test
+made with `requests` or `httpx`, as `httpExchanges` (and `httpExchangesOmitted`),
+the same calls and masking as a pytest test's evidence above, so a heal sees the
+response that failed the test. Each test's calls are cut to 24 KB (bodies
+first, then the oldest calls; `evidenceTrimmed` says so), and at most three
+failed results carry them. The action loads its plugin for this with
+`-p peeps_pytest_plugin`; your hook's runs carry no calls.
 
 **Running the workflow by hand.** `mode: inventory` needs no session id:
 
@@ -474,6 +622,76 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
+## 1.9.0
+
+- Agent mode: when Peeps names an environment for a session, every test process
+  `run_tests` starts gets the same variables run mode gives: `PEEPS_ENVIRONMENT`,
+  and when the environment has a `BASE_URL`, `PEEPS_BASE_URL`, and `BASE_URL` too
+  unless the workflow already sets it. That covers Playwright, its `--list`,
+  pytest and your `.peeps/run-tests` hook, so a heal reproduces and verifies a
+  failure in the environment it failed in. A workflow's own `BASE_URL` still wins,
+  and the job log says which one runs. With an older Peeps, or a run that named no
+  environment, nothing changes.
+- The job log's environment line no longer carries control characters from an
+  environment's name, or credentials from its URL, in either mode.
+
+## 1.8.1
+
+- Playwright's JSON report (the test list for inventory, report and run, and
+  agent mode's `run_tests` results) is read from a file instead of stdout. A
+  config that prints while loading broke every one of them: dotenv 17's
+  `config()` logs "injected env (N) from .env" on every load.
+
+## 1.8.0
+
+- New modes `attach-start` and `attach-finish` report a workflow's own
+  Playwright run, its command and reporters unchanged (see "Keep your own test
+  command and reporters"). Neither can fail the job: an error, an unreadable
+  environment, or a Peeps that is down, answers 5xx or never answers is a
+  warning in the log.
+
+## 1.7.0
+
+- Agent mode: `run_tests` of a Playwright teardown project runs it the way CI
+  does, after the project it tears down and that project's dependencies. Run
+  alone, a teardown starts from nothing (no sign-in state, nothing to clean
+  up), so a heal of a cleanup test failed every time it checked a fix. The
+  run selects the owning projects with no file or `grep` filter, since either
+  would drop the owner, and the answer says so as `ranUnder: { projects,
+  reason: "teardown" }`. Every test of the chain is in `results`. A config
+  that cannot be listed runs the project alone, as before.
+
+## 1.6.0
+
+- Run mode: when Peeps starts a run in an environment, the test process gets
+  `PEEPS_ENVIRONMENT` (its name) and `PEEPS_BASE_URL` (its `BASE_URL`, when
+  it has one), and `BASE_URL` too unless the workflow already sets it: a
+  workflow's own `BASE_URL` always wins, and the job log says which one runs.
+  No other variable or secret comes from Peeps. Read `process.env.BASE_URL` (or
+  `PEEPS_BASE_URL`) in `use.baseURL`, or map `PEEPS_ENVIRONMENT` to your own
+  settings. Needs a Peeps that sends the environment in the plan; with an older
+  one nothing changes.
+
+## 1.5.0
+
+- Agent mode, Playwright: `run_tests` results name each spec's `file`
+  relative to the repository root, and a failed result carries Playwright's
+  `error-context.md` as `errorContext` (16 KB each, 128 KB per answer).
+  Advertised as the runner capabilities `result_files` and `error_context`.
+- Agent mode: Playwright results' `title`, `error` and `errorSnippet` now pass
+  through the job's secret masking, as pytest's did; a masked title carries
+  `titleRedacted: true`, on both paths, and a masked `file` `fileRedacted: true`.
+  `grep` match paths are masked too.
+- Agent mode: a failed `run_tests` run's summary carries the tail of what it
+  printed (masked, 4000 characters). In a pytest suite, failed results carry
+  the HTTP calls the test made (masked, at most three, 24 KB).
+- Results, pytest: a failing test's `test_end` carries the HTTP calls it made
+  (`httpExchanges`), masked on the runner, so failure analysis can read the
+  failing call.
+- Agent mode: `grep` reads Python files, and `apply_patch` takes a model's
+  diff whose hunk header undercounts its lines without dropping the lines past
+  the count.
+
 ## Development
 
 ```bash
@@ -501,6 +719,18 @@ devDependencies) through the committed `dist/appium-collect.mjs`, and load
 rebuild after a source change. They start no device and no WebdriverIO.
 The device tools run against a fake Appium (`test/support/fake-webdriver.ts`),
 in-process and as the `appium` binary of a temporary working directory.
+
+**Releasing.** `ACTION_VERSION` in `src/version.ts` is reported to Peeps as
+`runnerInfo.actionVersion`, and Peeps decides from it what the runner supports.
+To release, merge a change into `main` that sets it to the new version (without
+the `v`), renames the README's `## Unreleased` section to `## <version>`, and
+rebuilds `dist/`. Once CI passes on `main`, the Release workflow
+(`scripts/release.sh`) tags that commit `v<version>`, moves the major tag (`v1`)
+to it, and publishes the GitHub release with that section as its notes. Nothing
+is tagged by hand. A merge that leaves the version alone releases nothing, and
+a version with no README section, or older than the newest release, fails the
+workflow instead. If a run fails part-way, rerun it (or run the workflow by
+hand on `main`): each step checks before it acts.
 
 ## License
 

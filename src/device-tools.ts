@@ -8,9 +8,10 @@
  *
  *   1. Capabilities. `dist/appium-collect.mjs --capabilities` reads the
  *      WebdriverIO config with WebdriverIO's own ConfigParser, in its own
- *      process with the job's environment (so `"appium:app":
- *      process.env.APP_PATH` resolves as it does under `wdio run`), and the
- *      first capability set is the session's (`sessionCapabilities`).
+ *      process with the job's environment and the session's Peeps
+ *      environment, as `run_tests` gives them to `wdio run` (so `"appium:app":
+ *      process.env.APP_PATH` resolves as it does there), and the first
+ *      capability set is the session's (`sessionCapabilities`).
  *   2. Appium. The `appium` the working directory resolves (its
  *      `node_modules/.bin`, walking up, as `npx appium` would; else one on
  *      PATH) is started on a free loopback port, in its own process group,
@@ -48,9 +49,10 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { readAppiumCapabilities } from "./appium";
+import { readAppiumCapabilities, wdioConfigPath } from "./appium";
 import { pageSourceExtension } from "./appium-reporter";
 import type { RunnerEnv } from "./env";
+import { hideEnvironmentUrls } from "./environment";
 
 export interface ToolSpecLike {
   name: string;
@@ -72,8 +74,8 @@ export interface AppiumServer {
 }
 
 export interface DeviceToolsDeps {
-  /** The WebdriverIO config's first capability set, as `wdio run` would read it. */
-  readCapabilities(): Promise<Record<string, unknown> | null>;
+  /** The WebdriverIO config's first capability set, as `wdio run` would read it (with `extraEnv`: the session's Peeps environment). */
+  readCapabilities(extraEnv: Record<string, string>): Promise<Record<string, unknown> | null>;
   /** Start Appium; abort the signal to stop it while it is still starting. */
   startAppium(signal: AbortSignal): Promise<AppiumServer>;
 }
@@ -349,8 +351,12 @@ export type DeviceToolHandler = (args: Record<string, unknown>) => Promise<CallT
 export interface DeviceToolHost {
   specs: ToolSpecLike[];
   handlers: Record<string, DeviceToolHandler>;
-  /** Read the capabilities, start Appium and open the session, in the background. */
-  start(): void;
+  /**
+   * Read the capabilities, start Appium and open the session, in the background.
+   * `testEnv`: the session's Peeps environment, which the WebdriverIO config is
+   * read with, as `run_tests` runs it; its URLs with credentials stay out of the job log.
+   */
+  start(testEnv?: Record<string, string>): void;
   /** Delete the session and stop Appium. Idempotent; never throws. */
   close(reason: string): Promise<void>;
   /** What `runnerInfo.deviceTools` reports at attach. */
@@ -376,7 +382,7 @@ export function createDeviceTools(
   const limits = { ...DEFAULT_DEVICE_LIMITS, ...options.limits };
   const redact = options.redact ?? ((t: string) => t);
   const deps: DeviceToolsDeps = {
-    readCapabilities: options.deps?.readCapabilities ?? (() => defaultReadCapabilities(env)),
+    readCapabilities: options.deps?.readCapabilities ?? ((extraEnv) => defaultReadCapabilities(env, extraEnv)),
     startAppium: options.deps?.startAppium ?? ((signal) => startAppiumServer(env, signal)),
   };
 
@@ -392,6 +398,9 @@ export function createDeviceTools(
   /** Values typed into secure fields this session: masked in every later result. */
   const typedSecrets = new Set<string>();
   let screenshots = 0;
+  /** The session's Peeps environment (`start`), and what hides its URLs in the job log. */
+  let testEnv: Record<string, string> = {};
+  let forLog = (text: string) => text;
 
   const mask = (value: string) => {
     let out = redact(value);
@@ -401,7 +410,7 @@ export function createDeviceTools(
   const platform = () => String(caps.platformName ?? "").toLowerCase();
 
   async function startup(): Promise<void> {
-    const raw = await deps.readCapabilities();
+    const raw = await deps.readCapabilities(testEnv);
     if (!raw) throw new DeviceError("the WebdriverIO config names no capabilities to open a device session with");
     caps = sessionCapabilities(raw);
     if (stopping.signal.aborted) return;
@@ -425,13 +434,17 @@ export function createDeviceTools(
     );
   }
 
-  function start(): void {
+  function start(vars?: Record<string, string>): void {
     if (ready) return;
+    if (vars) {
+      testEnv = vars;
+      forLog = hideEnvironmentUrls(vars);
+    }
     console.log("[peeps] device tools: reading capabilities, starting Appium and a device session");
     ready = startup().catch(async (error: unknown) => {
       startError = error instanceof Error ? error : new Error(String(error));
       // Appium's output can carry what the job's environment put in the capabilities.
-      if (!stopping.signal.aborted) console.log(`[peeps] device session could not start: ${mask(startError.message).slice(0, 2000)}`);
+      if (!stopping.signal.aborted) console.log(`[peeps] device session could not start: ${forLog(mask(startError.message)).slice(0, 2000)}`);
       await appium?.stop().catch(() => undefined);
     });
   }
@@ -714,7 +727,7 @@ export function createDeviceTools(
       const live = appium && sessionId ? `${appium.url}/session/${sessionId}` : null;
       if (live) {
         await webdriver(live, "DELETE", undefined, limits.closeMs).catch((error: unknown) => {
-          console.log(`[peeps] could not delete the device session: ${mask(String(error)).slice(0, 200)}`);
+          console.log(`[peeps] could not delete the device session: ${forLog(mask(String(error))).slice(0, 200)}`);
         });
       }
       stopping.abort();
@@ -739,8 +752,8 @@ export function createDeviceTools(
 // Production dependencies
 // ---------------------------------------------------------------------------
 
-async function defaultReadCapabilities(env: RunnerEnv): Promise<Record<string, unknown> | null> {
-  return (await readAppiumCapabilities(env)).capabilities;
+async function defaultReadCapabilities(env: RunnerEnv, extraEnv: Record<string, string>): Promise<Record<string, unknown> | null> {
+  return (await readAppiumCapabilities(env, wdioConfigPath(env), extraEnv)).capabilities;
 }
 
 /**

@@ -45,15 +45,16 @@ This is more than "test results". Concretely:
 
 | Sent to Peeps | When |
 | --- | --- |
-| The **full source of every spec file** Playwright lists (pytest: every test module it collects; Appium: every WebdriverIO spec file that holds a test) | `inventory`, and every `report`/`run` |
-| The Playwright test list: files, titles, projects, tags (pytest: node ids, browsers, lines, markers; Appium: spec files, `describe`/`it` titles, `@tags` in titles, the line each title is written on, spec files that failed to load) | `inventory`, `report`, `run` |
-| Test results, timings, errors and stack traces | `report`, `run` |
-| The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run` |
+| The **full source of every spec file** Playwright lists (pytest: every test module it collects; Appium: every WebdriverIO spec file that holds a test) | `inventory`, and every `report`/`run`/attached run |
+| The Playwright test list: files, titles, projects, tags (pytest: node ids, browsers, lines, markers; Appium: spec files, `describe`/`it` titles, `@tags` in titles, the line each title is written on, spec files that failed to load) | `inventory`, `report`, `run`, attached runs (files, titles, projects) |
+| Test results, timings, errors and stack traces, and which attempt each result was (its retry index, from Playwright or pytest-rerunfailures) | `report`, `run`, attached runs |
+| The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run`, and `attach-finish` (the directory your `html` reporter wrote) |
 | pytest only: skip reasons, `record_property` values, a failed test's captured stdout/stderr/log output, and the files a test saves in `peeps_artifacts_dir` or attaches with `record_property("peeps_attachment", path)` (only from inside the repository or pytest's temporary directory) | `report`, `run` |
 | Appium only: for each **failed** test, a **screenshot of the device screen**, the **page source** of the screen it failed on (the native view hierarchy as XML, or the WebView's HTML), and the Appium context name; and, when `@wdio/junit-reporter` is installed and not already configured, the JUnit XML it writes (only for a run that is a single batch, since it holds every test the run ran) | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
-| Tool results in an agent session: file contents, diffs, test output (Appium: a failed test's page source too) | `agent` |
+| The sha actually checked out (`git rev-parse HEAD`), and this action's version | `agent` |
+| Tool results in an agent session: file contents, diffs, test output (for a failed Playwright test, its `error-context.md`, which holds the page's accessibility snapshot at the failure: up to 16 KB each and 128 KB per run, masked like every result. It is read only when it is a regular file, not a symlink, named `error-context.md`, inside the workspace or a Playwright project's output directory. Those checks stop a mistaken attachment, not a hostile spec: the output directory comes from the Playwright config, which an agent can edit, and a hard link passes them; for a failed Appium test, its page source), and the sha256 of each changed file's contents (files up to 5 MB; symlinks are never followed) | `agent` |
 | Appium, only with `device-tools: true`: what the device tools read from the app under test, when Peeps' agent calls them: **page source** of the screen (native hierarchy XML, or a WebView's HTML), element texts and positions, context names, **device logs** (logcat or syslog), and **screenshots** | `agent` |
 
 Two of those deserve emphasis.
@@ -71,7 +72,8 @@ recording is never enabled by this action. Screenshots and video show page
 content. A trace records HTTP requests and responses, which means headers,
 cookies and bearer tokens your tests obtained against your app. Nothing
 redacts the report before upload. If that is not acceptable, turn tracing off
-for the Peeps job, or do not run `report`/`run` modes.
+for the Peeps job, or do not run `report`/`run` modes. Attach modes enable
+nothing: an attached run uploads what your own config captured.
 
 **An Appium failure sends what was on the device.** The screenshot shows the
 app's screen as the test left it, whatever data it displayed. The page source
@@ -108,13 +110,24 @@ credentials in it.
 
 ## What Peeps can do on your runner
 
-Only in `agent` mode, and only for the duration of one session.
+**In both `run` and `agent` mode, Peeps can choose where your tests point.** When
+a run or a session names a Peeps environment, the test processes (for an Appium
+suite, WebdriverIO, and the device tools' read of your WebdriverIO config) get
+`PEEPS_ENVIRONMENT`, and when it has a `BASE_URL`, `PEEPS_BASE_URL`, and `BASE_URL`
+too unless your workflow sets one. Those tests run with the job's own secrets,
+such as a login. A `BASE_URL` your workflow sets always wins, and the job log says
+which URL runs.
+
+The rest of this section applies only in `agent` mode, and only for the duration
+of one session.
 
 **In an agent session, Peeps has effective code execution on the runner.** We
 state that directly rather than implying otherwise. The tools include writing a
-file and running `npx playwright test`; Playwright loads your config file as
-Node code; so an agent that writes a config and runs tests runs code with the
-job's full environment. No arrangement of path checks changes that, and we have
+file and running `npx playwright test` (in a pytest suite, `python -m pytest`,
+or your own `.peeps/run-tests` hook); Playwright loads your config file as Node
+code and pytest imports your `conftest.py` and test modules as Python; so an
+agent that writes one of them and runs tests runs code with the job's full
+environment. No arrangement of path checks changes that, and we have
 not tried to pretend it does.
 
 For an Appium suite, `run_tests` runs `npx wdio run`, which loads your
@@ -139,11 +152,26 @@ The limits that do exist are guardrails against mistakes, not a sandbox:
 
 - Paths resolve inside the workspace. `..` and absolute paths are refused, as
   are `.git`, `node_modules` and `.env*`. Writes additionally refuse
-  `.github/workflows`, because Peeps never edits workflow files.
+  `.github/workflows`, because Peeps never edits workflow files, and `.peeps/`,
+  where your own hooks live. `.peeps/run-tests` runs as a copy taken from the
+  commit under test, and not at all while the checkout's `.peeps/` differs
+  from that commit, so a heal cannot change the hook itself (it can change the
+  tests the hook runs, as with Playwright).
 - Tool results pass through a redactor that masks values present in the job's
   environment, including `GITHUB_TOKEN`, `ACTIONS_RUNTIME_TOKEN` and the OIDC
   request token. It cannot mask a secret that is not in this process's own
   environment, so a credential read out of a JSON file is not masked.
+  `git_status` reports the sha256 of each changed file's unredacted bytes, so
+  Peeps can check them against what it wrote. A digest does not reveal a
+  file's contents, but it does confirm a guess of a short or predictable file.
+  Paths in `run_tests` and `grep` results are masked too. A test title or
+  `file` that masking changed carries `titleRedacted: true` or
+  `fileRedacted: true`. Paths in `list_files` and `read_file` are not masked,
+  because the agent must be able to open them: masking applies to result text
+  and the paths inside results, and a path is not treated as a secret channel.
+  The masking replaces any environment value of 8 or more characters outside
+  the CI prefixes, not only secrets, so a title naming one (`production`) is
+  masked too.
 - Every tool call and its arguments are echoed to the job log, so the session is
   auditable after the fact. Arguments known to carry secrets are excluded from
   that log.
@@ -152,11 +180,21 @@ The limits that do exist are guardrails against mistakes, not a sandbox:
 
 Two specifics a reviewer should weigh:
 
-- **The push stages everything.** It runs `git add -A`, so anything the job
-  wrote to the working tree that your `.gitignore` does not exclude is committed
-  to the `peeps/*` branch, except the action's own temporary WebdriverIO
-  configs (`.peeps-*.wdio.conf.*`). Your `.gitignore` is otherwise the only
-  thing bounding that.
+- **What the push commits.** When Peeps names the files to commit (`paths`),
+  only those are staged and committed. Before anything is staged, each must be
+  a repo-relative path (an absolute one is refused) inside the workspace that is
+  not under `.git`, `node_modules`, `.env*`, `.peeps/` or your CI configuration, not a
+  directory, not ignored by your `.gitignore`, and reached through no symlink.
+  These name checks are case-sensitive; on a case-insensitive filesystem a path
+  that names an existing file in another case is refused because it does not
+  resolve to itself. Git never follows a symlink when it stages. Your own commit
+  hooks still run, and after the commit, before the push, the commit is checked
+  to hold the listed paths and nothing else: a hook that stages another file, or
+  a listed file that replaced a folder, makes the call refuse, the commit is
+  undone, and nothing is pushed. Without `paths` the push stages everything
+  (`git add -A`), so anything the job wrote to the working tree that your
+  `.gitignore` does not exclude is committed to the `peeps/*` branch, except the
+  action's own temporary WebdriverIO configs (`.peeps-*.wdio.conf.*`).
 - **The push is a force push** to the `peeps/*` branch it names. An existing
   Peeps branch of the same name is replaced; nothing else can be.
 

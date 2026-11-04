@@ -6,7 +6,7 @@ branding:
   color: "green"
 inputs:
   mode:
-    description: "inventory | run | report | agent | ci (default: decide from the event)"
+    description: "inventory | run | report | agent | ci (default: decide from the event) | attach-start | attach-finish (report your own test step's run, its command and reporters unchanged; these two never fail the job)"
     required: false
     default: "ci"
   session-id:

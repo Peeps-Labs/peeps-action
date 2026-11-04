@@ -1138,3 +1138,30 @@ test("JUnit files travel as .dat under data/", () => {
   assert.equal(junitArtifactName("junit-0-0.xml"), "data/junit-0-0.xml.dat");
   assert.equal(junitArtifactName("junit 0/1.xml"), "data/junit_0_1.xml.dat");
 });
+
+test("run mode gives WebdriverIO the Peeps environment's variables beside the plan file", async () => {
+  const peeps = await fakePeeps();
+  process.env.PEEPS_API_KEY = "test-key";
+  const exitCode = process.exitCode;
+  try {
+    const { root, suite } = workspace();
+    const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile", PEEPS_API_URL: peeps.url });
+    let extraSeen: Record<string, string> | undefined;
+    await executeAppiumAndReport(env, new PeepsClient(env), {
+      configPath: path.join(suite, "wdio.conf.ts"),
+      runs: [run("r-1", "mobile/test/specs/login.spec.ts", "Login › x")],
+      batches: [{ batchId: "b-1", batchNumber: 1 }],
+      extraEnv: { PEEPS_ENVIRONMENT: "staging", BASE_URL: "https://staging.example.com" },
+      runner: async (_wrapper, extra) => {
+        extraSeen = extra;
+        return 0;
+      },
+    });
+    assert.equal(extraSeen?.PEEPS_ENVIRONMENT, "staging");
+    assert.equal(extraSeen?.BASE_URL, "https://staging.example.com");
+    assert.ok(extraSeen?.PEEPS_PLAN_FILE && extraSeen.PEEPS_ARTIFACTS_DIR);
+  } finally {
+    process.exitCode = exitCode;
+    peeps.close();
+  }
+});

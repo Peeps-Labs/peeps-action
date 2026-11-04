@@ -205,3 +205,22 @@ test("run_tests dispatches by framework: an Appium repository goes to wdio, not 
   // Still jailed to the workspace.
   await assert.rejects(server.handlers.run_tests!({ file: "../elsewhere.spec.ts" }), /escapes the workspace/);
 });
+
+test("run_tests gives an Appium run the session's Peeps environment, under the plan file it needs", async () => {
+  const { root } = workspace();
+  const env = readRunnerEnv({ GITHUB_WORKSPACE: root, "INPUT_WORKING-DIRECTORY": "mobile" });
+  let extra: Record<string, string> | undefined;
+  const server = createToolServer(env, {
+    appiumRunner: async (_wrapper, extraEnv) => {
+      extra = extraEnv;
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  server.setTestEnv({ PEEPS_ENVIRONMENT: "staging", PEEPS_BASE_URL: "https://staging.example.com" });
+  await server.handlers.run_tests!({ file: "mobile/test/specs/login.spec.ts" });
+  assert.equal(extra?.PEEPS_ENVIRONMENT, "staging");
+  assert.equal(extra?.PEEPS_BASE_URL, "https://staging.example.com");
+  assert.ok(extra?.PEEPS_PLAN_FILE && extra.PEEPS_ARTIFACTS_DIR);
+  // Never written to the action's own environment (the redactor reads it).
+  assert.notEqual(process.env.PEEPS_BASE_URL, "https://staging.example.com");
+});

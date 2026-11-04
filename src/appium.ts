@@ -35,6 +35,7 @@ import {
   type PeepsWdioOptions,
 } from "./appium-reporter";
 import type { RunnerEnv } from "./env";
+import { type PlanEnvironment, planEnvironmentVariables } from "./environment";
 import { gitBlobSha, type PlaywrightList, type PlaywrightSuite } from "./inventory";
 import type { PeepsClient } from "./peeps";
 import { requestPlan } from "./plan";
@@ -51,8 +52,12 @@ const DEFAULT_CONFIGS = ["ts", "mts", "js", "mjs", "cjs", "cts"].map((ext) => `w
 /** Collection imports the customer's specs; one that hangs at import must not hold the job. */
 const COLLECT_TIMEOUT_MS = 10 * 60 * 1000;
 /** The capabilities `wdio run` would open its first session with (`--capabilities`). */
-export async function readAppiumCapabilities(env: RunnerEnv, configPath = wdioConfigPath(env)): Promise<CapabilitiesRead> {
-  const read = await runCollector<CapabilitiesRead>(env, ["--capabilities", configPath], "reading the WebdriverIO capabilities");
+export async function readAppiumCapabilities(
+  env: RunnerEnv,
+  configPath = wdioConfigPath(env),
+  extraEnv: Record<string, string> = {},
+): Promise<CapabilitiesRead> {
+  const read = await runCollector<CapabilitiesRead>(env, ["--capabilities", configPath], "reading the WebdriverIO capabilities", extraEnv);
   for (const note of read.notes) console.log(`[peeps] ${note}`);
   return read;
 }
@@ -92,13 +97,13 @@ export function wdioConfigPath(env: RunnerEnv): string {
  * Run `dist/appium-collect.mjs` in its own process, in the working
  * directory, and read the JSON it writes. `what` names it in errors.
  */
-async function runCollector<T>(env: RunnerEnv, args: string[], what: string): Promise<T> {
+async function runCollector<T>(env: RunnerEnv, args: string[], what: string, extraEnv: Record<string, string> = {}): Promise<T> {
   const scratch = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-collect-"));
   const out = path.join(scratch, "collection.json");
   const { code, output } = await new Promise<{ code: number; output: string }>((resolve, reject) => {
     const child = spawn(process.execPath, [COLLECTOR, ...args, out], {
       cwd: env.workingDirectory,
-      env: { ...process.env, CI: "1" },
+      env: { ...process.env, CI: "1", ...extraEnv },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
@@ -324,6 +329,8 @@ interface Plan {
   batchId: string;
   batchNumber: number;
   runs: PlanEntry[];
+  /** The Peeps environment the run was started in; absent from an older Peeps. */
+  environment?: PlanEnvironment | null;
 }
 
 /**
@@ -413,11 +420,14 @@ export async function runAppiumDispatched(env: RunnerEnv, peeps: PeepsClient): P
     }
     return;
   }
+  const environment = planEnvironmentVariables(plan.environment, process.env);
+  if (environment.log) console.log(environment.log);
   await executeAppiumAndReport(env, peeps, {
     configPath,
     runs: matched,
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
     selection: { specs, capabilitySpecs, grep: mochaGrepFor(matched.map((r) => r.titlePath)) },
+    extraEnv: environment.vars,
   });
 }
 
@@ -578,6 +588,8 @@ export async function executeAppiumAndReport(
     batches: Array<{ batchId: string; batchNumber: number; runIds?: string[] }>;
     /** Run mode: only these spec files (absolute), this mocha grep, and only the planned (file, title path) pairs. */
     selection?: { specs: string[]; capabilitySpecs?: string[][]; grep: string };
+    /** Run mode: the Peeps environment's variables (`environment.ts`). */
+    extraEnv?: Record<string, string>;
     /** For tests: run this instead of `npx wdio run <config>`. */
     runner?: (configPath: string, extraEnv: Record<string, string>) => Promise<number>;
   },
@@ -609,7 +621,7 @@ export async function executeAppiumAndReport(
   const release = stopOnSignal();
   try {
     wrapper = await writeWrapperConfig(input.configPath, options);
-    const extraEnv = { PEEPS_PLAN_FILE: planFile, PEEPS_ARTIFACTS_DIR: artifactsDir };
+    const extraEnv = { ...input.extraEnv, PEEPS_PLAN_FILE: planFile, PEEPS_ARTIFACTS_DIR: artifactsDir };
     code = await (input.runner ?? ((config, extra) => runWdio(env, config, extra)))(wrapper.configPath, extraEnv);
   } catch (error) {
     console.log(`[peeps] could not run WebdriverIO: ${String(error)}`);
@@ -799,7 +811,12 @@ async function readLocalResults(resultsDir: string): Promise<LocalResultsLine[]>
  */
 export async function runAppiumTests(
   env: RunnerEnv,
-  input: { file: string; grep?: string },
+  input: {
+    file: string;
+    grep?: string;
+    /** The session's Peeps environment (`environment.ts`), on top of the job's environment. */
+    extraEnv?: Record<string, string>;
+  },
   options: { redact?: (text: string) => string; runner?: WdioRunner } = {},
 ): Promise<AgentRunTestsResult> {
   const redact = options.redact ?? ((text: string) => text);
@@ -823,7 +840,7 @@ export async function runAppiumTests(
   let wrapper: Awaited<ReturnType<typeof writeWrapperConfig>> | undefined;
   try {
     wrapper = await writeWrapperConfig(configPath, wdioOptions);
-    const extraEnv = { PEEPS_PLAN_FILE: planFile, PEEPS_ARTIFACTS_DIR: artifactsDir };
+    const extraEnv = { ...input.extraEnv, PEEPS_PLAN_FILE: planFile, PEEPS_ARTIFACTS_DIR: artifactsDir };
     run = await (options.runner ?? ((config, extra) => runWdioCaptured(env, config, extra)))(wrapper.configPath, extraEnv);
   } catch (error) {
     run = { ...run, stderr: `could not run WebdriverIO: ${String(error)}` };

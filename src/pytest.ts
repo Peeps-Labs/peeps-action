@@ -31,6 +31,7 @@ import path from "node:path";
 import type { RunnerEnv } from "./env";
 import { gitBlobSha } from "./inventory";
 import type { PeepsClient } from "./peeps";
+import { type PlanEnvironment, planEnvironmentVariables } from "./environment";
 import { requestPlan } from "./plan";
 import type { PlanEntry } from "./reporter";
 import type { PlannedTest } from "./report";
@@ -40,7 +41,7 @@ export const WDIO_CONFIG = /^wdio(\..+)?\.conf\.[cm]?[jt]s$/;
 
 /** Where `peeps_pytest_plugin.py` lives: `<action>/python`, from src/ or dist/. */
 export const PLUGIN_DIR = path.join(__dirname, "..", "python");
-const PLUGIN = "peeps_pytest_plugin";
+export const PLUGIN = "peeps_pytest_plugin";
 
 /** One collected item, exactly as the plugin writes it (Peeps' runner contract). */
 export interface PytestItem {
@@ -89,7 +90,8 @@ const PLAYWRIGHT_CONFIG = /^playwright(\..+)?\.config\.[cm]?[jt]s$/;
 export function resolveFramework(env: RunnerEnv): Framework {
   const declared = env.framework;
   if (declared === "playwright" || declared === "pytest" || declared === "appium") return declared;
-  if (declared !== null && declared !== "auto") {
+  // `undefined` is an env built before the input existed: treated as unset.
+  if (declared != null && declared !== "auto") {
     throw new Error(`unknown framework "${declared}": use playwright, pytest, appium or auto`);
   }
   if (env.configPath) return WDIO_CONFIG.test(path.basename(env.configPath)) ? "appium" : "playwright";
@@ -232,7 +234,7 @@ function pytestEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
  * `python` (the Playwright Python image has both; a bare Ubuntu runner only
  * `python3`). `PEEPS_PYTHON` names another interpreter, e.g. a virtualenv's.
  */
-function spawnPytest(
+export function spawnPytest(
   args: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv; capture: boolean },
 ): Promise<{ code: number; output: string }> {
@@ -262,7 +264,7 @@ function spawnPytest(
   return attempt(0);
 }
 
-function configArgs(env: RunnerEnv): string[] {
+export function configArgs(env: RunnerEnv): string[] {
   return env.configPath ? ["-c", env.configPath] : [];
 }
 
@@ -407,6 +409,8 @@ interface Plan {
   batchId: string;
   batchNumber: number;
   runs: PlanEntry[];
+  /** The Peeps environment the run was started in; absent from an older Peeps. */
+  environment?: PlanEnvironment | null;
 }
 
 /** `run`: Peeps dispatched this job for one batch; run exactly its tests, by node id. */
@@ -435,11 +439,14 @@ export async function runPytestDispatched(env: RunnerEnv, peeps: PeepsClient): P
     }
     return;
   }
+  const environment = planEnvironmentVariables(plan.environment, process.env);
+  if (environment.log) console.log(environment.log);
   await executePytestAndReport(env, peeps, {
     collection,
     byNodeId,
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
     nodeIds,
+    extraEnv: environment.vars,
   });
 }
 
@@ -479,6 +486,8 @@ export async function executePytestAndReport(
     batches: Array<{ batchId: string; batchNumber: number; runIds?: string[] }>;
     /** Run only these (run mode); omitted runs the whole suite (report mode). */
     nodeIds?: string[];
+    /** Run mode: the Peeps environment's variables (`environment.ts`). */
+    extraEnv?: Record<string, string>;
   },
 ): Promise<void> {
   const scratch = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-"));
@@ -523,6 +532,7 @@ export async function executePytestAndReport(
   const code = await spawnPytest(args, {
     cwd: env.workingDirectory,
     env: pytestEnv({
+      ...input.extraEnv,
       PEEPS_PLAN_FILE: planFile,
       PEEPS_RESULTS_OUT: resultsFile,
       PEEPS_ARTIFACTS_DIR: artifactsDir,
@@ -633,6 +643,8 @@ async function* walkOutput(dir: string, rel = ""): AsyncGenerator<{ abs: string;
  * The fields the plugin adds to a pytest test's FINAL `test_end` event (a
  * retried attempt's test_end carries none), on top of the fields every
  * test_end has (`testName`, `status`, `duration`, `error`, `errorStack`).
+ * Every test_end, retried or final, also carries `retry`: the attempt's
+ * index, 0 for the first.
  * Every field is optional and absent when empty, and a server that does not
  * know them strips them. `python/peeps_pytest_plugin.py` builds them; this
  * type is their documentation.
@@ -668,9 +680,32 @@ export interface PytestTestEndEvidence {
   /** Files not uploaded, and why (outside the workspace, over a cap…); at most 20 listed. */
   attachmentsOmitted?: Array<{ name: string; reason: string }>;
   /**
+   * Status `failed`: the HTTP calls the test made through `requests` or
+   * `httpx`, oldest first, the last 20. Masked on the runner: credential-named
+   * headers, query, form and JSON fields read `[masked]`, URL credentials are
+   * removed, and the job's secret-looking environment values read
+   * `[redacted]`. Bodies are at most 2,000 chars, absent with
+   * `PEEPS_HTTP_BODIES=off`.
+   */
+  httpExchanges?: Array<{
+    method: string;
+    url: string;
+    /** Null when the call raised before a response. */
+    status: number | null;
+    durationMs: number;
+    requestHeaders: Array<{ name: string; value: string }>;
+    responseHeaders: Array<{ name: string; value: string }>;
+    requestBody?: string;
+    responseBody?: string;
+    /** `ExceptionType: message` when the call raised. */
+    error?: string;
+  }>;
+  /** Earlier calls past the 20 kept, or dropped to fit the budget. */
+  httpExchangesOmitted?: number;
+  /**
    * Set when the evidence exceeded its 256 KB budget (as sent, JSON-escaped)
-   * and was cut: output first, then properties from the end, then most of
-   * the traceback.
+   * and was cut: output first, then HTTP bodies and the oldest calls, then
+   * properties from the end, then most of the traceback.
    */
   evidenceTrimmed?: true;
 }
