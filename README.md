@@ -413,6 +413,13 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
+## Unreleased
+
+- Playwright's JSON report (the test list for inventory, report and run, and
+  agent mode's `run_tests` results) is read from a file instead of stdout. A
+  config that prints while loading broke every one of them: dotenv 17's
+  `config()` logs "injected env (N) from .env" on every load.
+
 ## 1.8.0
 
 - New modes `attach-start` and `attach-finish` report a workflow's own
