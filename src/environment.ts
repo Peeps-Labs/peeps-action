@@ -41,6 +41,18 @@ function urlForLog(baseUrl: string): string {
   }
 }
 
+/**
+ * For a job-log line that may quote what a test process or the WebdriverIO
+ * config saw: each of the environment's values with an `@` (one `urlForLog`
+ * would hide) reads `<unreadable URL>`. Apply it before cutting the line, so
+ * no part of a value survives. What goes back to Peeps is unchanged: Peeps
+ * sent it.
+ */
+export function hideEnvironmentUrls(vars: Record<string, string>): (text: string) => string {
+  const hidden = [...new Set(Object.values(vars).filter((v) => v.includes("@")))].sort((a, b) => b.length - a.length);
+  return (text) => hidden.reduce((out, value) => out.split(value).join("<unreadable URL>"), text);
+}
+
 export function planEnvironmentVariables(
   planEnv: PlanEnvironment | null | undefined,
   current: NodeJS.ProcessEnv,

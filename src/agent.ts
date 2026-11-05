@@ -6,16 +6,24 @@
  * result. Every call is echoed to the job log so the repository's owners can
  * read exactly what Peeps did. The loop ends when Peeps ends the session
  * (410), when the session's hard cap passes, or on repeated transport errors.
+ *
+ * With `device-tools: true` on an Appium suite, the runner also offers the
+ * `device_*` tools (`device-tools.ts`): Appium and a device session start in
+ * the background right after attach, and are stopped when the loop ends, on
+ * SIGTERM/SIGINT, or on an error. A signal also stops a `run_tests` still
+ * running WebdriverIO and removes its temporary config.
  */
 
 import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
+import { stopAppiumRuns } from "./appium";
+import { createDeviceTools, type DeviceToolHost, type DeviceToolsDeps } from "./device-tools";
 import type { RunnerEnv } from "./env";
-import { type PlanEnvironment, planEnvironmentVariables } from "./environment";
+import { hideEnvironmentUrls, type PlanEnvironment, planEnvironmentVariables } from "./environment";
 import type { PeepsClient } from "./peeps";
 import { resolveFramework } from "./pytest";
-import { createToolServer } from "./tools";
+import { createToolServer, makeRedactor, type ToolHandler } from "./tools";
 import { ACTION_VERSION } from "./version";
 
 const execFileAsync = promisify(execFile);
@@ -27,22 +35,91 @@ interface Call {
   args: Record<string, unknown>;
 }
 
-export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void> {
+export interface AgentOptions {
+  /** For tests: the device tool host's Appium and capabilities. */
+  deviceDeps?: Partial<DeviceToolsDeps>;
+  /** For tests: whether to install SIGTERM/SIGINT handlers (default true). */
+  handleSignals?: boolean;
+}
+
+/** The framework, or why it could not be told (an unknown `framework` input). */
+function frameworkOf(env: RunnerEnv): string {
+  try {
+    return resolveFramework(env);
+  } catch (error) {
+    return `unknown (${error instanceof Error ? error.message : String(error)})`;
+  }
+}
+
+export async function runAgent(env: RunnerEnv, peeps: PeepsClient, options: AgentOptions = {}): Promise<void> {
   if (!env.sessionId) throw new Error("`session-id` is required in agent mode (Peeps passes it)");
   const server = createToolServer(env);
+  const framework = frameworkOf(env);
+  let device: DeviceToolHost | null = null;
+  if (env.deviceTools) {
+    if (framework === "appium") {
+      device = createDeviceTools(env, { redact: makeRedactor(process.env), deps: options.deviceDeps });
+    } else {
+      console.log(`[peeps] device-tools is for Appium suites; this one is ${framework}, so no device tools are offered`);
+    }
+  }
+  const specs = [...server.specs, ...(device?.specs ?? [])];
+  const handlers: Record<string, ToolHandler> = { ...server.handlers, ...(device?.handlers ?? {}) };
   const attach = await peeps.post<{ sessionId: string; kind: string; expiresAt: string; environment?: unknown }>(
     `/api/v1/bridge/sessions/${env.sessionId}/attach`,
     {
-      tools: server.specs,
-      runnerInfo: await runnerInfoFor(env),
+      tools: specs,
+      runnerInfo: {
+        ...(await runnerInfoFor(env)),
+        framework,
+        ...(device ? { deviceTools: device.info() } : {}),
+      },
     },
   );
   const expiresAt = new Date(attach.expiresAt).getTime();
-  console.log(`[peeps] agent session ${attach.sessionId} (${attach.kind}) attached; ${server.specs.length} tools; cap ${attach.expiresAt}`);
+  console.log(`[peeps] agent session ${attach.sessionId} (${attach.kind}) attached; ${specs.length} tools; cap ${attach.expiresAt}`);
+  // Before anything starts: an environment this action cannot read stops the
+  // job here, with no test run and no device session opened.
   const environment = planEnvironmentVariables(attachEnvironment(attach.environment), process.env);
   if (environment.log) console.log(environment.log);
   server.setTestEnv(environment.vars);
+  // However the job ends: a run_tests still running WebdriverIO is stopped and
+  // its temporary config removed; Appium and the device session are closed.
+  const host = device;
+  const onSignal = (signal: NodeJS.Signals) => {
+    console.log(`[peeps] ${signal}: stopping what the session started`);
+    void stopForSignal(host, signal).finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  };
+  const handleSignals = options.handleSignals !== false;
+  if (handleSignals) {
+    process.once("SIGTERM", onSignal);
+    process.once("SIGINT", onSignal);
+  }
+  host?.start(environment.vars);
+  try {
+    await serve(env, peeps, handlers, expiresAt, hideEnvironmentUrls(environment.vars));
+  } finally {
+    if (handleSignals) {
+      process.off("SIGTERM", onSignal);
+      process.off("SIGINT", onSignal);
+    }
+    await host?.close("agent session over");
+  }
+}
 
+/** On SIGTERM/SIGINT: stop a running wdio (removing its wrapper) and close the device session, together. */
+export async function stopForSignal(device: DeviceToolHost | null, signal: NodeJS.Signals): Promise<void> {
+  await Promise.allSettled([stopAppiumRuns(), device?.close(signal)]);
+}
+
+async function serve(
+  env: RunnerEnv,
+  peeps: PeepsClient,
+  handlers: Record<string, ToolHandler>,
+  expiresAt: number,
+  /** Hides the session environment's URLs with credentials from the log line (an error may quote one). */
+  forLog: (text: string) => string,
+): Promise<void> {
   let transportErrors = 0;
   let handled = 0;
   for (;;) {
@@ -69,7 +146,7 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void
     if (!call) continue;
 
     const started = Date.now();
-    const handler = server.handlers[call.tool];
+    const handler = handlers[call.tool];
     let outcome: { ok: true; result: unknown } | { ok: false; error: string };
     if (!handler) {
       outcome = { ok: false, error: `unknown tool ${call.tool}` };
@@ -82,7 +159,7 @@ export async function runAgent(env: RunnerEnv, peeps: PeepsClient): Promise<void
     }
     handled += 1;
     console.log(
-      `[peeps] #${call.seq} ${call.tool}(${summarizeArgs(call.args)}) → ${outcome.ok ? "ok" : `error: ${outcome.error.slice(0, 120)}`} in ${Date.now() - started} ms`,
+      `[peeps] #${call.seq} ${call.tool}(${summarizeArgs(call.args)}) → ${describeOutcome(outcome, forLog)} in ${Date.now() - started} ms`,
     );
     try {
       await peeps.post(`/api/v1/bridge/sessions/${env.sessionId}/calls/${call.id}/result`, outcome);
@@ -142,7 +219,8 @@ export async function runnerInfoFor(env: RunnerEnv): Promise<Record<string, unkn
     // `result_files`: each run_tests result's `file` is the repo-relative spec
     // it came from (PQA-2733); `error_context`: a failed one carries
     // Playwright's error-context.md as `errorContext` (PQA-2737). `environment`:
-    // run_tests applies the environment the attach answer names (PQA-3033).
+    // run_tests applies the environment the attach answer names (PQA-3033),
+    // as do Appium's run_tests and the device session's capabilities.
     capabilities: ["commit_paths", "environment", ...(playwrightJob(env) ? ["result_files", "error_context"] : [])],
   };
   try {
@@ -165,9 +243,24 @@ export async function runnerInfoFor(env: RunnerEnv): Promise<Record<string, unkn
   return info;
 }
 
-function summarizeArgs(args: Record<string, unknown>): string {
+/** "ok", or the error: a thrown one, or a tool result that says `isError` (device tools). */
+function describeOutcome(
+  outcome: { ok: true; result: unknown } | { ok: false; error: string },
+  forLog: (text: string) => string = (text) => text,
+): string {
+  if (!outcome.ok) return `error: ${forLog(outcome.error).slice(0, 120)}`;
+  const result = outcome.result as { isError?: unknown; content?: Array<{ type?: unknown; text?: unknown }> } | null;
+  if (result?.isError === true) {
+    const first = result.content?.find((part) => part.type === "text")?.text;
+    return `error: ${forLog(String(first ?? "")).slice(0, 120)}`;
+  }
+  return "ok";
+}
+
+/** Arguments for the job log, without the ones that carry secrets or bulk: a token, file contents, a patch, typed text. */
+export function summarizeArgs(args: Record<string, unknown>): string {
   return Object.entries(args)
-    .filter(([k]) => k !== "token" && k !== "content" && k !== "patch")
+    .filter(([k]) => k !== "token" && k !== "content" && k !== "patch" && k !== "text")
     .map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 60)}`)
     .join(", ");
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { planEnvironmentVariables } from "../src/environment";
+import { hideEnvironmentUrls, planEnvironmentVariables } from "../src/environment";
 
 test("exports the environment's name and its BASE_URL when the workflow sets none", () => {
   const { vars, log } = planEnvironmentVariables(
@@ -108,4 +108,11 @@ test("logs a plain URL as it is, and a placeholder for one it can't read", () =>
 test("exports nothing when Peeps sent no environment, or is older than this field", () => {
   assert.deepEqual(planEnvironmentVariables(null, {}).vars, {});
   assert.deepEqual(planEnvironmentVariables(undefined, {}).vars, {});
+});
+
+test("hideEnvironmentUrls hides only the values with an @, whole", () => {
+  const hide = hideEnvironmentUrls({ PEEPS_ENVIRONMENT: "production", PEEPS_BASE_URL: "https://u:p/w@x.example.com", BASE_URL: "https://u:p/w@x.example.com" });
+  assert.equal(hide("GET https://u:p/w@x.example.com/login failed in production"), "GET <unreadable URL>/login failed in production");
+  assert.equal(hideEnvironmentUrls({ BASE_URL: "https://x.example.com" })("at https://x.example.com"), "at https://x.example.com");
+  assert.equal(hideEnvironmentUrls({})("anything"), "anything");
 });

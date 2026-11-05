@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { RunnerEnv } from "../src/env";
+import { readRunnerEnv, type RunnerEnv } from "../src/env";
 import { planEnvironmentVariables } from "../src/environment";
 import {
   createToolServer,
@@ -231,6 +233,25 @@ test("a symlinked folder that stays inside the workspace is allowed", async () =
   await symlink(path.join(ws, "real"), path.join(ws, "alias"));
   await ensureParentDirInside(ws, jailForWrite(ws, "alias/sub/x.spec.ts"));
   assert.ok((await stat(path.join(ws, "real/sub"))).isDirectory());
+});
+
+test("git_commit_push never stages a temporary WebdriverIO config the action wrote", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "peeps-commit-"));
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+  git("init", "-q");
+  // An https origin nothing answers on: the commit is made, the push then refused.
+  git("remote", "add", "origin", "https://127.0.0.1:9/acme/app.git");
+  mkdirSync(path.join(root, "mobile"));
+  writeFileSync(path.join(root, "mobile", "login.spec.ts"), "it('x', () => {});\n");
+  // A wrapper a cancelled run left beside the customer's config, at the root and in a subdirectory.
+  writeFileSync(path.join(root, "mobile", ".peeps-0b9e.wdio.conf.mts"), "export const config = {};\n");
+  writeFileSync(path.join(root, ".peeps-1c2d.wdio.conf.mjs"), "export const config = {};\n");
+  const server = createToolServer(readRunnerEnv({ GITHUB_WORKSPACE: root }));
+  await assert.rejects(
+    server.handlers.git_commit_push!({ branch: "peeps/fix", message: "fix", token: "tok" }),
+    /git push refused/,
+  );
+  assert.deepEqual(git("show", "--name-only", "--format=", "HEAD").trim().split("\n"), ["mobile/login.spec.ts"]);
 });
 
 // ---------------------------------------------------------------------------

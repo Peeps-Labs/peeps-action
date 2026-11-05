@@ -97,6 +97,9 @@ function eventNameForPipelineSource(source) {
       return source;
   }
 }
+function flag(value) {
+  return /^(true|1|yes)$/i.test((value ?? "").trim());
+}
 function variable(env, name) {
   const value = env[name];
   return value && value.trim() !== "" ? value.trim() : null;
@@ -112,6 +115,7 @@ function readGitLabRunnerEnv(env) {
     sessionId: variable(env, "PEEPS_SESSION_ID"),
     configPath: variable(env, "PEEPS_PLAYWRIGHT_CONFIG"),
     framework: variable(env, "PEEPS_FRAMEWORK"),
+    deviceTools: flag(env.PEEPS_DEVICE_TOOLS),
     peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
     workingDirectory: workingDirectory ? import_node_path.default.resolve(workspace, workingDirectory) : workspace,
     repository: env.CI_PROJECT_PATH ?? null,
@@ -142,6 +146,7 @@ function readRunnerEnv(env = process.env) {
     sessionId: input(env, "session-id") ?? env.PEEPS_SESSION_ID ?? null,
     configPath: input(env, "config") ?? env.PEEPS_PLAYWRIGHT_CONFIG ?? null,
     framework: input(env, "framework") ?? env.PEEPS_FRAMEWORK ?? null,
+    deviceTools: flag(input(env, "device-tools") ?? env.PEEPS_DEVICE_TOOLS),
     peepsUrl: resolvePeepsUrl(env.PEEPS_API_URL ?? "https://app.peepsai.com"),
     workingDirectory: workingDirectory ? import_node_path.default.resolve(workspace, workingDirectory) : workspace,
     repository,

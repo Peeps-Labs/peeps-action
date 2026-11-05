@@ -96,3 +96,12 @@ test("readDefaultBranch returns null without a readable event payload", () => {
   assert.equal(readDefaultBranch({}), null);
   assert.equal(readDefaultBranch({ GITHUB_EVENT_PATH: "/nope/missing.json" }), null);
 });
+
+test("device-tools is off unless the job turns it on, on GitHub and on GitLab", () => {
+  assert.equal(readRunnerEnv({ GITHUB_WORKSPACE: "/workspace" }).deviceTools, false);
+  assert.equal(readRunnerEnv({ GITHUB_WORKSPACE: "/workspace", "INPUT_DEVICE-TOOLS": "false" }).deviceTools, false);
+  assert.equal(readRunnerEnv({ GITHUB_WORKSPACE: "/workspace", "INPUT_DEVICE-TOOLS": "true" }).deviceTools, true);
+  assert.equal(readRunnerEnv({ GITHUB_WORKSPACE: "/workspace", PEEPS_DEVICE_TOOLS: "1" }).deviceTools, true);
+  assert.equal(readRunnerEnv({ GITLAB_CI: "true", CI_PROJECT_DIR: "/builds/x", PEEPS_DEVICE_TOOLS: "TRUE" }).deviceTools, true);
+  assert.equal(readRunnerEnv({ GITLAB_CI: "true", CI_PROJECT_DIR: "/builds/x" }).deviceTools, false);
+});

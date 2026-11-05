@@ -38,6 +38,7 @@ import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, stat, wri
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { runAppiumTests, type WdioRunner } from "./appium";
 import type { RunnerEnv } from "./env";
 import { jsonReportTarget } from "./playwright-json";
 import { resolveFramework } from "./pytest";
@@ -501,7 +502,12 @@ const ALWAYS_MASK_KEYS = new Set([
 ]);
 const SAFE_ENV_KEYS = new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
 
-export function createToolServer(env: RunnerEnv): ToolServer {
+export interface ToolServerDeps {
+  /** For tests: run this instead of `npx wdio run <config>` for an Appium suite. */
+  appiumRunner?: WdioRunner;
+}
+
+export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): ToolServer {
   const workspace = env.workspace;
   const redact = makeRedactor(process.env);
 
@@ -712,6 +718,16 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       // Playwright resolve nothing, run zero tests, and report "no tests
       // found" — a confusing success. Re-express it relative to the cwd.
       const abs = jail(workspace, file);
+      // An Appium suite runs under WebdriverIO, through the same wrapper
+      // config `run` mode uses, and answers in this same shape, in the
+      // session's Peeps environment like every other test process.
+      if (resolveFramework(env) === "appium") {
+        return runAppiumTests(
+          env,
+          { file: abs, grep: typeof args.grep === "string" && args.grep ? args.grep : undefined, extraEnv: testEnv },
+          { redact, runner: deps.appiumRunner },
+        );
+      }
       const rel = path.relative(env.workingDirectory, abs).split(path.sep).join("/");
       const project = typeof args.project === "string" && args.project ? args.project : null;
       // A teardown runs only after the project it tears down: alone it starts
@@ -858,7 +874,9 @@ export function createToolServer(env: RunnerEnv): ToolServer {
       await git("checkout", "-B", branch);
       let commit;
       if (paths === null) {
-        await git("add", "-A");
+        // Everything, except a temporary WebdriverIO config a cancelled run_tests
+        // may have left beside the customer's (`.peeps-<id>.wdio.conf.mts`).
+        await git("add", "-A", "--", ".", ":(exclude,glob)**/.peeps-*.wdio.conf.*");
         commit = await git("commit", "-m", message).catch((e: { stderr?: string }) => {
           throw new ToolError(`nothing to commit? ${redact((e.stderr ?? "").slice(0, 500))}`);
         });
@@ -984,7 +1002,7 @@ export function createToolServer(env: RunnerEnv): ToolServer {
     { name: "grep", description: "Search source files for a regular expression; returns matching lines.", inputSchema: obj({ pattern: s("JavaScript regular expression"), path: s("Repo-relative directory to search; default the root"), ignoreCase: { type: "boolean" } }, ["pattern"]) },
     { name: "write_file", description: "Replace a file's contents (repo-relative path). Creates the file if missing.", inputSchema: obj({ path: s("Repo-relative path"), content: s("Full new contents") }, ["path", "content"]) },
     { name: "apply_patch", description: "Apply a unified diff to the repository with git apply.", inputSchema: obj({ patch: s("Unified diff text") }, ["patch"]) },
-    { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec, or in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one). Optionally narrow it: Playwright by --grep or project; pytest by test (the title path, e.g. TestClass › test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors; a failing Playwright test also carries what it printed (output), and a failing pytest test the HTTP calls it made through requests or httpx (httpExchanges, the last one usually the failing call).", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name"), test: s("Optional pytest title path of one test, scopes joined by ' › '") }, ["file"]) },
+    { name: "run_tests", description: "Run one test file with the repository's own config: a Playwright spec; in a pytest suite a test module (through the repository's .peeps/run-tests hook when it has one); in an Appium suite a WebdriverIO spec. Optionally narrow it: Playwright and Appium by grep (a regular expression over the test's full title), Playwright also by project; pytest by test (the title path, e.g. TestClass › test_name[param]) or grep (a pytest -k expression). Returns per-test results and errors; a failing Playwright test also carries what it printed (output), a failing pytest test the HTTP calls it made through requests or httpx (httpExchanges, the last one usually the failing call), and a failing Appium test its evidence paths and page source.", inputSchema: obj({ file: s("Repo-relative spec or test module path"), grep: s("Optional filter: Playwright or Appium --grep regular expression, or pytest -k expression"), project: s("Optional Playwright project name (ignored for Appium)"), test: s("Optional pytest title path of one test, scopes joined by ' › '") }, ["file"]) },
     { name: "git_status", description: "Files changed in the working tree: git's porcelain lines, and each changed file with its kind and the sha256 of its bytes.", inputSchema: obj({}, []) },
     { name: "git_diff", description: "Unified diff of the working tree against HEAD.", inputSchema: obj({}, []) },
     { name: "git_commit_push", description: "Commit on a new peeps/* branch and push it, using the token Peeps provides for this call: every change, or with `paths` only those files. Returns the paths the commit contains.", inputSchema: obj({ branch: s("Branch name starting with peeps/"), message: s("Commit message"), token: s("The token Peeps minted for this push"), paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_COMMIT_PATHS, description: "Optional. Repo-relative paths to commit; nothing else is staged or committed. Omit to commit every change." } }, ["branch", "message", "token"]) },
