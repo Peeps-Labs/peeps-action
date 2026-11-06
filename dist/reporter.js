@@ -364,6 +364,7 @@ function deadline(ms, what) {
 }
 var PeepsCiReporter = class {
   plan;
+  /** One list per test: projects whose roots overlap each planned it, each with its own run. */
   entries = /* @__PURE__ */ new Map();
   rootDirAbs = "";
   queues = /* @__PURE__ */ new Map();
@@ -387,7 +388,7 @@ var PeepsCiReporter = class {
     const planPath = process.env.PEEPS_PLAN_FILE;
     if (!planPath) throw new Error("PEEPS_PLAN_FILE is not set");
     this.plan = JSON.parse((0, import_node_fs2.readFileSync)(planPath, "utf8"));
-    for (const entry of this.plan.runs) this.entries.set(key(entry), entry);
+    this.addEntries(this.plan.runs);
   }
   printsToStdio() {
     return false;
@@ -414,7 +415,7 @@ var PeepsCiReporter = class {
       }
       return;
     }
-    console.log(`[peeps] reporting ${this.entries.size} planned run(s) to ${this.plan.peepsUrl}`);
+    console.log(`[peeps] reporting ${this.plan.runs.length} planned run(s) to ${this.plan.peepsUrl}`);
   }
   // The time is taken here, not on replay, so a buffered event keeps when it happened.
   onTestBegin(test) {
@@ -467,13 +468,14 @@ var PeepsCiReporter = class {
       jobUrl: env.runUrl,
       baseUrl: process.env.BASE_URL ?? null,
       tests: unique,
-      files
+      files,
+      reportsEveryBatch: true
     });
     if (this.gaveUp) return;
     this.plan = { peepsUrl: env.peepsUrl, rootDir, runs: response.batches.flatMap((b) => b.runs) };
-    for (const entry of this.plan.runs) this.entries.set(key(entry), entry);
+    this.addEntries(this.plan.runs);
     this.batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
-    console.log(`[peeps] attach: reporting ${this.entries.size} run(s) to ${env.peepsUrl}`);
+    console.log(`[peeps] attach: reporting ${this.plan.runs.length} run(s) to ${env.peepsUrl}`);
     await this.writeAttachState();
   }
   async writeAttachState() {
@@ -485,35 +487,37 @@ var PeepsCiReporter = class {
     );
   }
   testBegan(test, now) {
-    const entry = this.entryFor(test);
-    if (!entry) return;
-    if (!this.started.has(entry.runId)) {
-      this.started.add(entry.runId);
-      this.enqueue(entry, { type: "run_start", timestamp: now });
+    for (const entry of this.entriesFor(test)) {
+      if (!this.started.has(entry.runId)) {
+        this.started.add(entry.runId);
+        this.enqueue(entry, { type: "run_start", timestamp: now });
+      }
+      this.enqueue(entry, { type: "test_start", timestamp: now, testName: test.title });
     }
-    this.enqueue(entry, { type: "test_start", timestamp: now, testName: test.title });
   }
   testEnded(test, result, now) {
-    const entry = this.entryFor(test);
-    if (!entry) {
+    const entries = this.entriesFor(test);
+    if (entries.length === 0) {
       if (this.attachDir && this.batches.length === 0) return;
       console.log(`[peeps] not planned, not reported: ${test.titlePath().join(" \u203A ")} (${result.status})`);
       return;
     }
     const error = result.errors[0];
-    this.enqueue(entry, {
-      type: "test_end",
-      timestamp: now,
-      testName: test.title,
-      status: result.status,
-      duration: Math.round(result.duration),
-      error: error?.message?.slice(0, 4e3),
-      errorStack: error?.stack?.slice(0, 8e3),
-      retry: result.retry
-    });
-    if (result.retry >= test.retries || result.status === "passed") {
-      this.enqueue(entry, { type: "run_end", timestamp: now });
-      this.pending.push(this.flush(entry));
+    for (const entry of entries) {
+      this.enqueue(entry, {
+        type: "test_end",
+        timestamp: now,
+        testName: test.title,
+        status: result.status,
+        duration: Math.round(result.duration),
+        error: error?.message?.slice(0, 4e3),
+        errorStack: error?.stack?.slice(0, 8e3),
+        retry: result.retry
+      });
+      if (result.retry >= test.retries || result.status === "passed") {
+        this.enqueue(entry, { type: "run_end", timestamp: now });
+        this.pending.push(this.flush(entry));
+      }
     }
   }
   async onEnd() {
@@ -532,8 +536,15 @@ var PeepsCiReporter = class {
       (error) => console.log(`[peeps] attach: ${String(error)}; some results were not reported`)
     );
   }
-  entryFor(test) {
-    return this.entries.get(key(identityOf(test, this.rootDirAbs, this.plan.rootDir))) ?? null;
+  addEntries(runs) {
+    for (const entry of runs) {
+      const planned = this.entries.get(key(entry));
+      if (planned) planned.push(entry);
+      else this.entries.set(key(entry), [entry]);
+    }
+  }
+  entriesFor(test) {
+    return this.entries.get(key(identityOf(test, this.rootDirAbs, this.plan.rootDir))) ?? [];
   }
   enqueue(entry, event) {
     const queue = this.queues.get(entry.runId) ?? [];

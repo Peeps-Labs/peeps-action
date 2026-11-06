@@ -32,7 +32,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PlanEntry } from "./reporter";
@@ -96,7 +96,7 @@ export function repoRelative(workspace: string, abs: string): string | null {
   }
 }
 
-/** Identity is `(path, titlePath)`: one run per test (no projects here). */
+/** Identity is `(path, titlePath)`: no Playwright projects here. */
 export function identityKey(test: { path: string; titlePath: string }): string {
   return `${test.path}\n${test.titlePath}`;
 }
@@ -115,8 +115,15 @@ const fileSafe = (value: string) => value.replace(/[^A-Za-z0-9._-]/g, "_");
  */
 export type RunClaim = { state: "new" | "continue" | "ended" } | { state: "other"; owner: string };
 
+/**
+ * Every run of one test, in plan order: projects whose roots overlap each planned it. It is one
+ * group: the first run's id holds the claim and every per-test state below, so two capabilities
+ * can't split a test between its runs, and closing one run can't suppress the next.
+ */
+type RunGroup = [PlanEntry, ...PlanEntry[]];
+
 class Plan {
-  readonly entries = new Map<string, PlanEntry>();
+  readonly entries = new Map<string, RunGroup>();
   constructor(
     readonly file: AppiumPlanFile,
     /** Beside the plan file: one owner file per run, shared by every worker. */
@@ -124,7 +131,9 @@ class Plan {
   ) {
     for (const run of file.runs) {
       const key = identityKey(run);
-      if (!this.entries.has(key)) this.entries.set(key, run);
+      const group = this.entries.get(key);
+      if (group) group.push(run);
+      else this.entries.set(key, [run]);
     }
   }
 
@@ -177,8 +186,8 @@ class Plan {
     }
   }
 
-  /** The run a test reports to: its spec file (absolute) and title chain. */
-  entryFor(file: string | undefined, titles: string[]): PlanEntry | null {
+  /** The runs a test reports to: its spec file (absolute) and title chain. */
+  groupFor(file: string | undefined, titles: string[]): RunGroup | null {
     if (!file) return null;
     const rel = repoRelative(this.file.workspace, file.startsWith("file://") ? fileURLToPath(file) : file);
     if (rel === null) return null;
@@ -194,9 +203,9 @@ class Plan {
       pwProject: "",
       credential: { exp: 0, sig: "" },
     };
-    this.entries.set(key, entry);
+    this.entries.set(key, [entry]);
     this.file.runs.push(entry);
-    return entry;
+    return [entry];
   }
 }
 
@@ -319,10 +328,11 @@ export interface CaptureBrowser {
 
 /**
  * Save a screenshot and the page source for one run, into
- * `PEEPS_ARTIFACTS_DIR/upload`, replacing what an earlier attempt saved.
- * Never throws: evidence is a bonus on top of the result.
+ * `PEEPS_ARTIFACTS_DIR/upload`, replacing what an earlier attempt saved, and
+ * copy them for `siblings`, the test's other runs: capturing again would drive
+ * the device again. Never throws: evidence is a bonus on top of the result.
  */
-export async function captureEvidence(runId: string, browser: CaptureBrowser): Promise<void> {
+export async function captureEvidence(runId: string, browser: CaptureBrowser, siblings: string[] = []): Promise<void> {
   const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
   if (!artifacts) return;
   discardCaptured(runId);
@@ -371,6 +381,28 @@ export async function captureEvidence(runId: string, browser: CaptureBrowser): P
     console.log(`[peeps] evidence for ${runId} not captured: ${String(error)}`);
   }
   captured.set(runId, out);
+  for (const sibling of siblings) copyCaptured(out, sibling, dir);
+}
+
+function copyCaptured(from: Captured, runId: string, dir: string): void {
+  discardCaptured(runId);
+  const copy: Captured = { attachments: [], omitted: [...from.omitted], context: from.context, files: [] };
+  for (const attachment of from.attachments) {
+    const file = path.join(dir, evidenceFileName(runId, attachment.name));
+    try {
+      copyFileSync(path.join(dir, path.basename(attachment.path)), file);
+      copy.files.push(file);
+      copy.attachments.push({ ...attachment, path: `data/${path.basename(file)}` });
+    } catch (error) {
+      copy.omitted.push({ name: attachment.name, reason: reasonOf(error) });
+    }
+  }
+  captured.set(runId, copy);
+}
+
+function captureForGroup(group: RunGroup, browser: CaptureBrowser): Promise<void> {
+  const [lead, ...siblings] = group;
+  return captureEvidence(lead.runId, browser, siblings.map((run) => run.runId));
 }
 
 /** The `browser` global the WebdriverIO worker set up, if it is usable. */
@@ -407,8 +439,8 @@ export async function peepsAfterTest(
     const titles = titlesOf(context?.test);
     const browser = workerBrowser();
     if (!plan || !titles || !browser) return;
-    const entry = plan.entryFor(context?.test?.file, titles);
-    if (entry) await captureEvidence(entry.runId, browser);
+    const group = plan.groupFor(context?.test?.file, titles);
+    if (group) await captureForGroup(group, browser);
   } catch (error) {
     console.log(`[peeps] afterTest evidence not captured: ${String(error)}`);
   }
@@ -430,8 +462,8 @@ export async function peepsAfterHook(
     const titles = titlesOf(context?.currentTest);
     const browser = workerBrowser();
     if (!plan || !titles || !browser) return;
-    const entry = plan.entryFor(context?.currentTest?.file, titles);
-    if (entry) await captureEvidence(entry.runId, browser);
+    const group = plan.groupFor(context?.currentTest?.file, titles);
+    if (group) await captureForGroup(group, browser);
   } catch (error) {
     console.log(`[peeps] afterHook evidence not captured: ${String(error)}`);
   }
@@ -466,7 +498,7 @@ export const mochaHooks = {
     const test = this.currentTest;
     const titles = titlesOf(test);
     if (!titles) return;
-    if (!plan.entryFor(test?.file, titles)) this.skip();
+    if (!plan.groupFor(test?.file, titles)) this.skip();
   },
 };
 
@@ -589,7 +621,7 @@ export class PeepsAppiumReporter {
         console.log(
           this.plan.file.resultsDir
             ? "[peeps] recording results for the agent session"
-            : `[peeps] reporting ${this.plan.entries.size} planned run(s) to ${this.plan.file.peepsUrl}`,
+            : `[peeps] reporting ${this.plan.file.runs.length} planned run(s) to ${this.plan.file.peepsUrl}`,
         );
         return;
       case "suite:start":
@@ -625,83 +657,93 @@ export class PeepsAppiumReporter {
     }
   }
 
-  private entryOf(payload: WdioEventPayload): PlanEntry | null {
-    return this.plan!.entryFor(payload.file ?? this.file, [...this.suites, payload.title ?? ""]);
+  private groupOf(payload: WdioEventPayload): RunGroup | null {
+    return this.plan!.groupFor(payload.file ?? this.file, [...this.suites, payload.title ?? ""]);
   }
 
-  /** Open an attempt of `entry`'s run; false when this worker does not report it. */
-  private begin(entry: PlanEntry, testName: string): boolean {
-    if (this.suppressed.has(entry.runId)) return false;
+  /** Open an attempt of `group`'s runs; false when this worker does not report them. */
+  private begin(group: RunGroup, testName: string): boolean {
+    const [lead] = group;
+    if (this.suppressed.has(lead.runId)) return false;
     const now = Date.now();
-    if (!this.started.has(entry.runId)) {
-      const claim = this.plan!.claim(entry.runId, this.worker);
+    if (!this.started.has(lead.runId)) {
+      const claim = this.plan!.claim(lead.runId, this.worker);
       if (claim.state === "other" || claim.state === "ended") {
-        this.suppressed.add(entry.runId);
+        this.suppressed.add(lead.runId);
         console.log(
           claim.state === "other"
-            ? `[peeps] ${entry.titlePath}: reported by worker ${claim.owner}; this attempt (worker ${this.worker}) is not sent`
-            : `[peeps] ${entry.titlePath}: closed by an earlier attempt of worker ${this.worker}; this one is not sent`,
+            ? `[peeps] ${lead.titlePath}: reported by worker ${claim.owner}; this attempt (worker ${this.worker}) is not sent`
+            : `[peeps] ${lead.titlePath}: closed by an earlier attempt of worker ${this.worker}; this one is not sent`,
         );
         return false;
       }
-      this.started.add(entry.runId);
-      if (claim.state === "new") this.enqueue(entry.runId, { type: "run_start", timestamp: now });
+      this.started.add(lead.runId);
+      if (claim.state === "new") {
+        for (const run of group) this.enqueue(run.runId, { type: "run_start", timestamp: now });
+      }
     }
-    this.enqueue(entry.runId, { type: "test_start", timestamp: now, testName });
-    this.attemptStart.set(entry.runId, now);
+    for (const run of group) this.enqueue(run.runId, { type: "test_start", timestamp: now, testName });
+    this.attemptStart.set(lead.runId, now);
     return true;
   }
 
   private onTestStart(payload: WdioEventPayload): void {
-    const entry = this.entryOf(payload);
-    if (entry && !this.ended.has(entry.runId)) this.begin(entry, payload.title ?? "");
+    const group = this.groupOf(payload);
+    if (group && !this.ended.has(group[0].runId)) this.begin(group, payload.title ?? "");
   }
 
   private onTestEnd(payload: WdioEventPayload, status: "passed" | "failed" | "skipped"): void {
-    const entry = this.entryOf(payload);
-    if (!entry) {
+    const group = this.groupOf(payload);
+    if (!group) {
       console.log(
         `[peeps] not planned, not reported: ${[...this.suites, payload.title ?? ""].join(TITLE_PATH_SEPARATOR)} (${status})`,
       );
       return;
     }
+    const [lead] = group;
     // A test mocha reports twice (a second `done()`) closed its run already.
-    if (this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
+    if (this.ended.has(lead.runId) || this.suppressed.has(lead.runId)) return;
     // `it.skip` is reported without ever starting.
-    if (!this.attemptStart.has(entry.runId) && !this.begin(entry, payload.title ?? "")) return;
+    if (!this.attemptStart.has(lead.runId) && !this.begin(group, payload.title ?? "")) return;
+    const error = payload.error ?? payload.errors?.[0];
+    const shared: PeepsEvent = {
+      type: "test_end",
+      timestamp: Date.now(),
+      testName: payload.title ?? "",
+      status,
+      duration: this.durationOf(lead.runId, payload),
+    };
+    if (status === "failed") {
+      if (error?.message) shared.error = error.message.slice(0, 4000);
+      if (error?.stack) shared.errorStack = error.stack.slice(0, 8000);
+    }
+    this.close(group, (run) =>
+      status === "failed" ? { ...shared, ...failureEvidence(error, "call", captured.get(run.runId)) } : shared,
+    );
+  }
+
+  /** A failed attempt mocha retries: a failed `test_end`, without evidence. */
+  private onTestRetry(payload: WdioEventPayload): void {
+    const group = this.groupOf(payload);
+    if (!group) return;
+    const [lead] = group;
+    if (this.ended.has(lead.runId) || this.suppressed.has(lead.runId)) return;
     const error = payload.error ?? payload.errors?.[0];
     const event: PeepsEvent = {
       type: "test_end",
       timestamp: Date.now(),
       testName: payload.title ?? "",
-      status,
-      duration: this.durationOf(entry.runId, payload),
-    };
-    if (status === "failed") {
-      if (error?.message) event.error = error.message.slice(0, 4000);
-      if (error?.stack) event.errorStack = error.stack.slice(0, 8000);
-      Object.assign(event, failureEvidence(error, "call", captured.get(entry.runId)));
-    }
-    this.close(entry, event);
-  }
-
-  /** A failed attempt mocha retries: a failed `test_end`, without evidence. */
-  private onTestRetry(payload: WdioEventPayload): void {
-    const entry = this.entryOf(payload);
-    if (!entry || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
-    const error = payload.error ?? payload.errors?.[0];
-    this.enqueue(entry.runId, {
-      type: "test_end",
-      timestamp: Date.now(),
-      testName: payload.title ?? "",
       status: "failed",
-      duration: this.durationOf(entry.runId, payload),
+      duration: this.durationOf(lead.runId, payload),
       error: (error?.message ?? "failed; retried").slice(0, 4000),
       ...(error?.stack ? { errorStack: error.stack.slice(0, 8000) } : {}),
-    });
-    this.attemptStart.delete(entry.runId);
-    // Only the final attempt's evidence is reported, as under pytest.
-    discardCaptured(entry.runId);
+    };
+    this.attemptStart.delete(lead.runId);
+    for (const run of group) {
+      this.enqueue(run.runId, event);
+      // Only the final attempt's evidence is reported, as under pytest.
+      discardCaptured(run.runId);
+    }
   }
 
   /**
@@ -718,21 +760,23 @@ export class PeepsAppiumReporter {
     const scope = owner > 0 || payload.parent === "" ? this.suites.slice(0, owner) : this.suites;
     const prefix = scope.length ? scope.join(TITLE_PATH_SEPARATOR) + TITLE_PATH_SEPARATOR : "";
     const error = payload.error ?? payload.errors?.[0];
-    for (const entry of this.plan!.entries.values()) {
-      if (entry.path !== rel || !entry.titlePath.startsWith(prefix) || this.ended.has(entry.runId)) continue;
-      const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
-      if (!this.attemptStart.has(entry.runId) && !this.begin(entry, testName)) continue;
+    for (const group of this.plan!.entries.values()) {
+      const [lead] = group;
+      if (lead.path !== rel || !lead.titlePath.startsWith(prefix) || this.ended.has(lead.runId)) continue;
+      const testName = lead.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
+      if (!this.attemptStart.has(lead.runId) && !this.begin(group, testName)) continue;
       const message = `${payload.title ?? "a before hook"} failed: ${error?.message ?? ""}`;
-      this.close(entry, {
+      const timestamp = Date.now();
+      this.close(group, (run) => ({
         type: "test_end",
-        timestamp: Date.now(),
+        timestamp,
         testName,
         status: "failed",
         duration: 0,
         error: message.slice(0, 4000),
         ...(error?.stack ? { errorStack: error.stack.slice(0, 8000) } : {}),
-        ...failureEvidence(error, "setup", captured.get(entry.runId)),
-      });
+        ...failureEvidence(error, "setup", captured.get(run.runId)),
+      }));
     }
   }
 
@@ -744,21 +788,28 @@ export class PeepsAppiumReporter {
     return start === undefined ? 0 : Date.now() - start;
   }
 
-  private close(entry: PlanEntry, event: PeepsEvent): void {
-    this.ended.add(entry.runId);
-    this.attemptStart.delete(entry.runId);
-    if (event.status === "failed" && this.retriable) {
-      // WebdriverIO will run this spec file again on this worker: like a
-      // mocha retry, a failed attempt without evidence, the run left open.
-      const { attachments: _a, attachmentsOmitted: _o, properties: _p, ...attempt } = event;
-      this.enqueue(entry.runId, attempt);
-      discardCaptured(entry.runId);
-    } else {
-      this.enqueue(entry.runId, event);
-      this.enqueue(entry.runId, { type: "run_end", timestamp: Date.now() });
-      this.plan!.markEnded(entry.runId);
+  private close(group: RunGroup, eventFor: (run: PlanEntry) => PeepsEvent): void {
+    const [lead] = group;
+    this.ended.add(lead.runId);
+    this.attemptStart.delete(lead.runId);
+    let closed = false;
+    for (const run of group) {
+      const event = eventFor(run);
+      if (event.status === "failed" && this.retriable) {
+        // WebdriverIO will run this spec file again on this worker: like a
+        // mocha retry, a failed attempt without evidence, the run left open.
+        const { attachments: _a, attachmentsOmitted: _o, properties: _p, ...attempt } = event;
+        this.enqueue(run.runId, attempt);
+        discardCaptured(run.runId);
+      } else {
+        this.enqueue(run.runId, event);
+        this.enqueue(run.runId, { type: "run_end", timestamp: Date.now() });
+        closed = true;
+      }
+      this.flush(run.runId);
     }
-    this.flush(entry.runId);
+    // Only now, with every run closed: the marker is what stops a later attempt reopening them.
+    if (closed) this.plan!.markEnded(lead.runId);
   }
 
   private enqueue(runId: string, event: PeepsEvent): void {

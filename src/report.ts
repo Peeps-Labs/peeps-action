@@ -83,6 +83,7 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
     baseUrl: process.env.BASE_URL ?? null,
     tests,
     files,
+    reportsEveryBatch: true,
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -123,8 +124,8 @@ export async function executeAndReport(
 
   const exitCode = await runPlaywright(env, planFile, reportDir, input.selection, input.extraEnv);
 
-  let reportUploaded = false;
   for (const b of input.batches) {
+    let reportUploaded = false;
     try {
       const uploaded = await uploadReport(peeps, b.batchId, reportDir);
       reportUploaded = uploaded > 0;

@@ -192,21 +192,22 @@ export function plannedPytestTests(
 }
 
 /**
- * Match Peeps' planned runs back to the node ids that will execute them. A run
- * with no collected node id (the test was renamed or deleted since Peeps
- * planned it) is returned separately; nothing runs for it.
+ * Match Peeps' planned runs back to the node ids that will execute them: one
+ * run per project planning the test. A run with no collected node id (the test
+ * was renamed or deleted since Peeps planned it) is returned separately;
+ * nothing runs for it.
  */
 export function nodeIdsForRuns(
   planned: Array<PlannedTest & { nodeId: string }>,
   runs: PlanEntry[],
-): { byNodeId: Record<string, PlanEntry>; unmatched: PlanEntry[] } {
+): { byNodeId: Record<string, PlanEntry[]>; unmatched: PlanEntry[] } {
   const nodeIdOf = new Map(planned.map((t) => [planKey(t), t.nodeId]));
-  const byNodeId: Record<string, PlanEntry> = {};
+  const byNodeId: Record<string, PlanEntry[]> = {};
   const unmatched: PlanEntry[] = [];
   for (const run of runs) {
     const nodeId = nodeIdOf.get(planKey(run));
     if (nodeId === undefined) unmatched.push(run);
-    else byNodeId[nodeId] = run;
+    else (byNodeId[nodeId] ??= []).push(run);
   }
   return { byNodeId, unmatched };
 }
@@ -386,6 +387,7 @@ export async function runPytestReport(env: RunnerEnv, peeps: PeepsClient): Promi
     baseUrl: process.env.BASE_URL ?? null,
     tests: planned.map(({ path: p, titlePath, pwProject }) => ({ path: p, titlePath, pwProject })),
     files: await moduleFilePayload(env, collection),
+    reportsEveryBatch: true,
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -478,7 +480,7 @@ export async function executePytestAndReport(
   peeps: PeepsClient,
   input: {
     collection: PytestCollection;
-    byNodeId: Record<string, PlanEntry>;
+    byNodeId: Record<string, PlanEntry[]>;
     /**
      * `runIds`: the runs a batch holds, so each test's evidence goes to its
      * own batch. Omitted with a single batch, which then holds every run.
@@ -499,9 +501,9 @@ export async function executePytestAndReport(
   const artifactsDir = path.join(scratch, "evidence");
   await mkdir(artifactsDir);
   const runs = Object.fromEntries(
-    Object.entries(input.byNodeId).map(([nodeId, run]) => [
+    Object.entries(input.byNodeId).map(([nodeId, entries]) => [
       nodeId,
-      { runId: run.runId, credential: run.credential },
+      entries.map((run) => ({ runId: run.runId, credential: run.credential })),
     ]),
   );
   await writeFile(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 0o600 });
@@ -550,18 +552,19 @@ export async function executePytestAndReport(
     },
   );
 
-  const runIdByOutputDir = await readOutputDirs(resultsFile, input.byNodeId);
-  const evidence = await stagedEvidence(path.join(artifactsDir, "upload"), input.byNodeId);
+  const nodeIdByOutputDir = await readOutputDirs(resultsFile);
+  const byRunId = Object.fromEntries(Object.values(input.byNodeId).flat().map((run) => [run.runId, run]));
+  const evidence = await stagedEvidence(path.join(artifactsDir, "upload"), byRunId);
   for (const b of input.batches) {
+    const holds = (runId: string) => input.batches.length === 1 || (b.runIds ?? []).includes(runId);
     try {
-      const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir);
+      const runIdByOutputDir = runsOfOutputDirs(nodeIdByOutputDir, input.byNodeId, holds);
+      const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir, input.batches.length > 1);
       console.log(`[peeps] uploaded ${uploaded} artifact file(s) for batch ${b.batchNumber}`);
     } catch (error) {
       console.log(`[peeps] artifact upload failed for batch ${b.batchId}: ${String(error)}`);
     }
-    const mine = evidence.filter(
-      (file) => input.batches.length === 1 || (b.runIds ?? []).includes(file.runId),
-    );
+    const mine = evidence.filter((file) => holds(file.runId));
     if (mine.length > 0) {
       const uploaded = await uploadEvidence(peeps, b.batchId, mine);
       console.log(`[peeps] uploaded ${uploaded} test attachment(s) for batch ${b.batchNumber}`);
@@ -580,23 +583,33 @@ export async function executePytestAndReport(
   if (code !== 0) process.exitCode = code;
 }
 
-/** pytest-playwright's per-test directory name → the Peeps run that test reported to. */
-async function readOutputDirs(
-  resultsFile: string,
-  byNodeId: Record<string, PlanEntry>,
-): Promise<Map<string, string>> {
+/** pytest-playwright's per-test directory name → the node id that wrote it. */
+async function readOutputDirs(resultsFile: string): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   try {
     const results = JSON.parse(await readFile(resultsFile, "utf8")) as {
       outputDirs?: Record<string, string>;
     };
     for (const [nodeId, dir] of Object.entries(results.outputDirs ?? {})) {
-      const run = byNodeId[nodeId];
-      if (run) map.set(path.basename(dir), run.runId);
+      map.set(path.basename(dir), nodeId);
     }
   } catch {
     // No results file: pytest died before its session finished. The files
     // still upload, just without a run in their names.
+  }
+  return map;
+}
+
+/** Each output directory → the run that test reported to in one batch. */
+function runsOfOutputDirs(
+  nodeIdByOutputDir: Map<string, string>,
+  byNodeId: Record<string, PlanEntry[]>,
+  holds: (runId: string) => boolean,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const [dir, nodeId] of nodeIdByOutputDir) {
+    const run = byNodeId[nodeId]?.find((entry) => holds(entry.runId));
+    if (run) map.set(dir, run.runId);
   }
   return map;
 }
@@ -774,9 +787,15 @@ async function uploadOutput(
   batchId: string,
   outputDir: string,
   runIdByOutputDir: Map<string, string>,
+  /**
+   * Several batches are several projects, perhaps with different tests: a file
+   * with no run in this one is another project's, or one nobody can say whose.
+   */
+  onlyItsOwnRuns: boolean,
 ): Promise<number> {
   let uploaded = 0;
   for await (const file of walkOutput(outputDir)) {
+    if (onlyItsOwnRuns && !runIdByOutputDir.has(file.rel.split("/")[0]!)) continue;
     const info = await stat(file.abs);
     if (info.size > MAX_UPLOAD_BYTES) {
       console.log(`[peeps] skipping ${file.rel}: ${info.size} bytes exceeds the upload limit`);

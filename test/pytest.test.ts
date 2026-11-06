@@ -145,7 +145,7 @@ test("planned runs map back to the node ids that execute them, per browser", () 
     "tests/test_a.py::test_x[firefox]",
     "tests/test_a.py::test_y",
   ]);
-  assert.equal(byNodeId["tests/test_a.py::test_x[firefox]"]!.runId, "r1");
+  assert.equal(byNodeId["tests/test_a.py::test_x[firefox]"]![0]!.runId, "r1");
   assert.deepEqual(unmatched.map((u) => u.runId), ["r3"]);
 });
 
@@ -329,12 +329,12 @@ test("a run streams one test_start/test_end per planned node id, pytest's outcom
     // A failing test fails the job, as it would without Peeps.
     assert.equal(process.exitCode, 1);
     // Each test's output directory is uploaded under the run it belongs to.
-    const opens = byNodeId["tests/shop/test_cart.py::test_opens[chromium]"]!.runId;
+    const opens = byNodeId["tests/shop/test_cart.py::test_opens[chromium]"]![0]!.runId;
     assert.ok(peeps.received.artifacts.includes(`data/${opens}-trace.zip`), String(peeps.received.artifacts));
     assert.equal(peeps.received.artifacts.length, 6); // all but the skip-marked test
 
     const statusOf = (nodeId: string) => {
-      const events = peeps.received.events.get(byNodeId[nodeId]!.runId) ?? [];
+      const events = peeps.received.events.get(byNodeId[nodeId]![0]!.runId) ?? [];
       assert.deepEqual(
         events.map((e) => e.type),
         ["run_start", "test_start", "test_end", "run_end"],
@@ -449,15 +449,15 @@ async function runSuiteWith(addopts: string, prepare?: (suite: string) => void, 
 
 test("under pytest-xdist each run is reported once, with its artifacts", needsPlugins, async () => {
   const { received, byNodeId } = await runSuiteWith("-n 2");
-  for (const [nodeId, run] of Object.entries(byNodeId)) {
+  for (const [nodeId, [run]] of Object.entries(byNodeId)) {
     assert.deepEqual(
-      (received.events.get(run.runId) ?? []).map((e) => e.type),
+      (received.events.get(run!.runId) ?? []).map((e) => e.type),
       ["run_start", "test_start", "test_end", "run_end"],
       nodeId,
     );
   }
   // The output directories were recorded in the workers and still name runs.
-  const opens = byNodeId["tests/shop/test_cart.py::test_opens[chromium]"]!.runId;
+  const opens = byNodeId["tests/shop/test_cart.py::test_opens[chromium]"]![0]!.runId;
   assert.ok(received.artifacts.includes(`data/${opens}-trace.zip`), String(received.artifacts));
 });
 
@@ -477,7 +477,7 @@ test("with pytest-rerunfailures each attempt is a test_end and only the final on
       ].join("\n"),
     );
   });
-  const flaky = received.events.get(byNodeId["tests/shop/test_flaky.py::test_flaky"]!.runId) ?? [];
+  const flaky = received.events.get(byNodeId["tests/shop/test_flaky.py::test_flaky"]![0]!.runId) ?? [];
   // As the Playwright reporter sends a retried attempt: a failed test_end,
   // then the retry, and run_end only after the attempt that decides.
   assert.deepEqual(
@@ -498,7 +498,7 @@ test("with pytest-rerunfailures each attempt is a test_end and only the final on
     [0, 1],
   );
   // A test that fails every attempt still fails.
-  const wrong = received.events.get(byNodeId["tests/shop/test_cart.py::test_total_is_wrong"]!.runId) ?? [];
+  const wrong = received.events.get(byNodeId["tests/shop/test_cart.py::test_total_is_wrong"]![0]!.runId) ?? [];
   assert.equal(wrong[2]!.status, "failed");
   assert.deepEqual(
     wrong.filter((e) => e.type === "test_end").map((e) => (e as { retry?: unknown }).retry),
@@ -595,10 +595,10 @@ test("run mode executes only the plan even when addopts names a whole directory"
 type Event = Record<string, unknown>;
 
 /** The one test_end of each node id, with the checks every run must pass. */
-function testEnds(received: Received, byNodeId: Record<string, PlanEntry>): Record<string, Event> {
+function testEnds(received: Received, byNodeId: Record<string, PlanEntry[]>): Record<string, Event> {
   const ends: Record<string, Event> = {};
-  for (const [nodeId, run] of Object.entries(byNodeId)) {
-    const events = received.events.get(run.runId) ?? [];
+  for (const [nodeId, [run]] of Object.entries(byNodeId)) {
+    const events = received.events.get(run!.runId) ?? [];
     assert.deepEqual(
       events.map((e) => e.type),
       ["run_start", "test_start", "test_end", "run_end"],
@@ -610,7 +610,7 @@ function testEnds(received: Received, byNodeId: Record<string, PlanEntry>): Reco
 }
 
 /** What every run of the camera suite reports, however pytest ran it. */
-function assertCameraEvidence(received: Received, byNodeId: Record<string, PlanEntry>) {
+function assertCameraEvidence(received: Received, byNodeId: Record<string, PlanEntry[]>) {
   const ends = testEnds(received, byNodeId);
   const EVIDENCE = ["skipReason", "failure", "properties", "propertiesOmitted", "output", "attachments", "attachmentsOmitted"];
   const evidenceOf = (event: Event) => EVIDENCE.filter((key) => key in event);
@@ -657,7 +657,7 @@ function assertCameraEvidence(received: Received, byNodeId: Record<string, PlanE
   // uploaded under the test's run; a path outside the workspace is not.
   const frame = ends.test_saves_frame!;
   assert.equal(frame.status, "passed");
-  const runId = byNodeId["tests/test_camera.py::test_saves_frame"]!.runId;
+  const runId = byNodeId["tests/test_camera.py::test_saves_frame"]![0]!.runId;
   assert.deepEqual(frame.attachments, [
     { name: "frame.png", path: `data/${runId}-evidence-frame.png`, size: 19 },
     // `.npy` is not a type Peeps' data/ accepts, so it travels as `.dat`.
@@ -748,7 +748,7 @@ test("an API suite's failing test reports its HTTP calls, masked", needsHttpClie
     assert.match(calls[0]!.url, /\/robots\?api_key=\[masked\]&page=2$/);
     assert.equal(header(calls[0]!.requestHeaders, "x-fleet-echo"), "[redacted]");
     assert.equal(JSON.parse(calls[0]!.responseBody!).echo, "[redacted]");
-    assert.equal(JSON.stringify(received.events.get(byNodeId["tests/test_fleet.py::test_secret_never_leaves"]!.runId)).includes(secret), false);
+    assert.equal(JSON.stringify(received.events.get(byNodeId["tests/test_fleet.py::test_secret_never_leaves"]![0]!.runId)).includes(secret), false);
 
     // A call that never got an answer: no status, the error instead.
     const [down] = ends.test_api_down!.httpExchanges as Exchange[];
@@ -891,7 +891,7 @@ test(`with pytest-rerunfailures only the final attempt's evidence is reported ($
     },
     CAMERA,
   );
-  const runId = byNodeId["tests/test_flaky_camera.py::test_flaky"]!.runId;
+  const runId = byNodeId["tests/test_flaky_camera.py::test_flaky"]![0]!.runId;
   const ends = (received.events.get(runId) ?? []).filter((e) => e.type === "test_end");
   assert.deepEqual(
     ends.map((e) => e.status),
@@ -911,7 +911,7 @@ test(`with pytest-rerunfailures only the final attempt's evidence is reported ($
     [`data/${runId}-evidence-frame-3.png`],
   );
   // A test that fails on every attempt reports its final failure.
-  const sharp = (received.events.get(byNodeId["tests/test_camera.py::test_sharpness"]!.runId) ?? []).filter(
+  const sharp = (received.events.get(byNodeId["tests/test_camera.py::test_sharpness"]![0]!.runId) ?? []).filter(
     (e) => e.type === "test_end",
   );
   assert.equal(sharp.length, 3);

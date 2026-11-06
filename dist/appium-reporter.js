@@ -84,7 +84,9 @@ var Plan = class {
     this.claimsDir = claimsDir;
     for (const run of file.runs) {
       const key = identityKey(run);
-      if (!this.entries.has(key)) this.entries.set(key, run);
+      const group = this.entries.get(key);
+      if (group) group.push(run);
+      else this.entries.set(key, [run]);
     }
   }
   entries = /* @__PURE__ */ new Map();
@@ -133,8 +135,8 @@ var Plan = class {
       return 1;
     }
   }
-  /** The run a test reports to: its spec file (absolute) and title chain. */
-  entryFor(file, titles) {
+  /** The runs a test reports to: its spec file (absolute) and title chain. */
+  groupFor(file, titles) {
     if (!file) return null;
     const rel = repoRelative(this.file.workspace, file.startsWith("file://") ? (0, import_node_url.fileURLToPath)(file) : file);
     if (rel === null) return null;
@@ -149,9 +151,9 @@ var Plan = class {
       pwProject: "",
       credential: { exp: 0, sig: "" }
     };
-    this.entries.set(key, entry);
+    this.entries.set(key, [entry]);
     this.file.runs.push(entry);
-    return entry;
+    return [entry];
   }
 };
 var cachedPlan;
@@ -226,7 +228,7 @@ function withTimeout(promise, label) {
 function reasonOf(error) {
   return `capture failed: ${(error instanceof Error ? error.message : String(error)).split("\n")[0].slice(0, 200)}`;
 }
-async function captureEvidence(runId, browser) {
+async function captureEvidence(runId, browser, siblings = []) {
   const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
   if (!artifacts) return;
   discardCaptured(runId);
@@ -273,6 +275,26 @@ async function captureEvidence(runId, browser) {
     console.log(`[peeps] evidence for ${runId} not captured: ${String(error)}`);
   }
   captured.set(runId, out);
+  for (const sibling of siblings) copyCaptured(out, sibling, dir);
+}
+function copyCaptured(from, runId, dir) {
+  discardCaptured(runId);
+  const copy = { attachments: [], omitted: [...from.omitted], context: from.context, files: [] };
+  for (const attachment of from.attachments) {
+    const file = import_node_path.default.join(dir, evidenceFileName(runId, attachment.name));
+    try {
+      (0, import_node_fs.copyFileSync)(import_node_path.default.join(dir, import_node_path.default.basename(attachment.path)), file);
+      copy.files.push(file);
+      copy.attachments.push({ ...attachment, path: `data/${import_node_path.default.basename(file)}` });
+    } catch (error) {
+      copy.omitted.push({ name: attachment.name, reason: reasonOf(error) });
+    }
+  }
+  captured.set(runId, copy);
+}
+function captureForGroup(group, browser) {
+  const [lead, ...siblings] = group;
+  return captureEvidence(lead.runId, browser, siblings.map((run) => run.runId));
 }
 function workerBrowser() {
   const browser = globalThis.browser;
@@ -288,8 +310,8 @@ async function peepsAfterTest(_test, context, result) {
     const titles = titlesOf(context?.test);
     const browser = workerBrowser();
     if (!plan || !titles || !browser) return;
-    const entry = plan.entryFor(context?.test?.file, titles);
-    if (entry) await captureEvidence(entry.runId, browser);
+    const group = plan.groupFor(context?.test?.file, titles);
+    if (group) await captureForGroup(group, browser);
   } catch (error) {
     console.log(`[peeps] afterTest evidence not captured: ${String(error)}`);
   }
@@ -301,8 +323,8 @@ async function peepsAfterHook(_hook, context, result) {
     const titles = titlesOf(context?.currentTest);
     const browser = workerBrowser();
     if (!plan || !titles || !browser) return;
-    const entry = plan.entryFor(context?.currentTest?.file, titles);
-    if (entry) await captureEvidence(entry.runId, browser);
+    const group = plan.groupFor(context?.currentTest?.file, titles);
+    if (group) await captureForGroup(group, browser);
   } catch (error) {
     console.log(`[peeps] afterHook evidence not captured: ${String(error)}`);
   }
@@ -314,7 +336,7 @@ var mochaHooks = {
     const test = this.currentTest;
     const titles = titlesOf(test);
     if (!titles) return;
-    if (!plan.entryFor(test?.file, titles)) this.skip();
+    if (!plan.groupFor(test?.file, titles)) this.skip();
   }
 };
 function trimMiddle(text, head = 2e3, tail = 1e4) {
@@ -377,7 +399,7 @@ var PeepsAppiumReporter = class {
     switch (event) {
       case "runner:start":
         console.log(
-          this.plan.file.resultsDir ? "[peeps] recording results for the agent session" : `[peeps] reporting ${this.plan.entries.size} planned run(s) to ${this.plan.file.peepsUrl}`
+          this.plan.file.resultsDir ? "[peeps] recording results for the agent session" : `[peeps] reporting ${this.plan.file.runs.length} planned run(s) to ${this.plan.file.peepsUrl}`
         );
         return;
       case "suite:start":
@@ -412,74 +434,85 @@ var PeepsAppiumReporter = class {
         return;
     }
   }
-  entryOf(payload) {
-    return this.plan.entryFor(payload.file ?? this.file, [...this.suites, payload.title ?? ""]);
+  groupOf(payload) {
+    return this.plan.groupFor(payload.file ?? this.file, [...this.suites, payload.title ?? ""]);
   }
-  /** Open an attempt of `entry`'s run; false when this worker does not report it. */
-  begin(entry, testName) {
-    if (this.suppressed.has(entry.runId)) return false;
+  /** Open an attempt of `group`'s runs; false when this worker does not report them. */
+  begin(group, testName) {
+    const [lead] = group;
+    if (this.suppressed.has(lead.runId)) return false;
     const now = Date.now();
-    if (!this.started.has(entry.runId)) {
-      const claim = this.plan.claim(entry.runId, this.worker);
+    if (!this.started.has(lead.runId)) {
+      const claim = this.plan.claim(lead.runId, this.worker);
       if (claim.state === "other" || claim.state === "ended") {
-        this.suppressed.add(entry.runId);
+        this.suppressed.add(lead.runId);
         console.log(
-          claim.state === "other" ? `[peeps] ${entry.titlePath}: reported by worker ${claim.owner}; this attempt (worker ${this.worker}) is not sent` : `[peeps] ${entry.titlePath}: closed by an earlier attempt of worker ${this.worker}; this one is not sent`
+          claim.state === "other" ? `[peeps] ${lead.titlePath}: reported by worker ${claim.owner}; this attempt (worker ${this.worker}) is not sent` : `[peeps] ${lead.titlePath}: closed by an earlier attempt of worker ${this.worker}; this one is not sent`
         );
         return false;
       }
-      this.started.add(entry.runId);
-      if (claim.state === "new") this.enqueue(entry.runId, { type: "run_start", timestamp: now });
+      this.started.add(lead.runId);
+      if (claim.state === "new") {
+        for (const run of group) this.enqueue(run.runId, { type: "run_start", timestamp: now });
+      }
     }
-    this.enqueue(entry.runId, { type: "test_start", timestamp: now, testName });
-    this.attemptStart.set(entry.runId, now);
+    for (const run of group) this.enqueue(run.runId, { type: "test_start", timestamp: now, testName });
+    this.attemptStart.set(lead.runId, now);
     return true;
   }
   onTestStart(payload) {
-    const entry = this.entryOf(payload);
-    if (entry && !this.ended.has(entry.runId)) this.begin(entry, payload.title ?? "");
+    const group = this.groupOf(payload);
+    if (group && !this.ended.has(group[0].runId)) this.begin(group, payload.title ?? "");
   }
   onTestEnd(payload, status) {
-    const entry = this.entryOf(payload);
-    if (!entry) {
+    const group = this.groupOf(payload);
+    if (!group) {
       console.log(
         `[peeps] not planned, not reported: ${[...this.suites, payload.title ?? ""].join(TITLE_PATH_SEPARATOR)} (${status})`
       );
       return;
     }
-    if (this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
-    if (!this.attemptStart.has(entry.runId) && !this.begin(entry, payload.title ?? "")) return;
+    const [lead] = group;
+    if (this.ended.has(lead.runId) || this.suppressed.has(lead.runId)) return;
+    if (!this.attemptStart.has(lead.runId) && !this.begin(group, payload.title ?? "")) return;
+    const error = payload.error ?? payload.errors?.[0];
+    const shared = {
+      type: "test_end",
+      timestamp: Date.now(),
+      testName: payload.title ?? "",
+      status,
+      duration: this.durationOf(lead.runId, payload)
+    };
+    if (status === "failed") {
+      if (error?.message) shared.error = error.message.slice(0, 4e3);
+      if (error?.stack) shared.errorStack = error.stack.slice(0, 8e3);
+    }
+    this.close(
+      group,
+      (run) => status === "failed" ? { ...shared, ...failureEvidence(error, "call", captured.get(run.runId)) } : shared
+    );
+  }
+  /** A failed attempt mocha retries: a failed `test_end`, without evidence. */
+  onTestRetry(payload) {
+    const group = this.groupOf(payload);
+    if (!group) return;
+    const [lead] = group;
+    if (this.ended.has(lead.runId) || this.suppressed.has(lead.runId)) return;
     const error = payload.error ?? payload.errors?.[0];
     const event = {
       type: "test_end",
       timestamp: Date.now(),
       testName: payload.title ?? "",
-      status,
-      duration: this.durationOf(entry.runId, payload)
-    };
-    if (status === "failed") {
-      if (error?.message) event.error = error.message.slice(0, 4e3);
-      if (error?.stack) event.errorStack = error.stack.slice(0, 8e3);
-      Object.assign(event, failureEvidence(error, "call", captured.get(entry.runId)));
-    }
-    this.close(entry, event);
-  }
-  /** A failed attempt mocha retries: a failed `test_end`, without evidence. */
-  onTestRetry(payload) {
-    const entry = this.entryOf(payload);
-    if (!entry || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
-    const error = payload.error ?? payload.errors?.[0];
-    this.enqueue(entry.runId, {
-      type: "test_end",
-      timestamp: Date.now(),
-      testName: payload.title ?? "",
       status: "failed",
-      duration: this.durationOf(entry.runId, payload),
+      duration: this.durationOf(lead.runId, payload),
       error: (error?.message ?? "failed; retried").slice(0, 4e3),
       ...error?.stack ? { errorStack: error.stack.slice(0, 8e3) } : {}
-    });
-    this.attemptStart.delete(entry.runId);
-    discardCaptured(entry.runId);
+    };
+    this.attemptStart.delete(lead.runId);
+    for (const run of group) {
+      this.enqueue(run.runId, event);
+      discardCaptured(run.runId);
+    }
   }
   /**
    * A failed `before`/`beforeEach` hook: mocha runs none of the tests below
@@ -494,21 +527,23 @@ var PeepsAppiumReporter = class {
     const scope = owner > 0 || payload.parent === "" ? this.suites.slice(0, owner) : this.suites;
     const prefix = scope.length ? scope.join(TITLE_PATH_SEPARATOR) + TITLE_PATH_SEPARATOR : "";
     const error = payload.error ?? payload.errors?.[0];
-    for (const entry of this.plan.entries.values()) {
-      if (entry.path !== rel || !entry.titlePath.startsWith(prefix) || this.ended.has(entry.runId)) continue;
-      const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
-      if (!this.attemptStart.has(entry.runId) && !this.begin(entry, testName)) continue;
+    for (const group of this.plan.entries.values()) {
+      const [lead] = group;
+      if (lead.path !== rel || !lead.titlePath.startsWith(prefix) || this.ended.has(lead.runId)) continue;
+      const testName = lead.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
+      if (!this.attemptStart.has(lead.runId) && !this.begin(group, testName)) continue;
       const message = `${payload.title ?? "a before hook"} failed: ${error?.message ?? ""}`;
-      this.close(entry, {
+      const timestamp = Date.now();
+      this.close(group, (run) => ({
         type: "test_end",
-        timestamp: Date.now(),
+        timestamp,
         testName,
         status: "failed",
         duration: 0,
         error: message.slice(0, 4e3),
         ...error?.stack ? { errorStack: error.stack.slice(0, 8e3) } : {},
-        ...failureEvidence(error, "setup", captured.get(entry.runId))
-      });
+        ...failureEvidence(error, "setup", captured.get(run.runId))
+      }));
     }
   }
   durationOf(runId, payload) {
@@ -518,19 +553,25 @@ var PeepsAppiumReporter = class {
     const start = this.attemptStart.get(runId);
     return start === void 0 ? 0 : Date.now() - start;
   }
-  close(entry, event) {
-    this.ended.add(entry.runId);
-    this.attemptStart.delete(entry.runId);
-    if (event.status === "failed" && this.retriable) {
-      const { attachments: _a, attachmentsOmitted: _o, properties: _p, ...attempt } = event;
-      this.enqueue(entry.runId, attempt);
-      discardCaptured(entry.runId);
-    } else {
-      this.enqueue(entry.runId, event);
-      this.enqueue(entry.runId, { type: "run_end", timestamp: Date.now() });
-      this.plan.markEnded(entry.runId);
+  close(group, eventFor) {
+    const [lead] = group;
+    this.ended.add(lead.runId);
+    this.attemptStart.delete(lead.runId);
+    let closed = false;
+    for (const run of group) {
+      const event = eventFor(run);
+      if (event.status === "failed" && this.retriable) {
+        const { attachments: _a, attachmentsOmitted: _o, properties: _p, ...attempt } = event;
+        this.enqueue(run.runId, attempt);
+        discardCaptured(run.runId);
+      } else {
+        this.enqueue(run.runId, event);
+        this.enqueue(run.runId, { type: "run_end", timestamp: Date.now() });
+        closed = true;
+      }
+      this.flush(run.runId);
     }
-    this.flush(entry.runId);
+    if (closed) this.plan.markEnded(lead.runId);
   }
   enqueue(runId, event) {
     const queue = this.queues.get(runId) ?? [];
