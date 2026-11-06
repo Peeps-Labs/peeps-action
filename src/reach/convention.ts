@@ -56,6 +56,8 @@ export interface Convention {
   scanText?(file: string, text: string): void;
   /** Why this tree can't be read by its routes, if it can't. */
   refusal?(): string | null;
+  /** This file is the framework's to read, whatever it looks like: it isn't a mere document. */
+  ownsFile?(file: string): boolean;
   /** A change here, or to anything it imports, can reach everything. */
   isGlobalFile?(file: string): boolean;
   /** Reaching a symbol here can reach everything. */

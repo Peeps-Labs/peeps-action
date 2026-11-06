@@ -53,6 +53,9 @@ export const next: ConventionFactory = ({ files, read }) => {
     isGlobalFile: (file) => CONFIG.test(path.basename(file)) || belowRoots(file, roots).some((rest) => ROOT_LAYOUT.test(rest) || ROOT_FILE.test(rest)),
     isGlobalSymbol: (file) => belowRoots(file, roots).some((rest) => INSTRUMENTATION.test(rest)),
     fileSurface: (file) => nextEntry(file, roots),
+    ownsFile: (file) =>
+      belowRoots(file, roots).some((rest) => /^(?:src\/)?(?:app|pages)\//.test(rest)) ||
+      roots.some((root) => root !== "" && file.startsWith(`${root}/`) && !/(?:^|\/)(?:README|CHANGELOG|LICENSE)[^/]*$/i.test(file)),
   };
 };
 

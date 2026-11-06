@@ -202,3 +202,8 @@ test("the identity decision needs nothing but its port: a head checkout reads no
   assert.ok(calls.includes("rev-parse --verify --quiet HEAD^2"));
   assert.ok(!calls.some((c) => c.startsWith("fetch")), "a full clone isn't deepened");
 });
+
+test("past its deadline, the repository runs no git", async () => {
+  const repository = await localRepository(process.cwd(), Date.now() - 1);
+  await assert.rejects(repository.git("rev-parse", "HEAD"), /Out of time/);
+});

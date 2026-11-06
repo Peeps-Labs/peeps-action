@@ -25,8 +25,8 @@ import {
   withReporterTitles,
   type GrepTarget,
 } from "./narrow";
-import type { PeepsClient } from "./peeps";
-import { workspaceTestsMaySetTrace } from "./footprint/test-sources";
+import { PeepsHttpError, type PeepsClient } from "./peeps";
+import { workspaceTestSources } from "./footprint/test-sources";
 import { computeReach } from "./reach";
 import { reachWanted } from "./reach/preflight";
 import type { PlanFile } from "./reporter";
@@ -114,17 +114,27 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   const files = await specFilePayload(env, list);
   const specFiles = specFilesOf(list).map((file) => path.relative(env.workspace, path.join(rootDirAbs, file)).split(path.sep).join("/"));
   const started = Date.now();
-  const reach = (await reachWanted(env, peeps)) ? await computeReach(env, { rootDir, specFiles }) : undefined;
-  if (reach) console.log(`[peeps] reach in ${Date.now() - started} ms: ${reach.global ? `everything (${reach.why})` : `${reach.surfaces.length} surface(s)`}`);
-  const response = await peeps.post<BatchResponse>("/api/v1/ci/batches", {
+  const computed = (await reachWanted(env, peeps)) ? await computeReach(env, { specFiles }) : undefined;
+  if (computed) console.log(`[peeps] reach in ${Date.now() - started} ms: ${computed.global ? `everything (${computed.why})` : `${computed.surfaces.length} surface(s)`}`);
+  const announce = {
     sha: env.sha,
     jobUrl,
     baseUrl: process.env.BASE_URL ?? null,
     tests,
     files,
     canNarrow: true,
-    ...(reach ? { reach } : {}),
-  });
+  };
+  let reach = computed;
+  let response: BatchResponse;
+  try {
+    response = await peeps.post<BatchResponse>("/api/v1/ci/batches", { ...announce, ...(reach ? { reach } : {}) });
+  } catch (error) {
+    // A reach the server won't take costs that run its narrowing, never the job.
+    if (!reach || !(error instanceof PeepsHttpError) || error.status >= 500 || error.status === 401 || error.status === 403) throw error;
+    console.log(`[peeps] Peeps refused what this pull request reaches (${error.status}), so everything runs`);
+    reach = undefined;
+    response = await peeps.post<BatchResponse>("/api/v1/ci/batches", announce);
+  }
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
   console.log(
@@ -133,9 +143,12 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} › ${u.titlePath}`);
 
   const batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
-  const footprints = response.batches.some((b) => b.collectFootprints === true)
-    ? { origins: response.batches.flatMap((b) => b.footprintOrigins ?? []), record: !workspaceTestsMaySetTrace(env.workspace, specFiles) }
-    : undefined;
+  let footprints: { origins: string[]; hiddenRequests: string[]; record: boolean } | undefined;
+  if (response.batches.some((b) => b.collectFootprints === true)) {
+    const sources = workspaceTestSources(env.workspace, specFiles);
+    if (sources.maySetTrace) console.log("[peeps] not recording footprints: a test may set its own trace, so every test here reads unknown");
+    footprints = { origins: response.batches.flatMap((b) => b.footprintOrigins ?? []), hiddenRequests: sources.hiddenRequests, record: !sources.maySetTrace };
+  }
   if (!answeredNarrowed(response)) {
     await executeAndReport(env, peeps, { rootDir, runs, batches, footprints, executed: reach && { mode: "full", tests: tests.length } });
     return;
@@ -245,7 +258,7 @@ export async function executeAndReport(
   const reportDir = path.join(scratch, "report");
   const plan: PlanFile = { peepsUrl: env.peepsUrl, rootDir: input.rootDir, runs: input.runs };
   if (input.narrowed) plan.narrowed = true;
-  if (input.footprints) plan.footprints = { origins: input.footprints.origins };
+  if (input.footprints) plan.footprints = { origins: input.footprints.origins, hiddenRequests: input.footprints.hiddenRequests };
   await writeFile(planFile, JSON.stringify(plan), { mode: 0o600 });
 
   const exitCode = await runPlaywright(env, planFile, reportDir, input.selection, input.extraEnv, input.narrowed, input.footprints?.record === true);

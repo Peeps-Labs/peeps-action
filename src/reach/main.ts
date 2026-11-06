@@ -13,7 +13,6 @@ const input = JSON.parse(readFileSync(process.argv[2]!, "utf8")) as {
   root: string;
   files: string[];
   changes: FileChange[];
-  rootDir: string;
   specFiles: string[];
   base: string;
   deadlineMs: number;
@@ -25,7 +24,6 @@ process.stdout.write(
       files: input.files,
       read: (file) => readFileSync(path.join(input.root, file), "utf8"),
       changes: input.changes,
-      rootDir: input.rootDir,
       specFiles: input.specFiles,
       base: input.base,
       deadlineMs: input.deadlineMs,

@@ -10,32 +10,26 @@ import path from "node:path";
 import type { RunnerEnv } from "../env";
 import { readCheckout } from "./checkout";
 import { localRepository } from "./git";
+import { capReach } from "./limits";
 import type { Reach } from "./types";
 
 export const REACH_BUDGET_MS = 90_000;
 /** A scan with parent nodes reached 3.2 GB in the plan's measurement; one with none stays under this. */
 const REACH_HEAP_MB = 512;
 
-const widened = (why: string, base: string | null = null, changedFiles: string[] = []): Reach => ({
-  global: true,
-  why,
-  surfaces: [],
-  reasons: [],
-  changedFiles,
-  changedTestFiles: [],
-  base,
-});
+const widened = (why: string, base: string | null = null, changedFiles: string[] = []): Reach =>
+  capReach({ global: true, why, surfaces: [], reasons: [], changedFiles, changedTestFiles: [], base });
 
 export async function computeReach(
   env: RunnerEnv,
-  input: { rootDir: string; specFiles: string[] },
+  input: { specFiles: string[] },
   options: { budgetMs?: number; scanner?: string } = {},
 ): Promise<Reach | undefined> {
   if (env.platform !== "github" || env.eventName !== "pull_request" || !env.sha) return undefined;
   const budgetMs = options.budgetMs ?? REACH_BUDGET_MS;
   const started = Date.now();
   try {
-    const repository = await localRepository(env.workspace);
+    const repository = await localRepository(env.workspace, started + budgetMs);
     const checkout = await readCheckout(repository, env.sha);
     if (!checkout.ok) return widened(checkout.why);
     const changedFiles = checkout.changes.map((change) => change.path);
@@ -47,13 +41,13 @@ export async function computeReach(
       const inputFile = path.join(scratch, "input.json");
       await writeFile(
         inputFile,
-        JSON.stringify({ root: checkout.root, files, changes: checkout.changes, rootDir: input.rootDir, specFiles: input.specFiles, base: checkout.base, deadlineMs: remaining }),
+        JSON.stringify({ root: checkout.root, files, changes: checkout.changes, specFiles: input.specFiles, base: checkout.base, deadlineMs: remaining }),
         { mode: 0o600 },
       );
       const answer = await runScanner(options.scanner ?? path.join(__dirname, "reach.js"), inputFile, remaining);
       if (answer === "timeout") return widened("timeout", checkout.base, changedFiles);
       if (answer === null) return widened("scan_failed", checkout.base, changedFiles);
-      return answer;
+      return capReach(answer);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }

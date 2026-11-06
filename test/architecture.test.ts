@@ -12,7 +12,7 @@ const read = (file: string) => readFileSync(path.join(root, file), "utf8");
 const IMPURE = /from "(?:node:(?:fs|fs\/promises|child_process|net|http|https|os|zlib)|@playwright\/test)"|\bfetch\(/;
 
 const adapters = readdirSync(path.join(root, "reach/adapters")).map((file) => `reach/adapters/${file}`);
-const PURE = ["footprint/rules.ts", "footprint/test-trace.ts", "reach/preflight.ts", "reach/checkout.ts", "reach/match.ts", "reach/scan.ts", "reach/graph.ts", "reach/walk.ts", "reach/text-graph.ts", "reach/parse.ts", "reach/syntax.ts", "reach/convention.ts", ...adapters];
+const PURE = ["footprint/rules.ts", "footprint/test-trace.ts", "reach/preflight.ts", "reach/limits.ts", "reach/checkout.ts", "reach/match.ts", "reach/scan.ts", "reach/graph.ts", "reach/walk.ts", "reach/text-graph.ts", "reach/parse.ts", "reach/syntax.ts", "reach/convention.ts", ...adapters];
 
 for (const file of PURE) {
   test(`${file} touches no file system, git, Playwright or network`, () => {

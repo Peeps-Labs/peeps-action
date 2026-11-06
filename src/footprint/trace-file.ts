@@ -8,11 +8,11 @@ import path from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { footprintFromText, keepsTrace, type Footprint, type FootprintOrigins, type TraceText } from "./rules";
 
-/** A trace with more than this in one entry is not read, and the test is unknown. */
-const MAX_ENTRY_BYTES = 256 * 1024 * 1024;
+/** A trace with more than this in what's read of it isn't read, and the test is unknown. */
+const MAX_TRACE_BYTES = 512 * 1024 * 1024;
 
 /** The text of a zip's entries `wanted` names. Reads only those, from a file of any size. */
-export function readZip(file: string, wanted: (name: string) => boolean): string[] {
+export function readZip(file: string, wanted: (name: string) => boolean, budget = { left: MAX_TRACE_BYTES }): string[] {
   const fd = openSync(file, "r");
   try {
     const size = fstatSync(fd).size;
@@ -37,6 +37,7 @@ export function readZip(file: string, wanted: (name: string) => boolean): string
       if (directory.readUInt32LE(at) !== 0x02014b50) throw new Error("A corrupt zip directory");
       const method = directory.readUInt16LE(at + 10);
       const compressed = directory.readUInt32LE(at + 20);
+      const plain = directory.readUInt32LE(at + 24);
       const nameLength = directory.readUInt16LE(at + 28);
       const extraLength = directory.readUInt16LE(at + 30);
       const commentLength = directory.readUInt16LE(at + 32);
@@ -44,11 +45,13 @@ export function readZip(file: string, wanted: (name: string) => boolean): string
       const name = directory.toString("utf8", at + 46, at + 46 + nameLength);
       at += 46 + nameLength + extraLength + commentLength;
       if (!wanted(name)) continue;
+      budget.left -= plain;
+      if (budget.left < 0) throw new Error("A trace too large to read");
       const header = read(offset, 30);
       const start = offset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
       const bytes = read(start, compressed);
       if (method === 0) out.push(bytes.toString("utf8"));
-      else if (method === 8) out.push(inflateRawSync(bytes, { maxOutputLength: MAX_ENTRY_BYTES }).toString("utf8"));
+      else if (method === 8) out.push(plain === 0 ? "" : inflateRawSync(bytes, { maxOutputLength: plain }).toString("utf8"));
       else throw new Error(`A zip entry compressed with method ${method}`);
     }
     return out;
@@ -59,10 +62,11 @@ export function readZip(file: string, wanted: (name: string) => boolean): string
 
 function readTrace(file: string): TraceText | null {
   try {
+    const budget = { left: MAX_TRACE_BYTES };
     return {
-      network: readZip(file, (name) => name.endsWith(".network")),
+      network: readZip(file, (name) => name.endsWith(".network"), budget),
       // The runner's own `test.trace` has steps, not the browser's actions.
-      actions: readZip(file, (name) => name.endsWith(".trace") && !name.endsWith("test.trace")),
+      actions: readZip(file, (name) => name.endsWith(".trace") && !name.endsWith("test.trace"), budget),
     };
   } catch {
     return null;

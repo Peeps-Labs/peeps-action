@@ -171,9 +171,13 @@ var MAX_PATH_LENGTH = 512;
 var MAX_REQUEST_BYTES = 9e5;
 var MAX_REQUEST_EVENTS = 500;
 var STATIC_MIME = /^(?:image\/|font\/|text\/css$|application\/javascript$|text\/javascript$)/;
+var STATIC_FILE = /\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|woff2?|ttf|otf|eot|css|[cm]?js|map)$/i;
 var STATIC_PREFIX = "/_next/static/";
+var NEXT_DATA = /^\/_next\/data\/[^/]+\/(.*)\.json$/;
 var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var OPAQUE = /^(?=.*\d)[A-Za-z0-9_-]{20,}$/;
+var JWT = /^[\w-]+\.[\w-]+\.[\w-]+$/;
+var DATE = /^\d{4}-\d{2}-\d{2}$/;
 var IP = /^(?:\d+\.\d+\.\d+\.\d+|\[.*\])$/;
 var LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]"]);
 function hostsFor({ baseUrls, origins }) {
@@ -203,12 +207,27 @@ function hostnameOf(url) {
     return null;
   }
 }
+function isPrivate(raw) {
+  let segment = raw;
+  try {
+    segment = decodeURIComponent(raw);
+  } catch {
+    return true;
+  }
+  if (DATE.test(segment)) return false;
+  if (segment.includes("@") || UUID.test(segment) || /\d{6,}/.test(segment) || OPAQUE.test(segment)) return true;
+  if (/^[+\d().\s_-]+$/.test(segment) && segment.replace(/\D/g, "").length >= 7) return true;
+  if (/^[A-Za-z0-9+/_-]+={1,2}$/.test(segment)) return true;
+  if (JWT.test(segment) && (segment.startsWith("eyJ") || segment.length >= 32)) return true;
+  if (/^[0-9a-f]{8,}$/i.test(segment) && /\d/.test(segment)) return true;
+  const mixed = /[a-z]/.test(segment) && /[A-Z]/.test(segment);
+  if (mixed && /^[\w-]{8,}$/.test(segment) && /\d/.test(segment)) return true;
+  return mixed && /^[A-Za-z]{16,}$/.test(segment);
+}
 function foldPath(path4) {
-  return path4.split("/").map((segment) => {
-    if (segment === "") return segment;
-    if (/^\d{6,}$/.test(segment) || UUID.test(segment)) return ":id";
-    if (OPAQUE.test(segment) || /@|%40/i.test(segment)) return ":id";
-    return segment;
+  return path4.split("/").map((whole) => {
+    const segment = whole.split(";")[0];
+    return segment !== "" && isPrivate(segment) ? ":id" : segment;
   }).join("/");
 }
 function eventBatches(events) {
@@ -233,11 +252,13 @@ function requestPaths(url) {
   const path4 = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
   const batch = /^(.*\/trpc)\/([^/]*,[^/]*)$/.exec(path4);
   const paths = batch ? batch[2].split(",").map((procedure) => `${batch[1]}/${procedure}`) : [path4];
+  const data = NEXT_DATA.exec(path4);
+  if (data) paths.push(data[1] === "index" ? "/" : `/${data[1]}`);
   return paths.map(foldPath);
 }
 function sentFootprint(footprint, origins, attempt) {
   const repeated = attempt.repeatEachIndex > 0 || attempt.repeatEach > 1;
-  return { ...footprint, complete: footprint.complete && !repeated, attempt: { retry: attempt.retry }, origins };
+  return { ...footprint, complete: footprint.complete && !repeated && !attempt.hiddenRequests, attempt: { retry: attempt.retry }, origins };
 }
 function footprintFromText(traces, origins) {
   const isApp = hostsFor(origins);
@@ -267,7 +288,7 @@ function footprintFromText(traces, origins) {
           if (event.type !== "resource-snapshot" || !event.snapshot?.request?.url) continue;
           sawNetwork = true;
           const mime = event.snapshot.response?.content?.mimeType?.split(";")[0]?.trim() ?? "";
-          if (!STATIC_MIME.test(mime)) add(event.snapshot.request.url);
+          if (!STATIC_MIME.test(mime) || !STATIC_FILE.test(new URL(event.snapshot.request.url, "http://x").pathname)) add(event.snapshot.request.url);
         }
       }
       for (const text of trace.actions) {
@@ -312,8 +333,8 @@ function keepsTrace(policy, attempt) {
 var import_node_fs2 = require("node:fs");
 var import_node_path2 = __toESM(require("node:path"));
 var import_node_zlib = require("node:zlib");
-var MAX_ENTRY_BYTES = 256 * 1024 * 1024;
-function readZip(file, wanted) {
+var MAX_TRACE_BYTES = 512 * 1024 * 1024;
+function readZip(file, wanted, budget = { left: MAX_TRACE_BYTES }) {
   const fd = (0, import_node_fs2.openSync)(file, "r");
   try {
     const size = (0, import_node_fs2.fstatSync)(fd).size;
@@ -336,6 +357,7 @@ function readZip(file, wanted) {
       if (directory.readUInt32LE(at) !== 33639248) throw new Error("A corrupt zip directory");
       const method = directory.readUInt16LE(at + 10);
       const compressed = directory.readUInt32LE(at + 20);
+      const plain = directory.readUInt32LE(at + 24);
       const nameLength = directory.readUInt16LE(at + 28);
       const extraLength = directory.readUInt16LE(at + 30);
       const commentLength = directory.readUInt16LE(at + 32);
@@ -343,11 +365,13 @@ function readZip(file, wanted) {
       const name = directory.toString("utf8", at + 46, at + 46 + nameLength);
       at += 46 + nameLength + extraLength + commentLength;
       if (!wanted(name)) continue;
+      budget.left -= plain;
+      if (budget.left < 0) throw new Error("A trace too large to read");
       const header = read(offset, 30);
       const start = offset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
       const bytes = read(start, compressed);
       if (method === 0) out.push(bytes.toString("utf8"));
-      else if (method === 8) out.push((0, import_node_zlib.inflateRawSync)(bytes, { maxOutputLength: MAX_ENTRY_BYTES }).toString("utf8"));
+      else if (method === 8) out.push(plain === 0 ? "" : (0, import_node_zlib.inflateRawSync)(bytes, { maxOutputLength: plain }).toString("utf8"));
       else throw new Error(`A zip entry compressed with method ${method}`);
     }
     return out;
@@ -357,10 +381,11 @@ function readZip(file, wanted) {
 }
 function readTrace(file) {
   try {
+    const budget = { left: MAX_TRACE_BYTES };
     return {
-      network: readZip(file, (name) => name.endsWith(".network")),
+      network: readZip(file, (name) => name.endsWith(".network"), budget),
       // The runner's own `test.trace` has steps, not the browser's actions.
-      actions: readZip(file, (name) => name.endsWith(".trace") && !name.endsWith("test.trace"))
+      actions: readZip(file, (name) => name.endsWith(".trace") && !name.endsWith("test.trace"), budget)
     };
   } catch {
     return null;
@@ -750,7 +775,8 @@ var PeepsCiReporter = class {
         footprint: sentFootprint(footprint, this.plan.footprints?.origins ?? [], {
           retry: result.retry,
           repeatEachIndex: test.repeatEachIndex,
-          repeatEach: test.parent.project()?.repeatEach ?? 1
+          repeatEach: test.parent.project()?.repeatEach ?? 1,
+          hiddenRequests: this.plan.footprints?.hiddenRequests.includes(entry.path) ?? false
         })
       } : {}
     });
@@ -793,7 +819,7 @@ var PeepsCiReporter = class {
     const events = this.queues.get(entry.runId) ?? [];
     if (events.length === 0) return;
     this.queues.set(entry.runId, []);
-    for (const batch of eventBatches(events)) await this.post(entry, batch);
+    for (const batch of this.plan.footprints ? eventBatches(events) : [events]) await this.post(entry, batch);
   }
   async post(entry, events) {
     const url = `${this.plan.peepsUrl}/api/v1/runs/${entry.runId}/events`;

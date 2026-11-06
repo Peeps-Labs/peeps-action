@@ -7,7 +7,7 @@ import path from "node:path";
 import { deflateRawSync } from "node:zlib";
 
 import { eventBatches, foldPath, hostsFor, keepsTrace, MAX_FOOTPRINT_PATHS, requestPaths, sentFootprint } from "../src/footprint/rules";
-import { testsMaySetTrace } from "../src/footprint/test-trace";
+import { readTestSources } from "../src/footprint/test-trace";
 import { footprintFromTrace, readZip } from "../src/footprint/trace-file";
 
 /** A zip the way yazl writes one: local headers, central directory, end record. */
@@ -191,11 +191,19 @@ test("eventBatches keeps the order and stays under both of the route's limits", 
 
 test("what's sent says its attempt, and a repeated test is never whole", () => {
   const whole = { paths: ["/a"], complete: true };
-  assert.deepEqual(sentFootprint(whole, ["https://api.x.io"], { retry: 2, repeatEachIndex: 0, repeatEach: 1 }), { paths: ["/a"], complete: true, attempt: { retry: 2 }, origins: ["https://api.x.io"] });
-  assert.equal(sentFootprint(whole, [], { retry: 0, repeatEachIndex: 1, repeatEach: 2 }).complete, false);
-  assert.equal(sentFootprint(whole, [], { retry: 0, repeatEachIndex: 0, repeatEach: 2 }).complete, false, "the first repeat collides too");
-  assert.equal(sentFootprint({ paths: [], complete: false }, [], { retry: 0, repeatEachIndex: 0, repeatEach: 1 }).complete, false);
+  assert.deepEqual(sentFootprint(whole, ["https://api.x.io"], { retry: 2, repeatEachIndex: 0, repeatEach: 1, hiddenRequests: false }), { paths: ["/a"], complete: true, attempt: { retry: 2 }, origins: ["https://api.x.io"] });
+  assert.equal(sentFootprint(whole, [], { retry: 0, repeatEachIndex: 1, repeatEach: 2, hiddenRequests: false }).complete, false);
+  assert.equal(sentFootprint(whole, [], { retry: 0, repeatEachIndex: 0, repeatEach: 2, hiddenRequests: false }).complete, false, "the first repeat collides too");
+  assert.equal(sentFootprint({ paths: [], complete: false }, [], { retry: 0, repeatEachIndex: 0, repeatEach: 1, hiddenRequests: false }).complete, false);
 });
+
+function sources(tree: Record<string, string>, ...specs: string[]) {
+  return readTestSources(specs, Object.keys(tree), (file) => {
+    const text = tree[file];
+    if (text === undefined) throw new Error("gone");
+    return text;
+  });
+}
 
 test("whether a test may set its own trace, through what specs import", () => {
   const tree: Record<string, string> = {
@@ -207,17 +215,111 @@ test("whether a test may set its own trace, through what specs import", () => {
     "e2e/imports.spec.ts": 'import "./own.spec";\n',
     "unrelated.ts": 'x({ trace: "on" });\n',
   };
-  const read = (file: string) => {
-    const text = tree[file];
-    if (text === undefined) throw new Error("gone");
-    return text;
-  };
-  const ask = (...specs: string[]) => testsMaySetTrace(specs, Object.keys(tree), read);
+  const ask = (...specs: string[]) => sources(tree, ...specs).maySetTrace;
   assert.equal(ask("e2e/a.spec.ts", "e2e/quiet.spec.ts"), false, "nothing reachable sets it; comments and strings don't count");
   assert.equal(ask("e2e/own.spec.ts"), true);
   assert.equal(ask("e2e/short.spec.ts"), true, "shorthand");
   assert.equal(ask("e2e/imports.spec.ts"), true, "through an import");
   assert.equal(ask("e2e/gone.spec.ts"), true, "a file it can't read is a doubt");
+});
+
+for (const [why, text, expected] of [
+  ["its own tracing", "test('x', async ({ context }) => { await context.tracing.start(); });", true],
+  ["a quoted key", `test.use({ 'trace': 'on' });`, true],
+  ["a double-quoted key", `test.use({ "trace": "on" });`, true],
+  ["a computed literal key", `test.use({ ["trace"]: "on" });`, true],
+  ["a computed key", `const k = "tr" + "ace"; test.use({ [k]: "on" });`, true],
+  ["a spread", `import cfg from "./cfg.json";\ntest.use({ ...cfg });`, true],
+  ["a spread of the environment", `test.use({ ...JSON.parse(process.env.X!) });`, true],
+  ["a value that isn't a literal", `test.use(options);`, true],
+  ["extend with a value", `const t = base.extend(fixtures);`, true],
+  ["extend with a spread", `const t = base.extend({ ...fixtures });`, true],
+  ["a package's test", `import { test } from "@acme/fixtures";\ntest("x", () => {});`, true],
+  ["a package's test by another name", `import { fixtures as test } from "acme";`, true],
+  ["a package's default", `import test from "@acme/fixtures";`, true],
+  ["a required test", `const { test } = require("@acme/fixtures");`, true],
+  ["a package with no bindings", `import "@acme/setup";`, true],
+  ["a relative import that resolves nowhere", `import x from "./generated";`, true],
+  ["a rule hidden after a regex", `const a = x.replace(/\\/*$/, "");\ntest.use({ trace: "on" });`, true],
+  ["Playwright's own test", `import { test, expect } from "@playwright/test";\ntest("x", () => {});`, false],
+  ["a library", `import { faker } from "@faker-js/faker";\nimport path from "node:path";`, false],
+  ["a literal use", `test.use({ viewport: { width: 1, height: 2 }, locale: "en" });`, false],
+  ["extend with fixtures that spread inside", `const t = base.extend({ page: async ({ page }, use) => { const a = [...b]; await use(page); } });`, false],
+  ["a fixture calling use", `await use(page);`, false],
+] as const) {
+  test(`own trace: ${why} reads ${expected}`, () => {
+    assert.equal(sources({ "e/a.spec.ts": text }, "e/a.spec.ts").maySetTrace, expected);
+  });
+}
+
+test("requests a trace can't see: a spec whose closure may make them can't claim a whole footprint", () => {
+  const tree: Record<string, string> = {
+    "e/hook.spec.ts": `test.beforeAll(async () => {});`,
+    "e/node.spec.ts": `import { api } from "./client";\ntest("x", api);`,
+    "e/client.ts": `export const api = () => fetch("http://x/y");`,
+    "e/axios.spec.ts": `import axios from "axios";\naxios.get("/x");`,
+    "e/http.spec.ts": `import http from "node:http";\nhttp.request("x");`,
+    "e/clean.spec.ts": `test("x", async ({ page, request }) => { await page.route("**", (r) => r.fetch()); await request.get("/x"); });`,
+  };
+  assert.deepEqual(sources(tree, "e/hook.spec.ts", "e/node.spec.ts", "e/axios.spec.ts", "e/http.spec.ts", "e/clean.spec.ts").hiddenRequests.sort(), ["e/axios.spec.ts", "e/hook.spec.ts", "e/http.spec.ts", "e/node.spec.ts"]);
+});
+
+test("a repeated test and a spec with hidden requests are never whole", () => {
+  const whole = { paths: ["/a"], complete: true };
+  assert.equal(sentFootprint(whole, [], { retry: 0, repeatEachIndex: 0, repeatEach: 1, hiddenRequests: true }).complete, false);
+  assert.equal(sentFootprint(whole, [], { retry: 0, repeatEachIndex: 0, repeatEach: 1, hiddenRequests: false }).complete, true);
+});
+
+test("a Pages Router client navigation is the page's own path", () => {
+  assert.deepEqual(requestPaths("https://a.co/_next/data/abc123/cart.json?x=1"), ["/_next/data/abc123/cart.json", "/cart"]);
+  assert.deepEqual(requestPaths("https://a.co/_next/data/abc123/index.json"), ["/_next/data/abc123/index.json", "/"]);
+  assert.deepEqual(requestPaths("https://a.co/_next/data/abc123/orders/7.json"), ["/_next/data/abc123/orders/7.json", "/orders/7"]);
+});
+
+test("a type doesn't prove a resource is static: an endpoint serving an image stays, a file doesn't", async (t) => {
+  const file = await traceFile(t, {
+    "trace.network": {
+      text: network(
+        ["https://app.example.com/api/avatar", "image/png"],
+        ["https://app.example.com/report", "text/css"],
+        ["https://app.example.com/bundle", "application/javascript"],
+        ["https://app.example.com/logo.png", "image/png"],
+        ["https://app.example.com/page", "text/html"],
+      ),
+    },
+  });
+  assert.deepEqual(footprintFromTrace([file], app), { paths: ["/api/avatar", "/bundle", "/page", "/report"], complete: true });
+});
+
+test("nothing private leaves in a path", () => {
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc-def_123";
+  assert.equal(foldPath(`/s/${jwt}`), "/s/:id", "a JWT");
+  assert.equal(foldPath("/call/+15551234567"), "/call/:id", "a phone number");
+  assert.equal(foldPath("/call/%2B15551234567"), "/call/:id", "encoded");
+  assert.equal(foldPath("/call/555-123-4567"), "/call/:id", "with dashes");
+  assert.equal(foldPath("/invite/aB3xY9qZ"), "/invite/:id", "a short mixed token");
+  assert.equal(foldPath("/t/deadbeef1234"), "/t/:id", "hex");
+  assert.equal(foldPath("/t/AbCdEfGhIjKlMnOpQ"), "/t/:id", "long mixed letters");
+  assert.equal(foldPath("/o/order-1234567"), "/o/:id", "a long number inside");
+  assert.equal(foldPath("/reset/aGVsbG8xMjM0NTY3ODk="), "/reset/:id", "base64 padding");
+  assert.equal(foldPath("/reset/aGVsbG8xMjM0NTY3ODk%3D"), "/reset/:id", "encoded");
+  assert.equal(foldPath("/cart;jsessionid=A1B2C3D4E5F6A7B8"), "/cart", "a path parameter never leaves");
+  assert.equal(foldPath("/cart;jsessionid=A1B2/items"), "/cart/items");
+  assert.equal(foldPath("/u/+1%20555%20123%204567"), "/u/:id", "a phone number with spaces");
+  assert.equal(foldPath("/u/4111%201111%201111%201111"), "/u/:id", "a card number");
+  assert.equal(foldPath("/t/1234_5678_9012_3456_7890"), "/t/:id", "digits between underscores");
+  assert.equal(foldPath("/t/1234_5678_9012"), "/t/:id", "shorter");
+  assert.equal(foldPath("/x/%E0%A4%A"), "/x/:id", "what can't be decoded");
+  assert.equal(foldPath("/api/trpc/runs.list"), "/api/trpc/runs.list", "a procedure stays");
+  assert.equal(foldPath("/oauth2/callback/step1"), "/oauth2/callback/step1", "a route's name stays");
+  assert.equal(foldPath("/settings/api-keys/v2"), "/settings/api-keys/v2");
+  assert.equal(foldPath("/blog/2026-11-06"), "/blog/2026-11-06", "a date");
+});
+
+test("a budget across a trace's entries: over it reads as unknown", async (t) => {
+  const file = await traceFile(t, { "a.network": { text: "x".repeat(100) }, "b.network": { text: "y".repeat(100) } });
+  assert.equal(readZip(file, (n) => n.endsWith(".network"), { left: 250 }).length, 2);
+  assert.throws(() => readZip(file, (n) => n.endsWith(".network"), { left: 150 }));
 });
 
 test("requestPaths: no host or query, and a tRPC batch is one path per procedure", () => {

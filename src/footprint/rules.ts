@@ -25,10 +25,15 @@ const MAX_REQUEST_BYTES = 900_000;
 const MAX_REQUEST_EVENTS = 500;
 
 const STATIC_MIME = /^(?:image\/|font\/|text\/css$|application\/javascript$|text\/javascript$)/;
+/** A type alone doesn't prove a file: `/api/avatar` serving an image is an endpoint. */
+const STATIC_FILE = /\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|woff2?|ttf|otf|eot|css|[cm]?js|map)$/i;
 const STATIC_PREFIX = "/_next/static/";
+/** A Pages Router client navigation fetches this, not the page's own path. */
+const NEXT_DATA = /^\/_next\/data\/[^/]+\/(.*)\.json$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// The server folds again with this rule, and a long route name holding no digit stays.
 const OPAQUE = /^(?=.*\d)[A-Za-z0-9_-]{20,}$/;
+const JWT = /^[\w-]+\.[\w-]+\.[\w-]+$/;
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const IP = /^(?:\d+\.\d+\.\d+\.\d+|\[.*\])$/;
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
@@ -69,15 +74,36 @@ function hostnameOf(url: string): string | null {
   }
 }
 
+/** Whether a path segment could be somebody's: an id, a token, an address, a number. Folding too much only meets more. */
+function isPrivate(raw: string): boolean {
+  let segment = raw;
+  try {
+    segment = decodeURIComponent(raw);
+  } catch {
+    return true;
+  }
+  if (DATE.test(segment)) return false;
+  if (segment.includes("@") || UUID.test(segment) || /\d{6,}/.test(segment) || OPAQUE.test(segment)) return true;
+  // A phone or card number, however it's written.
+  if (/^[+\d().\s_-]+$/.test(segment) && segment.replace(/\D/g, "").length >= 7) return true;
+  // Base64's padding.
+  if (/^[A-Za-z0-9+/_-]+={1,2}$/.test(segment)) return true;
+  if (JWT.test(segment) && (segment.startsWith("eyJ") || segment.length >= 32)) return true;
+  if (/^[0-9a-f]{8,}$/i.test(segment) && /\d/.test(segment)) return true;
+  // A short token mixes cases and digits, and a long one mixes cases; a route's name doesn't.
+  const mixed = /[a-z]/.test(segment) && /[A-Z]/.test(segment);
+  if (mixed && /^[\w-]{8,}$/.test(segment) && /\d/.test(segment)) return true;
+  return mixed && /^[A-Za-z]{16,}$/.test(segment);
+}
+
 /** The path with its opaque segments folded. A folded segment meets any route's segment (`match.ts`). */
 export function foldPath(path: string): string {
   return path
     .split("/")
-    .map((segment) => {
-      if (segment === "") return segment;
-      if (/^\d{6,}$/.test(segment) || UUID.test(segment)) return ":id";
-      if (OPAQUE.test(segment) || /@|%40/i.test(segment)) return ":id";
-      return segment;
+    .map((whole) => {
+      // A `;parameter` isn't the path, and is where a session id goes.
+      const segment = whole.split(";")[0]!;
+      return segment !== "" && isPrivate(segment) ? ":id" : segment;
     })
     .join("/");
 }
@@ -110,6 +136,8 @@ export function requestPaths(url: string): string[] {
   const path = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
   const batch = /^(.*\/trpc)\/([^/]*,[^/]*)$/.exec(path);
   const paths = batch ? batch[2]!.split(",").map((procedure) => `${batch[1]}/${procedure}`) : [path];
+  const data = NEXT_DATA.exec(path);
+  if (data) paths.push(data[1] === "index" ? "/" : `/${data[1]}`);
   return paths.map(foldPath);
 }
 
@@ -122,11 +150,14 @@ export interface SentFootprint extends Footprint {
 /**
  * What a `test_end` sends. `attempt` lets Peeps see an attempt that never reached it.
  * `--repeat-each` repeats share one run and collide there, so a repeated test's
- * footprint is never whole.
+ * footprint is never whole, and nor is one of a spec that may make requests its trace
+ * doesn't hold (`test-trace.ts`). Whole means: this attempt's trace, read in full, within
+ * the limits, from a spec with no request known to be outside it. Not: every path the
+ * test could take on another day, or what the server did behind them.
  */
-export function sentFootprint(footprint: Footprint, origins: string[], attempt: { retry: number; repeatEachIndex: number; repeatEach: number }): SentFootprint {
+export function sentFootprint(footprint: Footprint, origins: string[], attempt: { retry: number; repeatEachIndex: number; repeatEach: number; hiddenRequests: boolean }): SentFootprint {
   const repeated = attempt.repeatEachIndex > 0 || attempt.repeatEach > 1;
-  return { ...footprint, complete: footprint.complete && !repeated, attempt: { retry: attempt.retry }, origins };
+  return { ...footprint, complete: footprint.complete && !repeated && !attempt.hiddenRequests, attempt: { retry: attempt.retry }, origins };
 }
 
 /** What a trace holds, as text: its `.network` entries, and its browser `.trace` entries. */
@@ -172,7 +203,7 @@ export function footprintFromText(traces: Array<TraceText | null>, origins: Foot
           if (event.type !== "resource-snapshot" || !event.snapshot?.request?.url) continue;
           sawNetwork = true;
           const mime = event.snapshot.response?.content?.mimeType?.split(";")[0]?.trim() ?? "";
-          if (!STATIC_MIME.test(mime)) add(event.snapshot.request.url);
+          if (!STATIC_MIME.test(mime) || !STATIC_FILE.test(new URL(event.snapshot.request.url, "http://x").pathname)) add(event.snapshot.request.url);
         }
       }
       for (const text of trace.actions) {

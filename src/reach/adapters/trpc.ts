@@ -57,6 +57,8 @@ interface RouterFact {
 }
 
 interface FileData {
+  /** Whether the file names a caller at all, asked once: this is read at every node. */
+  hasCaller?: boolean;
   routers: RouterFact[];
   /** Top-level names holding a caller. */
   callers: Set<string>;
@@ -70,6 +72,7 @@ interface Marks {
 }
 
 const dataOf = (facts: FileFacts): FileData => (facts.data.trpc ??= { routers: [], callers: new Set() }) as FileData;
+const namesCaller = ({ facts, text }: ReadContext): boolean => (dataOf(facts).hasCaller ??= text.includes("createCaller"));
 const marksOf = (sym: Sym): Marks => (sym.marks.trpc ??= {}) as Marks;
 
 /** The properties of a router: each procedure its own symbol, so a hunk in one is that one alone. */
@@ -109,15 +112,15 @@ function readRouter(name: string, object: ts.ObjectLiteralExpression, path: stri
 
 export const trpc: ConventionFactory = () => ({
   readBinding(name, init, sym, context) {
-    if (context.text.includes("createCaller") && buildsCaller(init, dataOf(context.facts).callers)) dataOf(context.facts).callers.add(name);
+    if (namesCaller(context) && buildsCaller(init, dataOf(context.facts).callers)) dataOf(context.facts).callers.add(name);
     if (!isRouterCall(init)) return false;
     readRouter(name, init.arguments[0] as ts.ObjectLiteralExpression, [], sym, context);
     context.collect(init.expression, sym);
     return true;
   },
-  readNode(node, sym, { text }) {
+  readNode(node, sym, context) {
     if (ts.isCallExpression(node) && isHandlerCall(node)) marksOf(sym).handler = handlerOptions(node);
-    if (!text.includes("createCaller")) return false;
+    if (!namesCaller(context)) return false;
     if (ts.isVariableDeclaration(node) && buildsCaller(node.initializer, marksOf(sym).callers ?? new Set())) {
       const callers = (marksOf(sym).callers ??= new Set());
       for (const name of bindingNames(node.name)) callers.add(name);

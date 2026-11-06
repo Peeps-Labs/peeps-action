@@ -9,6 +9,7 @@ import path from "node:path/posix";
 import { createConventions } from "./adapters";
 import type { Convention } from "./convention";
 import { extractFacts, type FileFacts } from "./graph";
+import { capReach, MAX_REACH_BYTES } from "./limits";
 import { parseSource } from "./parse";
 import { buildTextGraph, closure, type TextGraph } from "./text-graph";
 import type { FileChange, Hunk, Reach } from "./types";
@@ -18,12 +19,12 @@ export const MAX_CHANGED_FILES = 300;
 const MAX_TRACKED_FILES = 50_000;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_SURFACES = 2000;
-const MAX_REACH_BYTES = 256 * 1024;
 const DEFAULT_DEADLINE_MS = 90_000;
 
 const SOURCE = /\.[cm]?[jt]sx?$/;
 const UNIT_TEST = /(?:\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)__tests__\/)/;
 const DOC = /(?:\.md$|^docs\/|^LICENSE)/i;
+const PLAYWRIGHT_CONFIG = /^playwright\.config\.[cm]?[jt]s$/;
 const LOCKFILE = /^(?:package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/;
 const ALWAYS_GLOBAL = /^(?:package\.json|tsconfig(?:\.[^/]*)?\.json|playwright\.config\.[cm]?[jt]s)$/;
 
@@ -31,8 +32,6 @@ export interface ScanInput {
   files: string[];
   read: (file: string) => string;
   changes: FileChange[];
-  /** Playwright's rootDir, repo-relative: `.` when the config sits at the root. */
-  rootDir: string;
   /** The spec files, repo-relative. */
   specFiles: string[];
   base: string;
@@ -62,7 +61,7 @@ export function scan(input: ScanInput): Reach {
     if (!(error instanceof Global)) throw error;
     const first = changedFiles[0];
     const file = error.file ?? first;
-    return { ...out, global: true, why: error.why, surfaces: [], reasons: file ? [{ surface: null, file }] : [] };
+    return capReach({ ...out, global: true, why: error.why, surfaces: [], reasons: file ? [{ surface: null, file }] : [] });
   }
 }
 
@@ -106,40 +105,47 @@ function bound(input: ScanInput, out: Reach): void {
   if (files.length > MAX_TRACKED_FILES) throw new Global("too_many_tracked_files");
 
   const conventions = createConventions({ files, read });
-  const relevant = changes.filter((change) => !DOC.test(change.path));
-  for (const change of relevant) {
+  const looksLikeDoc = (file: string) => DOC.test(file) && !conventions.some((convention) => convention.ownsFile?.(file));
+  for (const change of changes) {
+    if (looksLikeDoc(change.path)) continue;
     for (const file of [change.path, change.oldPath]) {
       if (file && isGlobalByNature(file, conventions)) throw new Global("global_file", file);
     }
-  }
-  if (relevant.length === 0) return;
-  for (const convention of conventions) {
-    const refused = convention.refusal?.();
-    if (refused) throw new Global(refused);
   }
 
   const graph = buildTextGraph(files, read, tick, (file, text) => {
     for (const convention of conventions) convention.scanText?.(file, text);
   });
-  const root = input.rootDir === "." ? "" : `${input.rootDir.replace(/\/+$/, "")}/`;
+  // A document something reads isn't only a document.
+  const relevant = changes.filter((change) => !looksLikeDoc(change.path) || graph.reverse.has(change.path));
+  if (relevant.length === 0) return;
+  if (graph.unread.length > 0) throw new Global("unread_file", graph.unread[0]);
+  for (const convention of conventions) {
+    const refused = convention.refusal?.();
+    if (refused) throw new Global(refused);
+  }
+
   const specs = new Set(input.specFiles);
-  const specClosure = closure(graph.forward, specs);
-  const isTestPath = (file: string) => UNIT_TEST.test(file) || specs.has(file) || (root !== "" && file.startsWith(root));
-  const appFile = (file: string) => !isTestPath(file);
+  // What Playwright's config reaches is the suite's too: a global setup is no spec, and not the app.
+  const specClosure = closure(graph.forward, [...specs, ...files.filter((file) => PLAYWRIGHT_CONFIG.test(path.basename(file)))]);
+  // A helper only tests reach is theirs alone. Where the tests sit says nothing: Playwright's rootDir can hold the app.
+  const onlyTests = new Map<string, boolean>();
+  const isOnlyTests = (file: string) => {
+    if (!specClosure.has(file)) return false;
+    let answer = onlyTests.get(file);
+    if (answer === undefined) {
+      answer = [...closure(graph.reverse, [file])].every((user) => specClosure.has(user));
+      onlyTests.set(file, answer);
+    }
+    return answer;
+  };
+  const appFile = (file: string) => !UNIT_TEST.test(file) && !specs.has(file) && !isOnlyTests(file);
 
   // What's a test's, and what's the application's.
   const applied: FileChange[] = [];
   for (const change of relevant) {
-    const inSuite = specClosure.has(change.path);
-    if (inSuite) out.changedTestFiles.push(change.path);
-    if (UNIT_TEST.test(change.path) || specs.has(change.path)) continue;
-    if (root !== "" && change.path.startsWith(root)) {
-      if (!inSuite && change.status !== "deleted") throw new Global("unplaced_test_file", change.path);
-      continue;
-    }
-    // A helper only tests reach is theirs alone.
-    if (inSuite && [...closure(graph.reverse, [change.path])].every((file) => specClosure.has(file))) continue;
-    applied.push(change);
+    if (specClosure.has(change.path)) out.changedTestFiles.push(change.path);
+    if (appFile(change.path)) applied.push(change);
   }
   if (applied.length === 0) return;
 

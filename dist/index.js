@@ -589,11 +589,14 @@ function identity(test) {
 var import_node_fs2 = require("node:fs");
 var import_node_path5 = __toESM(require("node:path"));
 
+// src/footprint/test-trace.ts
+var import_node_module = require("node:module");
+
 // src/reach/text-graph.ts
 var import_posix = __toESM(require("node:path/posix"));
 var EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".jsx", ".json"];
 var SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)(["'`])([^"'`\n]+)\1/g;
-var PATH_LITERAL = /(["'`])((?:\.{1,2}\/)?[\w@.[\]-]+(?:\/[\w@.[\]()-]+)+)\1/g;
+var PATH_LITERAL = /(["'`])((?:\.{1,2}\/)?[\w@.[\]-]+(?:\/[\w@.[\]()-]+)+|\.{1,2}\/[\w@.[\]()-]+)\1/g;
 var TYPE_ONLY = /\b(?:import|export)\s+type\s+[\w$*{][^;'"`]*?\bfrom\s*["'][^"'\n]+["'];?/g;
 function stripJsonComments(text2) {
   let out = "";
@@ -618,6 +621,9 @@ function stripJsonComments(text2) {
 }
 function stripComments(text2) {
   let out = "";
+  let last = "";
+  let word = "";
+  let spaced = false;
   let i = 0;
   while (i < text2.length) {
     const c = text2[i];
@@ -626,19 +632,60 @@ function stripComments(text2) {
       while (i < text2.length && text2[i] !== "\n") i++;
     } else if (c === "/" && next === "*") {
       const end = text2.indexOf("*/", i + 2);
-      i = end === -1 ? text2.length : end + 2;
-      out += " ";
+      if (end === -1) {
+        out += c;
+        last = c;
+        i++;
+      } else {
+        i = end + 2;
+        out += " ";
+      }
     } else if (c === '"' || c === "'" || c === "`") {
       let j = i + 1;
       while (j < text2.length && text2[j] !== c && !(c !== "`" && text2[j] === "\n")) j += text2[j] === "\\" ? 2 : 1;
       out += text2.slice(i, j + 1);
+      last = c;
       i = j + 1;
+    } else if (c === "/" && startsExpression(last, word)) {
+      const end = regexEnd(text2, i);
+      if (end === -1) {
+        out += c;
+        last = c;
+        i++;
+      } else {
+        out += " ";
+        last = "/";
+        i = end;
+      }
     } else {
       out += c;
+      if (c === " " || c === "\n" || c === "	" || c === "\r") spaced = true;
+      else {
+        last = c;
+        const inWord = c >= "a" && c <= "z" || c >= "A" && c <= "Z" || c >= "0" && c <= "9" || c === "_" || c === "$";
+        word = inWord ? spaced ? c : word + c : "";
+        spaced = false;
+      }
       i++;
     }
   }
   return out;
+}
+var BEFORE_EXPRESSION = /* @__PURE__ */ new Set(["return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "do", "else", "yield", "await"]);
+function startsExpression(last, word) {
+  return last === "" || "(,=:[!&|?{};+-*%~^".includes(last) || BEFORE_EXPRESSION.has(word);
+}
+function regexEnd(text2, start) {
+  let inClass = false;
+  for (let i = start + 1; i < text2.length; i++) {
+    const c = text2[i];
+    if (c === "\n") return -1;
+    if (c === "\\") i++;
+    else if (c === "[") inClass = true;
+    else if (c === "]") inClass = false;
+    else if (c === "/" && !inClass) return i + 1;
+  }
+  return -1;
 }
 var Resolver = class {
   constructor(files, read) {
@@ -728,47 +775,113 @@ function referencedFiles(file, text2, resolver, onPackage) {
 }
 
 // src/footprint/test-trace.ts
-var SETS_TRACE = /\btrace\b\s*[:,}]/;
-function testsMaySetTrace(specs, files, read) {
-  const resolver = new Resolver(new Set(files), read);
-  const seen = new Set(specs);
-  const queue = [...specs];
-  while (queue.length > 0) {
-    const file = queue.pop();
-    if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
-    let text2;
-    try {
-      text2 = stripComments(read(file));
-    } catch {
-      return true;
-    }
-    if (SETS_TRACE.test(text2)) return true;
-    for (const next of referencedFiles(file, text2, resolver)) {
-      if (!seen.has(next)) {
-        seen.add(next);
-        queue.push(next);
+var SETS_TRACE = /\btrace\b\s*[:,}]|["'`]trace["'`]\s*[:\]]|\btracing\b/;
+var OPTION_CALL = /\.(?:use|extend)\s*(?:<[^(]*>)?\(/g;
+var HIDDEN_REQUESTS = /\b(?:beforeAll|afterAll)\b|(?<![.\w$])fetch\s*\(|\baxios\b|\bgot\s*\(|\bhttps?\.(?:get|request)\b|\bsuperagent\b|\bundici\b|["']node-fetch["']|\bky\.\w+\(/;
+var IMPORT_CLAUSE = /\bimport\s+(?!type\b)([^;'"`]*?)\s*from\s*["']([^"']+)["']/g;
+var IMPORT_BARE = /\bimport\s*["']([^"']+)["']/g;
+var REQUIRE_CLAUSE = /\b(?:const|let|var)\s+([^=;]+?)\s*=\s*require\(\s*["']([^"']+)["']\s*\)/g;
+var TEST_BINDING = /\b(?:test|base|it)\b/;
+var BUILTIN = new Set(import_node_module.builtinModules);
+var isPackage = (spec) => !spec.startsWith(".") && !spec.startsWith("node:") && !BUILTIN.has(spec) && !BUILTIN.has(spec.split("/")[0]);
+function optionsCallInDoubt(text2) {
+  for (const match of text2.matchAll(OPTION_CALL)) {
+    let at = match.index + match[0].length;
+    while (/\s/.test(text2[at] ?? "")) at++;
+    if (text2[at] !== "{") return true;
+    let depth = 0;
+    for (; at < text2.length; at++) {
+      const c = text2[at];
+      if (c === '"' || c === "'" || c === "`") {
+        let end = at + 1;
+        while (end < text2.length && text2[end] !== c) end += text2[end] === "\\" ? 2 : 1;
+        at = end;
+      } else if (depth === 1 && (c === "[" || text2.startsWith("...", at))) {
+        return true;
+      } else if (c === "{" || c === "(" || c === "[") {
+        depth++;
+      } else if (c === "}" || c === ")" || c === "]") {
+        depth--;
+        if (depth === 0) break;
       }
     }
   }
   return false;
 }
+function testFromPackage(text2) {
+  const named2 = (clause, spec) => isPackage(spec) && spec !== "@playwright/test" && (TEST_BINDING.test(clause) || /playwright|fixture/i.test(spec));
+  for (const match of text2.matchAll(IMPORT_CLAUSE)) if (named2(match[1], match[2])) return true;
+  for (const match of text2.matchAll(REQUIRE_CLAUSE)) if (named2(match[1], match[2])) return true;
+  for (const match of text2.matchAll(IMPORT_BARE)) if (isPackage(match[1])) return true;
+  return false;
+}
+function readTestSources(specs, files, read) {
+  const resolver = new Resolver(new Set(files), read);
+  const memo = /* @__PURE__ */ new Map();
+  const factsOf = (file) => {
+    let facts = memo.get(file);
+    if (facts) return facts;
+    facts = { doubt: false, hidden: false, edges: /* @__PURE__ */ new Set() };
+    memo.set(file, facts);
+    if (!/\.[cm]?[jt]sx?$/.test(file)) return facts;
+    let text2;
+    try {
+      text2 = stripComments(read(file));
+    } catch {
+      facts.doubt = true;
+      facts.hidden = true;
+      return facts;
+    }
+    let unresolved = false;
+    facts.edges = referencedFiles(file, text2, resolver, (spec) => {
+      if (spec.startsWith(".")) unresolved = true;
+    });
+    facts.doubt = unresolved || SETS_TRACE.test(text2) || optionsCallInDoubt(text2) || testFromPackage(text2);
+    facts.hidden = HIDDEN_REQUESTS.test(text2);
+    return facts;
+  };
+  let maySetTrace = false;
+  const hiddenRequests = [];
+  for (const spec of specs) {
+    const seen = /* @__PURE__ */ new Set([spec]);
+    const queue = [spec];
+    let hidden = false;
+    while (queue.length > 0) {
+      const facts = factsOf(queue.pop());
+      maySetTrace ||= facts.doubt;
+      hidden ||= facts.hidden;
+      for (const next of facts.edges) {
+        if (!seen.has(next)) {
+          seen.add(next);
+          queue.push(next);
+        }
+      }
+    }
+    if (hidden) hiddenRequests.push(spec);
+  }
+  return { maySetTrace, hiddenRequests };
+}
 
 // src/footprint/test-sources.ts
-function listFiles(root, dir = "") {
+var SKIPPED = /* @__PURE__ */ new Set(["node_modules", ".git", ".next", ".nuxt", ".turbo", ".cache", "dist", "build", "out", "coverage"]);
+var MAX_ENTRIES = 2e5;
+var BUDGET_MS = 1e4;
+function listFiles(root, deadline, limit = { left: MAX_ENTRIES }, dir = "") {
   const out = [];
   for (const entry of (0, import_node_fs2.readdirSync)(import_node_path5.default.join(root, dir), { withFileTypes: true })) {
-    if (entry.name === "node_modules" || entry.name === ".git") continue;
+    if (--limit.left < 0 || Date.now() > deadline) throw new Error("Too many files to read");
     const relative = dir ? `${dir}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) out.push(...listFiles(root, relative));
-    else if (entry.isFile()) out.push(relative);
+    if (entry.isDirectory()) {
+      if (!SKIPPED.has(entry.name)) out.push(...listFiles(root, deadline, limit, relative));
+    } else if (entry.isFile()) out.push(relative);
   }
   return out;
 }
-function workspaceTestsMaySetTrace(workspace, specs) {
+function workspaceTestSources(workspace, specs, budgetMs = BUDGET_MS) {
   try {
-    return testsMaySetTrace(specs, listFiles(workspace), (file) => (0, import_node_fs2.readFileSync)(import_node_path5.default.join(workspace, file), "utf8"));
+    return readTestSources(specs, listFiles(workspace, Date.now() + budgetMs), (file) => (0, import_node_fs2.readFileSync)(import_node_path5.default.join(workspace, file), "utf8"));
   } catch {
-    return true;
+    return { maySetTrace: true, hiddenRequests: specs };
   }
 }
 
@@ -872,14 +985,16 @@ var import_promises4 = require("node:fs/promises");
 var import_node_util2 = require("node:util");
 var execFileAsync2 = (0, import_node_util2.promisify)(import_node_child_process2.execFile);
 var MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
-async function localRepository(workspace) {
+async function localRepository(workspace, deadline = Number.POSITIVE_INFINITY) {
   return {
     workspace: await (0, import_promises4.realpath)(workspace),
     async git(...args) {
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error("Out of time");
       const { stdout } = await execFileAsync2("git", args, {
         cwd: workspace,
         maxBuffer: MAX_OUTPUT_BYTES,
-        timeout: 6e4,
+        timeout: Math.min(6e4, left),
         env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
       });
       return stdout;
@@ -887,24 +1002,23 @@ async function localRepository(workspace) {
   };
 }
 
+// src/reach/limits.ts
+var MAX_REACH_BYTES = 256 * 1024;
+function capReach(reach) {
+  if (Buffer.byteLength(JSON.stringify(reach)) <= MAX_REACH_BYTES) return reach;
+  return { ...reach, global: true, why: reach.why ?? "too_many_surfaces", surfaces: [], reasons: reach.reasons.slice(0, 1), changedFiles: [], changedTestFiles: [] };
+}
+
 // src/reach/index.ts
 var REACH_BUDGET_MS = 9e4;
 var REACH_HEAP_MB = 512;
-var widened = (why, base = null, changedFiles = []) => ({
-  global: true,
-  why,
-  surfaces: [],
-  reasons: [],
-  changedFiles,
-  changedTestFiles: [],
-  base
-});
+var widened = (why, base = null, changedFiles = []) => capReach({ global: true, why, surfaces: [], reasons: [], changedFiles, changedTestFiles: [], base });
 async function computeReach(env, input2, options = {}) {
   if (env.platform !== "github" || env.eventName !== "pull_request" || !env.sha) return void 0;
   const budgetMs = options.budgetMs ?? REACH_BUDGET_MS;
   const started = Date.now();
   try {
-    const repository = await localRepository(env.workspace);
+    const repository = await localRepository(env.workspace, started + budgetMs);
     const checkout = await readCheckout(repository, env.sha);
     if (!checkout.ok) return widened(checkout.why);
     const changedFiles = checkout.changes.map((change) => change.path);
@@ -916,13 +1030,13 @@ async function computeReach(env, input2, options = {}) {
       const inputFile = import_node_path6.default.join(scratch, "input.json");
       await (0, import_promises5.writeFile)(
         inputFile,
-        JSON.stringify({ root: checkout.root, files, changes: checkout.changes, rootDir: input2.rootDir, specFiles: input2.specFiles, base: checkout.base, deadlineMs: remaining }),
+        JSON.stringify({ root: checkout.root, files, changes: checkout.changes, specFiles: input2.specFiles, base: checkout.base, deadlineMs: remaining }),
         { mode: 384 }
       );
       const answer = await runScanner(options.scanner ?? import_node_path6.default.join(__dirname, "reach.js"), inputFile, remaining);
       if (answer === "timeout") return widened("timeout", checkout.base, changedFiles);
       if (answer === null) return widened("scan_failed", checkout.base, changedFiles);
-      return answer;
+      return capReach(answer);
     } finally {
       await (0, import_promises5.rm)(scratch, { recursive: true, force: true });
     }
@@ -1021,17 +1135,26 @@ async function runReport(env, peeps) {
   const files = await specFilePayload(env, list);
   const specFiles = specFilesOf(list).map((file) => import_node_path7.default.relative(env.workspace, import_node_path7.default.join(rootDirAbs, file)).split(import_node_path7.default.sep).join("/"));
   const started = Date.now();
-  const reach = await reachWanted(env, peeps) ? await computeReach(env, { rootDir, specFiles }) : void 0;
-  if (reach) console.log(`[peeps] reach in ${Date.now() - started} ms: ${reach.global ? `everything (${reach.why})` : `${reach.surfaces.length} surface(s)`}`);
-  const response = await peeps.post("/api/v1/ci/batches", {
+  const computed = await reachWanted(env, peeps) ? await computeReach(env, { specFiles }) : void 0;
+  if (computed) console.log(`[peeps] reach in ${Date.now() - started} ms: ${computed.global ? `everything (${computed.why})` : `${computed.surfaces.length} surface(s)`}`);
+  const announce = {
     sha: env.sha,
     jobUrl,
     baseUrl: process.env.BASE_URL ?? null,
     tests,
     files,
-    canNarrow: true,
-    ...reach ? { reach } : {}
-  });
+    canNarrow: true
+  };
+  let reach = computed;
+  let response;
+  try {
+    response = await peeps.post("/api/v1/ci/batches", { ...announce, ...reach ? { reach } : {} });
+  } catch (error) {
+    if (!reach || !(error instanceof PeepsHttpError) || error.status >= 500 || error.status === 401 || error.status === 403) throw error;
+    console.log(`[peeps] Peeps refused what this pull request reaches (${error.status}), so everything runs`);
+    reach = void 0;
+    response = await peeps.post("/api/v1/ci/batches", announce);
+  }
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
   console.log(
@@ -1039,7 +1162,12 @@ async function runReport(env, peeps) {
   );
   for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} \u203A ${u.titlePath}`);
   const batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
-  const footprints = response.batches.some((b) => b.collectFootprints === true) ? { origins: response.batches.flatMap((b) => b.footprintOrigins ?? []), record: !workspaceTestsMaySetTrace(env.workspace, specFiles) } : void 0;
+  let footprints;
+  if (response.batches.some((b) => b.collectFootprints === true)) {
+    const sources = workspaceTestSources(env.workspace, specFiles);
+    if (sources.maySetTrace) console.log("[peeps] not recording footprints: a test may set its own trace, so every test here reads unknown");
+    footprints = { origins: response.batches.flatMap((b) => b.footprintOrigins ?? []), hiddenRequests: sources.hiddenRequests, record: !sources.maySetTrace };
+  }
   if (!answeredNarrowed(response)) {
     await executeAndReport(env, peeps, { rootDir, runs, batches, footprints, executed: reach && { mode: "full", tests: tests.length } });
     return;
@@ -1105,7 +1233,7 @@ async function executeAndReport(env, peeps, input2) {
   const reportDir = import_node_path7.default.join(scratch, "report");
   const plan = { peepsUrl: env.peepsUrl, rootDir: input2.rootDir, runs: input2.runs };
   if (input2.narrowed) plan.narrowed = true;
-  if (input2.footprints) plan.footprints = { origins: input2.footprints.origins };
+  if (input2.footprints) plan.footprints = { origins: input2.footprints.origins, hiddenRequests: input2.footprints.hiddenRequests };
   await (0, import_promises6.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
   const exitCode = await runPlaywright(env, planFile, reportDir, input2.selection, input2.extraEnv, input2.narrowed, input2.footprints?.record === true);
   let reportUploaded = false;

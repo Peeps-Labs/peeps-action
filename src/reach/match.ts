@@ -13,11 +13,26 @@ export function surfaceMeetsPath(surface: string, path: string): boolean {
     if (segment === "*") return i < have.length;
     if (i >= have.length) return false;
     if (segment.startsWith(":") || have[i] === ":id") continue;
-    if (segment.toLowerCase() !== have[i]!.toLowerCase()) return false;
+    const wanted = readable(segment);
+    const had = readable(have[i]!);
+    // What can't be decoded could be anything, so it meets.
+    if (wanted !== null && had !== null && wanted !== had) return false;
   }
   return want.length === have.length;
 }
 
+/** A footprint's path is percent-encoded and a route's isn't, and a `;parameter` isn't the path. */
 function segments(path: string): string[] {
-  return path.split("/").filter((segment) => segment !== "");
+  return path
+    .split("/")
+    .map((segment) => segment.split(";")[0]!)
+    .filter((segment) => segment !== "");
+}
+
+function readable(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment).toLowerCase();
+  } catch {
+    return null;
+  }
 }

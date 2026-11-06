@@ -10,7 +10,7 @@ import path from "node:path/posix";
 const SOURCE = /\.[cm]?[jt]sx?$/;
 const EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".jsx", ".json"];
 const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)(["'`])([^"'`\n]+)\1/g;
-const PATH_LITERAL = /(["'`])((?:\.{1,2}\/)?[\w@.[\]-]+(?:\/[\w@.[\]()-]+)+)\1/g;
+const PATH_LITERAL = /(["'`])((?:\.{1,2}\/)?[\w@.[\]-]+(?:\/[\w@.[\]()-]+)+|\.{1,2}\/[\w@.[\]()-]+)\1/g;
 const TYPE_ONLY = /\b(?:import|export)\s+type\s+[\w$*{][^;'"`]*?\bfrom\s*["'][^"'\n]+["'];?/g;
 
 /** tsconfig is JSONC, and `"**\/*.ts"` looks like a block comment to a naive regex. */
@@ -39,27 +39,78 @@ export function stripJsonComments(text: string): string {
 /** The source with comments blanked and strings kept, so a path in a comment is no edge. */
 export function stripComments(text: string): string {
   let out = "";
+  let last = "";
+  // The word just before: a regex can follow `return`, and a division can't follow `)`.
+  let word = "";
+  let spaced = false;
   let i = 0;
   while (i < text.length) {
-    const c = text[i];
+    const c = text[i]!;
     const next = text[i + 1];
     if (c === "/" && next === "/") {
       while (i < text.length && text[i] !== "\n") i++;
     } else if (c === "/" && next === "*") {
       const end = text.indexOf("*/", i + 2);
-      i = end === -1 ? text.length : end + 2;
-      out += " ";
+      // Unclosed isn't a comment, and blanking the rest of a file would hide what's in it.
+      if (end === -1) {
+        out += c;
+        last = c;
+        i++;
+      } else {
+        i = end + 2;
+        out += " ";
+      }
     } else if (c === '"' || c === "'" || c === "`") {
       let j = i + 1;
       while (j < text.length && text[j] !== c && !(c !== "`" && text[j] === "\n")) j += text[j] === "\\" ? 2 : 1;
       out += text.slice(i, j + 1);
+      last = c;
       i = j + 1;
+    } else if (c === "/" && startsExpression(last, word)) {
+      const end = regexEnd(text, i);
+      if (end === -1) {
+        out += c;
+        last = c;
+        i++;
+      } else {
+        out += " ";
+        last = "/";
+        i = end;
+      }
     } else {
       out += c;
+      if (c === " " || c === "\n" || c === "\t" || c === "\r") spaced = true;
+      else {
+        last = c;
+        const inWord = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_" || c === "$";
+        word = inWord ? (spaced ? c : word + c) : "";
+        spaced = false;
+      }
       i++;
     }
   }
   return out;
+}
+
+const BEFORE_EXPRESSION = new Set(["return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "do", "else", "yield", "await"]);
+
+/** Whether a `/` here begins a regex, not a division. `<` is left out: `</div>`. */
+function startsExpression(last: string, word: string): boolean {
+  return last === "" || "(,=:[!&|?{};+-*%~^".includes(last) || BEFORE_EXPRESSION.has(word);
+}
+
+/** Past a regex literal starting at `start`, or -1 when none closes on its line. */
+function regexEnd(text: string, start: number): number {
+  let inClass = false;
+  for (let i = start + 1; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\n") return -1;
+    if (c === "\\") i++;
+    else if (c === "[") inClass = true;
+    else if (c === "]") inClass = false;
+    else if (c === "/" && !inClass) return i + 1;
+  }
+  return -1;
 }
 
 interface TsConfig {
@@ -170,6 +221,8 @@ export function referencedFiles(file: string, text: string, resolver: Resolver, 
 export interface TextGraph {
   forward: Map<string, Set<string>>;
   reverse: Map<string, Set<string>>;
+  /** Tracked source files the checkout doesn't have: they might import anything. */
+  unread: string[];
   /** Bare package names imported anywhere: a workspace's own is a dependency this graph can't follow. */
   packages: Set<string>;
   resolver: Resolver;
@@ -181,6 +234,7 @@ export function buildTextGraph(files: string[], read: (file: string) => string, 
   const forward = new Map<string, Set<string>>();
   const reverse = new Map<string, Set<string>>();
   const packages = new Set<string>();
+  const unread: string[] = [];
   for (const file of files) {
     if (!SOURCE.test(file)) continue;
     tick();
@@ -188,9 +242,11 @@ export function buildTextGraph(files: string[], read: (file: string) => string, 
     try {
       text = stripComments(read(file));
     } catch (error) {
-      // Tracked but absent: a sparse checkout. The parser's read says so if it matters.
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "EISDIR") continue;
+      if (code === "ENOENT" || code === "EISDIR") {
+        unread.push(file);
+        continue;
+      }
       throw error;
     }
     const edges = referencedFiles(file, text, resolver, (spec) => {
@@ -204,7 +260,7 @@ export function buildTextGraph(files: string[], read: (file: string) => string, 
     }
     scanText(file, text);
   }
-  return { forward, reverse, packages, resolver };
+  return { forward, reverse, unread, packages, resolver };
 }
 
 /** `from` and everything reaching it (or it reaches), through `edges`, keeping what `keep` allows. */

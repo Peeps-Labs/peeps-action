@@ -36,7 +36,6 @@ function run(tree: Record<string, string>, changes: FileChange[], extra: Partial
       return text;
     },
     changes,
-    rootDir: "e2e",
     specFiles: [],
     base: "b".repeat(40),
     ...extra,
@@ -545,6 +544,107 @@ test('fetch("/api/orders") bridges a route to its caller', () => {
   bounded(run(tree, [lineChange("app/api/orders/[id]/route.ts", 1)]), ["/api/orders/:id", "/b"]);
 });
 
+test("a server fetching its own absolute URL is bridged, by the path", () => {
+  const tree = {
+    ...NEXT,
+    "app/api/orders/route.ts": "export async function GET() {}\n",
+    "app/a/page.tsx": 'export default async function P() { return fetch("https://app.example.com/api/orders"); }\n',
+    "app/b/page.tsx": "export default async function P() { return fetch(`${process.env.API}/api/orders`); }\n",
+    "app/c/page.tsx": 'export default async function P() { return fetch(new URL("/api/orders", base)); }\n',
+    "app/d/page.tsx": "export default async function P() { return fetch(`https://${host}/api/orders?x=1`); }\n",
+    "app/e/page.tsx": 'export default async function P() { return fetch("https://stripe.com/v1/charges"); }\n',
+  };
+  bounded(run(tree, [lineChange("app/api/orders/route.ts", 1)]), ["/a", "/api/orders", "/b", "/c", "/d"]);
+});
+
+test("another API's URL, all placeholders where the route has words, isn't the route", () => {
+  const tree = {
+    ...NEXT,
+    "app/[org]/settings/[project]/repo/page.tsx": "export default function P() {}\n",
+    "lib/github.ts": "export const hooks = (o, r, id) => fetch(`${GITHUB}/repos/${o}/${r}/${id}`);\nregister(hooks);\n",
+  };
+  bounded(run(tree, [lineChange("app/[org]/settings/[project]/repo/page.tsx", 1)]), ["/:org/settings/:project/repo"]);
+});
+
+test("a regex can't start a comment and hide what comes after", () => {
+  const tree = {
+    ...NEXT,
+    "lib/x.ts": "export function x() {}\n",
+    "app/a/page.tsx": 'import { x } from "../../lib/x";\nexport default function P() { return x(); }\n',
+    "app/b/page.tsx": 'const t = "a".replace(/\\/*$/, "");\nconst L = () => import("../../lib/x");\n/* a comment later on */\nexport default function P() { return L; }\n',
+    "app/c/page.tsx": 'if (a) /\\/*x/.test(b);\nconst L = () => import("../../lib/x");\nexport default function P() { return L; }\n',
+  };
+  bounded(run(tree, [lineChange("lib/x.ts", 1)]), ["/a", "/b", "/c"]);
+});
+
+test("a regex after return is one", () => {
+  const tree = {
+    ...NEXT,
+    "lib/x.ts": "export function x() {}\n",
+    "app/a/page.tsx": 'function f() { return /\\/*x/; }\nconst L = () => import("../../lib/x");\nexport default function P() { return [f, L]; }\n',
+  };
+  bounded(run(tree, [lineChange("lib/x.ts", 1)]), ["/a"]);
+});
+
+test("stripping stays linear: a file full of slashes costs no more than its size", () => {
+  const big = "const a = 1 / 2;\n".repeat(60_000);
+  const started = Date.now();
+  run({ ...NEXT, "lib/big.ts": big, "lib/x.ts": "export function x() {}\n", "app/a/page.tsx": 'import { x } from "../../lib/x";\nexport default function P() { return x(); }\n' }, [lineChange("lib/x.ts", 1)]);
+  assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
+});
+
+test("a division isn't a regex, and a comment after it still is", () => {
+  const tree = {
+    ...NEXT,
+    "lib/x.ts": "export function x() {}\n",
+    "app/a/page.tsx": '// import "../../lib/x";\nconst q = (a) / 2; /* import("../../lib/x") */\nexport default function P() { return q; }\n',
+    "app/b/page.tsx": 'import { x } from "../../lib/x";\nexport default function P() { return x(); }\n',
+  };
+  bounded(run(tree, [lineChange("lib/x.ts", 1)]), ["/b"]);
+});
+
+test("with Playwright's rootDir holding the app, a shared helper and a deleted page are the app's", () => {
+  const tree = {
+    ...NEXT,
+    "apps/web/next.config.js": "module.exports = {};\n",
+    "apps/web/tests/cart.spec.ts": 'import { fmt } from "../lib/fmt";\nimport { CartPage } from "./pages/cart";\ntest("x", () => CartPage(fmt));\n',
+    "apps/web/tests/pages/cart.ts": "export function CartPage() {}\n",
+    "apps/web/lib/fmt.ts": "export function fmt() {}\n",
+    "apps/web/app/cart/page.tsx": 'import { fmt } from "../../lib/fmt";\nexport default function P() { return fmt(); }\n',
+  };
+  const input = { specFiles: ["apps/web/tests/cart.spec.ts"] };
+  const shared = run(tree, [lineChange("apps/web/lib/fmt.ts", 1)], input);
+  bounded(shared, ["/cart"]);
+  assert.deepEqual(shared.changedTestFiles, ["apps/web/lib/fmt.ts"]);
+  bounded(run(tree, [{ path: "apps/web/app/old/page.tsx", status: "deleted", binary: false, hunks: [{ newStart: 0, newCount: 0, removed: ["x"], added: [] }] }], input), ["/old"]);
+  bounded(run(tree, [lineChange("apps/web/app/cart/page.tsx", 2)], input), ["/cart"]);
+  bounded(run(tree, [lineChange("apps/web/tests/pages/cart.ts", 1)], input), []);
+});
+
+test("what reads as a document but isn't one widens", () => {
+  global(run({ ...NEXT, "pages/about.md": "# x\n" }, [lineChange("pages/about.md", 1)]), "unplaced_file");
+  global(run({ ...NEXT, "app/a/copy.md": "# x\n" }, [lineChange("app/a/copy.md", 1)]), "unplaced_file");
+  const site = { "package.json": "{}\n", "docs/next.config.js": "module.exports = {};\n", "docs/app/page.tsx": "export default function P() {}\n", "docs/content/a.md": "# x\n", "docs/README.md": "# x\n" };
+  bounded(run(site, [lineChange("docs/app/page.tsx", 1)]), ["/"]);
+  global(run(site, [lineChange("docs/content/a.md", 1)]), "unplaced_file");
+  bounded(run(site, [lineChange("docs/README.md", 1)]), []);
+  const prompt = { ...NEXT, "lib/prompt.md": "x\n", "lib/p.ts": 'export const p = "lib/prompt.md";\n', "app/a/page.tsx": 'import { p } from "../../lib/p";\nexport default function P() { return p; }\n' };
+  bounded(run(prompt, [lineChange("lib/prompt.md", 1)]), ["/a"]);
+});
+
+test("a tracked source file missing from a sparse checkout might import anything", () => {
+  const tree = { ...NEXT, "lib/x.ts": "export function x() {}\n", "app/a/page.tsx": 'import { x } from "../../lib/x";\nexport default function P() { return x(); }\n' };
+  global(run(tree, [lineChange("lib/x.ts", 1)], { files: [...Object.keys(tree), "app/b/page.tsx"] }), "unread_file");
+});
+
+test("a global reach stays under the announce's cap too", () => {
+  const changes = Array.from({ length: 6000 }, (_, i) => lineChange(`src/some/long/path/to/a/file/number/${i}/module-name.ts`, 1));
+  const reach = run({ ...NEXT }, changes);
+  global(reach, "too_many_files");
+  assert.ok(Buffer.byteLength(JSON.stringify(reach)) <= 256 * 1024);
+  assert.deepEqual(reach.changedFiles, [], "better no list than a refused announce");
+});
+
 test("instrumentation is a composition root: reaching it is global", () => {
   const tree = {
     ...NEXT,
@@ -742,7 +842,7 @@ test("a spec, a page object and a fixture go in changedTestFiles and pick nothin
 });
 
 test("a file under the test root no spec reaches is global", () => {
-  global(run(SUITE, [lineChange("e2e/stray.txt", 1)], SPECS), "unplaced_test_file");
+  global(run(SUITE, [lineChange("e2e/stray.txt", 1)], SPECS), "unplaced_file");
 });
 
 test("with the config at the repository root the same holds, and an app file a spec imports counts as both", () => {
@@ -753,13 +853,26 @@ test("with the config at the repository root the same holds, and an app file a s
     "lib/fmt.ts": "export function fmt() {}\n",
     "app/a/page.tsx": 'import { fmt } from "../../lib/fmt";\nexport default function P() { return fmt(); }\n',
   };
-  const input = { rootDir: ".", specFiles: ["tests/cart.spec.ts"] };
+  const input = { specFiles: ["tests/cart.spec.ts"] };
   const page = run(tree, [lineChange("tests/pages/cart.ts", 1)], input);
   bounded(page, []);
   assert.deepEqual(page.changedTestFiles, ["tests/pages/cart.ts"]);
   const both = run(tree, [lineChange("lib/fmt.ts", 1)], input);
   bounded(both, ["/a"]);
   assert.deepEqual(both.changedTestFiles, ["lib/fmt.ts"]);
+});
+
+test("what only Playwright's config reaches is the suite's: a global setup isn't the app, even with a top-level effect", () => {
+  const tree = {
+    ...NEXT,
+    "e2e/playwright.config.ts": 'export default { globalSetup: "./setup.ts" };\n',
+    "e2e/setup.ts": 'import { vars } from "./vars";\nconsole.log(vars);\nexport default () => {};\n',
+    "e2e/vars.ts": 'import { shared } from "../lib/shared";\nexport const vars = shared;\n',
+    "e2e/a.spec.ts": 'import { vars } from "./vars";\ntest("x", () => vars);\n',
+    "lib/shared.ts": "export const shared = 1;\n",
+    "app/a/page.tsx": 'import { shared } from "../../lib/shared";\nexport default function P() { return shared; }\n',
+  };
+  bounded(run(tree, [lineChange("lib/shared.ts", 1)], { specFiles: ["e2e/a.spec.ts"] }), ["/a"]);
 });
 
 test("a unit test beside the code changes no app surface", () => {

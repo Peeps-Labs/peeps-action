@@ -70,7 +70,7 @@ async function suite(t: TestContext, config: string, spec = SPEC) {
 
 type Preflight = "on" | "off" | "missing" | "error" | "hang" | "garbage";
 
-async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, leaveOut: (test: Planned) => boolean = () => false, preflight: Preflight = "missing") {
+async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, leaveOut: (test: Planned) => boolean = () => false, preflight: Preflight = "missing", refuseReach = 0) {
   const preflights: string[] = [];
   const announces: Array<Record<string, unknown>> = [];
   const completes: Array<Record<string, unknown>> = [];
@@ -100,6 +100,11 @@ async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, le
     } else if (url.pathname === "/api/v1/ci/batches") {
       const input = JSON.parse(bytes.toString()) as { tests: Planned[] };
       announces.push(input as unknown as Record<string, unknown>);
+      if (refuseReach && (input as { reach?: unknown }).reach) {
+        res.writeHead(refuseReach);
+        res.end();
+        return;
+      }
       const planned = input.tests.filter((v) => !leaveOut(v));
       const runs = planned.map((v, i) => {
         names.set(`run-${i}`, `${v.pwProject}|${v.titlePath}`);
@@ -293,7 +298,7 @@ import { test } from "@playwright/test";
 test("passes", async ({ page }) => {
   await page.route("https://stripe.com/**", (route) => route.fulfill({ status: 200, contentType: "application/json", body: "{}" }));
   await page.goto("/cart");
-  await page.evaluate(() => fetch("https://stripe.com/v1/charges", { mode: "no-cors" }).catch(() => {}));
+  await page.evaluate(async () => { await new Promise((done) => { const x = new XMLHttpRequest(); x.onloadend = done; x.open("GET", "https://stripe.com/v1/charges"); x.send(); }); });
 });
 `;
   const root = await suite(t, COMMON(`baseURL: ${JSON.stringify(app)},`), spec);
@@ -418,6 +423,55 @@ import { test } from "@playwright/test";
 test.use({ trace: "on" });
 test("passes", async ({ page }) => { await page.goto("/cart"); });
 `;
+
+test("a test starting its own tracing still passes on a recorded push", async (t) => {
+  const app = await appServer(t);
+  const spec = `
+import { test } from "@playwright/test";
+test("passes", async ({ page, context }) => {
+  await context.tracing.start({ screenshots: false });
+  await page.goto("/cart");
+  await context.tracing.stop();
+});
+`;
+  const root = await suite(t, COMMON(""), spec);
+  const peeps = await fakePeeps(t, { collectFootprints: true });
+  const result = await runAction(root, peeps.url, { BASE_URL: app });
+  assert.equal(result.code, 0, result.output);
+  assert.equal(ended(peeps.sent.get("|passes"))[0]!.footprint?.complete, false, "unknown, so it always runs");
+});
+
+test("a beforeAll's requests aren't in the trace, so its spec can't claim a whole footprint", async (t) => {
+  const app = await appServer(t);
+  const spec = `
+import { test } from "@playwright/test";
+test.beforeAll(async ({ request }) => { await request.get("/api/cart"); });
+test("passes", async ({ page }) => { await page.goto("/cart"); });
+`;
+  const root = await suite(t, COMMON(""), spec);
+  const peeps = await fakePeeps(t, { collectFootprints: true });
+  const result = await runAction(root, peeps.url, { BASE_URL: app });
+  assert.equal(result.code, 0, result.output);
+  const footprint = ended(peeps.sent.get("|passes"))[0]!.footprint!;
+  assert.equal(footprint.complete, false, JSON.stringify(footprint));
+  assert.ok(footprint.paths.includes("/cart"));
+});
+
+test("a server that refuses the reach still gets the announce, and the job runs", async (t) => {
+  const pr = await mergedPullRequest(t);
+  const peeps = await fakePeeps(t, {}, undefined, "on", 413);
+  const result = await runAction(pr.root, peeps.url, { GITHUB_SHA: pr.merge, GITHUB_REF: "refs/pull/1/merge", GITHUB_EVENT_NAME: "pull_request" });
+  assert.equal(result.code, 0, result.output);
+  assert.equal(peeps.announces.at(-1)!.reach, undefined, "sent again without it");
+  assert.deepEqual(peeps.completes, [{ reportUploaded: true }], "and says nothing of a reach it didn't send");
+});
+
+test("git runs under the budget: past it, everything runs", async (t) => {
+  const pr = await mergedPullRequest(t);
+  const env = readRunnerEnv({ GITHUB_WORKSPACE: pr.root, GITHUB_SHA: pr.merge, GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/1/merge" });
+  const late = await computeReach(env, { specFiles: [] }, { budgetMs: 0 });
+  assert.equal(late?.global, true);
+});
 
 test("a spec setting its own trace keeps it: Peeps can't read that policy, so it records nothing and deletes nothing", async (t) => {
   const app = await appServer(t);
@@ -585,24 +639,24 @@ test("a scanner that dies or overruns reads global, and doesn't fail the job", a
   const env = readRunnerEnv({ GITHUB_WORKSPACE: pr.root, GITHUB_SHA: pr.merge, GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/1/merge" });
   const dead = path.join(pr.root, "dead.js");
   await writeFile(dead, "process.exit(3);\n");
-  const failed = await computeReach(env, { rootDir: "suite", specFiles: [] }, { scanner: dead });
+  const failed = await computeReach(env, { specFiles: [] }, { scanner: dead });
   assert.equal(failed?.global, true);
   assert.equal(failed?.why, "scan_failed");
   assert.equal(failed?.base, pr.base);
   const slow = path.join(pr.root, "slow.js");
   await writeFile(slow, "for (;;) {}\n");
   const started = Date.now();
-  const late = await computeReach(env, { rootDir: "suite", specFiles: [] }, { scanner: slow, budgetMs: 1500 });
+  const late = await computeReach(env, { specFiles: [] }, { scanner: slow, budgetMs: 1500 });
   assert.equal(late?.why, "timeout", "a parse in progress can't be interrupted except by killing it");
   assert.ok(Date.now() - started < 10_000);
   const garbage = path.join(pr.root, "garbage.js");
   await writeFile(garbage, 'process.stdout.write("not json");\n');
-  assert.equal((await computeReach(env, { rootDir: "suite", specFiles: [] }, { scanner: garbage }))?.why, "scan_failed");
+  assert.equal((await computeReach(env, { specFiles: [] }, { scanner: garbage }))?.why, "scan_failed");
 });
 
 test("a push and a non-GitHub platform compute nothing", async () => {
   const base = { GITHUB_WORKSPACE: "/nowhere", GITHUB_SHA: "a".repeat(40) };
-  assert.equal(await computeReach(readRunnerEnv({ ...base, GITHUB_EVENT_NAME: "push" }), { rootDir: ".", specFiles: [] }), undefined);
-  assert.equal(await computeReach(readRunnerEnv({ ...base, GITHUB_EVENT_NAME: "pull_request_target" }), { rootDir: ".", specFiles: [] }), undefined);
-  assert.equal(await computeReach(readRunnerEnv({ GITLAB_CI: "true", CI_COMMIT_SHA: "a".repeat(40), CI_PIPELINE_SOURCE: "merge_request_event" }), { rootDir: ".", specFiles: [] }), undefined);
+  assert.equal(await computeReach(readRunnerEnv({ ...base, GITHUB_EVENT_NAME: "push" }), { specFiles: [] }), undefined);
+  assert.equal(await computeReach(readRunnerEnv({ ...base, GITHUB_EVENT_NAME: "pull_request_target" }), { specFiles: [] }), undefined);
+  assert.equal(await computeReach(readRunnerEnv({ GITLAB_CI: "true", CI_COMMIT_SHA: "a".repeat(40), CI_PIPELINE_SOURCE: "merge_request_event" }), { specFiles: [] }), undefined);
 });

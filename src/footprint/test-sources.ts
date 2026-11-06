@@ -1,23 +1,28 @@
-/** The workspace's files from the disk, for `test-trace.ts`. */
+/** The workspace's files from the disk, for `test-trace.ts`. Bounded: past its budget, it can't tell. */
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { testsMaySetTrace } from "./test-trace";
+import { readTestSources, type TestSources } from "./test-trace";
 
-function listFiles(root: string, dir = ""): string[] {
+const SKIPPED = new Set(["node_modules", ".git", ".next", ".nuxt", ".turbo", ".cache", "dist", "build", "out", "coverage"]);
+const MAX_ENTRIES = 200_000;
+const BUDGET_MS = 10_000;
+
+function listFiles(root: string, deadline: number, limit = { left: MAX_ENTRIES }, dir = ""): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(path.join(root, dir), { withFileTypes: true })) {
-    if (entry.name === "node_modules" || entry.name === ".git") continue;
+    if (--limit.left < 0 || Date.now() > deadline) throw new Error("Too many files to read");
     const relative = dir ? `${dir}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) out.push(...listFiles(root, relative));
-    else if (entry.isFile()) out.push(relative);
+    if (entry.isDirectory()) {
+      if (!SKIPPED.has(entry.name)) out.push(...listFiles(root, deadline, limit, relative));
+    } else if (entry.isFile()) out.push(relative);
   }
   return out;
 }
 
-export function workspaceTestsMaySetTrace(workspace: string, specs: string[]): boolean {
+export function workspaceTestSources(workspace: string, specs: string[], budgetMs = BUDGET_MS): TestSources {
   try {
-    return testsMaySetTrace(specs, listFiles(workspace), (file) => readFileSync(path.join(workspace, file), "utf8"));
+    return readTestSources(specs, listFiles(workspace, Date.now() + budgetMs), (file) => readFileSync(path.join(workspace, file), "utf8"));
   } catch {
-    return true;
+    return { maySetTrace: true, hiddenRequests: specs };
   }
 }
