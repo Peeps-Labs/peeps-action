@@ -3155,8 +3155,8 @@ function createToolServer(env, deps = {}) {
       const project = typeof args.project === "string" && args.project ? args.project : null;
       let owners = [];
       if (project) {
-        const graph = await projectGraph(env, runCapture, testEnv);
-        if (!Array.isArray(graph)) throw new ToolError(`project_graph_unavailable: ${redact(graph.unavailable)}`);
+        const graph = await projectGraph(env, runCapture, testEnv, redact);
+        if (!Array.isArray(graph)) throw new ToolError(`project_graph_unavailable: ${graph.unavailable}`);
         owners = teardownOwners(graph, project);
       }
       const cmd = ["playwright", "test", "--reporter=json"];
@@ -3530,17 +3530,20 @@ class PeepsProjectGraph {
 }
 module.exports = PeepsProjectGraph;
 `;
-async function projectGraph(env, run = runCapture, extraEnv = {}) {
+async function projectGraph(env, run = runCapture, extraEnv = {}, scrub = (text2) => text2) {
   let dir = null;
+  const limitMs = 2 * 60 * 1e3;
   try {
     dir = await (0, import_promises9.mkdtemp)(import_node_path12.default.join((0, import_node_os7.tmpdir)(), "peeps-graph-"));
     const reporter = import_node_path12.default.join(dir, "graph-reporter.cjs");
     await (0, import_promises9.writeFile)(reporter, PROJECT_GRAPH_REPORTER);
     const cmd = ["playwright", "test", "--list", `--reporter=${reporter}`];
     if (env.configPath) cmd.push("--config", env.configPath);
-    const { code, stdout, stderr } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1e3, extraEnv);
+    const started = Date.now();
+    const { code, stdout, stderr } = await run("npx", cmd, env.workingDirectory, limitMs, extraEnv);
+    const ended = Date.now() - started >= limitMs ? "timed out after 2 minutes" : `exit ${code}`;
     const why = (what) => ({
-      unavailable: `${what} (\`playwright test --list\` exit ${code}, 2-minute limit): ${stderr.trim().slice(-2e3)}`
+      unavailable: `${what} (\`playwright test --list\` ${ended}): ${scrub(stderr).trim().slice(-2e3)}`
     });
     const line = stdout.split("\n").find((l) => l.startsWith(GRAPH_MARKER));
     if (!line) return why("no project graph in the listing");
@@ -3561,7 +3564,7 @@ async function projectGraph(env, run = runCapture, extraEnv = {}) {
       }];
     });
   } catch (error) {
-    return { unavailable: `the listing did not start: ${String(error.message ?? error).slice(0, 500)}` };
+    return { unavailable: `the listing did not start: ${scrub(String(error.message ?? error)).slice(0, 500)}` };
   } finally {
     if (dir) await (0, import_promises9.rm)(dir, { recursive: true, force: true }).catch(() => {
     });

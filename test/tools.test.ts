@@ -579,6 +579,25 @@ test("projectGraph says why it could not list, with the exit code and stderr's t
   const malformed = await listing({ code: 0, stdout: "peeps:project-graph:{not json\n", stderr: "" });
   assert.ok(!Array.isArray(malformed));
   assert.match(malformed.unavailable, /unreadable project graph/);
+
+  // A listing that never starts (npx missing, say) says so.
+  const unstarted = await projectGraph(env, async () => {
+    throw new Error("spawn npx ENOENT");
+  });
+  assert.ok(!Array.isArray(unstarted));
+  assert.match(unstarted.unavailable, /^the listing did not start: spawn npx ENOENT$/);
+});
+
+test("projectGraph redacts stderr whole before it cuts the tail, so no secret is split", async () => {
+  const env = { workingDirectory: WS, configPath: null } as unknown as RunnerEnv;
+  const secret = "s3cr3t-value-that-straddles-the-cut";
+  // The secret starts just before the last 2000 characters: cut first, its tail would survive.
+  const stderr = secret + "y".repeat(2000 - 10);
+  const scrub = (text: string) => text.split(secret).join("[redacted]");
+  const out = await projectGraph(env, async () => ({ code: 1, stdout: "", stderr }), {}, scrub);
+  assert.ok(!Array.isArray(out));
+  assert.equal(out.unavailable.includes(secret.slice(-10)), false);
+  assert.match(out.unavailable, /exit 1\)/);
 });
 
 /**

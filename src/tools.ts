@@ -741,8 +741,8 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
       // DOG-49 heal's final check did exactly that, 11-05).
       let owners: string[] = [];
       if (project) {
-        const graph = await projectGraph(env, runCapture, testEnv);
-        if (!Array.isArray(graph)) throw new ToolError(`project_graph_unavailable: ${redact(graph.unavailable)}`);
+        const graph = await projectGraph(env, runCapture, testEnv, redact);
+        if (!Array.isArray(graph)) throw new ToolError(`project_graph_unavailable: ${graph.unavailable}`);
         owners = teardownOwners(graph, project);
       }
       const cmd = ["playwright", "test", "--reporter=json"];
@@ -1303,23 +1303,30 @@ export interface GraphUnavailable {
 /**
  * The config's projects and their edges, from a `--list` run (nothing is
  * executed but the config itself), or why they could not be listed: the exit
- * code and the tail of what the listing printed to stderr, unredacted.
+ * code and the tail of what the listing printed to stderr, redacted whole by
+ * `scrub` before it is cut, so no secret is split past the redactor.
  */
 export async function projectGraph(
   env: RunnerEnv,
   run: typeof runCapture = runCapture,
   extraEnv: Record<string, string> = {},
+  scrub: (text: string) => string = (text) => text,
 ): Promise<ProjectEdges[] | GraphUnavailable> {
   let dir: string | null = null;
+  const limitMs = 2 * 60 * 1000;
   try {
     dir = await mkdtemp(path.join(tmpdir(), "peeps-graph-"));
     const reporter = path.join(dir, "graph-reporter.cjs");
     await writeFile(reporter, PROJECT_GRAPH_REPORTER);
     const cmd = ["playwright", "test", "--list", `--reporter=${reporter}`];
     if (env.configPath) cmd.push("--config", env.configPath);
-    const { code, stdout, stderr } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1000, extraEnv);
+    const started = Date.now();
+    const { code, stdout, stderr } = await run("npx", cmd, env.workingDirectory, limitMs, extraEnv);
+    // A run killed at the limit reports exit 1 like any other failure, so the
+    // elapsed time is what says it timed out.
+    const ended = Date.now() - started >= limitMs ? "timed out after 2 minutes" : `exit ${code}`;
     const why = (what: string) => ({
-      unavailable: `${what} (\`playwright test --list\` exit ${code}, 2-minute limit): ${stderr.trim().slice(-2000)}`,
+      unavailable: `${what} (\`playwright test --list\` ${ended}): ${scrub(stderr).trim().slice(-2000)}`,
     });
     const line = stdout.split("\n").find((l) => l.startsWith(GRAPH_MARKER));
     if (!line) return why("no project graph in the listing");
@@ -1340,7 +1347,7 @@ export async function projectGraph(
       }];
     });
   } catch (error) {
-    return { unavailable: `the listing did not start: ${String((error as Error).message ?? error).slice(0, 500)}` };
+    return { unavailable: `the listing did not start: ${scrub(String((error as Error).message ?? error)).slice(0, 500)}` };
   } finally {
     if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
