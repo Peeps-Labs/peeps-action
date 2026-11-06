@@ -561,6 +561,26 @@ test("projectGraph lists with the extra environment it is given", async () => {
   assert.deepEqual(seen, [{ BASE_URL: PEEPS_URL }]);
 });
 
+test("projectGraph says why it could not list, with the exit code and stderr's tail", async () => {
+  const env = { workingDirectory: WS, configPath: null } as unknown as RunnerEnv;
+  const listing = (out: { code: number; stdout: string; stderr: string }) => projectGraph(env, async () => out);
+
+  const failed = await listing({ code: 1, stdout: "", stderr: "x".repeat(5000) + "Error: config does not load\n" });
+  assert.ok(!Array.isArray(failed));
+  assert.match(failed.unavailable, /exit 1/);
+  assert.match(failed.unavailable, /Error: config does not load$/);
+  assert.ok(failed.unavailable.length < 2100, String(failed.unavailable.length));
+
+  // Exit 0 with no graph line: a reporter that did not load, say.
+  const silent = await listing({ code: 0, stdout: "Listing tests:\n", stderr: "" });
+  assert.ok(!Array.isArray(silent));
+  assert.match(silent.unavailable, /no project graph in the listing/);
+
+  const malformed = await listing({ code: 0, stdout: "peeps:project-graph:{not json\n", stderr: "" });
+  assert.ok(!Array.isArray(malformed));
+  assert.match(malformed.unavailable, /unreadable project graph/);
+});
+
 /**
  * A real Playwright job: the config records what each process that loads it
  * was started with, and the one test's title is what its worker was.

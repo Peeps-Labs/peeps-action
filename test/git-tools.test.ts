@@ -450,13 +450,20 @@ test("run_tests of a project that is no teardown keeps the file and grep", async
   assert.equal("ranUnder" in out, false);
 });
 
-test("run_tests of a teardown falls back to the project alone when the config cannot be listed", async (t) => {
+test("run_tests of a named project refuses, and runs nothing, when the config cannot be listed", async (t) => {
   const { ws, tools } = await teardownChain(t);
-  // A config that does not load: the run fails as it did before, with Playwright's own error.
+  // Unlisted, `cleanup` cannot be told apart from an ordinary project, and run
+  // alone it fails on the login page (a heal of DOG-49 did, 11-05). So nothing
+  // runs, and the refusal carries Playwright's own error.
   await writeFile(path.join(ws, "pw.config.ts"), "throw new Error('config does not load');\n");
-  const out = (await tools.run_tests!({ file: "pw/cleanup/remove.spec.ts", project: "cleanup" })) as TeardownRun & { exitCode: number };
-  assert.notEqual(out.exitCode, 0);
-  assert.equal("ranUnder" in out, false);
+  await assert.rejects(
+    tools.run_tests!({ file: "pw/cleanup/remove.spec.ts", grep: "Cleanup: Add an environment", project: "cleanup" }),
+    (error: Error) => {
+      assert.match(error.message, /^project_graph_unavailable: /);
+      assert.match(error.message, /config does not load/);
+      return true;
+    },
+  );
 });
 
 test("run_tests redacts a secret in a Playwright result's title, error and snippet", async (t) => {

@@ -565,7 +565,11 @@ Playwright teardown (a cleanup another project lists as its `teardown`),
 `run_tests` selects the project it tears down instead, so the teardown starts
 from the state it has in CI. That run has no file or `grep` filter, its
 `results` hold every test of the chain, and the answer carries
-`ranUnder: { projects, reason: "teardown" }`.
+`ranUnder: { projects, reason: "teardown" }`. To know which projects are
+teardowns, `run_tests` lists the config first; when a `project` is named and
+that listing fails, nothing runs and the call fails with
+`project_graph_unavailable`, the listing's exit code and the tail of its
+stderr.
 
 **What `run_tests` reports for pytest.** When pytest itself runs (not your
 `.peeps/run-tests` hook), a failed result also carries the HTTP calls the test
@@ -621,6 +625,15 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## 1.10.1
+
+- Agent mode: when `run_tests` names a Playwright project and the config's
+  projects cannot be listed, it runs nothing and fails with
+  `project_graph_unavailable`, the listing's exit code and the tail of its
+  stderr. It used to run the project alone, and a teardown run alone starts
+  with no sign-in and nothing to clean up: a heal's final check of a cleanup
+  failed that way while its earlier runs under the owner had passed.
 
 ## 1.10.0
 

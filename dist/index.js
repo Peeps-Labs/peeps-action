@@ -3153,7 +3153,12 @@ function createToolServer(env, deps = {}) {
       }
       const rel = import_node_path12.default.relative(env.workingDirectory, abs).split(import_node_path12.default.sep).join("/");
       const project = typeof args.project === "string" && args.project ? args.project : null;
-      const owners = project ? teardownOwners(await projectGraph(env, runCapture, testEnv), project) : [];
+      let owners = [];
+      if (project) {
+        const graph = await projectGraph(env, runCapture, testEnv);
+        if (!Array.isArray(graph)) throw new ToolError(`project_graph_unavailable: ${redact(graph.unavailable)}`);
+        owners = teardownOwners(graph, project);
+      }
       const cmd = ["playwright", "test", "--reporter=json"];
       if (owners.length === 0 && typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
       for (const p of owners.length > 0 ? owners : project ? [project] : []) cmd.push("--project", p);
@@ -3533,11 +3538,19 @@ async function projectGraph(env, run = runCapture, extraEnv = {}) {
     await (0, import_promises9.writeFile)(reporter, PROJECT_GRAPH_REPORTER);
     const cmd = ["playwright", "test", "--list", `--reporter=${reporter}`];
     if (env.configPath) cmd.push("--config", env.configPath);
-    const { stdout } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1e3, extraEnv);
+    const { code, stdout, stderr } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1e3, extraEnv);
+    const why = (what) => ({
+      unavailable: `${what} (\`playwright test --list\` exit ${code}, 2-minute limit): ${stderr.trim().slice(-2e3)}`
+    });
     const line = stdout.split("\n").find((l) => l.startsWith(GRAPH_MARKER));
-    if (!line) return null;
-    const parsed = JSON.parse(line.slice(GRAPH_MARKER.length));
-    if (!Array.isArray(parsed)) return null;
+    if (!line) return why("no project graph in the listing");
+    let parsed;
+    try {
+      parsed = JSON.parse(line.slice(GRAPH_MARKER.length));
+    } catch {
+      return why("unreadable project graph");
+    }
+    if (!Array.isArray(parsed)) return why("unreadable project graph");
     return parsed.flatMap((p) => {
       if (typeof p !== "object" || p === null || typeof p.name !== "string") return [];
       const { name, dependencies, teardown } = p;
@@ -3547,15 +3560,14 @@ async function projectGraph(env, run = runCapture, extraEnv = {}) {
         teardown: typeof teardown === "string" ? teardown : null
       }];
     });
-  } catch {
-    return null;
+  } catch (error) {
+    return { unavailable: `the listing did not start: ${String(error.message ?? error).slice(0, 500)}` };
   } finally {
     if (dir) await (0, import_promises9.rm)(dir, { recursive: true, force: true }).catch(() => {
     });
   }
 }
 function teardownOwners(graph, project) {
-  if (!graph) return [];
   const ownersOf = (name) => graph.filter((p) => p.teardown === name).map((p) => p.name);
   const roots = /* @__PURE__ */ new Set();
   const seen = /* @__PURE__ */ new Set([project]);
@@ -3586,7 +3598,7 @@ function runCapture(cmd, args, cwd, timeoutMs, extraEnv = {}) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.10.0";
+var ACTION_VERSION = "1.10.1";
 
 // src/agent.ts
 var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process7.execFile);
