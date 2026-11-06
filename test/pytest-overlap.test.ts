@@ -229,7 +229,7 @@ test("one batch still stores the output of a test it didn't plan, flattened, as 
   assert.ok(uploads.some((name) => !name.startsWith("data/only-")), uploads.join(", "));
 });
 
-test("a run whose results file is missing still uploads, without a run in the names", needsPytest, async (t) => {
+test("a run whose results file is missing still closes every batch", needsPytest, async (t) => {
   const root = await suite(t, {
     "pytest.ini": "[pytest]\ntestpaths = tests\n",
     "tests/test_die.py": "import os\ndef test_dies():\n    os._exit(3)\n",
