@@ -35,7 +35,9 @@ __export(reporter_exports, {
   TITLE_PATH_SEPARATOR: () => TITLE_PATH_SEPARATOR,
   default: () => PeepsCiReporter,
   htmlReportDir: () => htmlReportDir,
-  identityOf: () => identityOf
+  identityOf: () => identityOf,
+  isLastAttempt: () => isLastAttempt,
+  narrowedOutcome: () => narrowedOutcome
 });
 module.exports = __toCommonJS(reporter_exports);
 var import_node_fs2 = require("node:fs");
@@ -378,6 +380,8 @@ var PeepsCiReporter = class {
   reportDir = null;
   /** Attach mode: planning missed its deadline, so a late answer must change nothing. */
   gaveUp = false;
+  /** A narrowed run's runs whose attempt ended with a retry still to come. */
+  awaitingRetry = /* @__PURE__ */ new Set();
   constructor(options = {}) {
     this.attachDir = options.attachDir ?? null;
     if (this.attachDir) {
@@ -487,6 +491,7 @@ var PeepsCiReporter = class {
   testBegan(test, now) {
     const entry = this.entryFor(test);
     if (!entry) return;
+    this.awaitingRetry.delete(entry.runId);
     if (!this.started.has(entry.runId)) {
       this.started.add(entry.runId);
       this.enqueue(entry, { type: "run_start", timestamp: now });
@@ -500,24 +505,32 @@ var PeepsCiReporter = class {
       console.log(`[peeps] not planned, not reported: ${test.titlePath().join(" \u203A ")} (${result.status})`);
       return;
     }
-    const error = result.errors[0];
+    const narrowed = this.plan.narrowed === true;
+    const outcome = narrowed ? narrowedOutcome(test, result) : null;
+    const error = outcome ? outcome.error : result.errors[0];
     this.enqueue(entry, {
       type: "test_end",
       timestamp: now,
       testName: test.title,
-      status: result.status,
+      status: outcome ? outcome.status : result.status,
       duration: Math.round(result.duration),
       error: error?.message?.slice(0, 4e3),
       errorStack: error?.stack?.slice(0, 8e3),
       retry: result.retry
     });
-    if (result.retry >= test.retries || result.status === "passed") {
+    if (narrowed ? isLastAttempt(test, result) : result.retry >= test.retries || result.status === "passed") {
       this.enqueue(entry, { type: "run_end", timestamp: now });
       this.pending.push(this.flush(entry));
+    } else if (narrowed) {
+      this.awaitingRetry.add(entry.runId);
     }
   }
   async onEnd() {
     if (this.planned) await this.planned;
+    for (const runId of this.awaitingRetry) {
+      const entry = this.plan.runs.find((r) => r.runId === runId);
+      if (entry) this.enqueue(entry, { type: "run_end", timestamp: Date.now() });
+    }
     for (const [runId, events] of this.queues) {
       if (events.length === 0) continue;
       const entry = this.plan.runs.find((r) => r.runId === runId);
@@ -570,6 +583,23 @@ var PeepsCiReporter = class {
     }
   }
 };
+function narrowedOutcome(test, result) {
+  if (test.expectedStatus === "failed" && result.status === "failed") return { status: "passed" };
+  if (test.expectedStatus === "failed" && result.status === "passed") {
+    return { status: "failed", error: { message: "Expected to fail, but passed." } };
+  }
+  return { status: result.status, error: result.errors[0] };
+}
+function isLastAttempt(test, result) {
+  if (result.retry >= test.retries || result.status === "interrupted") return true;
+  return result.status === test.expectedStatus && !inSerialGroup(test);
+}
+function inSerialGroup(test) {
+  for (let suite = test.parent; suite; suite = suite.parent) {
+    if (suite._parallelMode === "serial") return true;
+  }
+  return false;
+}
 function htmlReportDir(config) {
   const html = config.reporter.find(([name]) => name === "html");
   if (!html) return null;
@@ -589,5 +619,7 @@ function htmlReportDir(config) {
   ATTACH_PLAN_DEADLINE_MS,
   TITLE_PATH_SEPARATOR,
   htmlReportDir,
-  identityOf
+  identityOf,
+  isLastAttempt,
+  narrowedOutcome
 });

@@ -49,8 +49,8 @@ export function specFilesOf(list: PlaywrightList): string[] {
   return [...files].sort();
 }
 
-export async function listTests(env: RunnerEnv): Promise<PlaywrightList> {
-  const args = ["playwright", "test", "--list", "--reporter=json"];
+export async function listTests(env: RunnerEnv, extraArgs: string[] = []): Promise<PlaywrightList> {
+  const args = ["playwright", "test", "--list", "--reporter=json", ...extraArgs];
   if (env.configPath) args.push("--config", env.configPath);
   const target = await jsonReportTarget();
   try {

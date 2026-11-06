@@ -43,6 +43,8 @@ export interface AppiumCollection {
    * less its excludes. Null when `capabilities` is not a list (multiremote).
    */
   capabilitySpecs?: string[][] | null;
+  /** The config's `mochaOpts` filter tests: a narrowed run's grep would replace that. */
+  ownMochaFilter?: boolean;
   tests: CollectedTest[];
   /** Spec files that did not load: present, but what they hold is unknown. */
   errors: Array<{ file: string; message: string }>;
@@ -177,11 +179,18 @@ function installGlobalStubs(): void {
   g._wdioGlobals = registry;
 }
 
+interface MochaOpts {
+  ui?: string;
+  grep?: unknown;
+  fgrep?: unknown;
+  invert?: unknown;
+}
+
 interface SpecList {
   rootDir: string;
   specs: string[];
   capabilitySpecs: string[][] | null;
-  mochaOpts: { ui?: string };
+  mochaOpts: MochaOpts;
 }
 
 function flatten(specs: unknown[]): string[] {
@@ -196,7 +205,7 @@ async function specsFromWdio(configPath: string, wdioConfig: string): Promise<Sp
   const { ConfigParser } = (await importFile(entryOf(wdioConfig, "./node"))) as {
     ConfigParser: new (file: string) => {
       initialize(): Promise<void>;
-      getConfig(): { rootDir?: string; mochaOpts?: { ui?: string } };
+      getConfig(): { rootDir?: string; mochaOpts?: MochaOpts };
       getCapabilities(): unknown;
       getSpecs(capSpecs?: unknown, capExclude?: unknown): unknown[];
     };
@@ -240,7 +249,7 @@ function glob(patterns: unknown, rootDir: string): string[] {
 async function specsFromConfig(configPath: string): Promise<SpecList> {
   const loaded = await importFile(configPath);
   const config = (loaded.config ?? (loaded.default as Record<string, unknown> | undefined)?.config) as
-    | { rootDir?: string; specs?: unknown; exclude?: unknown; capabilities?: unknown; mochaOpts?: { ui?: string } }
+    | { rootDir?: string; specs?: unknown; exclude?: unknown; capabilities?: unknown; mochaOpts?: MochaOpts }
     | undefined;
   if (!config || typeof config !== "object") throw new Error(`${configPath} exports no \`config\` object`);
   const rootDir = config.rootDir ? path.resolve(path.dirname(configPath), config.rootDir) : path.dirname(configPath);
@@ -350,6 +359,7 @@ export async function collect(configPath: string): Promise<AppiumCollection> {
     rootDir: list.rootDir,
     specs: list.specs,
     capabilitySpecs: list.capabilitySpecs,
+    ownMochaFilter: Boolean(list.mochaOpts.grep || list.mochaOpts.fgrep || list.mochaOpts.invert),
     tests,
     errors,
     loader: tsx ? "tsx" : "node",

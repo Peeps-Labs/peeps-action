@@ -16,6 +16,7 @@ import {
   junitArtifactName,
   lineOf,
   mochaGrepFor,
+  runAppiumReport,
   specsForRuns,
   stopAppiumRuns,
   trackProcessGroup,
@@ -41,7 +42,7 @@ import { readRunnerEnv, type RunnerEnv } from "../src/env";
 import { gitBlobSha } from "../src/inventory";
 import { PeepsClient } from "../src/peeps";
 import { resolveFramework } from "../src/pytest";
-import { plannedTestsOf } from "../src/report";
+import { plannedTestsOf, type PlannedTest } from "../src/report";
 import type { PlanEntry } from "../src/reporter";
 
 type MochaCtor = new (o: object) => { options: { grep: RegExp } };
@@ -1163,5 +1164,245 @@ test("run mode gives WebdriverIO the Peeps environment's variables beside the pl
   } finally {
     process.exitCode = exitCode;
     peeps.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A narrowed pull request run
+// ---------------------------------------------------------------------------
+
+/** The Peeps client `runAppiumReport` needs: it answers the announce, and records the rest. */
+function announceAnswering(answer: (tests: PlannedTest[]) => Record<string, unknown>) {
+  const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const peeps = {
+    post: async (p: string, body: Record<string, unknown>) => {
+      posts.push({ path: p, body });
+      if (p !== "/api/v1/ci/batches") return {};
+      return { batches: [{ batchId: "b-1", batchNumber: 1, runs: [], unmatched: [], ...answer(body.tests as PlannedTest[]) }], failures: [] };
+    },
+    postBytes: async () => {},
+  } as unknown as PeepsClient;
+  return { peeps, posts };
+}
+
+const asRun = (t: PlannedTest, i: number): PlanEntry => ({ ...t, runId: `r-${i}`, credential: { exp: 99, sig: "s" } });
+const LOGIN = "Login › signs in with a valid account @smoke";
+const WEBVIEW = "Checkout web view › pays with a card";
+
+async function reportWith(answer: (tests: PlannedTest[]) => Record<string, unknown>, brokenSpec = false, mochaOpts?: string) {
+  const { root, suite } = workspace();
+  if (brokenSpec) writeFileSync(path.join(suite, "test", "specs", "broken.spec.ts"), 'import "./not-a-module";\n');
+  if (mochaOpts) {
+    const file = path.join(suite, "wdio.conf.ts");
+    writeFileSync(file, readFileSync(file, "utf8").replace('mochaOpts: { ui: "bdd", timeout: 60_000 }', `mochaOpts: ${mochaOpts}`));
+  }
+  const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile" });
+  const { peeps, posts } = announceAnswering(answer);
+  let seen: { config: Record<string, unknown>; plan: AppiumPlanFile } | undefined;
+  await runAppiumReport(env, peeps, async (wrapper, extra) => {
+    const loaded = (await import(pathToFileURL(wrapper).href)) as { config: Record<string, unknown> };
+    seen = { config: loaded.config, plan: JSON.parse(readFileSync(extra.PEEPS_PLAN_FILE!, "utf8")) as AppiumPlanFile };
+    return 0;
+  });
+  return { posts, seen };
+}
+
+test("a narrowed report runs its runs plus unmatched tests, by file and exact title", async () => {
+  const { posts, seen } = await reportWith((tests) => ({
+    narrowed: true,
+    runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun),
+    unmatched: tests.filter((t) => t.titlePath === WEBVIEW),
+  }));
+  assert.equal(posts[0]!.body.canNarrow, true);
+  assert.ok(seen, "wdio ran");
+  assert.equal(seen.plan.onlyPlanned, true);
+  assert.deepEqual(seen.plan.runs.map((r) => r.titlePath), [LOGIN]);
+  assert.deepEqual(seen.plan.alsoRun?.map((t) => [t.path, t.titlePath]), [["mobile/test/specs/webview.spec.ts", WEBVIEW]]);
+  const grep = new RegExp((seen.config.mochaOpts as { grep: string }).grep);
+  assert.equal(grep.test("Login signs in with a valid account @smoke"), true);
+  assert.equal(grep.test("Checkout web view pays with a card"), true);
+  assert.equal(grep.test("opens without a describe"), false);
+  assert.deepEqual(posts.at(-1), { path: "/api/v1/ci/batches/b-1/complete", body: { reportUploaded: false } }, "it narrowed: nothing to say");
+});
+
+test("a narrowed report with an empty plan never starts wdio, and closes its batch", async () => {
+  const { posts, seen } = await reportWith(() => ({ narrowed: true }));
+  assert.equal(seen, undefined);
+  assert.deepEqual(posts.map((p) => p.path), ["/api/v1/ci/batches", "/api/v1/ci/batches/b-1/complete"]);
+});
+
+/** A test Peeps selected that collection never found. */
+const GONE: PlannedTest = { path: "mobile/test/specs/gone.spec.ts", titlePath: "Gone › away", pwProject: "" };
+
+/** A full run: everything the config holds, nothing selecting, and the plan's runs still reported. */
+function assertAppiumFullRun(
+  { seen, posts }: Awaited<ReturnType<typeof reportWith>>,
+  runs: string[],
+) {
+  assert.ok(seen, "wdio ran");
+  assert.deepEqual(posts.at(-1), { path: "/api/v1/ci/batches/b-1/complete", body: { reportUploaded: false, ranFullSuite: true } });
+  assert.equal(seen.plan.onlyPlanned, undefined);
+  assert.equal(seen.plan.alsoRun, undefined);
+  assert.equal((seen.config.mochaOpts as { grep?: string } | undefined)?.grep, undefined);
+  assert.deepEqual(seen.plan.runs.map((r) => r.titlePath), runs);
+  assert.ok(!(seen.config.specs as string[]).some((s) => s.startsWith("file:")), "the config's own specs");
+}
+
+/** What the action logged while `body` ran. */
+async function logged(body: () => Promise<void>): Promise<string> {
+  const real = console.log;
+  const lines: string[] = [];
+  console.log = (...args: unknown[]) => void lines.push(args.join(" "));
+  try {
+    await body();
+  } finally {
+    console.log = real;
+  }
+  return lines.join("\n");
+}
+
+test("a narrowed report with a spec that did not load runs the full suite: the import failure stays in the job, and no selection can hide it", async () => {
+  for (const [answer, runs] of [
+    [(tests: PlannedTest[]) => ({ narrowed: true, runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun) }), [LOGIN]],
+    [() => ({ narrowed: true }), []],
+  ] as Array<[(tests: PlannedTest[]) => Record<string, unknown>, string[]]>) {
+    let result: Awaited<ReturnType<typeof reportWith>> | undefined;
+    const output = await logged(async () => {
+      result = await reportWith(answer, true);
+    });
+    assertAppiumFullRun(result!, runs);
+    assert.match(output, /not narrowing, running the full suite: /);
+  }
+});
+
+test("a config with its own Mocha filter is not narrowed: its filter stands, so a test it excludes can't start running", async () => {
+  for (const mochaOpts of ['{ grep: "@smoke" }', '{ fgrep: "@smoke" }', '{ grep: "@quarantine", invert: true }', "{ invert: true }"]) {
+    let result: Awaited<ReturnType<typeof reportWith>> | undefined;
+    const output = await logged(async () => {
+      result = await reportWith(
+        (tests) => ({ narrowed: true, runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun), unmatched: tests.filter((t) => t.titlePath === WEBVIEW) }),
+        false,
+        mochaOpts,
+      );
+    });
+    const { seen, posts } = result!;
+    assert.ok(seen, "wdio ran");
+    assert.equal(seen.plan.onlyPlanned, undefined, mochaOpts);
+    assert.equal(seen.plan.alsoRun, undefined, mochaOpts);
+    assert.deepEqual(seen.config.mochaOpts, new Function(`return ${mochaOpts}`)(), "the config's own, untouched");
+    assert.match(output, /not narrowing, running the full suite: .*Mocha filter/);
+    assert.deepEqual(posts.at(-1), { path: "/api/v1/ci/batches/b-1/complete", body: { reportUploaded: false, ranFullSuite: true } });
+  }
+});
+
+test("a config's other Mocha options, and a filter set to nothing, still narrow", async () => {
+  for (const mochaOpts of ['{ ui: "bdd", timeout: 1000 }', '{ grep: "", invert: false }']) {
+    const { seen } = await reportWith((tests) => ({ narrowed: true, runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun) }), false, mochaOpts);
+    assert.ok(seen, "wdio ran");
+    assert.equal(seen.plan.onlyPlanned, true, mochaOpts);
+  }
+});
+
+test("a narrowed report where no selected test can run runs the full suite, instead of failing the job", async () => {
+  let result: Awaited<ReturnType<typeof reportWith>> | undefined;
+  const output = await logged(async () => {
+    result = await reportWith(() => ({ narrowed: true, runs: [asRun(GONE, 0)] }));
+  });
+  assertAppiumFullRun(result!, [GONE.titlePath]);
+  assert.match(output, /not narrowing, running the full suite: /);
+  assert.match(output, /gone\.spec\.ts › Gone › away/);
+});
+
+test("a narrowed report with some selected tests not collected runs the rest, and names the ones it left out", async () => {
+  let result: Awaited<ReturnType<typeof reportWith>> | undefined;
+  const output = await logged(async () => {
+    result = await reportWith((tests) => ({
+      narrowed: true,
+      runs: [...tests.filter((t) => t.titlePath === LOGIN), GONE].map(asRun),
+      unmatched: [{ ...GONE, titlePath: "Gone › unmatched" }],
+    }));
+  });
+  const { seen } = result!;
+  assert.ok(seen, "wdio ran");
+  assert.equal(seen.plan.onlyPlanned, true);
+  assert.deepEqual(seen.plan.runs.map((r) => r.titlePath), [LOGIN]);
+  assert.equal(seen.plan.alsoRun, undefined);
+  assert.match(output, /not collected here \(or no capability runs its file\), not run: mobile\/test\/specs\/gone\.spec\.ts › Gone › away/);
+  assert.match(output, /not collected here \(or no capability runs its file\), not run: mobile\/test\/specs\/gone\.spec\.ts › Gone › unmatched/);
+});
+
+test("a narrowed report greps a title holding the separator by its own words", async () => {
+  const { root, suite } = workspace();
+  writeFileSync(path.join(suite, "test", "specs", "sep.spec.ts"), 'describe("a › b", () => { it("c", () => {}); });\n');
+  const { peeps } = announceAnswering((tests) => ({ narrowed: true, runs: tests.filter((t) => t.titlePath === "a › b › c").map(asRun) }));
+  let grep: string | undefined;
+  await runAppiumReport(envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile" }), peeps, async (wrapper) => {
+    const loaded = (await import(pathToFileURL(wrapper).href)) as { config: { mochaOpts: { grep: string } } };
+    grep = loaded.config.mochaOpts.grep;
+    return 0;
+  });
+  assert.equal(new RegExp(grep!).test("a › b c"), true, "mocha's full title joins describes and test with a space");
+});
+
+test("on a full run, a test with no plan entry is logged and sends nothing, and the planned-only hook skips nothing", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "peeps-plan-"));
+  const plan: AppiumPlanFile = { peepsUrl: "http://unused", workspace: "/w", runs: [run("r-a", "a.spec.js", "A › one")] };
+  writeFileSync(path.join(dir, "plan.json"), JSON.stringify(plan));
+  process.env.PEEPS_PLAN_FILE = path.join(dir, "plan.json");
+  resetForTests();
+  const real = console.log;
+  const lines: string[] = [];
+  console.log = (...args: unknown[]) => void lines.push(args.join(" "));
+  try {
+    let skipped = 0;
+    mochaHooks.beforeEach.call({ currentTest: mochaTest(["B", "two"], "/w/b.spec.js"), skip: () => void (skipped += 1) });
+    assert.equal(skipped, 0);
+    const reporter = new PeepsAppiumReporter();
+    reporter.emit("suite:start", { title: "B", file: "/w/b.spec.js" });
+    reporter.emit("test:start", { title: "two" });
+    reporter.emit("test:fail", { title: "two", error: { message: "boom" } });
+    assert.ok(lines.some((l) => l.includes("not planned, not reported: B › two (failed)")), lines.join("\n"));
+    assert.equal(reporter.isSynchronised, true, "nothing in flight");
+  } finally {
+    console.log = real;
+    delete process.env.PEEPS_PLAN_FILE;
+    resetForTests();
+  }
+});
+
+test("a report Peeps did not narrow selects nothing, as before", async () => {
+  const { seen, posts } = await reportWith((tests) => ({ runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun) }));
+  assert.ok(seen, "wdio ran");
+  assert.equal(seen.plan.onlyPlanned, undefined);
+  assert.equal(seen.plan.alsoRun, undefined);
+  assert.equal((seen.config.mochaOpts as { grep?: string }).grep, undefined);
+  assert.deepEqual(posts.at(-1), { path: "/api/v1/ci/batches/b-1/complete", body: { reportUploaded: false } }, "today's body, exactly");
+});
+
+test("with alsoRun, the planned-only hook leaves that test running, in its own file only, and the reporter sends nothing for it", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "peeps-plan-"));
+  const plan: AppiumPlanFile = {
+    peepsUrl: "http://unused",
+    workspace: "/w",
+    runs: [run("r-a", "a.spec.js", "A › one")],
+    onlyPlanned: true,
+    alsoRun: [{ path: "b.spec.js", titlePath: "B › two" }],
+  };
+  writeFileSync(path.join(dir, "plan.json"), JSON.stringify(plan));
+  process.env.PEEPS_PLAN_FILE = path.join(dir, "plan.json");
+  resetForTests();
+  try {
+    const skips = (titles: string[], file: string) => {
+      let skipped = 0;
+      mochaHooks.beforeEach.call({ currentTest: mochaTest(titles, file), skip: () => void (skipped += 1) });
+      return skipped;
+    };
+    assert.equal(skips(["A", "one"], "/w/a.spec.js"), 0, "planned");
+    assert.equal(skips(["B", "two"], "/w/b.spec.js"), 0, "unmatched, still attempted");
+    assert.equal(skips(["B", "two"], "/w/c.spec.js"), 1, "the same title in another file");
+    assert.equal(skips(["B", "three"], "/w/b.spec.js"), 1, "not selected");
+  } finally {
+    delete process.env.PEEPS_PLAN_FILE;
+    resetForTests();
   }
 });

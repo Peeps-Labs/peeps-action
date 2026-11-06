@@ -28,6 +28,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AppiumCollection, CapabilitiesRead } from "./appium-collect";
 import {
+  identityKey,
   repoRelative,
   TITLE_PATH_SEPARATOR,
   type AppiumPlanFile,
@@ -37,10 +38,11 @@ import {
 import type { RunnerEnv } from "./env";
 import { type PlanEnvironment, planEnvironmentVariables } from "./environment";
 import { gitBlobSha, type PlaywrightList, type PlaywrightSuite } from "./inventory";
+import { answeredNarrowed, isNarrowed } from "./narrow";
 import type { PeepsClient } from "./peeps";
 import { requestPlan } from "./plan";
 import { stagedEvidence, uploadEvidence, WDIO_CONFIG } from "./pytest";
-import { plannedTestsOf, type PlannedTest } from "./report";
+import { completeBatches, plannedTestsOf, type PlannedTest } from "./report";
 import type { PlanEntry } from "./reporter";
 
 /** Bundled beside dist/index.js; resolved the same way from src/ (tests) and dist/. */
@@ -290,11 +292,24 @@ export async function runAppiumInventory(env: RunnerEnv, peeps: PeepsClient): Pr
 }
 
 interface BatchResponse {
-  batches: Array<{ batchId: string; batchNumber: number; runs: PlanEntry[]; unmatched: PlannedTest[] }>;
+  batches: Array<{
+    batchId: string;
+    batchNumber: number;
+    runs: PlanEntry[];
+    unmatched: PlannedTest[];
+    /** Peeps cut this batch to the pull request's smoke tests; absent otherwise. */
+    narrowed?: boolean;
+  }>;
+  failures?: unknown[];
 }
 
-/** `report`: run this workflow's whole suite and report every planned test. */
-export async function runAppiumReport(env: RunnerEnv, peeps: PeepsClient): Promise<void> {
+/** `report`: run this workflow's suite, or what Peeps narrowed it to, and report every planned test. */
+export async function runAppiumReport(
+  env: RunnerEnv,
+  peeps: PeepsClient,
+  /** For tests: run this instead of `npx wdio run <config>`. */
+  runner?: (configPath: string, extraEnv: Record<string, string>) => Promise<number>,
+): Promise<void> {
   if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const configPath = wdioConfigPath(env);
   const collection = await collectAppium(env, configPath);
@@ -307,6 +322,7 @@ export async function runAppiumReport(env: RunnerEnv, peeps: PeepsClient): Promi
     baseUrl: process.env.BASE_URL ?? null,
     tests,
     files: built.files,
+    canNarrow: true,
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -314,14 +330,49 @@ export async function runAppiumReport(env: RunnerEnv, peeps: PeepsClient): Promi
     `[peeps] planned ${runs.length} run(s) in ${response.batches.length} batch(es); ${unmatched.length} test(s) unknown to Peeps`,
   );
   for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} › ${u.titlePath}`);
+  const batches = response.batches.map((b) => ({
+    batchId: b.batchId,
+    batchNumber: b.batchNumber,
+    runIds: b.runs.map((r) => r.runId),
+  }));
+  if (!answeredNarrowed(response)) {
+    await executeAppiumAndReport(env, peeps, { configPath, runs, batches, runner });
+    return;
+  }
+  const fallBack = (why: string) => {
+    console.log(`[peeps] not narrowing, running the full suite: ${why}`);
+    return executeAppiumAndReport(env, peeps, { configPath, runs, batches, runner, ranFullSuite: true });
+  };
+  if (!isNarrowed(response)) return fallBack("Peeps did not narrow every project's batch");
+  // A spec that did not load holds tests nobody could select, so only a full run answers for them.
+  if (collection.errors.length > 0) return fallBack(`${collection.errors.length} spec file(s) did not load`);
+  // An unmatched test has no run to report to, but it is still attempted.
+  const selected = [...runs, ...unmatched];
+  if (selected.length === 0) {
+    console.log("[peeps] narrowed to 0 test(s) for this pull request");
+    // Never start wdio without a selection: with none it runs the whole suite.
+    await completeBatches(peeps, batches);
+    return;
+  }
+  // Narrowing replaces the config's grep, which could start a test it excludes.
+  if (collection.ownMochaFilter) return fallBack("the WebdriverIO config sets its own Mocha filter");
+  const found = specsForRuns(env, collection, selected);
+  for (const test of found.unmatched.slice(0, 10)) {
+    console.log(`[peeps]   not collected here (or no capability runs its file), not run: ${test.path} › ${test.titlePath}`);
+  }
+  if (found.matched.length === 0) return fallBack(`none of the ${selected.length} selected test(s) can run at this commit`);
+  console.log(`[peeps] narrowed to ${selected.length} test(s) for this pull request`);
   await executeAppiumAndReport(env, peeps, {
     configPath,
-    runs,
-    batches: response.batches.map((b) => ({
-      batchId: b.batchId,
-      batchNumber: b.batchNumber,
-      runIds: b.runs.map((r) => r.runId),
-    })),
+    runs: runs.filter((r) => found.matched.includes(r)),
+    batches,
+    selection: {
+      specs: found.specs,
+      capabilitySpecs: found.capabilitySpecs,
+      grep: exactMochaGrepFor(env, collection, found.matched),
+      alsoRun: unmatched.filter((t) => found.matched.includes(t)),
+    },
+    runner,
   });
 }
 
@@ -341,11 +392,11 @@ interface Plan {
  * config's order, the planned spec files among its own (empty: it has none
  * to run), when collection knew each capability's list.
  */
-export function specsForRuns(
+export function specsForRuns<T extends { path: string; titlePath: string }>(
   env: RunnerEnv,
   collection: AppiumCollection,
-  runs: PlanEntry[],
-): { specs: string[]; capabilitySpecs?: string[][]; matched: PlanEntry[]; unmatched: PlanEntry[] } {
+  runs: T[],
+): { specs: string[]; capabilitySpecs?: string[][]; matched: T[]; unmatched: T[] } {
   const fileOf = new Map<string, string>();
   for (const test of collection.tests) {
     const rel = repoRelative(env.workspace, test.file);
@@ -354,8 +405,8 @@ export function specsForRuns(
   const perCapability = collection.capabilitySpecs ?? null;
   const scheduled = perCapability ? new Set(perCapability.flat()) : null;
   const specs = new Set<string>();
-  const matched: PlanEntry[] = [];
-  const unmatched: PlanEntry[] = [];
+  const matched: T[] = [];
+  const unmatched: T[] = [];
   for (const run of runs) {
     const file = fileOf.get(`${run.path}\n${run.titlePath}`);
     if (file === undefined || (scheduled && !scheduled.has(file))) {
@@ -392,8 +443,20 @@ function escapeRegex(value: string): string {
  * both ends, so a title never matches as part of a longer one.
  */
 export function mochaGrepFor(titlePaths: string[]): string {
-  const alternatives = [...new Set(titlePaths)].map((t) => escapeRegex(t.split(TITLE_PATH_SEPARATOR).join(" ")));
-  return `^(?:${alternatives.join("|")})$`;
+  return fullTitleGrep(titlePaths.map((t) => t.split(TITLE_PATH_SEPARATOR).join(" ")));
+}
+
+function fullTitleGrep(fullTitles: string[]): string {
+  return `^(?:${[...new Set(fullTitles)].map(escapeRegex).join("|")})$`;
+}
+
+/** A narrowed run's grep, from the collected titles: a joined identity can't say where a title ends. */
+function exactMochaGrepFor(env: RunnerEnv, collection: AppiumCollection, matched: Array<{ path: string; titlePath: string }>): string {
+  const wanted = new Set(matched.map(identityKey));
+  const collected = collection.tests.filter((test) =>
+    wanted.has(identityKey({ path: repoRelative(env.workspace, test.file) ?? "", titlePath: test.titlePath.join(TITLE_PATH_SEPARATOR) })),
+  );
+  return fullTitleGrep(collected.map((test) => test.titlePath.join(" ")));
 }
 
 /** `run`: Peeps dispatched this job for one batch; run exactly its tests. */
@@ -586,12 +649,14 @@ export async function executeAppiumAndReport(
     runs: PlanEntry[];
     /** `runIds`: the runs a batch holds; omitted with a single batch, which holds every run. */
     batches: Array<{ batchId: string; batchNumber: number; runIds?: string[] }>;
-    /** Run mode: only these spec files (absolute), this mocha grep, and only the planned (file, title path) pairs. */
-    selection?: { specs: string[]; capabilitySpecs?: string[][]; grep: string };
+    /** Run mode and a narrowed report: only these spec files (absolute), this mocha grep, and only the planned (file, title path) pairs. */
+    selection?: { specs: string[]; capabilitySpecs?: string[][]; grep: string; alsoRun?: AppiumPlanFile["alsoRun"] };
     /** Run mode: the Peeps environment's variables (`environment.ts`). */
     extraEnv?: Record<string, string>;
     /** For tests: run this instead of `npx wdio run <config>`. */
     runner?: (configPath: string, extraEnv: Record<string, string>) => Promise<number>;
+    /** Peeps answered narrowed, and this run fell back: each batch's `complete` says so. */
+    ranFullSuite?: boolean;
   },
 ): Promise<void> {
   const scratch = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-"));
@@ -599,8 +664,9 @@ export async function executeAppiumAndReport(
   const artifactsDir = path.join(scratch, "evidence");
   await mkdir(artifactsDir);
   const plan: AppiumPlanFile = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: input.runs };
-  // Run mode: the grep matches titles only; the root hook holds it to the planned (file, title path) pairs.
+  // Run mode and a narrowed report: the grep matches titles only; the root hook holds it to the planned (file, title path) pairs.
   if (input.selection) plan.onlyPlanned = true;
+  if (input.selection?.alsoRun?.length) plan.alsoRun = input.selection.alsoRun;
   await writeFile(planFile, JSON.stringify(plan), { mode: 0o600 });
   const junitDir = hasPackage("@wdio/junit-reporter", path.dirname(input.configPath)) ? path.join(scratch, "junit") : null;
   const options: PeepsWdioOptions = { junitDir };
@@ -649,7 +715,10 @@ export async function executeAppiumAndReport(
     if (junitDir && input.batches.length === 1) await uploadJunit(peeps, b.batchId, junitDir);
     try {
       // No HTML report: the evidence is in the batch's `data/`, named by run.
-      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded: false });
+      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, {
+        reportUploaded: false,
+        ...(input.ranFullSuite ? { ranFullSuite: true } : {}),
+      });
     } catch (error) {
       console.log(`[peeps] could not complete batch ${b.batchId}: ${String(error)}`);
     }

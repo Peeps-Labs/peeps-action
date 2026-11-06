@@ -52,7 +52,7 @@ export async function isModule(file: string): Promise<boolean> {
  * Load in the original's module format, then unwrap default exactly once as
  * Playwright does; cross-format imports can silently discard a TS/CJS config.
  */
-export async function prepareCaptureConfig(env: RunnerEnv): Promise<{
+export async function prepareCaptureConfig(env: RunnerEnv, options: { defaultRetries?: number } = {}): Promise<{
   configPath: string;
   cleanup: () => Promise<void>;
 }> {
@@ -93,7 +93,8 @@ if (config.use?.video === undefined) {
   }
 }
 const withEvidence = {
-  ...config,
+  ...config,${options.defaultRetries === undefined ? "" : `
+  ...(config.retries === undefined ? { retries: ${options.defaultRetries} } : {}),`}
   use: {
     ...config.use,
     screenshot: config.use?.screenshot === undefined ? "only-on-failure" : config.use.screenshot,
