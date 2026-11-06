@@ -1594,6 +1594,7 @@ async function runAppiumReport(env, peeps, runner) {
     await completeBatches(peeps, batches);
     return;
   }
+  if (collection.ownMochaFilter) return fallBack("the WebdriverIO config sets its own Mocha filter");
   const found = specsForRuns(env, collection, selected);
   for (const test of found.unmatched.slice(0, 10)) {
     console.log(`[peeps]   not collected here (or no capability runs its file), not run: ${test.path} \u203A ${test.titlePath}`);

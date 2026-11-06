@@ -1189,9 +1189,13 @@ const asRun = (t: PlannedTest, i: number): PlanEntry => ({ ...t, runId: `r-${i}`
 const LOGIN = "Login › signs in with a valid account @smoke";
 const WEBVIEW = "Checkout web view › pays with a card";
 
-async function reportWith(answer: (tests: PlannedTest[]) => Record<string, unknown>, brokenSpec = false) {
+async function reportWith(answer: (tests: PlannedTest[]) => Record<string, unknown>, brokenSpec = false, mochaOpts?: string) {
   const { root, suite } = workspace();
   if (brokenSpec) writeFileSync(path.join(suite, "test", "specs", "broken.spec.ts"), 'import "./not-a-module";\n');
+  if (mochaOpts) {
+    const file = path.join(suite, "wdio.conf.ts");
+    writeFileSync(file, readFileSync(file, "utf8").replace('mochaOpts: { ui: "bdd", timeout: 60_000 }', `mochaOpts: ${mochaOpts}`));
+  }
   const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile" });
   const { peeps, posts } = announceAnswering(answer);
   let seen: { config: Record<string, unknown>; plan: AppiumPlanFile } | undefined;
@@ -1268,6 +1272,34 @@ test("a narrowed report with a spec that did not load runs the full suite: the i
     });
     assertAppiumFullRun(result!, runs);
     assert.match(output, /not narrowing, running the full suite: /);
+  }
+});
+
+test("a config with its own Mocha filter is not narrowed: its filter stands, so a test it excludes can't start running", async () => {
+  for (const mochaOpts of ['{ grep: "@smoke" }', '{ fgrep: "@smoke" }', '{ grep: "@quarantine", invert: true }', "{ invert: true }"]) {
+    let result: Awaited<ReturnType<typeof reportWith>> | undefined;
+    const output = await logged(async () => {
+      result = await reportWith(
+        (tests) => ({ narrowed: true, runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun), unmatched: tests.filter((t) => t.titlePath === WEBVIEW) }),
+        false,
+        mochaOpts,
+      );
+    });
+    const { seen, posts } = result!;
+    assert.ok(seen, "wdio ran");
+    assert.equal(seen.plan.onlyPlanned, undefined, mochaOpts);
+    assert.equal(seen.plan.alsoRun, undefined, mochaOpts);
+    assert.deepEqual(seen.config.mochaOpts, new Function(`return ${mochaOpts}`)(), "the config's own, untouched");
+    assert.match(output, /not narrowing, running the full suite: .*Mocha filter/);
+    assert.deepEqual(posts.at(-1), { path: "/api/v1/ci/batches/b-1/complete", body: { reportUploaded: false, ranFullSuite: true } });
+  }
+});
+
+test("a config's other Mocha options, and a filter set to nothing, still narrow", async () => {
+  for (const mochaOpts of ['{ ui: "bdd", timeout: 1000 }', '{ grep: "", invert: false }']) {
+    const { seen } = await reportWith((tests) => ({ narrowed: true, runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun) }), false, mochaOpts);
+    assert.ok(seen, "wdio ran");
+    assert.equal(seen.plan.onlyPlanned, true, mochaOpts);
   }
 });
 

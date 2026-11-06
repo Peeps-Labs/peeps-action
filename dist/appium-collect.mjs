@@ -221,6 +221,7 @@ async function collect(configPath) {
     rootDir: list.rootDir,
     specs: list.specs,
     capabilitySpecs: list.capabilitySpecs,
+    ownMochaFilter: Boolean(list.mochaOpts.grep || list.mochaOpts.fgrep || list.mochaOpts.invert),
     tests,
     errors,
     loader: tsx ? "tsx" : "node",

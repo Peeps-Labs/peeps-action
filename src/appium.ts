@@ -354,6 +354,8 @@ export async function runAppiumReport(
     await completeBatches(peeps, batches);
     return;
   }
+  // Narrowing replaces the config's grep, which could start a test it excludes.
+  if (collection.ownMochaFilter) return fallBack("the WebdriverIO config sets its own Mocha filter");
   const found = specsForRuns(env, collection, selected);
   for (const test of found.unmatched.slice(0, 10)) {
     console.log(`[peeps]   not collected here (or no capability runs its file), not run: ${test.path} › ${test.titlePath}`);
