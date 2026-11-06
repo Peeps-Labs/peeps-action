@@ -1,0 +1,278 @@
+{
+  "description": "PQA-3135: who gets an event when one job reaches several projects. Each mutant is a way a project could go back to reading Error, hear another's test, or have its evidence stored under another run, or a single-project run could change. Run: node scripts/mutation-verify.mjs test/mutation-plans/who-gets-an-event.json (with PEEPS_PYTHON naming a Python with pytest).",
+  "mutants": [
+    {
+      "name": "Playwright: the last batch wins again, and the others read Error",
+      "file": "src/reporter.ts",
+      "find": "      if (planned) planned.push(entry);\n",
+      "replace": "      if (planned) planned[0] = entry;\n",
+      "tests": [
+        "test/overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Playwright: only the first run of a test hears it",
+      "file": "src/reporter.ts",
+      "find": "this.plan.rootDir))) ?? [];",
+      "replace": "this.plan.rootDir)))?.slice(0, 1) ?? [];",
+      "tests": [
+        "test/overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Playwright: every run posts under the first run's credential, and the rest are refused",
+      "file": "src/reporter.ts",
+      "find": "Authorization: `Bearer v1.${entry.credential.exp}.${entry.credential.sig}`,",
+      "replace": "Authorization: `Bearer v1.${entry.credential.exp}.${this.plan.runs[0]!.credential.sig}`,",
+      "tests": [
+        "test/overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Playwright: only the first run is closed, and a sibling reads Error",
+      "file": "src/reporter.ts",
+      "find": "      if (result.retry >= test.retries || result.status === \"passed\") {",
+      "replace": "      if ((result.retry >= test.retries || result.status === \"passed\") && entry === entries[0]) {",
+      "tests": [
+        "test/overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Playwright: a sibling hears a retried attempt's run_end early",
+      "file": "src/reporter.ts",
+      "find": "      if (result.retry >= test.retries || result.status === \"passed\") {",
+      "replace": "      if (result.retry >= test.retries || result.status === \"passed\" || entry !== entries[0]) {",
+      "tests": [
+        "test/overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Playwright: a sibling never hears run_start",
+      "file": "src/reporter.ts",
+      "find": "      if (!this.started.has(entry.runId)) {",
+      "replace": "      if (!this.started.has(entry.runId) && entry === this.entriesFor(test)[0]) {",
+      "tests": [
+        "test/overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Playwright: the log counts tests, not runs",
+      "file": "src/reporter.ts",
+      "find": "`[peeps] reporting ${this.plan.runs.length} planned run(s) to",
+      "replace": "`[peeps] reporting ${this.entries.size} planned run(s) to",
+      "tests": [
+        "test/overlap.test.ts"
+      ]
+    },
+    {
+      "name": "report mode: a batch whose upload threw borrows the last batch's flag, stamping a report that isn't there",
+      "file": "src/report.ts",
+      "find": "  for (const b of input.batches) {\n    let reportUploaded = false;\n",
+      "replace": "  let reportUploaded = false;\n  for (const b of input.batches) {\n",
+      "tests": [
+        "test/overlap.test.ts"
+      ]
+    },
+    {
+      "name": "report mode: the announce doesn't say it reports to every batch",
+      "file": "src/report.ts",
+      "find": "    reportsEveryBatch: true,\n",
+      "replace": "",
+      "tests": [
+        "test/overlap.test.ts",
+        "test/single-project.test.ts"
+      ]
+    },
+    {
+      "name": "attach mode: the announce doesn't say it reports to every batch",
+      "file": "src/reporter.ts",
+      "find": "      reportsEveryBatch: true,\n",
+      "replace": "",
+      "tests": [
+        "test/overlap.test.ts",
+        "test/single-project.test.ts"
+      ]
+    },
+    {
+      "name": "one project: a test_end loses its retry, which the golden holds",
+      "file": "src/reporter.ts",
+      "find": "        retry: result.retry,\n",
+      "replace": "",
+      "tests": [
+        "test/single-project.test.ts"
+      ]
+    },
+    {
+      "name": "one project: a log line is reworded, which the golden holds",
+      "file": "src/reporter.ts",
+      "find": "`[peeps] reporting ${this.plan.runs.length} planned run(s) to",
+      "replace": "`[peeps] reporting ${this.plan.runs.length} run(s) to",
+      "tests": [
+        "test/single-project.test.ts"
+      ]
+    },
+    {
+      "name": "pytest: only the first run of a test hears its end, and the rest read Error",
+      "file": "python/peeps_pytest_plugin.py",
+      "find": "            for entry in entries:\n                self._enqueue(entry[\"runId\"], {**event,",
+      "replace": "            for entry in entries[:1]:\n                self._enqueue(entry[\"runId\"], {**event,",
+      "tests": [
+        "test/pytest-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "pytest: a sibling never hears test_start",
+      "file": "python/peeps_pytest_plugin.py",
+      "find": "        for entry in entries:\n            run_id = entry[\"runId\"]\n",
+      "replace": "        for entry in entries[:1]:\n            run_id = entry[\"runId\"]\n",
+      "tests": [
+        "test/pytest-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "pytest: a sibling's copy is named for the first run, so its evidence is under another's",
+      "file": "python/peeps_pytest_plugin.py",
+      "find": "sibling_name = upload_name(run_id, name, taken)",
+      "replace": "sibling_name = upload_name(lead, name, taken)",
+      "tests": [
+        "test/pytest-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "pytest: copies spend the session's cap, and later tests lose their evidence",
+      "file": "python/peeps_pytest_plugin.py",
+      "find": "                staged[run_id].append({\"name\": name, \"path\": f\"data/{sibling_name}\", \"size\": info.st_size})\n",
+      "replace": "                staged[run_id].append({\"name\": name, \"path\": f\"data/{sibling_name}\", \"size\": info.st_size})\n                self.session_files += 1\n",
+      "tests": [
+        "test/pytest-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "pytest: one delivery thread however many runs, so the tail can miss the drain",
+      "file": "python/peeps_pytest_plugin.py",
+      "find": "range(OVERLAP_DELIVERY_THREADS if overlapping else 1)",
+      "replace": "range(1)",
+      "tests": [
+        "test/pytest-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "pytest: a single project's delivery widens too, which changes its order",
+      "file": "python/peeps_pytest_plugin.py",
+      "find": "range(OVERLAP_DELIVERY_THREADS if overlapping else 1)",
+      "replace": "range(OVERLAP_DELIVERY_THREADS)",
+      "tests": [
+        "test/pytest-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "pytest: every batch stores output under the first run's id",
+      "file": "src/pytest.ts",
+      "find": "byNodeId[nodeId]?.find((entry) => holds(entry.runId))",
+      "replace": "byNodeId[nodeId]?.[0]",
+      "tests": [
+        "test/pytest-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "pytest: every batch gets every run's evidence",
+      "file": "src/pytest.ts",
+      "find": "const mine = evidence.filter((file) => holds(file.runId));",
+      "replace": "const mine = evidence;",
+      "tests": [
+        "test/pytest-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "pytest: the announce doesn't say it reports to every batch",
+      "file": "src/pytest.ts",
+      "find": "    reportsEveryBatch: true,\n",
+      "replace": "",
+      "tests": [
+        "test/pytest-overlap.test.ts",
+        "test/single-project.test.ts"
+      ]
+    },
+    {
+      "name": "Appium: only the first run of a test opens, and the rest read Error",
+      "file": "src/appium-reporter.ts",
+      "find": "for (const run of group) this.enqueue(run.runId, { type: \"test_start\", timestamp: now, testName });",
+      "replace": "for (const run of group.slice(0, 1)) this.enqueue(run.runId, { type: \"test_start\", timestamp: now, testName });",
+      "tests": [
+        "test/appium-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Appium: closing the first run leaves the rest open",
+      "file": "src/appium-reporter.ts",
+      "find": "    let closed = false;\n    for (const run of group) {\n",
+      "replace": "    let closed = false;\n    for (const run of group.slice(0, 1)) {\n",
+      "tests": [
+        "test/appium-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Appium: a second capability claims its own run and splits the test",
+      "file": "src/appium-reporter.ts",
+      "find": "const claim = this.plan!.claim(lead.runId, this.worker);",
+      "replace": "const claim = this.plan!.claim(group.at(-1)!.runId + this.worker, this.worker);",
+      "tests": [
+        "test/appium-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Appium: a sibling's evidence isn't copied",
+      "file": "src/appium-reporter.ts",
+      "find": "  for (const sibling of siblings) copyCaptured(out, sibling, dir);\n",
+      "replace": "",
+      "tests": [
+        "test/appium-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Appium: a sibling's capture drives the device again",
+      "file": "src/appium-reporter.ts",
+      "find": "  return captureEvidence(lead.runId, browser, siblings.map((run) => run.runId));",
+      "replace": "  return Promise.all(group.map((run) => captureEvidence(run.runId, browser))).then(() => undefined);",
+      "tests": [
+        "test/appium-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Appium: a retried attempt's evidence stays on a sibling",
+      "file": "src/appium-reporter.ts",
+      "find": "    for (const run of group) {\n      this.enqueue(run.runId, event);\n      // Only the final attempt's evidence is reported, as under pytest.\n      discardCaptured(run.runId);\n    }",
+      "replace": "    for (const run of group) {\n      this.enqueue(run.runId, event);\n      // Only the final attempt's evidence is reported, as under pytest.\n      if (run === lead) discardCaptured(run.runId);\n    }",
+      "tests": [
+        "test/appium-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Appium: the ended marker never lands, so a retried spec file reopens the closed runs",
+      "file": "src/appium-reporter.ts",
+      "find": "    if (closed) this.plan!.markEnded(lead.runId);\n",
+      "replace": "",
+      "tests": [
+        "test/appium-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Appium: the log counts tests, not runs",
+      "file": "src/appium-reporter.ts",
+      "find": "`[peeps] reporting ${this.plan.file.runs.length} planned run(s) to",
+      "replace": "`[peeps] reporting ${this.plan.entries.size} planned run(s) to",
+      "tests": [
+        "test/appium-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "Appium: the announce doesn't say it reports to every batch",
+      "file": "src/appium.ts",
+      "find": "    reportsEveryBatch: true,\n",
+      "replace": "",
+      "tests": [
+        "test/appium-overlap.test.ts"
+      ]
+    }
+  ]
+}

@@ -307,6 +307,7 @@ export async function runAppiumReport(env: RunnerEnv, peeps: PeepsClient): Promi
     baseUrl: process.env.BASE_URL ?? null,
     tests,
     files: built.files,
+    reportsEveryBatch: true,
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);

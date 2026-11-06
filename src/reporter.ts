@@ -1,9 +1,9 @@
 /**
  * Playwright reporter for `peeps report` / `peeps run`.
  *
- * One Peeps run per Playwright test. The CLI writes a plan file mapping each
- * test's identity — repo-relative file, title path, project — to a Peeps run
- * id and a per-run credential; this reporter streams the same events
+ * One Peeps run per Playwright test, per Peeps project planning it. The CLI writes
+ * a plan file mapping each test's identity — repo-relative file, title path,
+ * project — to its Peeps run ids and per-run credentials; this reporter streams the same events
  * peeps-runner's reporter streams (`run_start`, `test_start`, `test_end`,
  * `run_end`) to `POST /api/v1/runs/{runId}/events`. Tests without a plan entry
  * are reported to the job log and otherwise ignored.
@@ -119,7 +119,8 @@ interface AttachBatches {
 
 export default class PeepsCiReporter implements Reporter {
   private plan: PlanFile;
-  private entries = new Map<string, PlanEntry>();
+  /** One list per test: projects whose roots overlap each planned it, each with its own run. */
+  private entries = new Map<string, PlanEntry[]>();
   private rootDirAbs = "";
   private queues = new Map<string, PeepsEvent[]>();
   private started = new Set<string>();
@@ -143,7 +144,7 @@ export default class PeepsCiReporter implements Reporter {
     const planPath = process.env.PEEPS_PLAN_FILE;
     if (!planPath) throw new Error("PEEPS_PLAN_FILE is not set");
     this.plan = JSON.parse(readFileSync(planPath, "utf8")) as PlanFile;
-    for (const entry of this.plan.runs) this.entries.set(key(entry), entry);
+    this.addEntries(this.plan.runs);
   }
 
   printsToStdio(): boolean {
@@ -173,7 +174,7 @@ export default class PeepsCiReporter implements Reporter {
       }
       return;
     }
-    console.log(`[peeps] reporting ${this.entries.size} planned run(s) to ${this.plan.peepsUrl}`);
+    console.log(`[peeps] reporting ${this.plan.runs.length} planned run(s) to ${this.plan.peepsUrl}`);
   }
 
   // The time is taken here, not on replay, so a buffered event keeps when it happened.
@@ -232,12 +233,13 @@ export default class PeepsCiReporter implements Reporter {
       baseUrl: process.env.BASE_URL ?? null,
       tests: unique,
       files,
+      reportsEveryBatch: true,
     });
     if (this.gaveUp) return;
     this.plan = { peepsUrl: env.peepsUrl, rootDir, runs: response.batches.flatMap((b) => b.runs) };
-    for (const entry of this.plan.runs) this.entries.set(key(entry), entry);
+    this.addEntries(this.plan.runs);
     this.batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
-    console.log(`[peeps] attach: reporting ${this.entries.size} run(s) to ${env.peepsUrl}`);
+    console.log(`[peeps] attach: reporting ${this.plan.runs.length} run(s) to ${env.peepsUrl}`);
     await this.writeAttachState();
   }
 
@@ -251,38 +253,40 @@ export default class PeepsCiReporter implements Reporter {
   }
 
   private testBegan(test: TestCase, now: number): void {
-    const entry = this.entryFor(test);
-    if (!entry) return;
-    if (!this.started.has(entry.runId)) {
-      this.started.add(entry.runId);
-      this.enqueue(entry, { type: "run_start", timestamp: now });
+    for (const entry of this.entriesFor(test)) {
+      if (!this.started.has(entry.runId)) {
+        this.started.add(entry.runId);
+        this.enqueue(entry, { type: "run_start", timestamp: now });
+      }
+      this.enqueue(entry, { type: "test_start", timestamp: now, testName: test.title });
     }
-    this.enqueue(entry, { type: "test_start", timestamp: now, testName: test.title });
   }
 
   private testEnded(test: TestCase, result: TestResult, now: number): void {
-    const entry = this.entryFor(test);
-    if (!entry) {
+    const entries = this.entriesFor(test);
+    if (entries.length === 0) {
       // An attached run Peeps never planned has said so once already; it reports nothing.
       if (this.attachDir && this.batches.length === 0) return;
       console.log(`[peeps] not planned, not reported: ${test.titlePath().join(" › ")} (${result.status})`);
       return;
     }
     const error = result.errors[0];
-    this.enqueue(entry, {
-      type: "test_end",
-      timestamp: now,
-      testName: test.title,
-      status: result.status,
-      duration: Math.round(result.duration),
-      error: error?.message?.slice(0, 4000),
-      errorStack: error?.stack?.slice(0, 8000),
-      retry: result.retry,
-    });
-    // Retries: only the final attempt closes the run.
-    if (result.retry >= test.retries || result.status === "passed") {
-      this.enqueue(entry, { type: "run_end", timestamp: now });
-      this.pending.push(this.flush(entry));
+    for (const entry of entries) {
+      this.enqueue(entry, {
+        type: "test_end",
+        timestamp: now,
+        testName: test.title,
+        status: result.status,
+        duration: Math.round(result.duration),
+        error: error?.message?.slice(0, 4000),
+        errorStack: error?.stack?.slice(0, 8000),
+        retry: result.retry,
+      });
+      // Retries: only the final attempt closes the run.
+      if (result.retry >= test.retries || result.status === "passed") {
+        this.enqueue(entry, { type: "run_end", timestamp: now });
+        this.pending.push(this.flush(entry));
+      }
     }
   }
 
@@ -303,8 +307,16 @@ export default class PeepsCiReporter implements Reporter {
     );
   }
 
-  private entryFor(test: TestCase): PlanEntry | null {
-    return this.entries.get(key(identityOf(test, this.rootDirAbs, this.plan.rootDir))) ?? null;
+  private addEntries(runs: PlanEntry[]): void {
+    for (const entry of runs) {
+      const planned = this.entries.get(key(entry));
+      if (planned) planned.push(entry);
+      else this.entries.set(key(entry), [entry]);
+    }
+  }
+
+  private entriesFor(test: TestCase): PlanEntry[] {
+    return this.entries.get(key(identityOf(test, this.rootDirAbs, this.plan.rootDir))) ?? [];
   }
 
   private enqueue(entry: PlanEntry, event: PeepsEvent): void {

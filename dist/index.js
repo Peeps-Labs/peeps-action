@@ -561,7 +561,8 @@ async function runReport(env, peeps) {
     jobUrl,
     baseUrl: process.env.BASE_URL ?? null,
     tests,
-    files
+    files,
+    reportsEveryBatch: true
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -582,8 +583,8 @@ async function executeAndReport(env, peeps, input2) {
   const plan = { peepsUrl: env.peepsUrl, rootDir: input2.rootDir, runs: input2.runs };
   await (0, import_promises4.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
   const exitCode = await runPlaywright(env, planFile, reportDir, input2.selection, input2.extraEnv);
-  let reportUploaded = false;
   for (const b of input2.batches) {
+    let reportUploaded = false;
     try {
       const uploaded = await uploadReport(peeps, b.batchId, reportDir);
       reportUploaded = uploaded > 0;
@@ -898,7 +899,7 @@ function nodeIdsForRuns(planned, runs) {
   for (const run of runs) {
     const nodeId = nodeIdOf.get(planKey(run));
     if (nodeId === void 0) unmatched.push(run);
-    else byNodeId[nodeId] = run;
+    else (byNodeId[nodeId] ??= []).push(run);
   }
   return { byNodeId, unmatched };
 }
@@ -1026,7 +1027,8 @@ async function runPytestReport(env, peeps) {
     jobUrl,
     baseUrl: process.env.BASE_URL ?? null,
     tests: planned.map(({ path: p, titlePath, pwProject }) => ({ path: p, titlePath, pwProject })),
-    files: await moduleFilePayload(env, collection)
+    files: await moduleFilePayload(env, collection),
+    reportsEveryBatch: true
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -1097,9 +1099,9 @@ async function executePytestAndReport(env, peeps, input2) {
   const artifactsDir = import_node_path8.default.join(scratch, "evidence");
   await (0, import_promises5.mkdir)(artifactsDir);
   const runs = Object.fromEntries(
-    Object.entries(input2.byNodeId).map(([nodeId, run]) => [
+    Object.entries(input2.byNodeId).map(([nodeId, entries]) => [
       nodeId,
-      { runId: run.runId, credential: run.credential }
+      entries.map((run) => ({ runId: run.runId, credential: run.credential }))
     ])
   );
   await (0, import_promises5.writeFile)(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 384 });
@@ -1132,18 +1134,19 @@ async function executePytestAndReport(env, peeps, input2) {
       return 1;
     }
   );
-  const runIdByOutputDir = await readOutputDirs(resultsFile, input2.byNodeId);
-  const evidence = await stagedEvidence(import_node_path8.default.join(artifactsDir, "upload"), input2.byNodeId);
+  const nodeIdByOutputDir = await readOutputDirs(resultsFile);
+  const byRunId = Object.fromEntries(Object.values(input2.byNodeId).flat().map((run) => [run.runId, run]));
+  const evidence = await stagedEvidence(import_node_path8.default.join(artifactsDir, "upload"), byRunId);
   for (const b of input2.batches) {
+    const holds = (runId) => input2.batches.length === 1 || (b.runIds ?? []).includes(runId);
     try {
+      const runIdByOutputDir = runsOfOutputDirs(nodeIdByOutputDir, input2.byNodeId, holds);
       const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir);
       console.log(`[peeps] uploaded ${uploaded} artifact file(s) for batch ${b.batchNumber}`);
     } catch (error) {
       console.log(`[peeps] artifact upload failed for batch ${b.batchId}: ${String(error)}`);
     }
-    const mine = evidence.filter(
-      (file) => input2.batches.length === 1 || (b.runIds ?? []).includes(file.runId)
-    );
+    const mine = evidence.filter((file) => holds(file.runId));
     if (mine.length > 0) {
       const uploaded = await uploadEvidence(peeps, b.batchId, mine);
       console.log(`[peeps] uploaded ${uploaded} test attachment(s) for batch ${b.batchNumber}`);
@@ -1157,15 +1160,22 @@ async function executePytestAndReport(env, peeps, input2) {
   console.log(`[peeps] pytest exited with ${code}`);
   if (code !== 0) process.exitCode = code;
 }
-async function readOutputDirs(resultsFile, byNodeId) {
+async function readOutputDirs(resultsFile) {
   const map = /* @__PURE__ */ new Map();
   try {
     const results = JSON.parse(await (0, import_promises5.readFile)(resultsFile, "utf8"));
     for (const [nodeId, dir] of Object.entries(results.outputDirs ?? {})) {
-      const run = byNodeId[nodeId];
-      if (run) map.set(import_node_path8.default.basename(dir), run.runId);
+      map.set(import_node_path8.default.basename(dir), nodeId);
     }
   } catch {
+  }
+  return map;
+}
+function runsOfOutputDirs(nodeIdByOutputDir, byNodeId, holds) {
+  const map = /* @__PURE__ */ new Map();
+  for (const [dir, nodeId] of nodeIdByOutputDir) {
+    const run = byNodeId[nodeId]?.find((entry) => holds(entry.runId));
+    if (run) map.set(dir, run.runId);
   }
   return map;
 }
@@ -1447,7 +1457,8 @@ async function runAppiumReport(env, peeps) {
     jobUrl: env.runUrl,
     baseUrl: process.env.BASE_URL ?? null,
     tests,
-    files: built.files
+    files: built.files,
+    reportsEveryBatch: true
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
