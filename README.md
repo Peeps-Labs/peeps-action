@@ -380,7 +380,7 @@ to run `npx playwright install ffmpeg` and leaves implicit video off so a
 system-browser suite keeps working. Explicit video settings still win. Failed
 attempts get evidence even without retries. Explicit repository, project and
 `test.use` settings still win, including `"off"` and options with a `mode`.
-Trace settings, viewport and device scale are unchanged. Inventory, agent-mode
+Viewport and device scale are unchanged, and so are trace settings, but for a push of a project with targeted runs switched on: that run records a trace of every attempt to read the paths each test touched, then deletes every recording your own setting wouldn't have kept, so your report and upload stay what you configured. Inventory, agent-mode
 `run_tests`, pytest and Appium do not use these Playwright defaults.
 
 The action loads your config through a temporary wrapper beside it, preserving

@@ -15,7 +15,7 @@ import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { RunnerEnv } from "./env";
-import { listTests, specFilePayload, type PlaywrightList, type PlaywrightSuite } from "./inventory";
+import { listTests, specFilePayload, specFilesOf, type PlaywrightList, type PlaywrightSuite } from "./inventory";
 import {
   answeredNarrowed,
   exactGrepFor,
@@ -26,6 +26,9 @@ import {
   type GrepTarget,
 } from "./narrow";
 import type { PeepsClient } from "./peeps";
+import { workspaceTestsMaySetTrace } from "./footprint/test-sources";
+import { computeReach } from "./reach";
+import { reachWanted } from "./reach/preflight";
 import type { PlanFile } from "./reporter";
 
 export interface PlannedTest {
@@ -84,8 +87,17 @@ interface BatchResponse {
     unmatched: PlannedTest[];
     /** Peeps cut this batch to the pull request's smoke tests; absent otherwise. */
     narrowed?: boolean;
+    /** Record each test's footprint on this run, and the further origins that count as the application's. */
+    collectFootprints?: boolean;
+    footprintOrigins?: string[];
   }>;
   failures?: unknown[];
+}
+
+/** What this job really ran, for a job that sent a reach: Peeps reads `full` as not narrowed. */
+export interface Executed {
+  mode: "targeted" | "full";
+  tests: number;
 }
 
 export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<void> {
@@ -100,6 +112,10 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   // The spec sources travel with the plan request so a run on a branch pins
   // the blob that executes here, not the default branch's mirror.
   const files = await specFilePayload(env, list);
+  const specFiles = specFilesOf(list).map((file) => path.relative(env.workspace, path.join(rootDirAbs, file)).split(path.sep).join("/"));
+  const started = Date.now();
+  const reach = (await reachWanted(env, peeps)) ? await computeReach(env, { rootDir, specFiles }) : undefined;
+  if (reach) console.log(`[peeps] reach in ${Date.now() - started} ms: ${reach.global ? `everything (${reach.why})` : `${reach.surfaces.length} surface(s)`}`);
   const response = await peeps.post<BatchResponse>("/api/v1/ci/batches", {
     sha: env.sha,
     jobUrl,
@@ -107,6 +123,7 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
     tests,
     files,
     canNarrow: true,
+    ...(reach ? { reach } : {}),
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -116,15 +133,18 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} › ${u.titlePath}`);
 
   const batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
+  const footprints = response.batches.some((b) => b.collectFootprints === true)
+    ? { origins: response.batches.flatMap((b) => b.footprintOrigins ?? []), record: !workspaceTestsMaySetTrace(env.workspace, specFiles) }
+    : undefined;
   if (!answeredNarrowed(response)) {
-    await executeAndReport(env, peeps, { rootDir, runs, batches });
+    await executeAndReport(env, peeps, { rootDir, runs, batches, footprints, executed: reach && { mode: "full", tests: tests.length } });
     return;
   }
   const listed = listedTestsOf(list, rootDir);
   const reporterRuns = withReporterTitles(runs, listed);
   if (!isNarrowed(response)) {
     console.log("[peeps] not narrowing, running the full suite: Peeps did not narrow every project's batch");
-    await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, ranFullSuite: true });
+    await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, ranFullSuite: true, executed: reach && { mode: "full", tests: tests.length } });
     return;
   }
   // An unmatched test has no run to report to, but it is still attempted.
@@ -132,16 +152,16 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   if (selected.length === 0) {
     console.log("[peeps] narrowed to 0 test(s) for this pull request");
     // Never start Playwright without a selection: with none it runs the whole suite.
-    await completeBatches(peeps, batches);
+    await completeBatches(peeps, batches, reach && { mode: "targeted", tests: 0 });
     return;
   }
   const grep = await verifiedGrep(env, selected, listed, rootDir);
   if (grep === null) {
-    await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, ranFullSuite: true });
+    await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, ranFullSuite: true, executed: reach && { mode: "full", tests: tests.length } });
     return;
   }
   console.log(`[peeps] narrowed to ${selected.length} test(s) for this pull request`);
-  await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, selection: { files: [], grep }, narrowed: true });
+  await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, selection: { files: [], grep }, narrowed: true, executed: reach && { mode: "targeted", tests: selected.length } });
 }
 
 const named = (tests: Array<{ path: string; titlePath: string }>) =>
@@ -185,10 +205,10 @@ async function verifiedGrep(
   return grep;
 }
 
-export async function completeBatches(peeps: PeepsClient, batches: Array<{ batchId: string }>): Promise<void> {
+export async function completeBatches(peeps: PeepsClient, batches: Array<{ batchId: string }>, executed?: Executed): Promise<void> {
   for (const b of batches) {
     try {
-      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded: false });
+      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded: false, ...(executed ? { executed } : {}) });
     } catch (error) {
       console.log(`[peeps] could not complete batch ${b.batchId}: ${String(error)}`);
     }
@@ -214,6 +234,10 @@ export async function executeAndReport(
     narrowed?: boolean;
     /** Peeps answered narrowed, and this run fell back: each batch's `complete` says so. */
     ranFullSuite?: boolean;
+    /** Peeps asked for each test's footprint on this run (`footprint.ts`). */
+    footprints?: NonNullable<PlanFile["footprints"]> & { record: boolean };
+    /** This job sent a reach: each batch's `complete` says what it ran. */
+    executed?: Executed;
   },
 ): Promise<void> {
   const scratch = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-"));
@@ -221,9 +245,10 @@ export async function executeAndReport(
   const reportDir = path.join(scratch, "report");
   const plan: PlanFile = { peepsUrl: env.peepsUrl, rootDir: input.rootDir, runs: input.runs };
   if (input.narrowed) plan.narrowed = true;
+  if (input.footprints) plan.footprints = { origins: input.footprints.origins };
   await writeFile(planFile, JSON.stringify(plan), { mode: 0o600 });
 
-  const exitCode = await runPlaywright(env, planFile, reportDir, input.selection, input.extraEnv, input.narrowed);
+  const exitCode = await runPlaywright(env, planFile, reportDir, input.selection, input.extraEnv, input.narrowed, input.footprints?.record === true);
 
   let reportUploaded = false;
   for (const b of input.batches) {
@@ -238,6 +263,7 @@ export async function executeAndReport(
       await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, {
         reportUploaded,
         ...(input.ranFullSuite ? { ranFullSuite: true } : {}),
+        ...(input.executed ? { executed: input.executed } : {}),
       });
     } catch (error) {
       console.log(`[peeps] could not complete batch ${b.batchId}: ${String(error)}`);
@@ -254,12 +280,16 @@ async function runPlaywright(
   selection?: { files: string[]; grep: string },
   extraEnv: Record<string, string> = {},
   narrowed = false,
+  collectFootprints = false,
 ): Promise<number> {
   const reporterPath = path.join(__dirname, "reporter.js");
   const args = ["playwright", "test", `--reporter=${reporterPath},list,html`];
   let capture: Awaited<ReturnType<typeof prepareCaptureConfig>> | undefined;
   try {
-    capture = await prepareCaptureConfig(env, narrowed ? { defaultRetries: NARROWED_DEFAULT_RETRIES } : {});
+    capture = await prepareCaptureConfig(env, {
+      ...(narrowed ? { defaultRetries: NARROWED_DEFAULT_RETRIES } : {}),
+      ...(collectFootprints ? { collectFootprints } : {}),
+    });
   } catch (error) {
     console.warn(`[peeps] screenshot/video defaults could not be applied; using the original config: ${String(error)}`);
   }

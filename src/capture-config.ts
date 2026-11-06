@@ -47,12 +47,38 @@ export async function isModule(file: string): Promise<boolean> {
 }
 
 /**
+ * Peeps asked for footprints: record a trace of every attempt, in each \`use\` that
+ * names one, since a project's value wins over the top level's. Only a trace with
+ * snapshots holds requests. The customer's own options stay, so an attempt their
+ * policy keeps is the trace they'd have had; the reporter deletes the rest, and reads
+ * the policy from \`peepsCustomerTrace\`, per project. A mode this doesn't know (from a
+ * later Playwright) is left alone.
+ */
+const RECORD_TRACES = `const recordTrace = (use) => {
+  const trace = use?.trace;
+  const mode = (typeof trace === "string" ? trace : trace?.mode) ?? "off";
+  if (!["off", "retain-on-failure", "on-first-retry", "retry-with-trace", "on-all-retries", "retain-on-first-failure", "retain-on-failure-and-retries"].includes(mode))
+    return { ...use, peepsCustomerTrace: mode };
+  return {
+    ...use,
+    peepsCustomerTrace: mode,
+    trace: mode === "off"
+      ? { mode: "on", snapshots: true, screenshots: false, sources: false }
+      : { ...(typeof trace === "object" ? trace : {}), mode: "on" },
+  };
+};
+withEvidence.use = recordTrace(withEvidence.use);
+if (Array.isArray(config.projects))
+  withEvidence.projects = config.projects.map((project) => project?.use?.trace === undefined ? project : { ...project, use: recordTrace(project.use) });
+`;
+
+/**
  * Playwright loads this wrapper in place of the original. Keeping it beside
  * that file preserves every config-relative directory and module resolution.
  * Load in the original's module format, then unwrap default exactly once as
  * Playwright does; cross-format imports can silently discard a TS/CJS config.
  */
-export async function prepareCaptureConfig(env: RunnerEnv, options: { defaultRetries?: number } = {}): Promise<{
+export async function prepareCaptureConfig(env: RunnerEnv, options: { defaultRetries?: number; collectFootprints?: boolean } = {}): Promise<{
   configPath: string;
   cleanup: () => Promise<void>;
 }> {
@@ -101,7 +127,7 @@ const withEvidence = {
     video: config.use?.video === undefined ? defaultVideo : config.use.video,
   },
 };
-`;
+${options.collectFootprints ? RECORD_TRACES : ""}`;
   // Await both raw CJS exports and the unwrapped value, matching Playwright's
   // async loader. Export a default envelope so its own unwrap cannot discard
   // an original config's unrelated `default` property.

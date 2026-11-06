@@ -153,13 +153,14 @@ export class PeepsClient {
     return JSON.parse(text) as T;
   }
 
-  async get<T>(path: string): Promise<T> {
+  async get<T>(path: string, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`${this.env.peepsUrl}${path}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
         "User-Agent": "peeps-action/0.1",
       },
+      ...(signal ? { signal } : {}),
     });
     const text = await response.text();
     if (!response.ok) {
