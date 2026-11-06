@@ -735,8 +735,16 @@ export function createToolServer(env: RunnerEnv, deps: ToolServerDeps = {}): Too
       // cleanup failed where the cleanup never fails in CI. It runs under its
       // owner instead, which brings the owner's dependencies too. Nothing may
       // narrow that run: a file or grep that leaves the owner out drops it,
-      // and Playwright then runs the teardown alone again.
-      const owners = project ? teardownOwners(await projectGraph(env, runCapture, testEnv), project) : [];
+      // and Playwright then runs the teardown alone again. When the projects
+      // cannot be listed, a teardown cannot be told from any other project,
+      // so nothing runs: running it alone is the failure this prevents (a
+      // DOG-49 heal's final check did exactly that, 11-05).
+      let owners: string[] = [];
+      if (project) {
+        const graph = await projectGraph(env, runCapture, testEnv, redact);
+        if (!Array.isArray(graph)) throw new ToolError(`project_graph_unavailable: ${graph.unavailable}`);
+        owners = teardownOwners(graph, project);
+      }
       const cmd = ["playwright", "test", "--reporter=json"];
       if (owners.length === 0 && typeof args.grep === "string" && args.grep) cmd.push("--grep", args.grep);
       for (const p of owners.length > 0 ? owners : project ? [project] : []) cmd.push("--project", p);
@@ -1287,28 +1295,48 @@ class PeepsProjectGraph {
 module.exports = PeepsProjectGraph;
 `;
 
+/** Why the config's projects could not be listed, for the caller to say. */
+export interface GraphUnavailable {
+  unavailable: string;
+}
+
 /**
  * The config's projects and their edges, from a `--list` run (nothing is
- * executed but the config itself), or null when the config does not list:
- * the caller then runs as it was asked.
+ * executed but the config itself), or why they could not be listed: the exit
+ * code and the tail of what the listing printed to stderr, redacted whole by
+ * `scrub` before it is cut, so no secret is split past the redactor.
  */
 export async function projectGraph(
   env: RunnerEnv,
   run: typeof runCapture = runCapture,
   extraEnv: Record<string, string> = {},
-): Promise<ProjectEdges[] | null> {
+  scrub: (text: string) => string = (text) => text,
+): Promise<ProjectEdges[] | GraphUnavailable> {
   let dir: string | null = null;
+  const limitMs = 2 * 60 * 1000;
   try {
     dir = await mkdtemp(path.join(tmpdir(), "peeps-graph-"));
     const reporter = path.join(dir, "graph-reporter.cjs");
     await writeFile(reporter, PROJECT_GRAPH_REPORTER);
     const cmd = ["playwright", "test", "--list", `--reporter=${reporter}`];
     if (env.configPath) cmd.push("--config", env.configPath);
-    const { stdout } = await run("npx", cmd, env.workingDirectory, 2 * 60 * 1000, extraEnv);
+    const started = Date.now();
+    const { code, stdout, stderr } = await run("npx", cmd, env.workingDirectory, limitMs, extraEnv);
+    // A run killed at the limit reports exit 1 like any other failure, so the
+    // elapsed time is what says it timed out.
+    const ended = Date.now() - started >= limitMs ? "timed out after 2 minutes" : `exit ${code}`;
+    const why = (what: string) => ({
+      unavailable: `${what} (\`playwright test --list\` ${ended}): ${scrub(stderr).trim().slice(-2000)}`,
+    });
     const line = stdout.split("\n").find((l) => l.startsWith(GRAPH_MARKER));
-    if (!line) return null;
-    const parsed = JSON.parse(line.slice(GRAPH_MARKER.length)) as unknown;
-    if (!Array.isArray(parsed)) return null;
+    if (!line) return why("no project graph in the listing");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line.slice(GRAPH_MARKER.length));
+    } catch {
+      return why("unreadable project graph");
+    }
+    if (!Array.isArray(parsed)) return why("unreadable project graph");
     return parsed.flatMap((p): ProjectEdges[] => {
       if (typeof p !== "object" || p === null || typeof (p as ProjectEdges).name !== "string") return [];
       const { name, dependencies, teardown } = p as ProjectEdges;
@@ -1318,8 +1346,8 @@ export async function projectGraph(
         teardown: typeof teardown === "string" ? teardown : null,
       }];
     });
-  } catch {
-    return null;
+  } catch (error) {
+    return { unavailable: `the listing did not start: ${scrub(String((error as Error).message ?? error)).slice(0, 500)}` };
   } finally {
     if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
@@ -1330,8 +1358,7 @@ export async function projectGraph(
  * teardown, the projects it tears down (an owner that is itself a teardown is
  * replaced by its own owners); otherwise none, and the run stays as asked.
  */
-export function teardownOwners(graph: ProjectEdges[] | null, project: string): string[] {
-  if (!graph) return [];
+export function teardownOwners(graph: ProjectEdges[], project: string): string[] {
   const ownersOf = (name: string) => graph.filter((p) => p.teardown === name).map((p) => p.name);
   const roots = new Set<string>();
   const seen = new Set<string>([project]);

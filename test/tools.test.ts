@@ -561,6 +561,45 @@ test("projectGraph lists with the extra environment it is given", async () => {
   assert.deepEqual(seen, [{ BASE_URL: PEEPS_URL }]);
 });
 
+test("projectGraph says why it could not list, with the exit code and stderr's tail", async () => {
+  const env = { workingDirectory: WS, configPath: null } as unknown as RunnerEnv;
+  const listing = (out: { code: number; stdout: string; stderr: string }) => projectGraph(env, async () => out);
+
+  const failed = await listing({ code: 1, stdout: "", stderr: "x".repeat(5000) + "Error: config does not load\n" });
+  assert.ok(!Array.isArray(failed));
+  assert.match(failed.unavailable, /exit 1/);
+  assert.match(failed.unavailable, /Error: config does not load$/);
+  assert.ok(failed.unavailable.length < 2100, String(failed.unavailable.length));
+
+  // Exit 0 with no graph line: a reporter that did not load, say.
+  const silent = await listing({ code: 0, stdout: "Listing tests:\n", stderr: "" });
+  assert.ok(!Array.isArray(silent));
+  assert.match(silent.unavailable, /no project graph in the listing/);
+
+  const malformed = await listing({ code: 0, stdout: "peeps:project-graph:{not json\n", stderr: "" });
+  assert.ok(!Array.isArray(malformed));
+  assert.match(malformed.unavailable, /unreadable project graph/);
+
+  // A listing that never starts (npx missing, say) says so.
+  const unstarted = await projectGraph(env, async () => {
+    throw new Error("spawn npx ENOENT");
+  });
+  assert.ok(!Array.isArray(unstarted));
+  assert.match(unstarted.unavailable, /^the listing did not start: spawn npx ENOENT$/);
+});
+
+test("projectGraph redacts stderr whole before it cuts the tail, so no secret is split", async () => {
+  const env = { workingDirectory: WS, configPath: null } as unknown as RunnerEnv;
+  const secret = "s3cr3t-value-that-straddles-the-cut";
+  // The secret starts just before the last 2000 characters: cut first, its tail would survive.
+  const stderr = secret + "y".repeat(2000 - 10);
+  const scrub = (text: string) => text.split(secret).join("[redacted]");
+  const out = await projectGraph(env, async () => ({ code: 1, stdout: "", stderr }), {}, scrub);
+  assert.ok(!Array.isArray(out));
+  assert.equal(out.unavailable.includes(secret.slice(-10)), false);
+  assert.match(out.unavailable, /exit 1\)/);
+});
+
 /**
  * A real Playwright job: the config records what each process that loads it
  * was started with, and the one test's title is what its worker was.
