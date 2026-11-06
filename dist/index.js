@@ -195,8 +195,8 @@ function specFilesOf(list) {
   for (const suite of list.suites) walk2(suite);
   return [...files].sort();
 }
-async function listTests(env) {
-  const args = ["playwright", "test", "--list", "--reporter=json"];
+async function listTests(env, extraArgs = []) {
+  const args = ["playwright", "test", "--list", "--reporter=json", ...extraArgs];
   if (env.configPath) args.push("--config", env.configPath);
   const target = await jsonReportTarget();
   try {
@@ -456,7 +456,7 @@ async function isModule(file) {
     dir = parent;
   }
 }
-async function prepareCaptureConfig(env) {
+async function prepareCaptureConfig(env, options = {}) {
   const { dir, file } = await configLocation(env);
   const esm = file ? await isModule(file) : false;
   const configPath = import_node_path4.default.join(dir, `.peeps-capture-${(0, import_node_crypto2.randomUUID)()}.config.${esm ? "mjs" : "cjs"}`);
@@ -492,7 +492,8 @@ if (config.use?.video === undefined) {
   }
 }
 const withEvidence = {
-  ...config,
+  ...config,${options.defaultRetries === void 0 ? "" : `
+  ...(config.retries === undefined ? { retries: ${options.defaultRetries} } : {}),`}
   use: {
     ...config.use,
     screenshot: config.use?.screenshot === undefined ? "only-on-failure" : config.use.screenshot,
@@ -525,8 +526,54 @@ return { default: withEvidence };
 var import_promises4 = require("node:fs/promises");
 var import_node_os2 = require("node:os");
 var import_node_path5 = __toESM(require("node:path"));
+
+// src/narrow.ts
+var MAX_GREP_BYTES = 64 * 1024;
+function isNarrowed(response) {
+  return response.batches.length > 0 && response.batches.every((b) => b.narrowed === true) && (response.failures ?? []).length === 0;
+}
+function answeredNarrowed(response) {
+  return response.batches.some((b) => b.narrowed === true);
+}
+function withReporterTitles(runs, listed) {
+  const reporterTitles = new Map(listed.map((test) => [identity(test), test.titles.filter((title) => title !== "").join(" \u203A ")]));
+  return runs.map((run) => ({ ...run, titlePath: reporterTitles.get(identity(run)) ?? run.titlePath }));
+}
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+}
+function exactGrepFor(selected, listed) {
+  const wanted = new Set(selected.map(identity));
+  const alternatives = new Set(
+    listed.filter((test) => wanted.has(identity(test))).map((test) => {
+      const values = test.tags.map(escapeRegex).join("|");
+      const own = values ? `(?: (?:${values}))*` : "";
+      const inherited = values ? `(?: (?:${values})(?: [^@ ][^ ]*)*)*` : "";
+      const parts = [test.pwProject ?? "", test.file, ...test.titles].filter((part) => part !== "");
+      return parts.map(escapeRegex).join(`${inherited} `) + own;
+    })
+  );
+  return `/^ *(?:${[...alternatives].join("|")})$/`;
+}
+function selectionDifference(selected, listed) {
+  const wanted = new Set(selected.map(identity));
+  const found = new Set(listed.map(identity));
+  return {
+    missing: selected.filter((test) => !found.has(identity(test))),
+    extra: listed.filter((test) => !wanted.has(identity(test)))
+  };
+}
+function identity(test) {
+  return JSON.stringify([test.pwProject ?? "", test.path, test.titlePath]);
+}
+
+// src/report.ts
 var MAX_UPLOAD_BYTES = 128 * 1024 * 1024;
+var NARROWED_DEFAULT_RETRIES = 1;
 function plannedTestsOf(list, rootDir) {
+  return listedTestsOf(list, rootDir).map(({ path: path14, titlePath, pwProject }) => ({ path: path14, titlePath, pwProject }));
+}
+function listedTestsOf(list, rootDir) {
   const out = [];
   const trimmed = rootDir.trim();
   const root = trimmed === "" || trimmed === "." || trimmed === "./" ? "" : trimmed.replace(/^\.\//, "").replace(/\/+$/, "");
@@ -539,7 +586,9 @@ function plannedTestsOf(list, rootDir) {
         (t) => t.projectName ?? ""
       );
       for (const pwProject of projects.length ? [...new Set(projects)] : [""]) {
-        out.push({ path: specPath, titlePath: [...next, spec.title].join(" \u203A "), pwProject });
+        const specTitles = [...next, spec.title];
+        const tags = (spec.tags ?? []).map((tag) => `@${tag}`);
+        out.push({ path: specPath, titlePath: specTitles.join(" \u203A "), pwProject, file, titles: specTitles, tags });
       }
     }
     for (const child of suite.suites ?? []) walk2(child, next, false);
@@ -561,7 +610,8 @@ async function runReport(env, peeps) {
     jobUrl,
     baseUrl: process.env.BASE_URL ?? null,
     tests,
-    files
+    files,
+    canNarrow: true
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -569,19 +619,74 @@ async function runReport(env, peeps) {
     `[peeps] planned ${runs.length} run(s) in ${response.batches.length} batch(es); ${unmatched.length} test(s) unknown to Peeps`
   );
   for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} \u203A ${u.titlePath}`);
-  await executeAndReport(env, peeps, {
-    rootDir,
-    runs,
-    batches: response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }))
-  });
+  const batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
+  if (!answeredNarrowed(response)) {
+    await executeAndReport(env, peeps, { rootDir, runs, batches });
+    return;
+  }
+  const listed = listedTestsOf(list, rootDir);
+  const reporterRuns = withReporterTitles(runs, listed);
+  if (!isNarrowed(response)) {
+    console.log("[peeps] not narrowing, running the full suite: Peeps did not narrow every project's batch");
+    await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, ranFullSuite: true });
+    return;
+  }
+  const selected = [...runs, ...unmatched];
+  if (selected.length === 0) {
+    console.log("[peeps] narrowed to 0 test(s) for this pull request");
+    await completeBatches(peeps, batches);
+    return;
+  }
+  const grep = await verifiedGrep(env, selected, listed, rootDir);
+  if (grep === null) {
+    await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, ranFullSuite: true });
+    return;
+  }
+  console.log(`[peeps] narrowed to ${selected.length} test(s) for this pull request`);
+  await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, selection: { files: [], grep }, narrowed: true });
+}
+var named = (tests) => tests.slice(0, 10).map((test) => `${test.path} \u203A ${test.titlePath}`).join("; ");
+async function verifiedGrep(env, selected, listed, rootDir) {
+  const fallBack = (why) => {
+    console.log(`[peeps] not narrowing, running the full suite: ${why}`);
+    return null;
+  };
+  const unlisted = selectionDifference(selected, listed).missing;
+  if (unlisted.length > 0) {
+    return fallBack(`${unlisted.length} selected test(s) not in Playwright's list: ${named(unlisted)}`);
+  }
+  const grep = exactGrepFor(selected, listed);
+  const bytes = Buffer.byteLength(grep);
+  if (bytes > MAX_GREP_BYTES) return fallBack(`its grep is ${bytes} bytes, over the limit of ${MAX_GREP_BYTES}`);
+  let found;
+  try {
+    found = listedTestsOf(await listTests(env, ["--grep", grep, "--no-deps"]), rootDir);
+  } catch (error) {
+    const why = error.stderr || String(error);
+    return fallBack(`Playwright could not list the grep's tests: ${why.slice(0, 500)}`);
+  }
+  const { missing, extra } = selectionDifference(selected, found);
+  if (missing.length > 0) return fallBack(`${missing.length} test(s) not selected by its grep: ${named(missing)}`);
+  if (extra.length > 0) return fallBack(`${extra.length} other test(s) also selected by its grep: ${named(extra)}`);
+  return grep;
+}
+async function completeBatches(peeps, batches) {
+  for (const b of batches) {
+    try {
+      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded: false });
+    } catch (error) {
+      console.log(`[peeps] could not complete batch ${b.batchId}: ${String(error)}`);
+    }
+  }
 }
 async function executeAndReport(env, peeps, input2) {
   const scratch = await (0, import_promises4.mkdtemp)(import_node_path5.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os2.tmpdir)(), "peeps-"));
   const planFile = import_node_path5.default.join(scratch, "plan.json");
   const reportDir = import_node_path5.default.join(scratch, "report");
   const plan = { peepsUrl: env.peepsUrl, rootDir: input2.rootDir, runs: input2.runs };
+  if (input2.narrowed) plan.narrowed = true;
   await (0, import_promises4.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
-  const exitCode = await runPlaywright(env, planFile, reportDir, input2.selection, input2.extraEnv);
+  const exitCode = await runPlaywright(env, planFile, reportDir, input2.selection, input2.extraEnv, input2.narrowed);
   let reportUploaded = false;
   for (const b of input2.batches) {
     try {
@@ -592,7 +697,10 @@ async function executeAndReport(env, peeps, input2) {
       console.log(`[peeps] report upload failed for batch ${b.batchId}: ${String(error)}`);
     }
     try {
-      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded });
+      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, {
+        reportUploaded,
+        ...input2.ranFullSuite ? { ranFullSuite: true } : {}
+      });
     } catch (error) {
       console.log(`[peeps] could not complete batch ${b.batchId}: ${String(error)}`);
     }
@@ -600,12 +708,12 @@ async function executeAndReport(env, peeps, input2) {
   console.log(`[peeps] playwright exited with ${exitCode}`);
   if (exitCode !== 0) process.exitCode = exitCode;
 }
-async function runPlaywright(env, planFile, reportDir, selection, extraEnv = {}) {
+async function runPlaywright(env, planFile, reportDir, selection, extraEnv = {}, narrowed = false) {
   const reporterPath = import_node_path5.default.join(__dirname, "reporter.js");
   const args = ["playwright", "test", `--reporter=${reporterPath},list,html`];
   let capture;
   try {
-    capture = await prepareCaptureConfig(env);
+    capture = await prepareCaptureConfig(env, narrowed ? { defaultRetries: NARROWED_DEFAULT_RETRIES } : {});
   } catch (error) {
     console.warn(`[peeps] screenshot/video defaults could not be applied; using the original config: ${String(error)}`);
   }
@@ -616,23 +724,28 @@ async function runPlaywright(env, planFile, reportDir, selection, extraEnv = {})
   }
   try {
     return await new Promise((resolve) => {
-      const child = (0, import_node_child_process2.spawn)("npx", args, {
-        cwd: env.workingDirectory,
-        stdio: "inherit",
-        env: {
-          ...process.env,
-          ...extraEnv,
-          CI: "1",
-          PEEPS_PLAN_FILE: planFile,
-          PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,
-          PLAYWRIGHT_HTML_OPEN: "never"
-        }
-      });
-      child.on("error", (error) => {
+      const couldNotStart = (error) => {
         console.error(`[peeps] could not start Playwright: ${String(error)}`);
         resolve(1);
-      });
-      child.on("close", (code) => resolve(code ?? 1));
+      };
+      try {
+        const child = (0, import_node_child_process2.spawn)("npx", args, {
+          cwd: env.workingDirectory,
+          stdio: "inherit",
+          env: {
+            ...process.env,
+            ...extraEnv,
+            CI: "1",
+            PEEPS_PLAN_FILE: planFile,
+            PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,
+            PLAYWRIGHT_HTML_OPEN: "never"
+          }
+        });
+        child.on("error", couldNotStart);
+        child.on("close", (code) => resolve(code ?? 1));
+      } catch (error) {
+        couldNotStart(error);
+      }
     });
   } finally {
     await capture?.cleanup().catch((error) => {
@@ -732,12 +845,12 @@ function planEnvironmentVariables(planEnv, current) {
 }
 
 // src/run.ts
-function escapeRegex(value) {
+function escapeRegex2(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function grepFor(titlePaths) {
   const alternatives = [...new Set(titlePaths)].map(
-    (t) => escapeRegex(t.split(" \u203A ").join(" ")) + "(?: @[^ ]+)*$"
+    (t) => escapeRegex2(t.split(" \u203A ").join(" ")) + "(?: @[^ ]+)*$"
   );
   return `(?:^| )(?:${alternatives.join("|")})`;
 }
@@ -799,6 +912,10 @@ function repoRelative(workspace, abs) {
   } catch {
     return null;
   }
+}
+function identityKey(test) {
+  return `${test.path}
+${test.titlePath}`;
 }
 var MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 function pageSourceExtension(source, context) {
@@ -1435,7 +1552,7 @@ async function runAppiumInventory(env, peeps) {
   const result = await peeps.post("/api/v1/ci/inventory", request);
   console.log(`[peeps] inventory accepted: ${JSON.stringify(result.results)}`);
 }
-async function runAppiumReport(env, peeps) {
+async function runAppiumReport(env, peeps, runner) {
   if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const configPath = wdioConfigPath(env);
   const collection = await collectAppium(env, configPath);
@@ -1447,7 +1564,8 @@ async function runAppiumReport(env, peeps) {
     jobUrl: env.runUrl,
     baseUrl: process.env.BASE_URL ?? null,
     tests,
-    files: built.files
+    files: built.files,
+    canNarrow: true
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -1455,14 +1573,44 @@ async function runAppiumReport(env, peeps) {
     `[peeps] planned ${runs.length} run(s) in ${response.batches.length} batch(es); ${unmatched.length} test(s) unknown to Peeps`
   );
   for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} \u203A ${u.titlePath}`);
+  const batches = response.batches.map((b) => ({
+    batchId: b.batchId,
+    batchNumber: b.batchNumber,
+    runIds: b.runs.map((r) => r.runId)
+  }));
+  if (!answeredNarrowed(response)) {
+    await executeAppiumAndReport(env, peeps, { configPath, runs, batches, runner });
+    return;
+  }
+  const fallBack = (why) => {
+    console.log(`[peeps] not narrowing, running the full suite: ${why}`);
+    return executeAppiumAndReport(env, peeps, { configPath, runs, batches, runner, ranFullSuite: true });
+  };
+  if (!isNarrowed(response)) return fallBack("Peeps did not narrow every project's batch");
+  if (collection.errors.length > 0) return fallBack(`${collection.errors.length} spec file(s) did not load`);
+  const selected = [...runs, ...unmatched];
+  if (selected.length === 0) {
+    console.log("[peeps] narrowed to 0 test(s) for this pull request");
+    await completeBatches(peeps, batches);
+    return;
+  }
+  const found = specsForRuns(env, collection, selected);
+  for (const test of found.unmatched.slice(0, 10)) {
+    console.log(`[peeps]   not collected here (or no capability runs its file), not run: ${test.path} \u203A ${test.titlePath}`);
+  }
+  if (found.matched.length === 0) return fallBack(`none of the ${selected.length} selected test(s) can run at this commit`);
+  console.log(`[peeps] narrowed to ${selected.length} test(s) for this pull request`);
   await executeAppiumAndReport(env, peeps, {
     configPath,
-    runs,
-    batches: response.batches.map((b) => ({
-      batchId: b.batchId,
-      batchNumber: b.batchNumber,
-      runIds: b.runs.map((r) => r.runId)
-    }))
+    runs: runs.filter((r) => found.matched.includes(r)),
+    batches,
+    selection: {
+      specs: found.specs,
+      capabilitySpecs: found.capabilitySpecs,
+      grep: exactMochaGrepFor(env, collection, found.matched),
+      alsoRun: unmatched.filter((t) => found.matched.includes(t))
+    },
+    runner
   });
 }
 function specsForRuns(env, collection, runs) {
@@ -1496,12 +1644,21 @@ ${run.titlePath}`);
     unmatched
   };
 }
-function escapeRegex2(value) {
+function escapeRegex3(value) {
   return value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 }
 function mochaGrepFor(titlePaths) {
-  const alternatives = [...new Set(titlePaths)].map((t) => escapeRegex2(t.split(TITLE_PATH_SEPARATOR).join(" ")));
-  return `^(?:${alternatives.join("|")})$`;
+  return fullTitleGrep(titlePaths.map((t) => t.split(TITLE_PATH_SEPARATOR).join(" ")));
+}
+function fullTitleGrep(fullTitles) {
+  return `^(?:${[...new Set(fullTitles)].map(escapeRegex3).join("|")})$`;
+}
+function exactMochaGrepFor(env, collection, matched) {
+  const wanted = new Set(matched.map(identityKey));
+  const collected = collection.tests.filter(
+    (test) => wanted.has(identityKey({ path: repoRelative(env.workspace, test.file) ?? "", titlePath: test.titlePath.join(TITLE_PATH_SEPARATOR) }))
+  );
+  return fullTitleGrep(collected.map((test) => test.titlePath.join(" ")));
 }
 async function runAppiumDispatched(env, peeps) {
   if (!env.sessionId) throw new Error("`session-id` is required in run mode (Peeps passes it)");
@@ -1641,6 +1798,7 @@ async function executeAppiumAndReport(env, peeps, input2) {
   await (0, import_promises6.mkdir)(artifactsDir);
   const plan = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: input2.runs };
   if (input2.selection) plan.onlyPlanned = true;
+  if (input2.selection?.alsoRun?.length) plan.alsoRun = input2.selection.alsoRun;
   await (0, import_promises6.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
   const junitDir = hasPackage("@wdio/junit-reporter", import_node_path9.default.dirname(input2.configPath)) ? import_node_path9.default.join(scratch, "junit") : null;
   const options = { junitDir };
@@ -1680,7 +1838,10 @@ async function executeAppiumAndReport(env, peeps, input2) {
     }
     if (junitDir && input2.batches.length === 1) await uploadJunit(peeps, b.batchId, junitDir);
     try {
-      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, { reportUploaded: false });
+      await peeps.post(`/api/v1/ci/batches/${b.batchId}/complete`, {
+        reportUploaded: false,
+        ...input2.ranFullSuite ? { ranFullSuite: true } : {}
+      });
     } catch (error) {
       console.log(`[peeps] could not complete batch ${b.batchId}: ${String(error)}`);
     }

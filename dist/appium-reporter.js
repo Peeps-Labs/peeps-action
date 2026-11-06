@@ -86,8 +86,16 @@ var Plan = class {
       const key = identityKey(run);
       if (!this.entries.has(key)) this.entries.set(key, run);
     }
+    this.alsoRun = new Set((file.alsoRun ?? []).map(identityKey));
   }
   entries = /* @__PURE__ */ new Map();
+  alsoRun;
+  /** Whether a test with no run of its own still runs (`AppiumPlanFile.alsoRun`). */
+  runsUnreported(file, titles) {
+    if (!file || this.alsoRun.size === 0) return false;
+    const rel = repoRelative(this.file.workspace, file.startsWith("file://") ? (0, import_node_url.fileURLToPath)(file) : file);
+    return rel !== null && this.alsoRun.has(identityKey({ path: rel, titlePath: titles.join(TITLE_PATH_SEPARATOR) }));
+  }
   /**
    * Claim `runId` for `worker` by creating its owner file exclusively, so
    * exactly one worker reports each run however many capabilities run its
@@ -314,7 +322,7 @@ var mochaHooks = {
     const test = this.currentTest;
     const titles = titlesOf(test);
     if (!titles) return;
-    if (!plan.entryFor(test?.file, titles)) this.skip();
+    if (!plan.entryFor(test?.file, titles) && !plan.runsUnreported(test?.file, titles)) this.skip();
   }
 };
 function trimMiddle(text, head = 2e3, tail = 1e4) {
