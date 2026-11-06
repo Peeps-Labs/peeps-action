@@ -559,7 +559,7 @@ export async function executePytestAndReport(
     const holds = (runId: string) => input.batches.length === 1 || (b.runIds ?? []).includes(runId);
     try {
       const runIdByOutputDir = runsOfOutputDirs(nodeIdByOutputDir, input.byNodeId, holds);
-      const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir);
+      const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir, input.batches.length > 1);
       console.log(`[peeps] uploaded ${uploaded} artifact file(s) for batch ${b.batchNumber}`);
     } catch (error) {
       console.log(`[peeps] artifact upload failed for batch ${b.batchId}: ${String(error)}`);
@@ -787,9 +787,15 @@ async function uploadOutput(
   batchId: string,
   outputDir: string,
   runIdByOutputDir: Map<string, string>,
+  /**
+   * Several batches are several projects, perhaps with different tests: a file
+   * with no run in this one is another project's, or one nobody can say whose.
+   */
+  onlyItsOwnRuns: boolean,
 ): Promise<number> {
   let uploaded = 0;
   for await (const file of walkOutput(outputDir)) {
+    if (onlyItsOwnRuns && !runIdByOutputDir.has(file.rel.split("/")[0]!)) continue;
     const info = await stat(file.abs);
     if (info.size > MAX_UPLOAD_BYTES) {
       console.log(`[peeps] skipping ${file.rel}: ${info.size} bytes exceeds the upload limit`);

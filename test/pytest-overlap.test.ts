@@ -3,7 +3,7 @@
  * it, and files named by run are named for each batch's own run. Real pytest, through the
  * committed action where it can be; pytest-playwright's output is only reachable below that.
  */
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,6 +30,8 @@ const CAMERA = path.join(__dirname, "fixtures", "pytest-camera");
 const SUITE = path.join(__dirname, "fixtures", "pytest-suite");
 const needsPytest = pytestAvailable();
 const everything = (name: string): BatchSpec => ({ name, picks: () => true });
+
+type PlannedNode = ReturnType<typeof plannedPytestTests>[number];
 
 const uploadsOf = (requests: Array<{ pathname: string; artifact: string | null }>, batch: string) =>
   requests.filter((v) => v.pathname === `/api/v1/ci/batches/batch-${batch}/artifacts`).map((v) => v.artifact!).sort();
@@ -154,7 +156,11 @@ test("delivery widens only when a test has several runs", needsPytest, async (t)
   assert.ok((await widest([everything("a"), everything("b")])) > 1);
 });
 
-test("pytest-playwright's output is stored under each batch's own run", needsPytest, async (t) => {
+/** The suite with pytest-playwright's output, run for `batchesFor`'s batches, below the action. */
+async function outputJob(
+  t: TestContext,
+  batchesFor: (planned: PlannedNode[]) => Array<{ name: string; nodes: PlannedNode[] }>,
+) {
   const root = mkdtempSync(path.join(realpathSync(tmpdir()), "peeps-pytest-overlap-"));
   const e2e = path.join(root, "e2e");
   mkdirSync(e2e);
@@ -173,32 +179,54 @@ test("pytest-playwright's output is stored under each batch's own run", needsPyt
   });
   const collection = await collectPytest(env);
   const planned = plannedPytestTests(collection, "e2e");
-  const entries = (batch: string): PlanEntry[] =>
-    planned.map((v, i) => ({
-      runId: `${batch}-${i}`, path: v.path, titlePath: v.titlePath, pwProject: v.pwProject,
-      credential: { exp: 99, sig: signatureOf(`${batch}-${i}`) },
-    }));
-  const runs = [...entries("a"), ...entries("b")];
-  const { byNodeId } = nodeIdsForRuns(planned, runs);
+  const batches = batchesFor(planned).map(({ name, nodes }) => ({
+    name,
+    runs: nodes.map((v, i): PlanEntry => ({
+      runId: `${name}-${i}`, path: v.path, titlePath: v.titlePath, pwProject: v.pwProject,
+      credential: { exp: 99, sig: signatureOf(`${name}-${i}`) },
+    })),
+  }));
+  const { byNodeId } = nodeIdsForRuns(planned, batches.flatMap((b) => b.runs));
   await executePytestAndReport(env, new PeepsClient(env), {
     collection: { ...collection, playwright: true },
     byNodeId,
-    batches: [
-      { batchId: "batch-a", batchNumber: 1, runIds: runs.filter((r) => r.runId.startsWith("a-")).map((r) => r.runId) },
-      { batchId: "batch-b", batchNumber: 2, runIds: runs.filter((r) => r.runId.startsWith("b-")).map((r) => r.runId) },
-    ],
+    batches: batches.map((b, n) => ({ batchId: `batch-${b.name}`, batchNumber: n + 1, runIds: b.runs.map((r) => r.runId) })),
   });
   process.exitCode = saved.code;
+  return { byNodeId, requests: peeps.requests };
+}
 
-  const node = "tests/shop/test_cart.py::test_opens[chromium]";
-  const [ofA, ofB] = byNodeId[node]!;
+const OPENS = "tests/shop/test_cart.py::test_opens[chromium]";
+const WRONG = "tests/shop/test_cart.py::test_total_is_wrong";
+
+test("pytest-playwright's output is stored under each batch's own run", needsPytest, async (t) => {
+  const { byNodeId, requests } = await outputJob(t, (planned) => [{ name: "a", nodes: planned }, { name: "b", nodes: planned }]);
+  const [ofA, ofB] = byNodeId[OPENS]!;
   assert.ok(ofA && ofB && ofA.runId.startsWith("a-") && ofB.runId.startsWith("b-"));
-  const a = uploadsOf(peeps.requests, "a");
-  const b = uploadsOf(peeps.requests, "b");
+  const a = uploadsOf(requests, "a");
+  const b = uploadsOf(requests, "b");
   assert.ok(a.includes(`data/${ofA.runId}-trace.zip`), a.join(", "));
   assert.ok(b.includes(`data/${ofB.runId}-trace.zip`), b.join(", "));
   assert.ok(!a.includes(`data/${ofB.runId}-trace.zip`), "nothing is stored under another batch's run");
   assert.ok(!b.includes(`data/${ofA.runId}-trace.zip`));
+});
+
+test("with several batches, a batch stores only the output of tests it holds", needsPytest, async (t) => {
+  const { requests } = await outputJob(t, (planned) => [
+    { name: "a", nodes: planned.filter((v) => v.nodeId === OPENS) },
+    { name: "b", nodes: planned.filter((v) => v.nodeId !== WRONG) },
+  ]);
+  const a = uploadsOf(requests, "a");
+  const b = uploadsOf(requests, "b");
+  assert.deepEqual(a, ["data/a-0-trace.zip"], "a planned one test, and no other project's files reach it");
+  assert.ok(b.length > 0);
+  assert.ok(b.every((name) => name.startsWith("data/b-")), `a test nobody planned reaches no batch: ${b.join(", ")}`);
+});
+
+test("one batch still stores the output of a test it didn't plan, flattened, as main did", needsPytest, async (t) => {
+  const { requests } = await outputJob(t, (planned) => [{ name: "only", nodes: planned.filter((v) => v.nodeId !== WRONG) }]);
+  const uploads = uploadsOf(requests, "only");
+  assert.ok(uploads.some((name) => !name.startsWith("data/only-")), uploads.join(", "));
 });
 
 test("a run whose results file is missing still uploads, without a run in the names", needsPytest, async (t) => {

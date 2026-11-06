@@ -184,6 +184,24 @@
       ]
     },
     {
+      "name": "pytest: a batch stores the output of tests only another project planned",
+      "file": "src/pytest.ts",
+      "find": "    if (onlyItsOwnRuns && !runIdByOutputDir.has(file.rel.split(\"/\")[0]!)) continue;\n",
+      "replace": "",
+      "tests": [
+        "test/pytest-overlap.test.ts"
+      ]
+    },
+    {
+      "name": "pytest: one project loses the output of a test it didn't plan, which main uploaded",
+      "file": "src/pytest.ts",
+      "find": "outputDir, runIdByOutputDir, input.batches.length > 1);",
+      "replace": "outputDir, runIdByOutputDir, true);",
+      "tests": [
+        "test/pytest-overlap.test.ts"
+      ]
+    },
+    {
       "name": "pytest: the announce doesn't say it reports to every batch",
       "file": "src/pytest.ts",
       "find": "    reportsEveryBatch: true,\n",

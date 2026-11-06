@@ -1141,7 +1141,7 @@ async function executePytestAndReport(env, peeps, input2) {
     const holds = (runId) => input2.batches.length === 1 || (b.runIds ?? []).includes(runId);
     try {
       const runIdByOutputDir = runsOfOutputDirs(nodeIdByOutputDir, input2.byNodeId, holds);
-      const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir);
+      const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir, input2.batches.length > 1);
       console.log(`[peeps] uploaded ${uploaded} artifact file(s) for batch ${b.batchNumber}`);
     } catch (error) {
       console.log(`[peeps] artifact upload failed for batch ${b.batchId}: ${String(error)}`);
@@ -1243,9 +1243,10 @@ async function uploadEvidence(peeps, batchId, files) {
   }
   return uploaded;
 }
-async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
+async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir, onlyItsOwnRuns) {
   let uploaded = 0;
   for await (const file of walkOutput(outputDir)) {
+    if (onlyItsOwnRuns && !runIdByOutputDir.has(file.rel.split("/")[0])) continue;
     const info = await (0, import_promises5.stat)(file.abs);
     if (info.size > MAX_UPLOAD_BYTES2) {
       console.log(`[peeps] skipping ${file.rel}: ${info.size} bytes exceeds the upload limit`);
