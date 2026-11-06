@@ -591,7 +591,14 @@ function narrowedOutcome(test, result) {
   return { status: result.status, error: result.errors[0] };
 }
 function isLastAttempt(test, result) {
-  return result.retry >= test.retries || result.status === test.expectedStatus || result.status === "interrupted";
+  if (result.retry >= test.retries || result.status === "interrupted") return true;
+  return result.status === test.expectedStatus && !inSerialGroup(test);
+}
+function inSerialGroup(test) {
+  for (let suite = test.parent; suite; suite = suite.parent) {
+    if (suite._parallelMode === "serial") return true;
+  }
+  return false;
 }
 function htmlReportDir(config) {
   const html = config.reporter.find(([name]) => name === "html");

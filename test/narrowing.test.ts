@@ -443,6 +443,43 @@ test("a serial prerequisite that keeps failing: selected tests keep their order,
   assert.deepEqual(last.filter((v) => v.startsWith("skipped") || v === "run_end"), ["skipped#0", "skipped#1", "run_end"]);
 });
 
+test("narrowed, a later failure re-runs a serial group: the earlier tests' attempts stay open until their last, however they ended", async (t) => {
+  const root = await fixture(t, {
+    "helper.ts": HELPER,
+    "playwright.config.ts": outcomesConfig("retries: 1"),
+    "specs/s.spec.ts": `import { test, expect } from "../helper";
+test.describe.serial("group", () => {
+  test("expected", async ({}, info) => { test.fail(); expect(info.retry).toBe(1); });
+  test("plain", async () => {});
+  test("later", async ({}, info) => { expect(info.retry).toBe(1); });
+});
+`,
+  });
+  const peeps = await fakePeeps(t, (tests) => ({ narrowed: true, runs: tests }));
+  await runAction(root, peeps.url);
+  assert.deepEqual(shape(peeps.sent.get("group › expected")), ["run_start", "test_start", "passed#0", "test_start", "failed#1", "run_end"]);
+  // The retry's unexpected pass fails the group, so what follows it is skipped.
+  assert.deepEqual(shape(peeps.sent.get("group › plain")), ["run_start", "test_start", "passed#0", "test_start", "skipped#1", "run_end"]);
+  assert.deepEqual(shape(peeps.sent.get("group › later")), ["run_start", "test_start", "failed#0", "test_start", "skipped#1", "run_end"]);
+});
+
+test("narrowed, a serial group that passes with retries left closes each run once, at the end", async (t) => {
+  const root = await fixture(t, {
+    "helper.ts": HELPER,
+    "playwright.config.ts": outcomesConfig("retries: 1"),
+    "specs/s.spec.ts": `import { test } from "../helper";
+test.describe.configure({ mode: "serial" });
+test("first", async () => {});
+test("second", async () => {});
+`,
+  });
+  const peeps = await fakePeeps(t, (tests) => ({ narrowed: true, runs: tests }));
+  const result = await runAction(root, peeps.url);
+  assert.equal(result.code, 0, result.output);
+  assert.deepEqual(shape(peeps.sent.get("first")), ["run_start", "test_start", "passed#0", "run_end"]);
+  assert.deepEqual(shape(peeps.sent.get("second")), ["run_start", "test_start", "passed#0", "run_end"]);
+});
+
 test("a serial prerequisite that passes on retry: the dependant's early skip does not close it", async (t) => {
   const root = await fixture(t, {
     "helper.ts": HELPER,
