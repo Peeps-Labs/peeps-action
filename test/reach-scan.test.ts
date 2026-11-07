@@ -712,6 +712,21 @@ test("a base before a path is that path, however it's written, with a client ins
   bounded(run(tree, [lineChange("app/api/orders/route.ts", 1)]), ["/a", "/api/orders", "/b", "/c"]);
 });
 
+test("a URL after a computed base must share a word with the route; a path written from / needs only one word of its own", () => {
+  const settings = "app/[org]/settings/project/[acronym]/repository/page.tsx";
+  const tree = {
+    ...NEXT,
+    [settings]: "export default function P() {}\n",
+    "app/api/orders/route.ts": "export async function GET() {}\n",
+    "app/github/page.tsx": "const hooks = (o, r, id) => fetch(`${GITHUB}/repos/${o}/${r}/hooks/${id}`);\nexport default function P() { return hooks; }\n",
+    "app/own/page.tsx": "export default async function P() { return fetch(`${BASE}/api/orders`); }\n",
+    "app/host/page.tsx": 'export default async function P() { return fetch("https://app.example.com/api/orders"); }\n',
+    "app/written/page.tsx": "const f = (o, r, id) => fetch(`/repos/${o}/${r}/hooks/${id}`);\nexport default function P() { return f; }\n",
+  };
+  bounded(run(tree, [lineChange("app/api/orders/route.ts", 1)]), ["/api/orders", "/host", "/own"]);
+  bounded(run(tree, [lineChange(settings, 1)]), ["/:org/settings/project/:acronym/repository", "/written"]);
+});
+
 test("a fetch of nothing but placeholders doesn't bridge, one with a word does", () => {
   const tree = {
     ...NEXT,

@@ -44,3 +44,19 @@ exotic form found there goes on this list rather than into a new special case.
   the literal forms each adapter reads, Next `basePath`, `rewrites`, `i18n` and
   `pageExtensions`.
 - Footprint: `--repeat-each`, a trace over 512 MB, more than 300 paths in one attempt.
+
+## How often it bounds (replay, 11/6)
+
+Of merges changing application code, the share that doesn't run everything:
+
+- Peeps: about one in seven (12 of 83). Changes reach a composition root (`scripts/peeps-worker.ts`,
+  `src/instrumentation.ts`), a CLI script's top-level `main()`, or the root layout through
+  shared providers. Excusing every top-level effect would add 2 of 76.
+- Umami (a single public Next.js app): none, because its `next.config.ts` uses `rewrites`
+  and an environment `basePath`. Without that refusal, 34 of 76, and 24 more are blocked
+  by a workspace package whose entry is `dist/`.
+
+Not shipped, because none is provably sound or none gains anything: treating CLI scripts
+as not the app (a worker is a script too); property assignments and registry calls as
+pure (sound, gains 0 on both); ignoring files nothing names (`bunfig.toml`, a JSON in
+`scripts/`); reading `rewrites` destinations and recording the base path.

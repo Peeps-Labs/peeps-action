@@ -15,11 +15,17 @@ const VERBS = new Set(["get", "post", "put", "patch", "delete", "head", "options
 const GLOBALS = new Set(["globalThis", "global", "window", "self"]);
 const MENTIONS_REQUEST = /\b(?:fetch|ofetch|got|ky|axios|superagent)\b|\.(?:get|post|put|patch|delete|head|options|request)\(/;
 
+/** A fetched path, and whether it was written from `/` rather than after a base or a host. */
+interface Fetched {
+  path: string;
+  own: boolean;
+}
+
 interface Marks {
-  paths?: string[];
+  paths?: Fetched[];
   unresolved?: boolean;
   /** `x.get(…)` on a binding that may be a client, settled once files are linked. */
-  maybe?: Array<{ root: string; path: string | null }>;
+  maybe?: Array<{ root: string; path: Fetched | null }>;
 }
 
 const marksOf = (sym: Sym): Marks => (sym.marks.fetch ??= {}) as Marks;
@@ -30,11 +36,11 @@ const clientsOf = (facts: FileFacts): Set<string> => (facts.data.fetchClients ??
  * folded segment. A server fetching its own absolute URL is the same route, whatever the
  * host. Null with no path to read.
  */
-function fetchedPath(literal: string): string | null {
+function fetchedPath(literal: string): Fetched | null {
   const address = literal.replace(/^(?:https?:)?\/\/[^/]*/, "").replace(/^\$\{x\}(?=\/)/, "");
   if (!address.startsWith("/")) return null;
   const path = address.split(/[?#]/)[0]!.replace(/\$\{x\}/g, ":id");
-  return path.length > 1 ? path.replace(/\/+$/, "") : path;
+  return { path: path.length > 1 ? path.replace(/\/+$/, "") : path, own: literal.startsWith("/") && !literal.startsWith("//") };
 }
 
 /** The address in a call's first argument, however it's written, with `${x}` for what's computed. */
@@ -65,20 +71,24 @@ function requestOf(call: ts.CallExpression): { direct: boolean; root?: string } 
   return null;
 }
 
-const pathOf = (call: ts.CallExpression): string | null => {
+const pathOf = (call: ts.CallExpression): Fetched | null => {
   const address = addressOf(call.arguments[0]);
   return address === null ? null : fetchedPath(address);
 };
 
 /**
- * Whether this fetch is of this route. It must meet it, and name a word of its own: a
- * URL of nothing but placeholders would tie every route to it. Fetching a wholly
- * computed path is an unresolved request instead.
+ * Whether this fetch is of this route. It must meet it. A path written from `/` is this
+ * application's, so one word of its own is enough: nothing but placeholders would tie
+ * every route to it. After a computed base or a host it may be another API's, so it must
+ * share a word with the route: `${GITHUB}/repos/${o}/${r}/${id}` isn't `/:org/settings/:p`.
  */
-function bridges(surface: string, path: string): boolean {
+function bridges(surface: string, path: string, ownPath: boolean): boolean {
   if (!surfaceMeetsPath(surface, path)) return false;
   const have = path.split("/").filter(Boolean);
-  return have.length === 0 || have.some((segment) => !segment.startsWith(":"));
+  if (have.length === 0) return true;
+  if (ownPath) return have.some((segment) => !segment.startsWith(":"));
+  const want = surface.split("/").filter(Boolean);
+  return want.some((segment, i) => !/^(?::|\*)/.test(segment) && have[i] !== undefined && !have[i]!.startsWith(":") && segment.toLowerCase() === have[i]!.toLowerCase());
 }
 
 /** Fetched paths by their segments, so a surface finds what might meet it without trying them all. */
@@ -86,9 +96,9 @@ class PathIndex<T> {
   private root: TrieNode<T> = { children: new Map(), values: [] };
   private memo = new Map<string, T[]>();
 
-  add(path: string, value: T) {
+  add(fetched: Fetched, value: T) {
     let node = this.root;
-    for (const segment of indexSegments(path)) {
+    for (const segment of indexSegments(fetched.path)) {
       let next = node.children.get(segment);
       if (!next) {
         next = { children: new Map(), values: [] };
@@ -96,7 +106,7 @@ class PathIndex<T> {
       }
       node = next;
     }
-    node.values.push({ path, value });
+    node.values.push({ fetched, value });
   }
 
   meeting(surface: string): T[] {
@@ -105,12 +115,12 @@ class PathIndex<T> {
     found = [];
     const want = surface.split("/").filter(Boolean);
     const collect = (node: TrieNode<T>) => {
-      for (const entry of node.values) if (bridges(surface, entry.path)) found!.push(entry.value);
+      for (const entry of node.values) if (bridges(surface, entry.fetched.path, entry.fetched.own)) found!.push(entry.value);
       for (const child of node.children.values()) collect(child);
     };
     const visit = (node: TrieNode<T>, at: number) => {
       if (at === want.length) {
-        for (const entry of node.values) if (bridges(surface, entry.path)) found!.push(entry.value);
+        for (const entry of node.values) if (bridges(surface, entry.fetched.path, entry.fetched.own)) found!.push(entry.value);
         return;
       }
       const segment = want[at]!;
@@ -132,7 +142,7 @@ class PathIndex<T> {
 
 interface TrieNode<T> {
   children: Map<string, TrieNode<T>>;
-  values: Array<{ path: string; value: T }>;
+  values: Array<{ fetched: Fetched; value: T }>;
 }
 
 function normal(segment: string): string {

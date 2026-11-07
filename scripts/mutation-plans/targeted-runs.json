@@ -1023,8 +1023,8 @@
     {
       "name": "placeholders alone bridge a fetch",
       "file": "src/reach/adapters/fetch.ts",
-      "find": "return have.length === 0 || have.some((segment) => !segment.startsWith(\":\"));",
-      "replace": "return true;",
+      "find": "if (ownPath) return have.some((segment) => !segment.startsWith(\":\"));",
+      "replace": "if (ownPath) return true;",
       "tests": [
         "test/reach-scan.test.ts"
       ]
@@ -1115,6 +1115,24 @@
       "file": "src/reach/adapters/fetch.ts",
       "find": "surfaces.flatMap((surface) => fetchers.meeting(surface).filter((other) => other.sym !== node.sym))",
       "replace": "[]",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a URL after a base needn't share a word",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "  const want = surface.split(\"/\").filter(Boolean);\n  return want.some((segment, i) =>",
+      "replace": "  const want = surface.split(\"/\").filter(Boolean);\n  return true || want.some((segment, i) =>",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a path from / must share a word",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "own: literal.startsWith(\"/\") && !literal.startsWith(\"//\") };",
+      "replace": "own: false };",
       "tests": [
         "test/reach-scan.test.ts"
       ]
