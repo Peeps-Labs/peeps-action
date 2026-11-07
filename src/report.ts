@@ -145,9 +145,11 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   const batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
   let footprints: { origins: string[]; hiddenRequests: string[]; record: boolean } | undefined;
   if (response.batches.some((b) => b.collectFootprints === true)) {
-    const sources = workspaceTestSources(env.workspace, specFiles);
-    if (sources.maySetTrace) console.log("[peeps] not recording footprints: a test may set its own trace, so every test here reads unknown");
-    footprints = { origins: response.batches.flatMap((b) => b.footprintOrigins ?? []), hiddenRequests: sources.hiddenRequests, record: !sources.maySetTrace };
+    const globalSetups = [list.config.globalSetup ?? []].flat().map((file) => path.relative(env.workspace, path.resolve(rootDirAbs, file)).split(path.sep).join("/"));
+    const sources = await workspaceTestSources(env.workspace, specFiles, globalSetups);
+    for (const { file, why } of sources.reasons.slice(0, 5)) console.log(`[peeps] not recording footprints: ${file}: ${why}`);
+    if (sources.reasons.length > 0) console.log("[peeps] so every test here reads unknown, and always runs");
+    footprints = { origins: response.batches.flatMap((b) => b.footprintOrigins ?? []), hiddenRequests: sources.hiddenRequests, record: sources.reasons.length === 0 };
   }
   if (!answeredNarrowed(response)) {
     await executeAndReport(env, peeps, { rootDir, runs, batches, footprints, executed: reach && { mode: "full", tests: tests.length } });

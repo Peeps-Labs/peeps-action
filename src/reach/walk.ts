@@ -9,7 +9,7 @@ import type { Resolver } from "./text-graph";
 
 export type { Node } from "./convention";
 
-export type Doubt = "module_effect" | "unknown_route" | "global_file" | "global_surface";
+export type Doubt = string;
 
 export interface Walk {
   surfaces: Set<string>;
@@ -23,6 +23,8 @@ export class SymbolGraph {
   private linked: Linked[] = [];
   /** Files a convention needs that aren't parsed yet. */
   neededFiles = new Set<string>();
+  /** Files a convention only wants to read: they aren't affected. */
+  filesToRead = new Set<string>();
 
   constructor(
     private factsByFile: Map<string, FileFacts>,
@@ -48,6 +50,9 @@ export class SymbolGraph {
       bindingOf: (file, local) => this.bindingOf(file, local),
       exportedBinding: (file, imported) => this.aliased(file, imported),
       constant: (file, local) => this.constant(file, local),
+      read: (file) => {
+        if (!facts.has(file)) this.filesToRead.add(file);
+      },
       addEdge: (from, to) => this.addEdge(from, to),
       fileSurface: (file) => this.fileSurface(file),
     };
@@ -252,6 +257,7 @@ export class SymbolGraph {
         if (surface === "/**") doubt ??= "global_surface";
       }
       if (node.sym.effect && served.surfaces.length === 0) doubt ??= "module_effect";
+      for (const linked of this.linked) doubt ??= linked.doubt?.(node) ?? null;
       const next = [...(this.dependents.get(node.sym) ?? [])];
       for (const linked of this.linked) next.push(...(linked.dependents?.(node, served.surfaces) ?? []));
       for (const dependent of next) {

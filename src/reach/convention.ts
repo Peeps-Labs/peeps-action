@@ -37,12 +37,16 @@ export interface GraphView {
   exportedBinding(file: string, imported: string): { file: string; name: string } | null;
   /** The string a local name holds. A file not yet parsed is asked for, and read next round. */
   constant(file: string, local: string): string | null;
+  /** Asks for a file's facts next round, without treating it as affected. */
+  read(file: string): void;
   /** `to` uses `from`. */
   addEdge(from: Sym, to: Node): void;
   fileSurface(file: string): string | null;
 }
 
 export interface Linked {
+  /** Reaching this symbol can't be bounded, and why. */
+  doubt?(node: Node): string | null;
   /** What this symbol serves, beyond its file. */
   surfacesOf?(node: Node): Served;
   /** Who else depends on this symbol, in ways imports don't show. */
@@ -52,8 +56,8 @@ export interface Linked {
 }
 
 export interface Convention {
-  /** Sees every source file's text in the first pass, comments gone. */
-  scanText?(file: string, text: string): void;
+  /** Sees every source file in the first pass. */
+  scanSource?(file: string, source: ts.SourceFile): void;
   /** Why this tree can't be read by its routes, if it can't. */
   refusal?(): string | null;
   /** This file is the framework's to read, whatever it looks like: it isn't a mere document. */
@@ -64,6 +68,8 @@ export interface Convention {
   isGlobalSymbol?(file: string): boolean;
   /** The surface a file is by its path alone, present or deleted. */
   fileSurface?(file: string): string | null;
+  /** What a change took away named a route no surface of the new tree can recover. */
+  removesRoute?(removed: string[], added: string[]): boolean;
   /** Any node of a symbol. True when it has read that node whole. */
   readNode?(node: ts.Node, sym: Sym, context: ReadContext): boolean;
   /** A top-level binding. True when it has read the initializer whole. */

@@ -24,9 +24,8 @@ const MAX_PATH_LENGTH = 512;
 const MAX_REQUEST_BYTES = 900_000;
 const MAX_REQUEST_EVENTS = 500;
 
-const STATIC_MIME = /^(?:image\/|font\/|text\/css$|application\/javascript$|text\/javascript$)/;
-/** A type alone doesn't prove a file: `/api/avatar` serving an image is an endpoint. */
-const STATIC_FILE = /\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|woff2?|ttf|otf|eot|css|[cm]?js|map)$/i;
+/** Neither a type nor an extension proves a file: `/api/avatar` and `/env.js` can be handlers. Over the cap, the footprint reads unknown. */
+const APP_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
 const STATIC_PREFIX = "/_next/static/";
 /** A Pages Router client navigation fetches this, not the page's own path. */
 const NEXT_DATA = /^\/_next\/data\/[^/]+\/(.*)\.json$/;
@@ -180,7 +179,8 @@ export function footprintFromText(traces: Array<TraceText | null>, origins: Foot
   const add = (url: string) => {
     // `page.goto("/cart")` is in the trace as written.
     const parsed = new URL(url, origins.baseUrls.find((base) => hostnameOf(base)));
-    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !isApp(parsed.hostname)) return;
+    // A WebSocket's route is in the trace too.
+    if (!APP_PROTOCOLS.has(parsed.protocol) || !isApp(parsed.hostname)) return;
     for (const path of requestPaths(parsed.href)) {
       if (path.startsWith(STATIC_PREFIX)) continue;
       if (path.length > MAX_PATH_LENGTH) complete = false;
@@ -198,12 +198,11 @@ export function footprintFromText(traces: Array<TraceText | null>, origins: Foot
           if (line === "") continue;
           const event = JSON.parse(line) as {
             type?: string;
-            snapshot?: { request?: { url?: string }; response?: { content?: { mimeType?: string } } };
+            snapshot?: { request?: { url?: string } };
           };
           if (event.type !== "resource-snapshot" || !event.snapshot?.request?.url) continue;
           sawNetwork = true;
-          const mime = event.snapshot.response?.content?.mimeType?.split(";")[0]?.trim() ?? "";
-          if (!STATIC_MIME.test(mime) || !STATIC_FILE.test(new URL(event.snapshot.request.url, "http://x").pathname)) add(event.snapshot.request.url);
+          add(event.snapshot.request.url);
         }
       }
       for (const text of trace.actions) {

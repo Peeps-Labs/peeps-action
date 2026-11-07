@@ -19,7 +19,7 @@ import type { PeepsClient } from "./peeps";
 const execFileAsync = promisify(execFile);
 
 export interface PlaywrightList {
-  config: { rootDir?: string; projects?: Array<{ name: string }> };
+  config: { rootDir?: string; projects?: Array<{ name: string }>; globalSetup?: string | string[] | null };
   suites: PlaywrightSuite[];
 }
 export interface PlaywrightSuite {

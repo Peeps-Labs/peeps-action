@@ -25,7 +25,7 @@ function rootsOf(files: string[], read: (file: string) => string): { roots: stri
     if (CONFIG.test(base)) {
       roots.add(dir);
       try {
-        if (/\b(?:basePath|rewrites|i18n)\b/.test(read(file))) moved = true;
+        if (/\b(?:basePath|rewrites|i18n|pageExtensions)\b/.test(read(file))) moved = true;
       } catch {
         moved = true;
       }

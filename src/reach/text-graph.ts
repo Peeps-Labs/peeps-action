@@ -1,17 +1,22 @@
 /**
- * The first pass: the repository's module graph from the source text alone, with no
- * parser. It answers most changes in seconds, and bounds the files the parser has to
- * read. Type-only imports are not edges: `import type { AppRouter }` would otherwise
- * tie every router to every client. A string naming a tracked file is one, because
- * code reads fixtures and spawns scripts by path.
+ * The first pass: the repository's module graph, read with the parser and thrown away,
+ * so it answers most changes before the symbol pass reads anything. It's the parser and
+ * not a tokenizer of ours because a regex, a template or JSX holding `/*` or `//` kept
+ * hiding the imports after it: a hand-written reader failed on each new form, and this
+ * cost 1 to 2 s on 10,000 files. Type-only imports are not edges: `import type {
+ * AppRouter }` would otherwise tie every router to every client. A string naming a
+ * tracked file is one, because code reads fixtures and spawns scripts by path.
  */
 import path from "node:path/posix";
+import ts from "typescript";
+import { scriptKind } from "./parse";
 
 const SOURCE = /\.[cm]?[jt]sx?$/;
 const EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".jsx", ".json"];
+/** Over this a file isn't parsed for its edges: generated output. Its specifiers are read from the raw text, comments and all, which only adds edges. */
+const MAX_PARSED_BYTES = 1024 * 1024;
 const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)(["'`])([^"'`\n]+)\1/g;
-const PATH_LITERAL = /(["'`])((?:\.{1,2}\/)?[\w@.[\]-]+(?:\/[\w@.[\]()-]+)+|\.{1,2}\/[\w@.[\]()-]+)\1/g;
-const TYPE_ONLY = /\b(?:import|export)\s+type\s+[\w$*{][^;'"`]*?\bfrom\s*["'][^"'\n]+["'];?/g;
+const PATH_SHAPE = /^(?:(?:\.{1,2}\/)?[\w@.[\]-]+(?:\/[\w@.[\]()-]+)+|\.{1,2}\/[\w@.[\]()-]+)$/;
 
 /** tsconfig is JSONC, and `"**\/*.ts"` looks like a block comment to a naive regex. */
 export function stripJsonComments(text: string): string {
@@ -34,83 +39,6 @@ export function stripJsonComments(text: string): string {
     }
   }
   return out.replace(/,(\s*[}\]])/g, "$1");
-}
-
-/** The source with comments blanked and strings kept, so a path in a comment is no edge. */
-export function stripComments(text: string): string {
-  let out = "";
-  let last = "";
-  // The word just before: a regex can follow `return`, and a division can't follow `)`.
-  let word = "";
-  let spaced = false;
-  let i = 0;
-  while (i < text.length) {
-    const c = text[i]!;
-    const next = text[i + 1];
-    if (c === "/" && next === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-    } else if (c === "/" && next === "*") {
-      const end = text.indexOf("*/", i + 2);
-      // Unclosed isn't a comment, and blanking the rest of a file would hide what's in it.
-      if (end === -1) {
-        out += c;
-        last = c;
-        i++;
-      } else {
-        i = end + 2;
-        out += " ";
-      }
-    } else if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1;
-      while (j < text.length && text[j] !== c && !(c !== "`" && text[j] === "\n")) j += text[j] === "\\" ? 2 : 1;
-      out += text.slice(i, j + 1);
-      last = c;
-      i = j + 1;
-    } else if (c === "/" && startsExpression(last, word)) {
-      const end = regexEnd(text, i);
-      if (end === -1) {
-        out += c;
-        last = c;
-        i++;
-      } else {
-        out += " ";
-        last = "/";
-        i = end;
-      }
-    } else {
-      out += c;
-      if (c === " " || c === "\n" || c === "\t" || c === "\r") spaced = true;
-      else {
-        last = c;
-        const inWord = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_" || c === "$";
-        word = inWord ? (spaced ? c : word + c) : "";
-        spaced = false;
-      }
-      i++;
-    }
-  }
-  return out;
-}
-
-const BEFORE_EXPRESSION = new Set(["return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "do", "else", "yield", "await"]);
-
-/** Whether a `/` here begins a regex, not a division. `<` is left out: `</div>`. */
-function startsExpression(last: string, word: string): boolean {
-  return last === "" || "(,=:[!&|?{};+-*%~^".includes(last) || BEFORE_EXPRESSION.has(word);
-}
-
-/** Past a regex literal starting at `start`, or -1 when none closes on its line. */
-function regexEnd(text: string, start: number): number {
-  let inClass = false;
-  for (let i = start + 1; i < text.length; i++) {
-    const c = text[i];
-    if (c === "\n") return -1;
-    if (c === "\\") i++;
-    else if (c === "[") inClass = true;
-    else if (c === "]") inClass = false;
-    else if (c === "/" && !inClass) return i + 1;
-  }
-  return -1;
 }
 
 interface TsConfig {
@@ -201,17 +129,55 @@ export class Resolver {
   }
 }
 
-/** The tracked files this text names: by a module specifier, or a string holding a path. */
-export function referencedFiles(file: string, text: string, resolver: Resolver, onPackage?: (spec: string) => void): Set<string> {
+/** The tracked files this source names at run time: by a module specifier, or a string holding a path. */
+function referencedFiles(file: string, source: ts.SourceFile, resolver: Resolver, onPackage: (spec: string) => void): Set<string> {
   const edges = new Set<string>();
-  const runtime = text.replace(TYPE_ONLY, " ");
-  for (const match of runtime.matchAll(SPECIFIER)) {
-    const target = resolver.resolve(file, match[2]!);
+  const specifier = (spec: string) => {
+    const target = resolver.resolve(file, spec);
     if (target) edges.add(target);
-    else onPackage?.(match[2]!);
-  }
-  for (const match of runtime.matchAll(PATH_LITERAL)) {
-    const target = resolver.resolveLiteral(file, match[2]!);
+    else onPackage(spec);
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isTypeNode(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return;
+    if (ts.isImportDeclaration(node)) {
+      const clause = node.importClause;
+      const bindings = clause?.namedBindings;
+      const onlyTypes = clause?.isTypeOnly || (clause && !clause.name && bindings && ts.isNamedImports(bindings) && bindings.elements.length > 0 && bindings.elements.every((element) => element.isTypeOnly));
+      if (!onlyTypes && ts.isStringLiteralLike(node.moduleSpecifier)) specifier(node.moduleSpecifier.text);
+      return;
+    }
+    if (ts.isExportDeclaration(node)) {
+      if (!node.isTypeOnly && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) specifier(node.moduleSpecifier.text);
+      if (node.moduleSpecifier) return;
+    }
+    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) && ts.isStringLiteralLike(node.moduleReference.expression)) {
+      specifier(node.moduleReference.expression.text);
+      return;
+    }
+    if (ts.isCallExpression(node) && node.arguments[0] && ts.isStringLiteralLike(node.arguments[0])) {
+      const callee = node.expression;
+      if (callee.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(callee) && callee.text === "require")) {
+        specifier(node.arguments[0].text);
+        return;
+      }
+    }
+    if (ts.isStringLiteralLike(node) && PATH_SHAPE.test(node.text)) {
+      const target = resolver.resolveLiteral(file, node.text);
+      if (target) edges.add(target);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  edges.delete(file);
+  return edges;
+}
+
+/** What a file too large to parse names, from its raw text. */
+function referencedInRawText(file: string, text: string, resolver: Resolver): Set<string> {
+  const edges = new Set<string>();
+  for (const match of text.matchAll(SPECIFIER)) {
+    const target = resolver.resolve(file, match[2]!);
     if (target) edges.add(target);
   }
   edges.delete(file);
@@ -228,7 +194,7 @@ export interface TextGraph {
   resolver: Resolver;
 }
 
-export function buildTextGraph(files: string[], read: (file: string) => string, tick: () => void, scanText: (file: string, text: string) => void): TextGraph {
+export function buildTextGraph(files: string[], read: (file: string) => string, tick: () => void, scanSource: (file: string, source: ts.SourceFile) => void): TextGraph {
   const tracked = new Set(files);
   const resolver = new Resolver(tracked, read);
   const forward = new Map<string, Set<string>>();
@@ -240,7 +206,7 @@ export function buildTextGraph(files: string[], read: (file: string) => string, 
     tick();
     let text: string;
     try {
-      text = stripComments(read(file));
+      text = read(file);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT" || code === "EISDIR") {
@@ -249,16 +215,21 @@ export function buildTextGraph(files: string[], read: (file: string) => string, 
       }
       throw error;
     }
-    const edges = referencedFiles(file, text, resolver, (spec) => {
-      if (!spec.startsWith(".")) packages.add(spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!);
-    });
+    let edges: Set<string>;
+    if (text.length > MAX_PARSED_BYTES) edges = referencedInRawText(file, text, resolver);
+    else {
+      const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, scriptKind(file));
+      edges = referencedFiles(file, source, resolver, (spec) => {
+        if (!spec.startsWith(".")) packages.add(spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!);
+      });
+      scanSource(file, source);
+    }
     forward.set(file, edges);
     for (const target of edges) {
       const importers = reverse.get(target);
       if (importers) importers.add(file);
       else reverse.set(target, new Set([file]));
     }
-    scanText(file, text);
   }
   return { forward, reverse, unread, packages, resolver };
 }

@@ -557,15 +557,6 @@ test("a server fetching its own absolute URL is bridged, by the path", () => {
   bounded(run(tree, [lineChange("app/api/orders/route.ts", 1)]), ["/a", "/api/orders", "/b", "/c", "/d"]);
 });
 
-test("another API's URL, all placeholders where the route has words, isn't the route", () => {
-  const tree = {
-    ...NEXT,
-    "app/[org]/settings/[project]/repo/page.tsx": "export default function P() {}\n",
-    "lib/github.ts": "export const hooks = (o, r, id) => fetch(`${GITHUB}/repos/${o}/${r}/${id}`);\nregister(hooks);\n",
-  };
-  bounded(run(tree, [lineChange("app/[org]/settings/[project]/repo/page.tsx", 1)]), ["/:org/settings/:project/repo"]);
-});
-
 test("a regex can't start a comment and hide what comes after", () => {
   const tree = {
     ...NEXT,
@@ -643,6 +634,156 @@ test("a global reach stays under the announce's cap too", () => {
   global(reach, "too_many_files");
   assert.ok(Buffer.byteLength(JSON.stringify(reach)) <= 256 * 1024);
   assert.deepEqual(reach.changedFiles, [], "better no list than a refused announce");
+});
+
+// ---------------------------------------------------------------------------
+// Second reviews: what the scanner doesn't positively understand reads as unknown
+// ---------------------------------------------------------------------------
+
+function hunk(file: string, line: number, removed: string[], added: string[]): FileChange {
+  return { path: file, status: "modified", binary: false, hunks: [{ newStart: line, newCount: added.length, removed, added }] };
+}
+
+const SERVER = {
+  "package.json": "{}\n",
+  "server.js": 'const express = require("express");\nconst app = express();\napp.get("/basket", (req, res) => res.send(1));\napp.post("/keep", (req, res) => res.send(2));\n',
+};
+
+test("a route's path changing can't lose the old one", () => {
+  global(run(SERVER, [hunk("server.js", 3, ['app.get("/cart", (req, res) => res.send(1));'], ['app.get("/basket", (req, res) => res.send(1));'])]), "removed_route");
+  global(run(SERVER, [hunk("server.js", 4, ['app.delete("/gone", h);'], [])]), "removed_route");
+  bounded(run(SERVER, [hunk("server.js", 3, ['app.get("/basket", (req, res) => res.send(0));'], ['app.get("/basket", (req, res) => res.send(1));'])]), ["/basket"]);
+});
+
+test("a procedure's name changing can't lose the old one", () => {
+  const tree = { ...TRPC };
+  global(run(tree, [hunk("server/routers/runs.ts", 5, ["  fetch: publicProcedure.query(() => 2),"], ["  get: publicProcedure.query(() => 2),"])]), "removed_route");
+});
+
+test("a spec importing the server doesn't make the app the tests' alone", () => {
+  const tree = {
+    ...SERVER,
+    "app/cart.js": 'const router = require("express").Router();\nrouter.get("/cart", (req, res) => res.send(1));\nmodule.exports = router;\n',
+    "server.js": 'const express = require("express");\nconst app = express();\napp.use("/", require("./app/cart"));\napp.listen(3000);\n',
+    "e2e/a.spec.ts": 'import "../server";\ntest("x", () => {});\n',
+    "e2e/pages/p.ts": 'export function P() {}\nsetup(P);\n',
+    "e2e/b.spec.ts": 'import { P } from "./pages/p";\ntest("x", P);\n',
+  };
+  const input = { specFiles: ["e2e/a.spec.ts", "e2e/b.spec.ts"] };
+  const cart = run(tree, [lineChange("app/cart.js", 2)], input);
+  bounded(cart, ["/cart"]);
+  assert.deepEqual(cart.changedTestFiles, ["app/cart.js"]);
+  bounded(run(tree, [lineChange("e2e/pages/p.ts", 1)], input), []);
+});
+
+const FETCHES = (body: string) => ({
+  ...NEXT,
+  "lib/x.ts": "export function x() { return 1; }\n",
+  "app/a/page.tsx": `import { x } from "../../lib/x";\nexport default async function P() { x(); ${body} }\n`,
+});
+
+for (const [why, body] of [
+  ["a variable", "return fetch(url);"],
+  ["a computed call", "return globalThis.fetch(url);"],
+  ["all placeholders", "return fetch(`${a}${b}`);"],
+  ["a client's computed path", 'return axios.get(url);'],
+] as const) {
+  test(`reached server code requesting ${why} can't be bounded`, () => {
+    const tree = FETCHES(body);
+    global(run(tree, [lineChange("lib/x.ts", 1)]), "unresolved_request");
+  });
+}
+
+test("what a browser runs is the trace's business, not an unresolved request", () => {
+  const tree = { ...FETCHES("return 1;"), "components/c.tsx": '"use client";\nimport { x } from "../lib/x";\nexport function C() { x(); return fetch(url); }\n', "app/b/page.tsx": 'import { C } from "../../components/c";\nexport default function P() { return C(); }\n' };
+  bounded(run(tree, [lineChange("lib/x.ts", 1)]), ["/a", "/b"]);
+});
+
+test("a base before a path is that path, however it's written, with a client instance too", () => {
+  const route = { ...NEXT, "app/api/orders/route.ts": "export async function GET() {}\n" };
+  const tree = {
+    ...route,
+    "app/a/page.tsx": 'export default async function P() { return fetch(API + "/api/orders"); }\n',
+    "app/b/page.tsx": 'export default async function P() { return globalThis.fetch(`${c["api"]}/api/orders`); }\n',
+    "lib/http.ts": 'import axios from "axios";\nexport const api = axios.create({});\n',
+    "app/c/page.tsx": 'import { api } from "../../lib/http";\nexport default async function P() { return api.get("/api/orders"); }\n',
+    "app/d/page.tsx": 'export default async function P() { return fetch("/api/other"); }\n',
+  };
+  bounded(run(tree, [lineChange("app/api/orders/route.ts", 1)]), ["/a", "/api/orders", "/b", "/c"]);
+});
+
+test("a fetch of nothing but placeholders doesn't bridge, one with a word does", () => {
+  const tree = {
+    ...NEXT,
+    "app/[org]/[project]/page.tsx": "export default function P() {}\n",
+    "app/a/page.tsx": 'const f = (a, b) => fetch(`/${a}/${b}`);\nexport default function P() { return f; }\n',
+    "app/b/page.tsx": 'const f = (a) => fetch(`/x/${a}`);\nexport default function P() { return f; }\n',
+  };
+  bounded(run(tree, [lineChange("app/[org]/[project]/page.tsx", 1)]), ["/:org/:project", "/b"]);
+});
+
+test("a fetch with a placeholder bridges a route with a word there", () => {
+  const tree = {
+    ...NEXT,
+    "app/api/orders/export/route.ts": "export async function GET() {}\n",
+    "app/a/page.tsx": "export default async function P() { return fetch(`/api/orders/${id}`); }\n",
+  };
+  bounded(run(tree, [lineChange("app/api/orders/export/route.ts", 1)]), ["/a", "/api/orders/export"]);
+});
+
+test("a document something reads isn't only a document", () => {
+  const tree = { ...NEXT, "docs/prompt.md": "x\n", "lib/p.ts": 'export const p = "docs/prompt.md";\n', "app/a/page.tsx": 'import { p } from "../../lib/p";\nexport default function P() { return p; }\n' };
+  bounded(run(tree, [lineChange("docs/prompt.md", 1)]), ["/a"]);
+});
+
+test("a dynamic import through an alias is an edge", () => {
+  const tree = {
+    ...NEXT,
+    "tsconfig.json": '{ "compilerOptions": { "baseUrl": ".", "paths": { "~/*": ["./src/*"] } } }\n',
+    "src/lib/x.ts": "export function x() {}\n",
+    "app/a/page.tsx": 'const L = () => import("~/lib/x");\nexport default function P() { return L; }\n',
+  };
+  bounded(run(tree, [lineChange("src/lib/x.ts", 1)]), ["/a"]);
+});
+
+test("the bridges stay fast on a large tree", () => {
+  const tree: Record<string, string> = { ...NEXT, "lib/x.ts": "export function x() {}\n", "app/api/orders/route.ts": 'import { x } from "../../../lib/x";\nexport async function GET() { return x(); }\n' };
+  for (let i = 0; i < 6000; i++) tree[`app/p${i}/page.tsx`] = `import { x } from "../../lib/x";\nexport default async function P() { x(); return fetch("/api/p${i}"); }\n`;
+  const started = Date.now();
+  const reach = run(tree, [lineChange("lib/x.ts", 1)]);
+  assert.equal(reach.global, true, "too many surfaces");
+  assert.ok(Date.now() - started < 30_000, `took ${Date.now() - started} ms`);
+});
+
+for (const path of ["/users{/:id}", "/user-:id", "/v:version/x", "/a/*/b", "/x(y)?"]) {
+  test(`Express: ${path} isn't a matcher this reads`, () => {
+    const tree = { "package.json": "{}\n", "s.js": `const app = require("express")();\nfunction h() {}\napp.get(${JSON.stringify(path)}, h);\n` };
+    global(run(tree, [lineChange("s.js", 2)]), "unknown_route");
+  });
+}
+
+test("custom pageExtensions aren't routes this reads", () => {
+  const tree = { "package.json": '{"dependencies":{"next":"16"}}\n', "next.config.js": 'module.exports = { pageExtensions: ["page.tsx"] };\n', "app/a/page.tsx": "export default function P() {}\n" };
+  global(run(tree, [lineChange("app/a/page.tsx", 1)]), "next_config_routing");
+});
+
+for (const [why, body] of [
+  ["after an escaped slash in a division-looking place", 'const r = (x) / 2; const s = "a".split(/\\/*/);\nconst L = () => import("../../lib/x");\n/* later */'],
+  ["after a block", 'function g() {}\n/\\/*x/.test(a);\nconst L = () => import("../../lib/x");\n/* later */'],
+  ["after a string and an increment", 'let i = 0; i++ / 2; const q = "return" / 2;\nconst L = () => import("../../lib/x");'],
+  ["in JSX", 'const j = <a href="/*">http://x</a>;\nconst L = () => import("../../lib/x");\n/* later */'],
+] as const) {
+  test(`what follows reads whole: ${why}`, () => {
+    const tree = { ...NEXT, "lib/x.ts": "export function x() {}\n", "app/a/page.tsx": `${body}\nexport default function P() { return L; }\n` };
+    bounded(run(tree, [lineChange("lib/x.ts", 1)]), ["/a"]);
+  });
+}
+
+test("a source file is never a document, and a markdown file only where documents live", () => {
+  const tree = { "package.json": "{}\n", "docs/server.js": 'require("http").createServer();\n', "content/post.md": "# x\n", "docs/guide.md": "# x\n", "src/README.md": "# x\n", ".claude/notes.md": "x\n", "CHANGELOG.md": "x\n" };
+  global(run(tree, [lineChange("docs/server.js", 1)]));
+  global(run(tree, [lineChange("content/post.md", 1)]), "unplaced_file");
+  for (const file of ["docs/guide.md", "src/README.md", ".claude/notes.md", "CHANGELOG.md"]) bounded(run(tree, [lineChange(file, 1)]), []);
 });
 
 test("instrumentation is a composition root: reaching it is global", () => {

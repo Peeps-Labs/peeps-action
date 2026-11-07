@@ -170,8 +170,7 @@ var MAX_FOOTPRINT_PATHS = 300;
 var MAX_PATH_LENGTH = 512;
 var MAX_REQUEST_BYTES = 9e5;
 var MAX_REQUEST_EVENTS = 500;
-var STATIC_MIME = /^(?:image\/|font\/|text\/css$|application\/javascript$|text\/javascript$)/;
-var STATIC_FILE = /\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|woff2?|ttf|otf|eot|css|[cm]?js|map)$/i;
+var APP_PROTOCOLS = /* @__PURE__ */ new Set(["http:", "https:", "ws:", "wss:"]);
 var STATIC_PREFIX = "/_next/static/";
 var NEXT_DATA = /^\/_next\/data\/[^/]+\/(.*)\.json$/;
 var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -268,7 +267,7 @@ function footprintFromText(traces, origins) {
   let sawNetwork = false;
   const add = (url) => {
     const parsed = new URL(url, origins.baseUrls.find((base) => hostnameOf(base)));
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:" || !isApp(parsed.hostname)) return;
+    if (!APP_PROTOCOLS.has(parsed.protocol) || !isApp(parsed.hostname)) return;
     for (const path4 of requestPaths(parsed.href)) {
       if (path4.startsWith(STATIC_PREFIX)) continue;
       if (path4.length > MAX_PATH_LENGTH) complete = false;
@@ -287,8 +286,7 @@ function footprintFromText(traces, origins) {
           const event = JSON.parse(line);
           if (event.type !== "resource-snapshot" || !event.snapshot?.request?.url) continue;
           sawNetwork = true;
-          const mime = event.snapshot.response?.content?.mimeType?.split(";")[0]?.trim() ?? "";
-          if (!STATIC_MIME.test(mime) || !STATIC_FILE.test(new URL(event.snapshot.request.url, "http://x").pathname)) add(event.snapshot.request.url);
+          add(event.snapshot.request.url);
         }
       }
       for (const text of trace.actions) {

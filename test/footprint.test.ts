@@ -78,17 +78,12 @@ test("a file that isn't a zip throws, so the caller reads it as unknown", async 
   assert.throws(() => readZip(file, () => true));
 });
 
-test("a trace's requests and navigations are the footprint; assets are dropped by mime type and prefix", async (t) => {
+test("a trace's requests and navigations are the footprint", async (t) => {
   const file = await traceFile(t, {
     "trace.network": {
       text: network(
         ["https://app.example.com/cart?x=1#y", "text/html; charset=utf-8"],
         ["https://app.example.com/api/cart", "application/json"],
-        ["https://app.example.com/logo.png", "image/png"],
-        ["https://app.example.com/f.woff2", "font/woff2"],
-        ["https://app.example.com/s.css", "text/css"],
-        ["https://app.example.com/a.js", "application/javascript"],
-        ["https://app.example.com/b.js", "text/javascript; charset=UTF-8"],
         ["https://app.example.com/_next/static/chunk.bin", "application/octet-stream"],
         ["https://app.example.com/redirected", undefined],
       ),
@@ -197,71 +192,163 @@ test("what's sent says its attempt, and a repeated test is never whole", () => {
   assert.equal(sentFootprint({ paths: [], complete: false }, [], { retry: 0, repeatEachIndex: 0, repeatEach: 1, hiddenRequests: false }).complete, false);
 });
 
-function sources(tree: Record<string, string>, ...specs: string[]) {
-  return readTestSources(specs, Object.keys(tree), (file) => {
+const PW = 'import { test, expect } from "@playwright/test";\n';
+
+function sources(tree: Record<string, string>, specs: string[], globalSetups: string[] = []) {
+  return readTestSources(specs, globalSetups, Object.keys(tree), (file) => {
     const text = tree[file];
     if (text === undefined) throw new Error("gone");
     return text;
   });
 }
+const one = (text: string, extra: Record<string, string> = {}) => sources({ "e/a.spec.ts": text, ...extra }, ["e/a.spec.ts"]);
 
-test("whether a test may set its own trace, through what specs import", () => {
-  const tree: Record<string, string> = {
-    "e2e/a.spec.ts": 'import { h } from "./h";\ntest("x", h);\n',
-    "e2e/h.ts": "export const h = 1;\n",
-    "e2e/own.spec.ts": 'test.use({ trace: "on" });\n',
-    "e2e/quiet.spec.ts": '// test.use({ trace: "on" })\nconst text = "trace";\n',
-    "e2e/short.spec.ts": "const trace = 'on';\ntest.use({ trace });\n",
-    "e2e/imports.spec.ts": 'import "./own.spec";\n',
-    "unrelated.ts": 'x({ trace: "on" });\n',
-  };
-  const ask = (...specs: string[]) => sources(tree, ...specs).maySetTrace;
-  assert.equal(ask("e2e/a.spec.ts", "e2e/quiet.spec.ts"), false, "nothing reachable sets it; comments and strings don't count");
-  assert.equal(ask("e2e/own.spec.ts"), true);
-  assert.equal(ask("e2e/short.spec.ts"), true, "shorthand");
-  assert.equal(ask("e2e/imports.spec.ts"), true, "through an import");
-  assert.equal(ask("e2e/gone.spec.ts"), true, "a file it can't read is a doubt");
-});
-
-for (const [why, text, expected] of [
-  ["its own tracing", "test('x', async ({ context }) => { await context.tracing.start(); });", true],
-  ["a quoted key", `test.use({ 'trace': 'on' });`, true],
-  ["a double-quoted key", `test.use({ "trace": "on" });`, true],
-  ["a computed literal key", `test.use({ ["trace"]: "on" });`, true],
-  ["a computed key", `const k = "tr" + "ace"; test.use({ [k]: "on" });`, true],
-  ["a spread", `import cfg from "./cfg.json";\ntest.use({ ...cfg });`, true],
-  ["a spread of the environment", `test.use({ ...JSON.parse(process.env.X!) });`, true],
-  ["a value that isn't a literal", `test.use(options);`, true],
-  ["extend with a value", `const t = base.extend(fixtures);`, true],
-  ["extend with a spread", `const t = base.extend({ ...fixtures });`, true],
-  ["a package's test", `import { test } from "@acme/fixtures";\ntest("x", () => {});`, true],
-  ["a package's test by another name", `import { fixtures as test } from "acme";`, true],
-  ["a package's default", `import test from "@acme/fixtures";`, true],
-  ["a required test", `const { test } = require("@acme/fixtures");`, true],
-  ["a package with no bindings", `import "@acme/setup";`, true],
-  ["a relative import that resolves nowhere", `import x from "./generated";`, true],
-  ["a rule hidden after a regex", `const a = x.replace(/\\/*$/, "");\ntest.use({ trace: "on" });`, true],
-  ["Playwright's own test", `import { test, expect } from "@playwright/test";\ntest("x", () => {});`, false],
-  ["a library", `import { faker } from "@faker-js/faker";\nimport path from "node:path";`, false],
-  ["a literal use", `test.use({ viewport: { width: 1, height: 2 }, locale: "en" });`, false],
-  ["extend with fixtures that spread inside", `const t = base.extend({ page: async ({ page }, use) => { const a = [...b]; await use(page); } });`, false],
-  ["a fixture calling use", `await use(page);`, false],
+for (const [why, text] of [
+  ["Playwright's test", `${PW}test("x", async () => {});`],
+  ["aliased", 'import { test as it } from "@playwright/test";\nit("x", async () => {});'],
+  ["a namespace", 'import * as pw from "@playwright/test";\npw.test("x", async () => {});'],
+  ["required", 'const { test } = require("@playwright/test");\ntest("x", async () => {});'],
+  ["a library's extend", `${PW}import dayjs from "dayjs";\ndayjs.extend(utc);\napp.use(cors());\ntest("x", async () => {});`],
+  ["a package's helpers", `${PW}import AxeBuilder from "@axe-core/playwright";\nimport "dotenv/config";\ntest("x", async ({ page }) => { await new AxeBuilder({ page }).analyze(); });`],
+  ["a device spread", `import { test, devices } from "@playwright/test";\ntest.use({ ...devices["iPhone 13"] });\ntest("x", async () => {});`],
+  ["a literal use", `${PW}test.use({ viewport: { width: 1, height: 2 }, locale: "en" });\ntest("x", async () => {});`],
+  ["an array in value position", `${PW}test.use({ permissions: ["clipboard-read"], launchOptions: { args: ["--x"] } });\ntest("x", async () => {});`],
+  ["a helper with a title and a callback", `${PW}function step(t, f) {}\nstep("a", () => {});\ntest("x", async () => {});`],
+  ["its own trace mentioned in a string", `${PW}// test.use({ trace: "on" })\nconst t = "trace: on";\ntest("x", async () => {});`],
 ] as const) {
-  test(`own trace: ${why} reads ${expected}`, () => {
-    assert.equal(sources({ "e/a.spec.ts": text }, "e/a.spec.ts").maySetTrace, expected);
+  test(`records: ${why}`, () => {
+    assert.deepEqual(one(text).reasons, []);
   });
 }
 
-test("requests a trace can't see: a spec whose closure may make them can't claim a whole footprint", () => {
-  const tree: Record<string, string> = {
-    "e/hook.spec.ts": `test.beforeAll(async () => {});`,
-    "e/node.spec.ts": `import { api } from "./client";\ntest("x", api);`,
-    "e/client.ts": `export const api = () => fetch("http://x/y");`,
-    "e/axios.spec.ts": `import axios from "axios";\naxios.get("/x");`,
-    "e/http.spec.ts": `import http from "node:http";\nhttp.request("x");`,
-    "e/clean.spec.ts": `test("x", async ({ page, request }) => { await page.route("**", (r) => r.fetch()); await request.get("/x"); });`,
-  };
-  assert.deepEqual(sources(tree, "e/hook.spec.ts", "e/node.spec.ts", "e/axios.spec.ts", "e/http.spec.ts", "e/clean.spec.ts").hiddenRequests.sort(), ["e/axios.spec.ts", "e/hook.spec.ts", "e/http.spec.ts", "e/node.spec.ts"]);
+const FIXTURES = `import { test as base } from "@playwright/test";
+export const test = base.extend({ a: async ({}, use) => { await use(1); }, b: [async ({}, use) => { await use(2); }, { auto: true }] });
+export { expect } from "@playwright/test";
+`;
+
+test("records: a local file extending Playwright's test, through a re-export, a star, an alias and merged tests", () => {
+  const cases: Array<Record<string, string>> = [
+    { "e/f.ts": FIXTURES },
+    { "e/f.ts": 'export { test } from "./g";\n', "e/g.ts": FIXTURES },
+    { "e/f.ts": 'export { test, expect } from "@playwright/test";\n' },
+    { "e/f.ts": 'export * from "./g";\n', "e/g.ts": FIXTURES },
+    { "e/f.ts": 'import { test as base } from "@playwright/test";\nconst more = base.extend({});\nexport { more as test };\n' },
+    { "e/f.ts": 'import { test as a, mergeTests } from "@playwright/test";\nexport const test = mergeTests(a, a.extend({}));\n' },
+    { "e/f.ts": 'import { test as a } from "@playwright/test";\nexport const test = a.extend({}).extend({});\n' },
+  ];
+  for (const extra of cases) {
+    assert.deepEqual(one('import { test } from "./f";\ntest("x", async () => {});', extra).reasons, [], JSON.stringify(extra));
+  }
+});
+
+for (const [why, text, extra] of [
+  ["a package's test", 'import { test } from "@acme/fixtures";\ntest("x", async () => {});', {}],
+  ["a package's test beside Playwright's", `${PW}import { authedTest } from "@acme/e2e";\ntest("x", async () => {});\nauthedTest("y", async () => {});`, {}],
+  ["a package's test under another name", 'import { authedTest } from "@acme/e2e";\nauthedTest("x", async () => {});', {}],
+  ["a package's namespace", 'import * as e2e from "@acme/e2e";\ne2e.test("x", async () => {});', {}],
+  ["a package's default", 'import test from "@acme/fixtures";\ntest("x", async () => {});', {}],
+  ["required from a package", 'const { test } = require("@acme/fixtures");\ntest("x", async () => {});', {}],
+  ["re-exported from a package", 'import { test } from "./f";\ntest("x", async () => {});', { "e/f.ts": 'export { test } from "@acme/e2e";\n' }],
+  ["imported late", 'const { test } = await import("@acme/e2e");\ntest("x", async () => {});', {}],
+  ["no test at all", 'import { helper } from "@acme/e2e";\nhelper();', {}],
+  ["a local wrapper around something else", 'import { test } from "./f";\ntest("x", async () => {});', { "e/f.ts": 'export const test = make();\n' }],
+  ["its own trace", `${PW}test.use({ trace: "on" });\ntest("x", async () => {});`, {}],
+  ["a shorthand trace", `${PW}const trace = "on";\ntest.use({ trace });\ntest("x", async () => {});`, {}],
+  ["a quoted key", `${PW}test.use({ "trace": "on" });\ntest("x", async () => {});`, {}],
+  ["a computed literal key", `${PW}test.use({ ["trace"]: "on" });\ntest("x", async () => {});`, {}],
+  ["a computed key", `${PW}test.use({ [k]: "on" });\ntest("x", async () => {});`, {}],
+  ["a spread", `${PW}import cfg from "./cfg.json";\ntest.use({ ...cfg });\ntest("x", async () => {});`, { "e/cfg.json": "{}" }],
+  ["a value", `${PW}test.use(options);\ntest("x", async () => {});`, {}],
+  ["extend with a value", `${PW}const t = test.extend(fixtures);\nt("x", async () => {});`, {}],
+  ["extend with a trace fixture", `${PW}const t = test.extend({ trace: "on" });\nt("x", async () => {});`, {}],
+  ["a helper's use", 'import { test } from "./f";\ntest("x", async () => {});', { "e/f.ts": 'import { test } from "@playwright/test";\ntest.use({ trace: "on" });\nexport { test };\n' }],
+  ["its own tracing", `${PW}test("x", async ({ context }) => { await context.tracing.start(); });`, {}],
+  ["tracing off a call", `${PW}test("x", async ({ page }) => { await page.context().tracing.start(); });`, {}],
+] as const) {
+  test(`doesn't record: ${why}, and says where`, () => {
+    const found = one(text, extra);
+    assert.ok(found.reasons.length > 0, "should read as a doubt");
+    assert.match(found.reasons[0]!.file, /^e\//);
+    assert.ok(found.reasons[0]!.why.length > 0);
+  });
+}
+
+test("a spec that can't be read, or doesn't parse, is a doubt", () => {
+  assert.ok(sources({}, ["e/gone.spec.ts"]).reasons.length > 0);
+  assert.ok(one("export default function P( {{{").reasons.length > 0);
+});
+
+for (const [why, text, extra] of [
+  ["a beforeAll", `${PW}test.beforeAll(async () => {});\ntest("x", async () => {});`, {}],
+  ["Node's fetch", `${PW}test("x", async () => { await fetch("http://x/y"); });`, {}],
+  ["globalThis.fetch", `${PW}test("x", async () => { await globalThis.fetch("http://x/y"); });`, {}],
+  ["axios", `${PW}import axios from "axios";\ntest("x", async () => { await axios.get("/x"); });`, {}],
+  ["got", `${PW}import got from "got";\ntest("x", async () => { await got("/x"); });`, {}],
+  ["ky", `${PW}import ky from "ky";\ntest("x", async () => { await ky.get("/x"); });`, {}],
+  ["ofetch", `${PW}import { ofetch as $f } from "ofetch";\ntest("x", async () => { await $f("/x"); });`, {}],
+  ["supertest", `${PW}import st from "supertest";\ntest("x", async () => { await st(app).get("/x"); });`, {}],
+  ["a named node:http", `${PW}import { request as r } from "node:http";\ntest("x", async () => { r("x"); });`, {}],
+  ["an aliased https", `${PW}import { get as g } from "https";\ntest("x", async () => { g("x"); });`, {}],
+  ["curl", `${PW}import { execSync } from "node:child_process";\ntest("x", async () => { execSync("curl x"); });`, {}],
+  ["a required client", `${PW}const got = require("got");\ntest("x", async () => { await got("/x"); });`, {}],
+  ["a standalone request context", `import { test, request } from "@playwright/test";\ntest("x", async () => { await request.newContext(); });`, {}],
+  ["a worker fixture", 'import { test } from "./f";\ntest("x", async () => {});', { "e/f.ts": 'import { test as b } from "@playwright/test";\nexport const test = b.extend({ w: [async ({}, use) => { await use(1); }, { scope: "worker" }] });\n' }],
+  ["a helper it calls", `${PW}import { h } from "./f";\ntest("x", async () => { await h(); });`, { "e/f.ts": 'export const h = () => fetch("/x");\n' }],
+] as const) {
+  test(`hidden requests: ${why}`, () => {
+    const found = one(text, extra);
+    assert.deepEqual(found.hiddenRequests, ["e/a.spec.ts"]);
+    assert.deepEqual(found.reasons, [], "they don't turn recording off");
+  });
+}
+
+for (const [why, text, extra] of [
+  ["a browser's fetch", `${PW}test("x", async ({ page }) => { await page.evaluate(() => fetch("/x")); });`, {}],
+  ["a route's fetch", `${PW}test("x", async ({ page }) => { await page.route("**", (r) => r.fetch()); });`, {}],
+  ["the request fixture", `${PW}test("x", async ({ request }) => { await request.get("/x"); });`, {}],
+  ["a test-scoped auto fixture", 'import { test } from "./f";\ntest("x", async () => {});', { "e/f.ts": FIXTURES }],
+  ["a helper with a fetch it doesn't call", `${PW}import { other } from "./f";\ntest("x", async () => { other(); });`, { "e/f.ts": 'export const h = () => fetch("/x");\nexport const other = () => 1;\n' }],
+] as const) {
+  test(`not hidden: ${why}`, () => {
+    assert.deepEqual(one(text, extra).hiddenRequests, []);
+  });
+}
+
+test("one fetch in shared fixtures marks only the specs reaching it", () => {
+  const found = sources(
+    {
+      "e/f.ts": `${FIXTURES}export const magic = () => fetch("/m");\nexport const plain = () => 1;\n`,
+      "e/a.spec.ts": 'import { test, magic } from "./f";\ntest("x", async () => { await magic(); });',
+      "e/b.spec.ts": 'import { test, plain } from "./f";\ntest("x", async () => { plain(); });',
+    },
+    ["e/a.spec.ts", "e/b.spec.ts"],
+  );
+  assert.deepEqual(found.hiddenRequests, ["e/a.spec.ts"]);
+});
+
+test("a helper put on globalThis counts only for the specs calling it by name", () => {
+  const f = `${FIXTURES}async function magic() { await fetch("/m"); }\nObject.assign(globalThis, { magic, other: magic });\n`;
+  const found = sources(
+    {
+      "e/f.ts": f,
+      "e/a.spec.ts": 'import { test } from "./f";\ntest("x", async () => { await magic(); });',
+      "e/b.spec.ts": 'import { test } from "./f";\ntest("x", async () => {});',
+    },
+    ["e/a.spec.ts", "e/b.spec.ts"],
+  );
+  assert.deepEqual(found.hiddenRequests, ["e/a.spec.ts"]);
+});
+
+test("a global setup making requests hides them from every test", () => {
+  const tree = { "e/a.spec.ts": `${PW}test("x", async () => {});`, "e/b.spec.ts": `${PW}test("y", async () => {});` };
+  assert.deepEqual(sources({ ...tree, "e/setup.ts": 'export default async () => { await fetch("/login"); };\n' }, ["e/a.spec.ts", "e/b.spec.ts"], ["e/setup.ts"]).hiddenRequests.sort(), ["e/a.spec.ts", "e/b.spec.ts"]);
+  assert.deepEqual(sources({ ...tree, "e/setup.ts": 'import { chromium } from "@playwright/test";\nexport default async () => { await chromium.launch(); };\n' }, ["e/a.spec.ts"], ["e/setup.ts"]).hiddenRequests, ["e/a.spec.ts"]);
+  assert.deepEqual(sources({ ...tree, "e/setup.ts": 'import { rmSync } from "node:fs";\nexport default () => rmSync("x");\n' }, ["e/a.spec.ts"], ["e/setup.ts"]).hiddenRequests, []);
+});
+
+test("a WebSocket's route is in the footprint: a trace holds it", async (t) => {
+  const file = await traceFile(t, { "trace.network": { text: network(["wss://app.example.com/live/updates", undefined], ["https://app.example.com/a", "text/html"]) } });
+  assert.deepEqual(footprintFromTrace([file], app), { paths: ["/a", "/live/updates"], complete: true });
 });
 
 test("a repeated test and a spec with hidden requests are never whole", () => {
@@ -276,19 +363,19 @@ test("a Pages Router client navigation is the page's own path", () => {
   assert.deepEqual(requestPaths("https://a.co/_next/data/abc123/orders/7.json"), ["/_next/data/abc123/orders/7.json", "/orders/7"]);
 });
 
-test("a type doesn't prove a resource is static: an endpoint serving an image stays, a file doesn't", async (t) => {
+test("neither a type nor an extension proves a file: only the framework's own assets go", async (t) => {
   const file = await traceFile(t, {
     "trace.network": {
       text: network(
         ["https://app.example.com/api/avatar", "image/png"],
-        ["https://app.example.com/report", "text/css"],
-        ["https://app.example.com/bundle", "application/javascript"],
-        ["https://app.example.com/logo.png", "image/png"],
-        ["https://app.example.com/page", "text/html"],
+        ["https://app.example.com/env.js", "application/javascript"],
+        ["https://app.example.com/og.png", "image/png"],
+        ["https://app.example.com/report.css", "text/css"],
+        ["https://app.example.com/_next/static/chunk.js", "application/javascript"],
       ),
     },
   });
-  assert.deepEqual(footprintFromTrace([file], app), { paths: ["/api/avatar", "/bundle", "/page", "/report"], complete: true });
+  assert.deepEqual(footprintFromTrace([file], app), { paths: ["/api/avatar", "/env.js", "/og.png", "/report.css"], complete: true });
 });
 
 test("nothing private leaves in a path", () => {

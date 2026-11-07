@@ -110,7 +110,16 @@ function readRouter(name: string, object: ts.ObjectLiteralExpression, path: stri
   }
 }
 
+const PROCEDURE_LINE = /^\s*["']?([\w$]+)["']?\s*:\s*.*(?:rocedure|outer)\b/;
+
 export const trpc: ConventionFactory = () => ({
+  removesRoute(removed, added) {
+    const kept = new Set(added.map((line) => PROCEDURE_LINE.exec(line)?.[1]));
+    return removed.some((line) => {
+      const name = PROCEDURE_LINE.exec(line)?.[1];
+      return name !== undefined && !kept.has(name);
+    });
+  },
   readBinding(name, init, sym, context) {
     if (namesCaller(context) && buildsCaller(init, dataOf(context.facts).callers)) dataOf(context.facts).callers.add(name);
     if (!isRouterCall(init)) return false;

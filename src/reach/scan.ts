@@ -23,7 +23,9 @@ const DEFAULT_DEADLINE_MS = 90_000;
 
 const SOURCE = /\.[cm]?[jt]sx?$/;
 const UNIT_TEST = /(?:\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)__tests__\/)/;
-const DOC = /(?:\.md$|^docs\/|^LICENSE)/i;
+/** Documents by where they live or what they're called. A source file never is one, and other markdown might be read. */
+const DOC_NAME = /(?:^|\/)(?:README|CHANGELOG|CONTRIBUTING|LICENSE|SECURITY|AGENTS|CLAUDE|CODE_OF_CONDUCT)(?:\.[^/]*)?$/i;
+const DOC_PLACE = /^(?:docs\/|\.[^/]+\/.*\.md$)/;
 const PLAYWRIGHT_CONFIG = /^playwright\.config\.[cm]?[jt]s$/;
 const LOCKFILE = /^(?:package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/;
 const ALWAYS_GLOBAL = /^(?:package\.json|tsconfig(?:\.[^/]*)?\.json|playwright\.config\.[cm]?[jt]s)$/;
@@ -105,7 +107,7 @@ function bound(input: ScanInput, out: Reach): void {
   if (files.length > MAX_TRACKED_FILES) throw new Global("too_many_tracked_files");
 
   const conventions = createConventions({ files, read });
-  const looksLikeDoc = (file: string) => DOC.test(file) && !conventions.some((convention) => convention.ownsFile?.(file));
+  const looksLikeDoc = (file: string) => !SOURCE.test(file) && (DOC_NAME.test(file) || DOC_PLACE.test(file)) && !conventions.some((convention) => convention.ownsFile?.(file));
   for (const change of changes) {
     if (looksLikeDoc(change.path)) continue;
     for (const file of [change.path, change.oldPath]) {
@@ -114,7 +116,7 @@ function bound(input: ScanInput, out: Reach): void {
   }
 
   const graph = buildTextGraph(files, read, tick, (file, text) => {
-    for (const convention of conventions) convention.scanText?.(file, text);
+    for (const convention of conventions) convention.scanSource?.(file, text);
   });
   // A document something reads isn't only a document.
   const relevant = changes.filter((change) => !looksLikeDoc(change.path) || graph.reverse.has(change.path));
@@ -141,13 +143,20 @@ function bound(input: ScanInput, out: Reach): void {
   };
   const appFile = (file: string) => !UNIT_TEST.test(file) && !specs.has(file) && !isOnlyTests(file);
 
-  // What's a test's, and what's the application's.
+  // What's a test's, and what's the application's. A file only specs reach may still be the app, when a spec imports
+  // the server: it's walked on its own, and counts only if the walk finds it serves something.
   const applied: FileChange[] = [];
+  const onlyReachedByTests: FileChange[] = [];
   for (const change of relevant) {
     if (specClosure.has(change.path)) out.changedTestFiles.push(change.path);
     if (appFile(change.path)) applied.push(change);
+    else if (!UNIT_TEST.test(change.path) && !specs.has(change.path) && SOURCE.test(change.path)) onlyReachedByTests.push(change);
   }
-  if (applied.length === 0) return;
+  for (const change of [...applied, ...onlyReachedByTests]) {
+    const removed = change.hunks.flatMap((hunk) => hunk.removed);
+    const added = change.hunks.flatMap((hunk) => hunk.added);
+    if (conventions.some((convention) => convention.removesRoute?.(removed, added))) throw new Global("removed_route", change.path);
+  }
 
   const surfaces = new Map<string, string>();
   const addSurface = (surface: string, file: string) => {
@@ -169,7 +178,10 @@ function bound(input: ScanInput, out: Reach): void {
     }
     present.push(change);
   }
-  if (present.length > 0) walkChanges(input, present, graph, conventions, appFile, addSurface, tick);
+  if (present.length > 0) walkChanges(input, present, graph, conventions, appFile, addSurface, tick, false);
+  const notSuiteSetup = (file: string) => !UNIT_TEST.test(file) && !specs.has(file) && !PLAYWRIGHT_CONFIG.test(path.basename(file));
+  const stillThere = onlyReachedByTests.filter((change) => change.status !== "deleted");
+  if (stillThere.length > 0) walkChanges(input, stillThere, graph, conventions, notSuiteSetup, addSurface, tick, true);
 
   out.surfaces = [...surfaces.keys()].sort();
   out.reasons = out.surfaces.map((surface) => ({ surface, file: surfaces.get(surface)! }));
@@ -183,6 +195,8 @@ function walkChanges(
   appFile: (file: string) => boolean,
   addSurface: (surface: string, file: string) => void,
   tick: () => void,
+  /** These changes may be the tests' alone: a walk that finds no surface is no doubt. */
+  mayBeTests: boolean,
 ) {
   const { read, files } = input;
   const parse = input.parse ?? parseSource;
@@ -200,8 +214,9 @@ function walkChanges(
   const wanted = closure(graph.reverse, changes.map((change) => change.path), appFile);
   checkClosure(wanted);
 
+  const toRead = new Set<string>();
   const parseAll = () => {
-    for (const file of wanted) {
+    for (const file of [...wanted, ...toRead]) {
       if (parsedFacts.has(file) || !SOURCE.test(file)) continue;
       tick();
       let text: string;
@@ -225,13 +240,17 @@ function walkChanges(
   for (;;) {
     parseAll();
     const symbols = new SymbolGraph(parsedFacts, graph.resolver, conventions);
+    if (symbols.filesToRead.size > 0) {
+      for (const file of symbols.filesToRead) toRead.add(file);
+      continue;
+    }
     const answers: Array<{ change: FileChange; walked: ReturnType<SymbolGraph["walk"]>; starts: Node[] }> = [];
     const reached: Node[] = [];
     const surfaces = new Set<string>();
     for (const change of changes) {
       for (const starts of startsOf(change, symbols, parsedFacts)) {
         const walked = symbols.walk(starts);
-        if (walked.doubt) throw new Global(walked.doubt, change.path);
+        if (walked.doubt && !(mayBeTests && walked.surfaces.size === 0)) throw new Global(walked.doubt, change.path);
         answers.push({ change, walked, starts });
         reached.push(...walked.reached);
         for (const surface of walked.surfaces) surfaces.add(surface);
@@ -249,7 +268,7 @@ function walkChanges(
       continue;
     }
     for (const { change, walked, starts } of answers) {
-      if (walked.surfaces.size === 0 && starts.length > 0) {
+      if (walked.surfaces.size === 0 && starts.length > 0 && !mayBeTests) {
         const placed = SOURCE.test(change.path);
         throw new Global(placed ? "no_entry" : "unplaced_file", change.path);
       }

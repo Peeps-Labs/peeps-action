@@ -54,11 +54,22 @@ function literalPath(node: ts.Node | undefined, constant: (name: string) => stri
   return null;
 }
 
-/** Express's own syntax is already a matcher, but for a regex or an optional part. */
+const PLAIN_SEGMENT = /^(?:[\w.~%-]+|:[A-Za-z_]\w*)$/;
+
+/**
+ * A path this reads: each segment a word or a whole `:param`, with a catch-all only at
+ * the end. A regex, an optional `{/:id}`, or `/user-:id` has no matcher here.
+ */
 export function routePath(path: string | null): string | null {
-  if (path === null || /[()?+]/.test(path)) return null;
-  return path.replace(/\/\*[^/]*$/, "/*");
+  if (path === null) return null;
+  const segments = path.split("/").filter(Boolean);
+  const last = segments[segments.length - 1];
+  const catchAll = last !== undefined && /^\*\w*$/.test(last);
+  if (!(catchAll ? segments.slice(0, -1) : segments).every((segment) => PLAIN_SEGMENT.test(segment))) return null;
+  return path.replace(/\/\*\w*$/, "/*");
 }
+
+const ROUTE_LINE = /\.(?:get|post|put|patch|delete|options|head|all|use|route)\(\s*(["'`])([^"'`]*)\1/;
 
 export function readExpressCall(
   statement: ts.ExpressionStatement,
@@ -113,6 +124,13 @@ const bindingsOf = (facts: FileFacts): Map<string, ExpressBinding> => (facts.dat
 const marksOf = (node: Node): Marks | undefined => node.sym.marks.express as Marks | undefined;
 
 export const express: ConventionFactory = () => ({
+  removesRoute(removed, added) {
+    const kept = added.join("\n");
+    return removed.some((line) => {
+      const match = ROUTE_LINE.exec(line);
+      return match !== null && !kept.includes(`${match[1]}${match[2]}${match[1]}`);
+    });
+  },
   readBinding(name, init, _sym, { facts }) {
     const fromExpress = (local: string, imported: string[]) => facts.imports.some((fact) => fact.local === local && fact.spec === "express" && imported.includes(fact.imported));
     const kind = expressBinding(init, (local) => fromExpress(local, ["default", "*"]), (local) => fromExpress(local, ["Router"]));

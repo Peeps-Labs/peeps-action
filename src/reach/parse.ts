@@ -6,9 +6,12 @@
  */
 import ts from "typescript";
 
+export function scriptKind(file: string): ts.ScriptKind {
+  return /\.[cm]?ts$/.test(file) ? ts.ScriptKind.TS : /\.tsx$/.test(file) ? ts.ScriptKind.TSX : ts.ScriptKind.JSX;
+}
+
 export function parseSource(file: string, text: string): ts.SourceFile {
-  const kind = /\.[cm]?ts$/.test(file) ? ts.ScriptKind.TS : /\.tsx$/.test(file) ? ts.ScriptKind.TSX : ts.ScriptKind.JSX;
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, kind);
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, scriptKind(file));
   const { parseDiagnostics } = source as unknown as { parseDiagnostics: unknown[] };
   if (parseDiagnostics.length > 0) throw new Error(`${file} doesn't parse`);
   return source;

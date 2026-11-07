@@ -204,7 +204,7 @@ test("off, the default: a footprint of what the app served, and no trace anywher
   assert.equal(result.code, 1, result.output);
   for (const name of ["|passes", "|fails"]) {
     const [event] = ended(peeps.sent.get(name));
-    assert.deepEqual(event!.footprint, { paths: ["/api/cart", "/cart"], complete: true, attempt: { retry: 0 }, origins: [] }, `${name}: ${result.output}`);
+    assert.deepEqual(event!.footprint, { paths: ["/api/cart", "/cart", "/logo.png"], complete: true, attempt: { retry: 0 }, origins: [] }, `${name}: ${result.output}`);
   }
   assert.deepEqual(uploadedTraces(peeps.artifacts), [], "nothing of ours is uploaded");
   assert.equal(await reportTraceLinks(peeps.artifacts, root), 0, "no dead link in the report");
@@ -496,6 +496,26 @@ test("passes", async ({ page }) => { await page.goto("/cart"); });
   assert.equal(result.code, 0, result.output);
   assert.deepEqual(uploadedTraces(peeps.artifacts), [], "nothing was recorded for Peeps");
   assert.equal(ended(peeps.sent.get("|passes"))[0]!.footprint?.complete, false, "so it always runs");
+});
+
+test("a global setup's requests leave every test unknown, and recording stays on", async (t) => {
+  const app = await appServer(t);
+  const root = await suite(t, COMMON("", `globalSetup: "./setup.ts",`));
+  await writeFile(path.join(root, "suite/setup.ts"), `export default async () => { await fetch(process.env.BASE_URL + "/api/cart"); };\n`);
+  const peeps = await fakePeeps(t, { collectFootprints: true });
+  const result = await runAction(root, peeps.url, { BASE_URL: app });
+  assert.equal(result.code, 1, result.output);
+  const footprint = ended(peeps.sent.get("|passes"))[0]!.footprint!;
+  assert.equal(footprint.complete, false, JSON.stringify(footprint));
+  assert.ok(footprint.paths.includes("/cart"), "it still recorded");
+});
+
+test("says why it isn't recording", async (t) => {
+  const app = await appServer(t);
+  const root = await suite(t, COMMON(""), USES_OWN_TRACE);
+  const peeps = await fakePeeps(t, { collectFootprints: true });
+  const result = await runAction(root, peeps.url, { BASE_URL: app });
+  assert.match(result.output, /not recording footprints: suite\/specs\/cart\.spec\.ts: /);
 });
 
 test("attach mode's wrapper never loads: no footprint, even when Peeps asks, and the trace stays off", async (t) => {
