@@ -1106,6 +1106,66 @@ test("peepsScreen never throws into the test", async () => {
   }
 });
 
+test("every Appium failure field is redacted of the job's secret values, before it is cut", async () => {
+  const peeps = await fakePeeps();
+  const secret = process.env.APPIUM_CLOUD_KEY;
+  const key = "cloud-key-0123456789";
+  process.env.APPIUM_CLOUD_KEY = key;
+  try {
+    usePlan(peeps.url, [
+      run("r-fail", "mobile/test/specs/checkout.spec.ts", "Checkout › pays"),
+      run("r-flaky", "mobile/test/specs/checkout.spec.ts", "Checkout › retries"),
+      run("r-hook", "mobile/test/specs/checkout.spec.ts", "Checkout › Card › first"),
+      run("r-long", "mobile/test/specs/checkout.spec.ts", "Checkout › long"),
+    ]);
+    const reporter = new PeepsAppiumReporter({});
+    const leaky = { name: "AssertionError", message: `token ${key} rejected`, stack: `AssertionError: token ${key} rejected\n    at login (${key}.ts:1:1)` };
+    reporter.emit("suite:start", { title: "Checkout", file: SPEC });
+    reporter.emit("test:start", { title: "pays", file: SPEC });
+    reporter.emit("test:fail", { title: "pays", file: SPEC, error: leaky });
+    reporter.emit("test:start", { title: "retries", file: SPEC });
+    reporter.emit("test:retry", { title: "retries", file: SPEC, error: leaky });
+    reporter.emit("test:start", { title: "retries", file: SPEC });
+    reporter.emit("test:pass", { title: "retries", file: SPEC });
+    // A secret straddling the 4000-character cut: redacted first, so no part of it survives.
+    reporter.emit("test:start", { title: "long", file: SPEC });
+    reporter.emit("test:fail", { title: "long", file: SPEC, error: { message: `${"x".repeat(3995)}${key}`, stack: `${"y".repeat(7995)}${key}` } });
+    reporter.emit("suite:start", { title: "Card", file: SPEC });
+    reporter.emit("test:start", { title: "first", file: SPEC });
+    reporter.emit("hook:end", { title: '"before each" hook for Card', parent: "Card", file: SPEC, error: leaky });
+    reporter.emit("suite:end", { title: "Card" });
+    reporter.emit("suite:end", { title: "Checkout" });
+    reporter.emit("runner:end", {});
+    await synchronised(reporter);
+
+    const sent = JSON.stringify([...peeps.received.events.values()]);
+    assert.equal(sent.includes(key), false);
+    assert.equal(sent.includes("cloud-"), false);
+    const end = (runId: string, n = 0) => peeps.received.events.get(runId)!.filter((e) => e.type === "test_end")[n]!;
+    const fail = end("r-fail");
+    assert.equal(fail.error, "token [redacted] rejected");
+    assert.equal(fail.errorStack, "AssertionError: token [redacted] rejected\n    at login ([redacted].ts:1:1)");
+    assert.deepEqual(fail.failure, {
+      phase: "call",
+      exceptionType: "AssertionError",
+      message: "token [redacted] rejected",
+      traceback: "AssertionError: token [redacted] rejected\n    at login ([redacted].ts:1:1)",
+    });
+    assert.equal(end("r-flaky").error, "token [redacted] rejected");
+    assert.equal(end("r-flaky").errorStack, "AssertionError: token [redacted] rejected\n    at login ([redacted].ts:1:1)");
+    const hook = end("r-hook");
+    assert.equal(hook.error, '"before each" hook for Card failed: token [redacted] rejected');
+    assert.equal((hook.failure as { message: string }).message, "token [redacted] rejected");
+    const long = end("r-long");
+    assert.equal(long.error, `${"x".repeat(3995)}[reda`);
+    assert.equal(long.errorStack, `${"y".repeat(7995)}[reda`);
+  } finally {
+    if (secret === undefined) delete process.env.APPIUM_CLOUD_KEY;
+    else process.env.APPIUM_CLOUD_KEY = secret;
+    peeps.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // A session that never starts: WebdriverIO's runner:end error
 // ---------------------------------------------------------------------------

@@ -516,6 +516,15 @@ var mochaHooks = {
     if (!plan.entryFor(test?.file, titles)) this.skip();
   }
 };
+function redactError(error) {
+  if (!error) return error;
+  const redact = makeRedactor(process.env);
+  return {
+    ...error,
+    ...error.message !== void 0 ? { message: redact(error.message) } : {},
+    ...error.stack !== void 0 ? { stack: redact(error.stack) } : {}
+  };
+}
 function trimMiddle(text, head = 2e3, tail = 1e4) {
   if (text.length <= head + tail) return text;
   return `${text.slice(0, head)}
@@ -652,7 +661,7 @@ var PeepsAppiumReporter = class {
     }
     if (this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
     if (!this.attemptStart.has(entry.runId) && !this.begin(entry, payload.title ?? "")) return;
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     const event = {
       type: "test_end",
       timestamp: Date.now(),
@@ -673,7 +682,7 @@ var PeepsAppiumReporter = class {
   onTestRetry(payload) {
     const entry = this.entryOf(payload);
     if (!entry || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     this.enqueue(entry.runId, {
       type: "test_end",
       timestamp: Date.now(),
@@ -699,7 +708,7 @@ var PeepsAppiumReporter = class {
     const owner = payload.parent === "" ? 0 : this.suites.lastIndexOf(payload.parent ?? "") + 1;
     const scope = owner > 0 || payload.parent === "" ? this.suites.slice(0, owner) : this.suites;
     const prefix = scope.length ? scope.join(TITLE_PATH_SEPARATOR) + TITLE_PATH_SEPARATOR : "";
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     for (const entry of this.plan.entries.values()) {
       if (entry.path !== rel || !entry.titlePath.startsWith(prefix) || this.ended.has(entry.runId)) continue;
       const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
@@ -730,11 +739,11 @@ var PeepsAppiumReporter = class {
   onSessionError(raw) {
     const text = typeof raw === "string" ? raw : raw?.message;
     if (typeof text !== "string" || !text) return;
-    const message = makeRedactor(process.env)(text);
+    const error = redactError({ name: "SessionNotCreated", message: text, stack: text });
+    const message = error.message;
     const specs = new Set(
       this.specs.map((spec) => repoRelative(this.plan.file.workspace, spec.startsWith("file://") ? (0, import_node_url.fileURLToPath)(spec) : spec)).filter((rel) => rel !== null)
     );
-    const error = { name: "SessionNotCreated", message, stack: message };
     for (const entry of this.plan.entries.values()) {
       if (!specs.has(entry.path) || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) continue;
       const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";

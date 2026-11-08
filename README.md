@@ -299,6 +299,8 @@ worker's tests. Each planned test of that worker's spec files is then
 reported failed in the `setup` phase, with `exceptionType`
 `SessionNotCreated` and the session's error as the message (job secrets
 masked as `[redacted]`); a test that already has a result is left alone.
+Every failure's message, traceback and error text is masked the same way
+before it is cut to length, whatever failed.
 
 A capture that fails or exceeds 25 MB is listed in `attachmentsOmitted` with
 its reason. Under mocha retries each retried attempt sends a failed
@@ -706,6 +708,9 @@ access token Peeps was given (Maintainer).
   reported failed at setup with the session's error (`SessionNotCreated`, redacted of
   the job's secrets), instead of every run reading "The CI job finished without
   reporting a result". A test that already has a result is not reported again.
+- Appium failure messages are now redacted of the job's secret values: the message,
+  traceback and error of a failed test, a retried attempt and a failed hook, masked
+  before they are cut to length.
 
 ## 1.10.1
 

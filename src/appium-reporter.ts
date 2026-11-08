@@ -794,6 +794,21 @@ export interface PeepsEvent {
   attachmentsOmitted?: Array<{ name: string; reason: string }>;
 }
 
+/**
+ * The error with the job's secret values masked in its message and stack,
+ * before anything cuts them (PQA-2748): a value cut first could leave part of
+ * itself behind, unmatched.
+ */
+function redactError(error: WdioError | undefined): WdioError | undefined {
+  if (!error) return error;
+  const redact = makeRedactor(process.env);
+  return {
+    ...error,
+    ...(error.message !== undefined ? { message: redact(error.message) } : {}),
+    ...(error.stack !== undefined ? { stack: redact(error.stack) } : {}),
+  };
+}
+
 /** The pytest plugin's traceback trim: keep the head and the tail. */
 function trimMiddle(text: string, head = 2000, tail = 10000): string {
   if (text.length <= head + tail) return text;
@@ -955,7 +970,7 @@ export class PeepsAppiumReporter {
     if (this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
     // `it.skip` is reported without ever starting.
     if (!this.attemptStart.has(entry.runId) && !this.begin(entry, payload.title ?? "")) return;
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     const event: PeepsEvent = {
       type: "test_end",
       timestamp: Date.now(),
@@ -977,7 +992,7 @@ export class PeepsAppiumReporter {
   private onTestRetry(payload: WdioEventPayload): void {
     const entry = this.entryOf(payload);
     if (!entry || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     this.enqueue(entry.runId, {
       type: "test_end",
       timestamp: Date.now(),
@@ -1006,7 +1021,7 @@ export class PeepsAppiumReporter {
     const owner = payload.parent === "" ? 0 : this.suites.lastIndexOf(payload.parent ?? "") + 1;
     const scope = owner > 0 || payload.parent === "" ? this.suites.slice(0, owner) : this.suites;
     const prefix = scope.length ? scope.join(TITLE_PATH_SEPARATOR) + TITLE_PATH_SEPARATOR : "";
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     for (const entry of this.plan!.entries.values()) {
       if (entry.path !== rel || !entry.titlePath.startsWith(prefix) || this.ended.has(entry.runId)) continue;
       const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
@@ -1038,13 +1053,13 @@ export class PeepsAppiumReporter {
   private onSessionError(raw: unknown): void {
     const text = typeof raw === "string" ? raw : (raw as { message?: unknown } | null)?.message;
     if (typeof text !== "string" || !text) return;
-    const message = makeRedactor(process.env)(text);
+    const error = redactError({ name: "SessionNotCreated", message: text, stack: text })!;
+    const message = error.message!;
     const specs = new Set(
       this.specs
         .map((spec) => repoRelative(this.plan!.file.workspace, spec.startsWith("file://") ? fileURLToPath(spec) : spec))
         .filter((rel): rel is string => rel !== null),
     );
-    const error: WdioError = { name: "SessionNotCreated", message, stack: message };
     for (const entry of this.plan!.entries.values()) {
       if (!specs.has(entry.path) || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) continue;
       const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
