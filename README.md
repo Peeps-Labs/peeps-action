@@ -334,10 +334,15 @@ running now and listed on its final `test_end`, **passed or failed**, as
 a repeated one gets `-2`, `-3`…), after a failure's own `screenshot.png` and
 page source. The same `test_end` carries the device, for Peeps to keep one
 baseline per device: `properties` gets
-`{ "name": "peeps_device", "value": "{\"platform\":\"android\",\"deviceName\":…,\"platformVersion\":…,\"width\":1080,\"height\":2400,\"statusBarHeight\":63}" }`,
+`{ "name": "peeps_device", "value": "{\"platform\":\"android\",\"deviceName\":…,\"deviceModel\":…,\"platformVersion\":…,\"width\":1080,\"height\":2400,\"statusBarHeight\":63}" }`,
 from the session's capabilities, the PNG's own size, and the status bar's
 height in screenshot pixels (iOS: `mobile: deviceScreenInfo`; Android:
-`getSystemBars()`; 0 when the driver does not say).
+`getSystemBars()`; 0 when the driver does not say). `deviceModel` is there
+only when the session reports one: UiAutomator2 does (`deviceModel`, for
+example `sdk_gphone64_x86_64` or `SM-S911B`), and since it rewrites
+`deviceName` to the device serial (`emulator-5554`), Peeps keys a device on
+the model first; an iOS session normally has none, and its `deviceName` is
+the simulator's or device's own name.
 
 The name is 1 to 80 characters. The call never fails the test: a bad name, a
 call outside a test (in an `afterEach`, say), or a screenshot that fails is
@@ -686,7 +691,8 @@ access token Peeps was given (Maintainer).
 - Appium: `browser.peepsScreen(name)` saves a named screen of the running test for
   Peeps' visual diffs. It waits for the screen to settle, and the screen is sent on
   the test's result whether it passed or failed, with the device it was taken on
-  (platform, device name, OS version, screen size, status bar height). Up to 10 per
+  (platform, device name, device model when the driver reports one, OS version,
+  screen size, status bar height). Up to 10 per
   test; the call never fails a test.
 
 ## 1.10.1

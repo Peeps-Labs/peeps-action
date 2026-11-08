@@ -472,6 +472,11 @@ const DEVICE_QUERY_TIMEOUT_MS = 5_000;
 export interface ScreenDevice {
   platform: "ios" | "android";
   deviceName: string;
+  /**
+   * When the session reports one (UiAutomator2's `deviceModel`): UiAutomator2
+   * rewrites `deviceName` to the device serial, so Peeps keys on this first.
+   */
+  deviceModel?: string;
   platformVersion: string;
   /** The screenshot's own pixel size. */
   width: number;
@@ -545,7 +550,7 @@ let cachedDevice: Promise<DeviceFacts | null> | undefined;
 
 /**
  * The device from the session's capabilities (Appium's `appium:` prefix or
- * not), and the status bar's height in screenshot pixels: iOS from
+ * not; `deviceModel` only when the session reports one), and the status bar's height in screenshot pixels: iOS from
  * `mobile: deviceScreenInfo` (points times its scale), else the session's
  * `statBarHeight` times its `pixelRatio`; Android from `getSystemBars()`.
  * Each query is bounded and best-effort: 0 when the driver does not say.
@@ -585,9 +590,11 @@ export async function deviceFacts(browser: ScreenBrowser, timeoutMs = DEVICE_QUE
   } catch {
     // Unknown: 0.
   }
+  const deviceModel = text("deviceModel");
   return {
     platform,
     deviceName: text("deviceName"),
+    ...(deviceModel ? { deviceModel } : {}),
     platformVersion: text("platformVersion"),
     statusBarHeight: Math.round(statusBarHeight),
   };
@@ -642,8 +649,16 @@ export async function captureScreen(
       cachedDevice ??= deviceFacts(browser);
       const facts = await cachedDevice;
       if (facts) {
-        const { platform, deviceName, platformVersion, statusBarHeight } = facts;
-        out.device = { platform, deviceName, platformVersion, width: size.width, height: size.height, statusBarHeight };
+        const { platform, deviceName, deviceModel, platformVersion, statusBarHeight } = facts;
+        out.device = {
+          platform,
+          deviceName,
+          ...(deviceModel ? { deviceModel } : {}),
+          platformVersion,
+          width: size.width,
+          height: size.height,
+          statusBarHeight,
+        };
       }
     }
   } catch (error) {

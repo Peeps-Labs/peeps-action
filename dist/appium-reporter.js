@@ -378,9 +378,11 @@ async function deviceFacts(browser, timeoutMs = DEVICE_QUERY_TIMEOUT_MS) {
     }
   } catch {
   }
+  const deviceModel = text("deviceModel");
   return {
     platform,
     deviceName: text("deviceName"),
+    ...deviceModel ? { deviceModel } : {},
     platformVersion: text("platformVersion"),
     statusBarHeight: Math.round(statusBarHeight)
   };
@@ -422,8 +424,16 @@ async function captureScreen(runId, browser, name, intervalMs = STABLE_FRAME_INT
       cachedDevice ??= deviceFacts(browser);
       const facts = await cachedDevice;
       if (facts) {
-        const { platform, deviceName, platformVersion, statusBarHeight } = facts;
-        out.device = { platform, deviceName, platformVersion, width: size.width, height: size.height, statusBarHeight };
+        const { platform, deviceName, deviceModel, platformVersion, statusBarHeight } = facts;
+        out.device = {
+          platform,
+          deviceName,
+          ...deviceModel ? { deviceModel } : {},
+          platformVersion,
+          width: size.width,
+          height: size.height,
+          statusBarHeight
+        };
       }
     }
   } catch (error) {

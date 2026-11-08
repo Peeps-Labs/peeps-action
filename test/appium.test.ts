@@ -865,7 +865,8 @@ function registeredScreen(): ScreenCommand {
   return command;
 }
 
-const ANDROID_CAPS = { platformName: "Android", "appium:deviceName": "emulator-5554", platformVersion: "14", "appium:udid": "emulator-5554" };
+// UiAutomator2's session capabilities: deviceName rewritten to the serial, the model beside it.
+const ANDROID_CAPS = { platformName: "Android", "appium:deviceName": "emulator-5554", deviceModel: "sdk_gphone64_x86_64", platformVersion: "14", "appium:udid": "emulator-5554" };
 
 function screenBrowser(over: Partial<ScreenBrowser> = {}): ScreenBrowser & { shots: () => number } {
   let shots = 0;
@@ -907,7 +908,7 @@ test("named screens ride on a passed test's test_end, with the device they were 
     await synchronised(reporter);
 
     const size = fakePng(1080, 2400).length;
-    const device = { name: "peeps_device", value: JSON.stringify({ platform: "android", deviceName: "emulator-5554", platformVersion: "14", width: 1080, height: 2400, statusBarHeight: 63 }) };
+    const device = { name: "peeps_device", value: JSON.stringify({ platform: "android", deviceName: "emulator-5554", deviceModel: "sdk_gphone64_x86_64", platformVersion: "14", width: 1080, height: 2400, statusBarHeight: 63 }) };
     const pass = peeps.received.events.get("r-pass")!.find((e) => e.type === "test_end")!;
     assert.equal(pass.status, "passed");
     assert.deepEqual(pass.attachments, [
@@ -1034,7 +1035,15 @@ test("the device: iOS and Android capability shapes, status bar in screenshot pi
   assert.deepEqual(iosCaps, { platform: "ios", deviceName: "iPad Air", platformVersion: "17.5", statusBarHeight: 48 });
   // Android: getSystemBars' status bar, already in pixels.
   const android = await deviceFacts(screenBrowser());
-  assert.deepEqual(android, { platform: "android", deviceName: "emulator-5554", platformVersion: "14", statusBarHeight: 63 });
+  assert.deepEqual(android, { platform: "android", deviceName: "emulator-5554", deviceModel: "sdk_gphone64_x86_64", platformVersion: "14", statusBarHeight: 63 });
+  // The model under Appium's prefix counts too.
+  const prefixed = await deviceFacts(screenBrowser({ capabilities: { platformName: "Android", deviceName: "R5CT", "appium:deviceModel": "SM-S911B", platformVersion: "14" } }));
+  assert.equal(prefixed!.deviceModel, "SM-S911B");
+  assert.equal(prefixed!.deviceName, "R5CT");
+  // iOS with a model in its session: sent; without one (the iOS cases above): left out.
+  const iosModel = await deviceFacts({ capabilities: { platformName: "iOS", deviceName: "iPhone 16", deviceModel: "iPhone17,3", platformVersion: "18.2" }, takeScreenshot: async () => "" });
+  assert.equal(iosModel!.deviceModel, "iPhone17,3");
+  assert.equal("deviceModel" in ios!, false);
   // A driver that fails, or never answers, costs nothing but the status bar.
   const failing = await deviceFacts(screenBrowser({ getSystemBars: async () => Promise.reject(new Error("no")) }));
   assert.equal(failing!.statusBarHeight, 0);
