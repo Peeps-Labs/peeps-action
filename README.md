@@ -293,6 +293,13 @@ mocha runs none of them), and `attachments`:
 When the driver reports one, `properties` holds the Appium context the test
 failed in: `[{ "name": "context", "value": "WEBVIEW_com.example" }]`.
 
+When the device session cannot start (no app at the configured path, no
+booted device, a capability the driver refuses), WebdriverIO runs none of the
+worker's tests. Each planned test of that worker's spec files is then
+reported failed in the `setup` phase, with `exceptionType`
+`SessionNotCreated` and the session's error as the message (job secrets
+masked as `[redacted]`); a test that already has a result is left alone.
+
 A capture that fails or exceeds 25 MB is listed in `attachmentsOmitted` with
 its reason. Under mocha retries each retried attempt sends a failed
 `test_end` and only the final attempt's evidence is kept.
@@ -694,6 +701,11 @@ access token Peeps was given (Maintainer).
   (platform, device name, device model when the driver reports one, OS version,
   screen size, status bar height). Up to 10 per
   test; the call never fails a test.
+- Appium: when the device session cannot start (no app at the configured path, no
+  booted device, a bad capability), each planned test of that worker's spec files is
+  reported failed at setup with the session's error (`SessionNotCreated`, redacted of
+  the job's secrets), instead of every run reading "The CI job finished without
+  reporting a result". A test that already has a result is not reported again.
 
 ## 1.10.1
 

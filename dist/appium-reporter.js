@@ -59,6 +59,38 @@ var import_node_crypto = require("node:crypto");
 var import_node_fs = require("node:fs");
 var import_node_path = __toESM(require("node:path"));
 var import_node_url = require("node:url");
+
+// src/redact.ts
+function makeRedactor(env) {
+  const values = Object.entries(env).filter(([k, v]) => v && v.length >= 8 && isSecretish(k)).map(([, v]) => v).sort((a, b) => b.length - a.length);
+  if (values.length === 0) return (t) => t;
+  const pattern = new RegExp(values.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+  return (text) => text.replace(pattern, "[redacted]");
+}
+function isSecretish(key) {
+  if (ALWAYS_MASK_KEYS.has(key)) return true;
+  if (SAFE_ENV_KEYS.has(key)) return false;
+  return !/^(GITHUB|RUNNER|ACTIONS|INPUT|CI)_/.test(key);
+}
+var ALWAYS_MASK_KEYS = /* @__PURE__ */ new Set([
+  "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+  "ACTIONS_RUNTIME_TOKEN",
+  "GITHUB_TOKEN",
+  // GitLab's `CI_` variables are exempt by prefix like GitHub's, except the
+  // ones that are credentials: the job token (and the clone URL it is in),
+  // the legacy job JWTs, and the registry, deploy and proxy passwords.
+  "CI_JOB_TOKEN",
+  "CI_REPOSITORY_URL",
+  "CI_JOB_JWT",
+  "CI_JOB_JWT_V1",
+  "CI_JOB_JWT_V2",
+  "CI_REGISTRY_PASSWORD",
+  "CI_DEPLOY_PASSWORD",
+  "CI_DEPENDENCY_PROXY_PASSWORD"
+]);
+var SAFE_ENV_KEYS = /* @__PURE__ */ new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
+
+// src/appium-reporter.ts
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function localRunId(relPath, titlePath) {
   return `local-${(0, import_node_crypto.createHash)("sha1").update(`${relPath}
@@ -527,6 +559,8 @@ var PeepsAppiumReporter = class {
   retriable = false;
   inflight = 0;
   file;
+  /** This worker's spec files, from `runner:start`. */
+  specs = [];
   constructor(_options) {
     this.plan = loadPlan();
     if (!this.plan) {
@@ -543,6 +577,7 @@ var PeepsAppiumReporter = class {
     if (!this.plan) return;
     switch (event) {
       case "runner:start":
+        this.specs = payload.specs ?? [];
         console.log(
           this.plan.file.resultsDir ? "[peeps] recording results for the agent session" : `[peeps] reporting ${this.plan.entries.size} planned run(s) to ${this.plan.file.peepsUrl}`
         );
@@ -573,6 +608,7 @@ var PeepsAppiumReporter = class {
         if (payload.error && BEFORE_HOOK.test(payload.title ?? "")) this.onSetupFailure(payload);
         return;
       case "runner:end":
+        this.onSessionError(payload.error);
         for (const runId of this.queues.keys()) this.flush(runId);
         return;
       default:
@@ -681,6 +717,37 @@ var PeepsAppiumReporter = class {
       };
       attachScreens(event, entry.runId);
       this.close(entry, event);
+    }
+  }
+  /**
+   * WebdriverIO 9 reports a session that could not start (no app at the
+   * path, no booted device, a bad capability) only as `runner:end`'s
+   * `error`, with no test events. Each planned test of this worker's spec
+   * files that has no result fails at setup with that error, redacted of
+   * the job's secrets and clipped like any failure. A clean `runner:end`
+   * changes nothing.
+   */
+  onSessionError(raw) {
+    const text = typeof raw === "string" ? raw : raw?.message;
+    if (typeof text !== "string" || !text) return;
+    const message = makeRedactor(process.env)(text);
+    const specs = new Set(
+      this.specs.map((spec) => repoRelative(this.plan.file.workspace, spec.startsWith("file://") ? (0, import_node_url.fileURLToPath)(spec) : spec)).filter((rel) => rel !== null)
+    );
+    const error = { name: "SessionNotCreated", message, stack: message };
+    for (const entry of this.plan.entries.values()) {
+      if (!specs.has(entry.path) || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) continue;
+      const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
+      if (!this.attemptStart.has(entry.runId) && !this.begin(entry, testName)) continue;
+      this.close(entry, {
+        type: "test_end",
+        timestamp: Date.now(),
+        testName,
+        status: "failed",
+        duration: 0,
+        error: `Appium session could not start: ${message}`.slice(0, 4e3),
+        ...failureEvidence(error, "setup", void 0)
+      });
     }
   }
   durationOf(runId, payload) {

@@ -1106,6 +1106,118 @@ test("peepsScreen never throws into the test", async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// A session that never starts: WebdriverIO's runner:end error
+// ---------------------------------------------------------------------------
+
+const LOGIN = "/w/mobile/test/specs/login.spec.ts";
+const SESSION_ERROR = "Failed to create session.\nThe application at '/w/app/build/app-debug.apk' does not exist or is not accessible";
+
+/** A worker whose session failed: WebdriverIO 9 sends runner:start, then runner:end with the error, and no test events. */
+function sessionFailed(reporter: PeepsAppiumReporter, error: unknown, specs = [pathToFileURL(SPEC).href]): void {
+  reporter.emit("runner:start", { specs });
+  reporter.emit("runner:end", { error, failures: 1 } as never);
+}
+
+test("a session that cannot start fails each planned test of the worker's specs at setup, with the session's error", async () => {
+  const peeps = await fakePeeps();
+  const secret = process.env.APPIUM_CLOUD_KEY;
+  process.env.APPIUM_CLOUD_KEY = "cloud-key-0123456789";
+  try {
+    usePlan(peeps.url, [
+      run("r-a", "mobile/test/specs/checkout.spec.ts", "Checkout › pays"),
+      run("r-b", "mobile/test/specs/checkout.spec.ts", "Checkout › Card › declines"),
+      run("r-other", "mobile/test/specs/login.spec.ts", "Login › signs in"),
+    ]);
+    const reporter = new PeepsAppiumReporter({});
+    sessionFailed(reporter, `${SESSION_ERROR} (hub https://me:cloud-key-0123456789@hub.example)`);
+    await synchronised(reporter);
+    const message = `${SESSION_ERROR} (hub https://me:[redacted]@hub.example)`;
+    for (const runId of ["r-a", "r-b"]) {
+      const events = peeps.received.events.get(runId)!;
+      assert.deepEqual(events.map((e) => e.type), ["run_start", "test_start", "test_end", "run_end"]);
+      const end = events[2]!;
+      assert.equal(end.status, "failed");
+      assert.equal(end.duration, 0);
+      assert.equal(end.error, `Appium session could not start: ${message}`);
+      assert.deepEqual(end.failure, { phase: "setup", exceptionType: "SessionNotCreated", message, traceback: message });
+    }
+    assert.equal(peeps.received.events.get("r-b")![1]!.testName, "declines");
+    // Another spec file's test belongs to another worker.
+    assert.equal(peeps.received.events.has("r-other"), false);
+
+    // An error object, as an older runner may send it, and a long message clipped like any failure's.
+    usePlan(peeps.url, [run("r-long", "mobile/test/specs/login.spec.ts", "Login › signs in")]);
+    const second = new PeepsAppiumReporter({});
+    sessionFailed(second, { message: "x".repeat(5000) }, [LOGIN]);
+    await synchronised(second);
+    const long = peeps.received.events.get("r-long")!.find((e) => e.type === "test_end")!;
+    assert.equal((long.failure as { message: string }).message.length, 4000);
+    assert.equal((long.error as string).length, 4000);
+  } finally {
+    if (secret === undefined) delete process.env.APPIUM_CLOUD_KEY;
+    else process.env.APPIUM_CLOUD_KEY = secret;
+    peeps.close();
+  }
+});
+
+test("a runner:end error never reports a test twice", async () => {
+  const peeps = await fakePeeps();
+  try {
+    usePlan(peeps.url, [
+      run("r-done", "mobile/test/specs/checkout.spec.ts", "Checkout › pays"),
+      run("r-open", "mobile/test/specs/checkout.spec.ts", "Checkout › refunds"),
+    ]);
+    const reporter = new PeepsAppiumReporter({});
+    reporter.emit("runner:start", { specs: [SPEC] });
+    reporter.emit("suite:start", { title: "Checkout", file: SPEC });
+    reporter.emit("test:start", { title: "pays", file: SPEC });
+    reporter.emit("test:pass", { title: "pays", file: SPEC });
+    reporter.emit("suite:end", { title: "Checkout" });
+    reporter.emit("runner:end", { error: SESSION_ERROR } as never);
+    await synchronised(reporter);
+    assert.deepEqual(
+      peeps.received.events.get("r-done")!.map((e) => [e.type, e.status]),
+      [["run_start", undefined], ["test_start", undefined], ["test_end", "passed"], ["run_end", undefined]],
+    );
+    assert.equal(peeps.received.events.get("r-open")!.find((e) => e.type === "test_end")!.status, "failed");
+  } finally {
+    peeps.close();
+  }
+});
+
+test("a clean runner:end reports nothing for planned tests that did not run", async () => {
+  const peeps = await fakePeeps();
+  try {
+    usePlan(peeps.url, [run("r-a", "mobile/test/specs/checkout.spec.ts", "Checkout › pays")]);
+    const reporter = new PeepsAppiumReporter({});
+    reporter.emit("runner:start", { specs: [SPEC] });
+    reporter.emit("runner:end", { failures: 0 } as never);
+    reporter.emit("runner:end", { error: "" } as never);
+    await synchronised(reporter);
+    assert.equal(peeps.received.events.size, 0);
+  } finally {
+    peeps.close();
+  }
+});
+
+test("with a specFileRetries retry left, a session error is a retried attempt and the run stays open", async () => {
+  const peeps = await fakePeeps();
+  try {
+    usePlan(peeps.url, [run("r-a", "mobile/test/specs/checkout.spec.ts", "Checkout › pays")]);
+    withPeeps({ specFileRetries: 1 });
+    const reporter = new PeepsAppiumReporter({});
+    sessionFailed(reporter, SESSION_ERROR);
+    await synchronised(reporter);
+    const events = peeps.received.events.get("r-a")!;
+    assert.deepEqual(events.map((e) => e.type), ["run_start", "test_start", "test_end"]);
+    assert.equal(events[2]!.status, "failed");
+    assert.equal("failure" in events[2]!, true);
+  } finally {
+    peeps.close();
+  }
+});
+
 test("each run is reported by one worker: a second capability's attempt is logged, not sent", async () => {
   const peeps = await fakePeeps();
   const workerId = process.env.WDIO_WORKER_ID;

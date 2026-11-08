@@ -39,6 +39,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { makeRedactor } from "./redact";
 import type { PlanEntry } from "./reporter";
 
 export const TITLE_PATH_SEPARATOR = " › ";
@@ -847,6 +848,8 @@ export class PeepsAppiumReporter {
   private readonly retriable: boolean = false;
   private inflight = 0;
   private file: string | undefined;
+  /** This worker's spec files, from `runner:start`. */
+  private specs: string[] = [];
 
   constructor(_options?: unknown) {
     this.plan = loadPlan();
@@ -866,6 +869,7 @@ export class PeepsAppiumReporter {
     if (!this.plan) return;
     switch (event) {
       case "runner:start":
+        this.specs = payload.specs ?? [];
         console.log(
           this.plan.file.resultsDir
             ? "[peeps] recording results for the agent session"
@@ -898,6 +902,7 @@ export class PeepsAppiumReporter {
         if (payload.error && BEFORE_HOOK.test(payload.title ?? "")) this.onSetupFailure(payload);
         return;
       case "runner:end":
+        this.onSessionError((payload as { error?: unknown }).error);
         for (const runId of this.queues.keys()) this.flush(runId);
         return;
       default:
@@ -1019,6 +1024,40 @@ export class PeepsAppiumReporter {
       };
       attachScreens(event, entry.runId);
       this.close(entry, event);
+    }
+  }
+
+  /**
+   * WebdriverIO 9 reports a session that could not start (no app at the
+   * path, no booted device, a bad capability) only as `runner:end`'s
+   * `error`, with no test events. Each planned test of this worker's spec
+   * files that has no result fails at setup with that error, redacted of
+   * the job's secrets and clipped like any failure. A clean `runner:end`
+   * changes nothing.
+   */
+  private onSessionError(raw: unknown): void {
+    const text = typeof raw === "string" ? raw : (raw as { message?: unknown } | null)?.message;
+    if (typeof text !== "string" || !text) return;
+    const message = makeRedactor(process.env)(text);
+    const specs = new Set(
+      this.specs
+        .map((spec) => repoRelative(this.plan!.file.workspace, spec.startsWith("file://") ? fileURLToPath(spec) : spec))
+        .filter((rel): rel is string => rel !== null),
+    );
+    const error: WdioError = { name: "SessionNotCreated", message, stack: message };
+    for (const entry of this.plan!.entries.values()) {
+      if (!specs.has(entry.path) || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) continue;
+      const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
+      if (!this.attemptStart.has(entry.runId) && !this.begin(entry, testName)) continue;
+      this.close(entry, {
+        type: "test_end",
+        timestamp: Date.now(),
+        testName,
+        status: "failed",
+        duration: 0,
+        error: `Appium session could not start: ${message}`.slice(0, 4000),
+        ...failureEvidence(error, "setup", undefined),
+      });
     }
   }
 
