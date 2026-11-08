@@ -262,8 +262,9 @@ How each mode works for Appium:
 - **report** and **run**: the action runs `npx wdio run` with a temporary
   config beside yours (`.peeps-<id>.wdio.conf.mts`, removed afterwards, and
   at once if the job is cancelled, when WebdriverIO is stopped too) that
-  imports yours and adds Peeps' reporter and an `afterTest` hook; your own
-  reporters, hooks and services stay. `run` narrows the spec files to the
+  imports yours and adds Peeps' reporter, an `afterTest` hook and a `before`
+  hook that registers `browser.peepsScreen`; your own reporters, hooks and
+  services stay. `run` narrows the spec files to the
   planned ones, passes a mocha grep over the planned titles, and adds a mocha
   root `beforeEach` (through `mochaOpts.require`, beside any of yours) that
   skips any test whose spec file and title path together are not planned, so
@@ -295,6 +296,60 @@ failed in: `[{ "name": "context", "value": "WEBVIEW_com.example" }]`.
 A capture that fails or exceeds 25 MB is listed in `attachmentsOmitted` with
 its reason. Under mocha retries each retried attempt sends a failed
 `test_end` and only the final attempt's evidence is kept.
+
+### Named screens for visual diffs
+
+To have Peeps compare a screen from run to run, name it in the test:
+
+```ts
+it("shows the order summary", async () => {
+  await CheckoutPage.open();
+  await browser.peepsScreen?.("Order summary");
+  // …
+});
+```
+
+`withPeeps` registers `browser.peepsScreen(name)` in a `before` hook, so
+nothing is installed or imported. The `?.` keeps the spec running where the
+action is not (a local `npx wdio run`), and TypeScript needs one declaration
+somewhere in your specs' compilation:
+
+```ts
+declare global {
+  namespace WebdriverIO {
+    interface Browser {
+      peepsScreen?(name: string): Promise<void>;
+    }
+  }
+}
+export {};
+```
+
+Each call waits for the screen to settle: it takes screenshots 300 ms apart
+until two in a row are identical, at most five (so a blinking cursor or a
+running animation keeps the fifth). The settled PNG is saved for the test
+running now and listed on its final `test_end`, **passed or failed**, as
+`{ "name": "screen:Order summary", "path": "data/<runId>-evidence-screen-order-summary.png", "size": … }`
+(the file name is the name lowercased, other characters as `-`, at most 60;
+a repeated one gets `-2`, `-3`…), after a failure's own `screenshot.png` and
+page source. The same `test_end` carries the device, for Peeps to keep one
+baseline per device: `properties` gets
+`{ "name": "peeps_device", "value": "{\"platform\":\"android\",\"deviceName\":…,\"platformVersion\":…,\"width\":1080,\"height\":2400,\"statusBarHeight\":63}" }`,
+from the session's capabilities, the PNG's own size, and the status bar's
+height in screenshot pixels (iOS: `mobile: deviceScreenInfo`; Android:
+`getSystemBars()`; 0 when the driver does not say).
+
+The name is 1 to 80 characters. The call never fails the test: a bad name, a
+call outside a test (in an `afterEach`, say), or a screenshot that fails is
+logged in the job, and a failed capture is listed in `attachmentsOmitted`.
+Call it in the test body or a `beforeEach`.
+
+What it costs: two to five screenshots and 0.3 to 1.2 seconds of waiting per
+call, plus one PNG upload (a few hundred KB to a couple of MB per phone
+screen). Up to 10 screens per test are kept; later calls are not captured
+and are listed in `attachmentsOmitted` with reason `screen_limit`. A retried
+attempt's screens are discarded with its other evidence, and a skipped
+test sends none.
 
 One capability per config (one platform per config, named in `config`) is
 the supported shape. With several, each test is reported once, from the
@@ -625,6 +680,14 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## 1.11.0
+
+- Appium: `browser.peepsScreen(name)` saves a named screen of the running test for
+  Peeps' visual diffs. It waits for the screen to settle, and the screen is sent on
+  the test's result whether it passed or failed, with the device it was taken on
+  (platform, device name, OS version, screen size, status bar height). Up to 10 per
+  test; the call never fails a test.
 
 ## 1.10.1
 

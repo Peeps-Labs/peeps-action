@@ -26,16 +26,22 @@ import {
 import type { AppiumCollection } from "../src/appium-collect";
 import {
   captureEvidence,
+  captureScreen,
+  deviceFacts,
   evidenceFileName,
   mochaHooks,
   pageSourceExtension,
   PeepsAppiumReporter,
   peepsAfterHook,
   peepsAfterTest,
+  peepsBefore,
   resetForTests,
+  screenSlug,
+  stableFrame,
   withPeeps,
   type AppiumPlanFile,
   type CaptureBrowser,
+  type ScreenBrowser,
 } from "../src/appium-reporter";
 import { readRunnerEnv, type RunnerEnv } from "../src/env";
 import { gitBlobSha } from "../src/inventory";
@@ -43,6 +49,7 @@ import { PeepsClient } from "../src/peeps";
 import { resolveFramework } from "../src/pytest";
 import { plannedTestsOf } from "../src/report";
 import type { PlanEntry } from "../src/reporter";
+import { fakePng } from "./support/fake-webdriver";
 
 type MochaCtor = new (o: object) => { options: { grep: RegExp } };
 
@@ -451,6 +458,7 @@ test("withPeeps appends the reporter and hooks to the customer's, and narrows on
   assert.equal((report.reporters as unknown[]).length, 3);
   assert.deepEqual(report.afterTest, [theirs, peepsAfterTest]);
   assert.deepEqual(report.afterHook, [peepsAfterHook]);
+  assert.deepEqual(report.before, [peepsBefore]);
   assert.equal(report.reporterSyncTimeout, 60_000);
   assert.equal(report.specs, base.specs);
   assert.equal(report.mochaOpts, base.mochaOpts);
@@ -461,6 +469,8 @@ test("withPeeps appends the reporter and hooks to the customer's, and narrows on
     { specs: ["file:///w/a.spec.ts"], grep: "^(?:A one)$", junitDir: "/tmp/junit" },
   );
   assert.equal((run.reporters as unknown[])[0], PeepsAppiumReporter);
+  const before = () => undefined;
+  assert.deepEqual(withPeeps({ before: [before] }).before, [before, peepsBefore]);
   const junit = (run.reporters as Array<[string, { outputDir: string; outputFileFormat: (o: { cid: string }) => string }]>)[1]!;
   assert.equal(junit[0], "junit");
   assert.equal(junit[1].outputDir, "/tmp/junit");
@@ -800,6 +810,289 @@ test("a capture that fails is listed as omitted, and never fails the test", asyn
     assert.deepEqual(readdirSync(path.join(dir, "evidence", "upload")), ["r-1-evidence-page-source.xml.dat"]);
   } finally {
     delete (globalThis as { browser?: unknown }).browser;
+    peeps.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Named screens: browser.peepsScreen(name)
+// ---------------------------------------------------------------------------
+
+test("a screen's file slug: lowercased, other runs to '-', trimmed, at most 60 characters", () => {
+  assert.equal(screenSlug("Home"), "home");
+  assert.equal(screenSlug("  Cart / Checkout!! "), "cart-checkout");
+  assert.equal(screenSlug("--Order__Summary--"), "order-summary");
+  assert.equal(screenSlug("Ünïcode Böx"), "n-code-b-x");
+  const long = screenSlug(`${"a".repeat(59)} b`);
+  assert.equal(long, "a".repeat(59));
+  assert.equal(screenSlug("x".repeat(80)).length, 60);
+  // Nothing left of the name: the file still needs a name; the attachment keeps the real one.
+  assert.equal(screenSlug("ホーム"), "screen");
+});
+
+test("the stable frame: captures until two in a row are byte-identical, at most five, else the last", async () => {
+  const sequence = (...frames: string[]) => {
+    let calls = 0;
+    return { take: async () => Buffer.from(frames[Math.min(calls++, frames.length - 1)]!), calls: () => calls };
+  };
+  const settled = sequence("a", "a");
+  assert.equal(String(await stableFrame(settled.take, 1)), "a");
+  assert.equal(settled.calls(), 2);
+  const animating = sequence("a", "b", "c", "c", "z");
+  assert.equal(String(await stableFrame(animating.take, 1)), "c");
+  assert.equal(animating.calls(), 4);
+  const never = sequence("a", "b", "c", "d", "e", "f");
+  assert.equal(String(await stableFrame(never.take, 1)), "e");
+  assert.equal(never.calls(), 5);
+  // 300 ms apart by default.
+  const started = Date.now();
+  await stableFrame(sequence("a", "a").take);
+  assert.ok(Date.now() - started >= 290);
+});
+
+type ScreenCommand = (this: ScreenBrowser, name: unknown) => Promise<void>;
+
+/** The command `withPeeps`' `before` hook registers on the worker's browser. */
+function registeredScreen(): ScreenCommand {
+  let command: ScreenCommand | undefined;
+  peepsBefore({}, [], {
+    addCommand: (name: string, fn: ScreenCommand) => {
+      assert.equal(name, "peepsScreen");
+      command = fn;
+    },
+  });
+  assert.ok(command);
+  return command;
+}
+
+const ANDROID_CAPS = { platformName: "Android", "appium:deviceName": "emulator-5554", platformVersion: "14", "appium:udid": "emulator-5554" };
+
+function screenBrowser(over: Partial<ScreenBrowser> = {}): ScreenBrowser & { shots: () => number } {
+  let shots = 0;
+  return {
+    capabilities: ANDROID_CAPS,
+    takeScreenshot: async () => {
+      shots += 1;
+      return fakePng(1080, 2400).toString("base64");
+    },
+    getSystemBars: async () => ({ statusBar: { visible: true, x: 0, y: 0, width: 1080, height: 63 } }),
+    shots: () => shots,
+    ...over,
+  };
+}
+
+test("named screens ride on a passed test's test_end, with the device they were taken on", async () => {
+  const peeps = await fakePeeps();
+  try {
+    const dir = usePlan(peeps.url, [
+      run("r-pass", "mobile/test/specs/checkout.spec.ts", "Checkout › pays"),
+      run("r-fail", "mobile/test/specs/checkout.spec.ts", "Checkout › declines"),
+    ]);
+    const screen = registeredScreen();
+    const browser = screenBrowser();
+    const reporter = new PeepsAppiumReporter({});
+    reporter.emit("suite:start", { title: "Checkout", file: SPEC });
+    reporter.emit("test:start", { title: "pays", file: SPEC });
+    await screen.call(browser, "  Home screen ");
+    await screen.call(browser, "Home/Screen");
+    reporter.emit("test:pass", { title: "pays", file: SPEC, duration: 5 });
+    reporter.emit("test:start", { title: "declines", file: SPEC });
+    await screen.call(browser, "Card form");
+    (globalThis as { browser?: unknown }).browser = fakeBrowser();
+    const error = { name: "Error", message: "declined", stack: "Error: declined" };
+    await peepsAfterTest({}, { test: mochaTest(["Checkout", "declines"]) }, { passed: false, error });
+    reporter.emit("test:fail", { title: "declines", file: SPEC, error });
+    reporter.emit("suite:end", { title: "Checkout" });
+    reporter.emit("runner:end", {});
+    await synchronised(reporter);
+
+    const size = fakePng(1080, 2400).length;
+    const device = { name: "peeps_device", value: JSON.stringify({ platform: "android", deviceName: "emulator-5554", platformVersion: "14", width: 1080, height: 2400, statusBarHeight: 63 }) };
+    const pass = peeps.received.events.get("r-pass")!.find((e) => e.type === "test_end")!;
+    assert.equal(pass.status, "passed");
+    assert.deepEqual(pass.attachments, [
+      { name: "screen:Home screen", path: "data/r-pass-evidence-screen-home-screen.png", size },
+      { name: "screen:Home/Screen", path: "data/r-pass-evidence-screen-home-screen-2.png", size },
+    ]);
+    assert.deepEqual(pass.properties, [device]);
+    assert.equal("attachmentsOmitted" in pass, false);
+    // Identical frames: two captures per screen.
+    assert.equal(browser.shots(), 6);
+
+    // A failure keeps its own evidence first, then the screens.
+    const fail = peeps.received.events.get("r-fail")!.find((e) => e.type === "test_end")!;
+    assert.deepEqual((fail.attachments as Array<{ name: string }>).map((a) => a.name), ["screenshot.png", "page-source.xml", "screen:Card form"]);
+    assert.deepEqual(fail.properties, [{ name: "context", value: "NATIVE_APP" }, device]);
+    assert.deepEqual(readdirSync(path.join(dir, "evidence", "upload")).sort(), [
+      "r-fail-evidence-page-source.xml.dat",
+      "r-fail-evidence-screen-card-form.png",
+      "r-fail-evidence-screenshot.png",
+      "r-pass-evidence-screen-home-screen-2.png",
+      "r-pass-evidence-screen-home-screen.png",
+    ]);
+    assert.deepEqual(
+      readFileSync(path.join(dir, "evidence", "upload", "r-pass-evidence-screen-home-screen.png")),
+      fakePng(1080, 2400),
+    );
+  } finally {
+    delete (globalThis as { browser?: unknown }).browser;
+    peeps.close();
+  }
+});
+
+test("at most ten named screens per test; the rest are listed as omitted, not captured", async () => {
+  const peeps = await fakePeeps();
+  try {
+    const file = "/w/mobile/a.spec.ts";
+    usePlan(peeps.url, [run("r-1", "mobile/a.spec.ts", "A › b")]);
+    const browser = screenBrowser();
+    const reporter = new PeepsAppiumReporter({});
+    reporter.emit("suite:start", { title: "A", file });
+    reporter.emit("test:start", { title: "b", file });
+    for (let i = 1; i <= 12; i++) await captureScreen("r-1", browser, `step ${i}`, 0);
+    reporter.emit("test:pass", { title: "b", file });
+    await synchronised(reporter);
+    const end = peeps.received.events.get("r-1")!.find((e) => e.type === "test_end")!;
+    assert.equal((end.attachments as unknown[]).length, 10);
+    assert.deepEqual(end.attachmentsOmitted, [
+      { name: "screen:step 11", reason: "screen_limit" },
+      { name: "screen:step 12", reason: "screen_limit" },
+    ]);
+    assert.equal(browser.shots(), 20);
+  } finally {
+    peeps.close();
+  }
+});
+
+test("a retried attempt's screens are discarded, files and all; the final attempt's are sent", async () => {
+  const peeps = await fakePeeps();
+  try {
+    const dir = usePlan(peeps.url, [run("r-flaky", "mobile/test/specs/checkout.spec.ts", "Checkout › retries")]);
+    const screen = registeredScreen();
+    const browser = screenBrowser();
+    const reporter = new PeepsAppiumReporter({});
+    reporter.emit("suite:start", { title: "Checkout", file: SPEC });
+    reporter.emit("test:start", { title: "retries", file: SPEC });
+    await screen.call(browser, "first try");
+    reporter.emit("test:retry", { title: "retries", file: SPEC, error: { message: "flake" } });
+    // Between attempts (afterEach): no test is running, so nothing is captured.
+    await screen.call(browser, "between");
+    reporter.emit("test:start", { title: "retries", file: SPEC });
+    await screen.call(browser, "second try");
+    reporter.emit("test:pass", { title: "retries", file: SPEC });
+    reporter.emit("runner:end", {});
+    await synchronised(reporter);
+    const events = peeps.received.events.get("r-flaky")!;
+    const ends = events.filter((e) => e.type === "test_end");
+    assert.equal("attachments" in ends[0]!, false);
+    assert.equal("properties" in ends[0]!, false);
+    assert.deepEqual((ends[1]!.attachments as Array<{ name: string }>).map((a) => a.name), ["screen:second try"]);
+    assert.deepEqual(readdirSync(path.join(dir, "evidence", "upload")), ["r-flaky-evidence-screen-second-try.png"]);
+  } finally {
+    peeps.close();
+  }
+});
+
+test("a skipped test sends no screens and leaves none staged", async () => {
+  const peeps = await fakePeeps();
+  try {
+    const file = "/w/mobile/a.spec.ts";
+    const dir = usePlan(peeps.url, [run("r-1", "mobile/a.spec.ts", "A › b")]);
+    const reporter = new PeepsAppiumReporter({});
+    reporter.emit("suite:start", { title: "A", file });
+    reporter.emit("test:start", { title: "b", file });
+    await captureScreen("r-1", screenBrowser(), "before skip", 0);
+    reporter.emit("test:pending", { title: "b", file });
+    await synchronised(reporter);
+    const end = peeps.received.events.get("r-1")!.find((e) => e.type === "test_end")!;
+    assert.equal("attachments" in end, false);
+    assert.deepEqual(readdirSync(path.join(dir, "evidence", "upload")), []);
+  } finally {
+    peeps.close();
+  }
+});
+
+test("the device: iOS and Android capability shapes, status bar in screenshot pixels, 0 when unknown", async () => {
+  // iOS: deviceScreenInfo's status bar (points) times its scale.
+  const ios = await deviceFacts({
+    capabilities: { platformName: "iOS", deviceName: "iPhone 16", platformVersion: "18.2" },
+    takeScreenshot: async () => "",
+    execute: async (script: string) => {
+      assert.equal(script, "mobile: deviceScreenInfo");
+      return { statusBarSize: { width: 393, height: 54 }, scale: 3 };
+    },
+  });
+  assert.deepEqual(ios, { platform: "ios", deviceName: "iPhone 16", platformVersion: "18.2", statusBarHeight: 162 });
+  // iOS without deviceScreenInfo: the session's statBarHeight times its pixelRatio.
+  const iosCaps = await deviceFacts({
+    capabilities: { platformName: "iOS", "appium:deviceName": "iPad Air", "appium:platformVersion": "17.5", statBarHeight: 24, pixelRatio: 2 },
+    takeScreenshot: async () => "",
+    execute: async () => {
+      throw new Error("unknown command");
+    },
+  });
+  assert.deepEqual(iosCaps, { platform: "ios", deviceName: "iPad Air", platformVersion: "17.5", statusBarHeight: 48 });
+  // Android: getSystemBars' status bar, already in pixels.
+  const android = await deviceFacts(screenBrowser());
+  assert.deepEqual(android, { platform: "android", deviceName: "emulator-5554", platformVersion: "14", statusBarHeight: 63 });
+  // A driver that fails, or never answers, costs nothing but the status bar.
+  const failing = await deviceFacts(screenBrowser({ getSystemBars: async () => Promise.reject(new Error("no")) }));
+  assert.equal(failing!.statusBarHeight, 0);
+  const hanging = await deviceFacts(screenBrowser({ getSystemBars: () => new Promise(() => {}) }), 20);
+  assert.equal(hanging!.statusBarHeight, 0);
+  const missing = await deviceFacts({ capabilities: { platformName: "Android" }, takeScreenshot: async () => "" });
+  assert.deepEqual(missing, { platform: "android", deviceName: "", platformVersion: "", statusBarHeight: 0 });
+  // Not a phone: no device property.
+  assert.equal(await deviceFacts({ capabilities: { browserName: "chrome", platformName: "linux" }, takeScreenshot: async () => "" }), null);
+  assert.equal(await deviceFacts({ takeScreenshot: async () => "" }), null);
+});
+
+test("peepsScreen never throws into the test", async () => {
+  const peeps = await fakePeeps();
+  const logs: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => void logs.push(args.join(" "));
+  try {
+    const file = "/w/mobile/a.spec.ts";
+    usePlan(peeps.url, [run("r-1", "mobile/a.spec.ts", "A › b")]);
+    const screen = registeredScreen();
+    // Outside any test: logged, nothing captured.
+    const idle = screenBrowser();
+    await screen.call(idle, "home");
+    assert.equal(idle.shots(), 0);
+    const reporter = new PeepsAppiumReporter({});
+    reporter.emit("suite:start", { title: "A", file });
+    reporter.emit("test:start", { title: "b", file });
+    // Invalid names: logged, nothing captured.
+    for (const name of ["", "   ", "x".repeat(81), 42, undefined]) await screen.call(idle, name);
+    assert.equal(idle.shots(), 0);
+    // A screenshot that fails, or is not a PNG: listed as omitted.
+    await screen.call(screenBrowser({ takeScreenshot: async () => Promise.reject(new Error("session deleted\nmore")) }), "gone");
+    await screen.call(screenBrowser({ takeScreenshot: async () => Buffer.from("not a png").toString("base64") }), "garbled");
+    // No staging directory: logged, nothing captured.
+    const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
+    delete process.env.PEEPS_ARTIFACTS_DIR;
+    await screen.call(idle, "nowhere");
+    process.env.PEEPS_ARTIFACTS_DIR = artifacts;
+    assert.equal(idle.shots(), 0);
+    // A name of exactly 80 characters is fine.
+    await screen.call(screenBrowser(), "y".repeat(80));
+    reporter.emit("test:pass", { title: "b", file });
+    await synchronised(reporter);
+    const end = peeps.received.events.get("r-1")!.find((e) => e.type === "test_end")!;
+    assert.deepEqual((end.attachments as Array<{ name: string }>).map((a) => a.name), [`screen:${"y".repeat(80)}`]);
+    assert.deepEqual(end.attachmentsOmitted, [
+      { name: "screen:gone", reason: "capture failed: session deleted" },
+      { name: "screen:garbled", reason: "capture failed: the screenshot is not a PNG" },
+    ]);
+    assert.ok(logs.some((line) => /\[peeps\] peepsScreen\("home"\) not captured: no Peeps test is running/.test(line)));
+    assert.ok(logs.some((line) => /\[peeps\] peepsScreen: the name must be 1 to 80 characters/.test(line)));
+    // The before hook itself never throws either, whatever WebdriverIO hands it.
+    peepsBefore({}, [], undefined);
+    peepsBefore({}, [], {} as never);
+    peepsBefore({}, [], { addCommand: () => { throw new Error("multiremote"); } });
+  } finally {
+    console.log = log;
     peeps.close();
   }
 });

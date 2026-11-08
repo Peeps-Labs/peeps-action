@@ -808,6 +808,10 @@ function pageSourceExtension(source, context) {
   if (/^<!doctype html|<html[\s>]/i.test(head)) return "html";
   return context && /^NATIVE/i.test(context) ? "xml" : "html";
 }
+function pngSize(bytes) {
+  if (bytes.length < 24 || bytes.readUInt32BE(0) !== 2303741511 || bytes.toString("ascii", 12, 16) !== "IHDR") return null;
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
 
 // src/pytest.ts
 var import_node_child_process3 = require("node:child_process");
@@ -1911,10 +1915,6 @@ function sessionCapabilities(raw) {
   const idle = Number(caps["appium:newCommandTimeout"]);
   if (idle !== 0 && !(idle >= SESSION_IDLE_SECONDS)) caps["appium:newCommandTimeout"] = SESSION_IDLE_SECONDS;
   return caps;
-}
-function pngSize(bytes) {
-  if (bytes.length < 24 || bytes.readUInt32BE(0) !== 2303741511 || bytes.toString("ascii", 12, 16) !== "IHDR") return null;
-  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
 }
 var DeviceError = class extends Error {
   constructor(message, code = null) {
@@ -3601,7 +3601,7 @@ function runCapture(cmd, args, cwd, timeoutMs, extraEnv = {}) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.10.1";
+var ACTION_VERSION = "1.11.0";
 
 // src/agent.ts
 var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process7.execFile);
