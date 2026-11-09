@@ -693,6 +693,13 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
+## 1.12.1
+
+- `preview: vercel` in a job Peeps starts now finds the checked-out commit
+  inside the Playwright container. 1.12.0 asked git without
+  `safe.directory`, git refused a checkout another user owns, and the job
+  logged "could not read the checked-out commit" and ran with no `BASE_URL`.
+
 ## 1.12.0
 
 - `preview: vercel` in a job Peeps starts (`run`, `agent`): the Vercel preview

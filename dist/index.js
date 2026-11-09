@@ -3611,7 +3611,7 @@ function runCapture(cmd, args, cwd, timeoutMs, extraEnv = {}) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.12.0";
+var ACTION_VERSION = "1.12.1";
 
 // src/agent.ts
 var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process7.execFile);
@@ -4202,7 +4202,11 @@ async function dispatchedPreviewUrl(mode, env, githubToken, checkedOutSha, deps 
 }
 function headSha(cwd) {
   try {
-    return (0, import_node_child_process9.execFileSync)("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return (0, import_node_child_process9.execFileSync)("git", ["-c", `safe.directory=${cwd}`, "rev-parse", "HEAD"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
   } catch {
     return null;
   }

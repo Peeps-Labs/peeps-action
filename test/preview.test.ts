@@ -1,11 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   GITHUB_TOKEN_INPUT,
   dispatchedPreviewUrl,
+  headSha,
   previewBaseUrl,
   readPreviewRequest,
   takeGithubToken,
@@ -479,4 +481,30 @@ test("unnamed, another project's finished status does not stop a ready preview",
     ],
   });
   assert.equal(await waitForVercelPreview(request, { fetch: fetchFn, ...instant }), "https://web.vercel.app");
+});
+
+// Inside the Playwright container the checkout belongs to the runner's uid and
+// git refuses a repository another user owns: a heal on v1.12.0 logged "could
+// not read the checked-out commit" and tested nothing. Git's own test switch
+// makes it treat the repository as someone else's.
+test("headSha reads a checkout another user owns, as in the Playwright container", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "peeps-head-"));
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }).trim();
+  git("init", "-q");
+  git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x");
+  const sha = git("rev-parse", "HEAD");
+  const before = { owner: process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER, global: process.env.GIT_CONFIG_GLOBAL };
+  process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
+  process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+  try {
+    assert.throws(() => execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, stdio: "pipe" }));
+    assert.equal(headSha(repo), sha);
+  } finally {
+    if (before.owner === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = before.owner;
+    if (before.global === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = before.global;
+  }
+  assert.equal(headSha(mkdtempSync(path.join(tmpdir(), "peeps-nogit-"))), null);
 });

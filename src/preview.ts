@@ -401,10 +401,18 @@ export async function dispatchedPreviewUrl(
   }
 }
 
-/** The commit checked out in `cwd`, or null outside a git checkout. */
+/**
+ * The commit checked out in `cwd`, or null outside a git checkout.
+ * `-c safe.directory`: inside the Playwright container the checkout is owned
+ * by another uid, and git refuses it without this (see tools.ts).
+ */
 export function headSha(cwd: string): string | null {
   try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return execFileSync("git", ["-c", `safe.directory=${cwd}`, "rev-parse", "HEAD"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
   } catch {
     return null;
   }
