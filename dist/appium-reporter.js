@@ -32,9 +32,12 @@ var appium_reporter_exports = {};
 __export(appium_reporter_exports, {
   DATA_EXTENSIONS: () => DATA_EXTENSIONS,
   MAX_ATTACHMENT_BYTES: () => MAX_ATTACHMENT_BYTES,
+  MAX_SCREENS_PER_TEST: () => MAX_SCREENS_PER_TEST,
   PeepsAppiumReporter: () => PeepsAppiumReporter,
   TITLE_PATH_SEPARATOR: () => TITLE_PATH_SEPARATOR,
   captureEvidence: () => captureEvidence,
+  captureScreen: () => captureScreen,
+  deviceFacts: () => deviceFacts,
   evidenceFileName: () => evidenceFileName,
   failureEvidence: () => failureEvidence,
   identityKey: () => identityKey,
@@ -43,8 +46,12 @@ __export(appium_reporter_exports, {
   pageSourceExtension: () => pageSourceExtension,
   peepsAfterHook: () => peepsAfterHook,
   peepsAfterTest: () => peepsAfterTest,
+  peepsBefore: () => peepsBefore,
+  pngSize: () => pngSize,
   repoRelative: () => repoRelative,
   resetForTests: () => resetForTests,
+  screenSlug: () => screenSlug,
+  stableFrame: () => stableFrame,
   withPeeps: () => withPeeps
 });
 module.exports = __toCommonJS(appium_reporter_exports);
@@ -52,6 +59,38 @@ var import_node_crypto = require("node:crypto");
 var import_node_fs = require("node:fs");
 var import_node_path = __toESM(require("node:path"));
 var import_node_url = require("node:url");
+
+// src/redact.ts
+function makeRedactor(env) {
+  const values = Object.entries(env).filter(([k, v]) => v && v.length >= 8 && isSecretish(k)).map(([, v]) => v).sort((a, b) => b.length - a.length);
+  if (values.length === 0) return (t) => t;
+  const pattern = new RegExp(values.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+  return (text) => text.replace(pattern, "[redacted]");
+}
+function isSecretish(key) {
+  if (ALWAYS_MASK_KEYS.has(key)) return true;
+  if (SAFE_ENV_KEYS.has(key)) return false;
+  return !/^(GITHUB|RUNNER|ACTIONS|INPUT|CI)_/.test(key);
+}
+var ALWAYS_MASK_KEYS = /* @__PURE__ */ new Set([
+  "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+  "ACTIONS_RUNTIME_TOKEN",
+  "GITHUB_TOKEN",
+  // GitLab's `CI_` variables are exempt by prefix like GitHub's, except the
+  // ones that are credentials: the job token (and the clone URL it is in),
+  // the legacy job JWTs, and the registry, deploy and proxy passwords.
+  "CI_JOB_TOKEN",
+  "CI_REPOSITORY_URL",
+  "CI_JOB_JWT",
+  "CI_JOB_JWT_V1",
+  "CI_JOB_JWT_V2",
+  "CI_REGISTRY_PASSWORD",
+  "CI_DEPLOY_PASSWORD",
+  "CI_DEPENDENCY_PROXY_PASSWORD"
+]);
+var SAFE_ENV_KEYS = /* @__PURE__ */ new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
+
+// src/appium-reporter.ts
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function localRunId(relPath, titlePath) {
   return `local-${(0, import_node_crypto.createHash)("sha1").update(`${relPath}
@@ -169,6 +208,9 @@ var specFileRetries = 0;
 function resetForTests() {
   cachedPlan = void 0;
   captured.clear();
+  screens.clear();
+  currentRunId = null;
+  cachedDevice = void 0;
   specFileRetries = 0;
 }
 var DATA_EXTENSIONS = /* @__PURE__ */ new Set([
@@ -205,21 +247,29 @@ function pageSourceExtension(source, context) {
   return context && /^NATIVE/i.test(context) ? "xml" : "html";
 }
 var captured = /* @__PURE__ */ new Map();
-function discardCaptured(runId) {
-  for (const file of captured.get(runId)?.files ?? []) {
+function removeFiles(files) {
+  for (const file of files) {
     try {
       (0, import_node_fs.unlinkSync)(file);
     } catch {
     }
   }
+}
+function discardFailureEvidence(runId) {
+  removeFiles(captured.get(runId)?.files ?? []);
   captured.delete(runId);
 }
-function withTimeout(promise, label) {
+function discardCaptured(runId) {
+  discardFailureEvidence(runId);
+  removeFiles([...screens.get(runId)?.shots.values() ?? []].map((shot) => shot.file));
+  screens.delete(runId);
+}
+function withTimeout(promise, label, ms = CAPTURE_TIMEOUT_MS) {
   let timer;
   return Promise.race([
     promise,
     new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out after ${CAPTURE_TIMEOUT_MS} ms`)), CAPTURE_TIMEOUT_MS);
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
     })
   ]).finally(() => clearTimeout(timer));
 }
@@ -229,7 +279,7 @@ function reasonOf(error) {
 async function captureEvidence(runId, browser) {
   const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
   if (!artifacts) return;
-  discardCaptured(runId);
+  discardFailureEvidence(runId);
   const dir = import_node_path.default.join(artifacts, "upload");
   const out = { attachments: [], omitted: [], context: null, files: [] };
   const keep = (name, file) => {
@@ -307,6 +357,160 @@ async function peepsAfterHook(_hook, context, result) {
     console.log(`[peeps] afterHook evidence not captured: ${String(error)}`);
   }
 }
+var MAX_SCREENS_PER_TEST = 10;
+var MAX_SCREEN_NAME = 80;
+var STABLE_FRAME_CAPTURES = 5;
+var STABLE_FRAME_INTERVAL_MS = 300;
+var DEVICE_QUERY_TIMEOUT_MS = 5e3;
+var screens = /* @__PURE__ */ new Map();
+var currentRunId = null;
+function pngSize(bytes) {
+  if (bytes.length < 24 || bytes.readUInt32BE(0) !== 2303741511 || bytes.toString("ascii", 12, 16) !== "IHDR") return null;
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+function screenSlug(name) {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60).replace(/-+$/, "");
+  return slug || "screen";
+}
+async function stableFrame(take, intervalMs = STABLE_FRAME_INTERVAL_MS) {
+  let last = await take();
+  for (let i = 1; i < STABLE_FRAME_CAPTURES; i++) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    const next = await take();
+    if (next.equals(last)) return next;
+    last = next;
+  }
+  return last;
+}
+var cachedDevice;
+async function deviceFacts(browser, timeoutMs = DEVICE_QUERY_TIMEOUT_MS) {
+  const caps = browser.capabilities ?? {};
+  const cap = (key) => caps[key] ?? caps[`appium:${key}`];
+  const text = (key) => {
+    const value = cap(key);
+    return typeof value === "string" || typeof value === "number" ? String(value) : "";
+  };
+  const platform = text("platformName").toLowerCase();
+  if (platform !== "ios" && platform !== "android") return null;
+  const positive = (value) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+  let statusBarHeight = 0;
+  try {
+    if (platform === "ios") {
+      let info = null;
+      try {
+        if (typeof browser.execute === "function") {
+          info = await withTimeout(Promise.resolve(browser.execute("mobile: deviceScreenInfo")), "deviceScreenInfo", timeoutMs);
+        }
+      } catch {
+      }
+      statusBarHeight = positive(info?.statusBarSize?.height) * (positive(info?.scale) || 1) || positive(cap("statBarHeight")) * (positive(cap("pixelRatio")) || 1);
+    } else if (typeof browser.getSystemBars === "function") {
+      const bars = await withTimeout(Promise.resolve(browser.getSystemBars()), "getSystemBars", timeoutMs);
+      statusBarHeight = positive(bars?.statusBar?.height);
+    }
+  } catch {
+  }
+  const deviceModel = text("deviceModel");
+  return {
+    platform,
+    deviceName: text("deviceName"),
+    ...deviceModel ? { deviceModel } : {},
+    platformVersion: text("platformVersion"),
+    statusBarHeight: Math.round(statusBarHeight)
+  };
+}
+async function captureScreen(runId, browser, name, intervalMs = STABLE_FRAME_INTERVAL_MS) {
+  const label = `screen:${name}`;
+  const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
+  if (!artifacts) {
+    console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: PEEPS_ARTIFACTS_DIR is not set`);
+    return;
+  }
+  const out = screens.get(runId) ?? { shots: /* @__PURE__ */ new Map(), omitted: [], names: /* @__PURE__ */ new Set(), device: null };
+  screens.set(runId, out);
+  if (!out.names.has(name) && out.names.size >= MAX_SCREENS_PER_TEST) {
+    console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: at most ${MAX_SCREENS_PER_TEST} screens per test`);
+    out.omitted.push({ name: label, reason: "screen_limit" });
+    return;
+  }
+  out.names.add(name);
+  try {
+    const frame = await stableFrame(
+      async () => Buffer.from(String(await withTimeout(Promise.resolve(browser.takeScreenshot()), "takeScreenshot")), "base64"),
+      intervalMs
+    );
+    const size = pngSize(frame);
+    if (!size) throw new Error("the screenshot is not a PNG");
+    if (frame.length > MAX_ATTACHMENT_BYTES) throw new Error(`larger than ${MAX_ATTACHMENT_BYTES} bytes`);
+    const earlier = out.shots.get(name);
+    if (earlier) {
+      removeFiles([earlier.file]);
+      out.shots.delete(name);
+    }
+    const taken = new Set([...out.shots.values()].map((shot) => shot.slug));
+    const base = screenSlug(name);
+    let slug = base;
+    for (let n = 2; taken.has(slug); n++) slug = `${base}-${n}`;
+    const dir = import_node_path.default.join(artifacts, "upload");
+    (0, import_node_fs.mkdirSync)(dir, { recursive: true });
+    const file = import_node_path.default.join(dir, evidenceFileName(runId, `screen-${slug}.png`));
+    (0, import_node_fs.writeFileSync)(file, frame);
+    out.shots.set(name, { slug, file, size: frame.length });
+    if (!out.device) {
+      cachedDevice ??= deviceFacts(browser);
+      const facts = await cachedDevice;
+      if (facts) {
+        const { platform, deviceName, deviceModel, platformVersion, statusBarHeight } = facts;
+        out.device = {
+          platform,
+          deviceName,
+          ...deviceModel ? { deviceModel } : {},
+          platformVersion,
+          width: size.width,
+          height: size.height,
+          statusBarHeight
+        };
+      }
+    }
+  } catch (error) {
+    if (!out.shots.has(name)) out.names.delete(name);
+    console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: ${String(error).split("\n")[0]}`);
+    out.omitted.push({ name: label, reason: reasonOf(error) });
+  }
+}
+async function peepsScreen(name) {
+  try {
+    const trimmed = typeof name === "string" ? name.trim() : "";
+    if (trimmed.length < 1 || trimmed.length > MAX_SCREEN_NAME) {
+      console.log(`[peeps] peepsScreen: the name must be 1 to ${MAX_SCREEN_NAME} characters; got ${JSON.stringify(name)}`);
+      return;
+    }
+    if (!currentRunId) {
+      console.log(`[peeps] peepsScreen(${JSON.stringify(trimmed)}) not captured: no Peeps test is running`);
+      return;
+    }
+    await captureScreen(currentRunId, this, trimmed);
+  } catch (error) {
+    console.log(`[peeps] peepsScreen not captured: ${String(error)}`);
+  }
+}
+function peepsBefore(_capabilities, _specs, browser) {
+  try {
+    const host = browser ?? globalThis.browser;
+    if (typeof host?.addCommand !== "function") return;
+    host.addCommand("peepsScreen", peepsScreen);
+  } catch (error) {
+    console.log(`[peeps] peepsScreen not registered: ${String(error)}`);
+  }
+}
+function attachScreens(event, runId) {
+  const shots = screens.get(runId);
+  if (!shots) return;
+  const attachments = [...shots.shots].map(([name, shot]) => ({ name: `screen:${name}`, path: `data/${import_node_path.default.basename(shot.file)}`, size: shot.size }));
+  if (attachments.length) event.attachments = [...event.attachments ?? [], ...attachments];
+  if (shots.omitted.length) event.attachmentsOmitted = [...event.attachmentsOmitted ?? [], ...shots.omitted];
+  if (shots.device) event.properties = [...event.properties ?? [], { name: "peeps_device", value: JSON.stringify(shots.device) }];
+}
 var mochaHooks = {
   beforeEach() {
     const plan = loadPlan();
@@ -317,6 +521,15 @@ var mochaHooks = {
     if (!plan.entryFor(test?.file, titles)) this.skip();
   }
 };
+function redactError(error) {
+  if (!error) return error;
+  const redact = makeRedactor(process.env);
+  return {
+    ...error,
+    ...error.message !== void 0 ? { message: redact(error.message) } : {},
+    ...error.stack !== void 0 ? { stack: redact(error.stack) } : {}
+  };
+}
 function trimMiddle(text, head = 2e3, tail = 1e4) {
   if (text.length <= head + tail) return text;
   return `${text.slice(0, head)}
@@ -360,6 +573,8 @@ var PeepsAppiumReporter = class {
   retriable = false;
   inflight = 0;
   file;
+  /** This worker's spec files, from `runner:start`. */
+  specs = [];
   constructor(_options) {
     this.plan = loadPlan();
     if (!this.plan) {
@@ -376,6 +591,7 @@ var PeepsAppiumReporter = class {
     if (!this.plan) return;
     switch (event) {
       case "runner:start":
+        this.specs = payload.specs ?? [];
         console.log(
           this.plan.file.resultsDir ? "[peeps] recording results for the agent session" : `[peeps] reporting ${this.plan.entries.size} planned run(s) to ${this.plan.file.peepsUrl}`
         );
@@ -406,6 +622,7 @@ var PeepsAppiumReporter = class {
         if (payload.error && BEFORE_HOOK.test(payload.title ?? "")) this.onSetupFailure(payload);
         return;
       case "runner:end":
+        this.onSessionError(payload.error);
         for (const runId of this.queues.keys()) this.flush(runId);
         return;
       default:
@@ -437,7 +654,7 @@ var PeepsAppiumReporter = class {
   }
   onTestStart(payload) {
     const entry = this.entryOf(payload);
-    if (entry && !this.ended.has(entry.runId)) this.begin(entry, payload.title ?? "");
+    currentRunId = entry && !this.ended.has(entry.runId) && this.begin(entry, payload.title ?? "") ? entry.runId : null;
   }
   onTestEnd(payload, status) {
     const entry = this.entryOf(payload);
@@ -449,7 +666,7 @@ var PeepsAppiumReporter = class {
     }
     if (this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
     if (!this.attemptStart.has(entry.runId) && !this.begin(entry, payload.title ?? "")) return;
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     const event = {
       type: "test_end",
       timestamp: Date.now(),
@@ -462,13 +679,15 @@ var PeepsAppiumReporter = class {
       if (error?.stack) event.errorStack = error.stack.slice(0, 8e3);
       Object.assign(event, failureEvidence(error, "call", captured.get(entry.runId)));
     }
+    if (status === "skipped") discardCaptured(entry.runId);
+    else attachScreens(event, entry.runId);
     this.close(entry, event);
   }
   /** A failed attempt mocha retries: a failed `test_end`, without evidence. */
   onTestRetry(payload) {
     const entry = this.entryOf(payload);
     if (!entry || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     this.enqueue(entry.runId, {
       type: "test_end",
       timestamp: Date.now(),
@@ -479,6 +698,7 @@ var PeepsAppiumReporter = class {
       ...error?.stack ? { errorStack: error.stack.slice(0, 8e3) } : {}
     });
     this.attemptStart.delete(entry.runId);
+    if (currentRunId === entry.runId) currentRunId = null;
     discardCaptured(entry.runId);
   }
   /**
@@ -493,13 +713,13 @@ var PeepsAppiumReporter = class {
     const owner = payload.parent === "" ? 0 : this.suites.lastIndexOf(payload.parent ?? "") + 1;
     const scope = owner > 0 || payload.parent === "" ? this.suites.slice(0, owner) : this.suites;
     const prefix = scope.length ? scope.join(TITLE_PATH_SEPARATOR) + TITLE_PATH_SEPARATOR : "";
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     for (const entry of this.plan.entries.values()) {
       if (entry.path !== rel || !entry.titlePath.startsWith(prefix) || this.ended.has(entry.runId)) continue;
       const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
       if (!this.attemptStart.has(entry.runId) && !this.begin(entry, testName)) continue;
       const message = `${payload.title ?? "a before hook"} failed: ${error?.message ?? ""}`;
-      this.close(entry, {
+      const event = {
         type: "test_end",
         timestamp: Date.now(),
         testName,
@@ -508,6 +728,39 @@ var PeepsAppiumReporter = class {
         error: message.slice(0, 4e3),
         ...error?.stack ? { errorStack: error.stack.slice(0, 8e3) } : {},
         ...failureEvidence(error, "setup", captured.get(entry.runId))
+      };
+      attachScreens(event, entry.runId);
+      this.close(entry, event);
+    }
+  }
+  /**
+   * WebdriverIO 9 reports a session that could not start (no app at the
+   * path, no booted device, a bad capability) only as `runner:end`'s
+   * `error`, with no test events. Each planned test of this worker's spec
+   * files that has no result fails at setup with that error, redacted of
+   * the job's secrets and clipped like any failure. A clean `runner:end`
+   * changes nothing.
+   */
+  onSessionError(raw) {
+    const text = typeof raw === "string" ? raw : raw?.message;
+    if (typeof text !== "string" || !text) return;
+    const error = redactError({ name: "SessionNotCreated", message: text, stack: text });
+    const message = error.message;
+    const specs = new Set(
+      this.specs.map((spec) => repoRelative(this.plan.file.workspace, spec.startsWith("file://") ? (0, import_node_url.fileURLToPath)(spec) : spec)).filter((rel) => rel !== null)
+    );
+    for (const entry of this.plan.entries.values()) {
+      if (!specs.has(entry.path) || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) continue;
+      const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
+      if (!this.attemptStart.has(entry.runId) && !this.begin(entry, testName)) continue;
+      this.close(entry, {
+        type: "test_end",
+        timestamp: Date.now(),
+        testName,
+        status: "failed",
+        duration: 0,
+        error: `Appium session could not start: ${message}`.slice(0, 4e3),
+        ...failureEvidence(error, "setup", void 0)
       });
     }
   }
@@ -521,6 +774,7 @@ var PeepsAppiumReporter = class {
   close(entry, event) {
     this.ended.add(entry.runId);
     this.attemptStart.delete(entry.runId);
+    if (currentRunId === entry.runId) currentRunId = null;
     if (event.status === "failed" && this.retriable) {
       const { attachments: _a, attachmentsOmitted: _o, properties: _p, ...attempt } = event;
       this.enqueue(entry.runId, attempt);
@@ -611,6 +865,7 @@ function withPeeps(base, options = {}) {
     reporters,
     afterTest: [...hooksOf(base.afterTest), peepsAfterTest],
     afterHook: [...hooksOf(base.afterHook), peepsAfterHook],
+    before: [...hooksOf(base.before), peepsBefore],
     // Room for the last test's events to reach Peeps before the worker exits.
     reporterSyncTimeout: Math.max(Number(base.reporterSyncTimeout) || 5e3, 6e4)
   };
@@ -646,9 +901,12 @@ function withPeeps(base, options = {}) {
 0 && (module.exports = {
   DATA_EXTENSIONS,
   MAX_ATTACHMENT_BYTES,
+  MAX_SCREENS_PER_TEST,
   PeepsAppiumReporter,
   TITLE_PATH_SEPARATOR,
   captureEvidence,
+  captureScreen,
+  deviceFacts,
   evidenceFileName,
   failureEvidence,
   identityKey,
@@ -657,7 +915,11 @@ function withPeeps(base, options = {}) {
   pageSourceExtension,
   peepsAfterHook,
   peepsAfterTest,
+  peepsBefore,
+  pngSize,
   repoRelative,
   resetForTests,
+  screenSlug,
+  stableFrame,
   withPeeps
 });

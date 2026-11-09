@@ -50,7 +50,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { readAppiumCapabilities, wdioConfigPath } from "./appium";
-import { pageSourceExtension } from "./appium-reporter";
+import { pageSourceExtension, pngSize } from "./appium-reporter";
 import type { RunnerEnv } from "./env";
 import { hideEnvironmentUrls } from "./environment";
 
@@ -167,12 +167,6 @@ export function sessionCapabilities(raw: Record<string, unknown>): Record<string
   const idle = Number(caps["appium:newCommandTimeout"]);
   if (idle !== 0 && !(idle >= SESSION_IDLE_SECONDS)) caps["appium:newCommandTimeout"] = SESSION_IDLE_SECONDS;
   return caps;
-}
-
-/** Width and height from a PNG's IHDR chunk; null when it is not a PNG. */
-export function pngSize(bytes: Buffer): { width: number; height: number } | null {
-  if (bytes.length < 24 || bytes.readUInt32BE(0) !== 0x89504e47 || bytes.toString("ascii", 12, 16) !== "IHDR") return null;
-  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
 }
 
 class DeviceError extends Error {

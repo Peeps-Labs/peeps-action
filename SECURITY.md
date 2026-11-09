@@ -50,7 +50,7 @@ This is more than "test results". Concretely:
 | Test results, timings, errors and stack traces, and which attempt each result was (its retry index, from Playwright or pytest-rerunfailures) | `report`, `run`, attached runs |
 | The **entire Playwright HTML report directory**, file by file (pytest: pytest-playwright's `--output` directory) | `report`, `run`, and `attach-finish` (the directory your `html` reporter wrote) |
 | pytest only: skip reasons, `record_property` values, a failed test's captured stdout/stderr/log output, and the files a test saves in `peeps_artifacts_dir` or attaches with `record_property("peeps_attachment", path)` (only from inside the repository or pytest's temporary directory) | `report`, `run` |
-| Appium only: for each **failed** test, a **screenshot of the device screen**, the **page source** of the screen it failed on (the native view hierarchy as XML, or the WebView's HTML), and the Appium context name; and, when `@wdio/junit-reporter` is installed and not already configured, the JUnit XML it writes (only for a run that is a single batch, since it holds every test the run ran) | `report`, `run` |
+| Appium only: for each **failed** test, a **screenshot of the device screen**, the **page source** of the screen it failed on (the native view hierarchy as XML, or the WebView's HTML), and the Appium context name; for any test, passed or failed, each **named screen** the test itself saved with `browser.peepsScreen(name)` (a device screenshot, up to 10 per test), with the device's platform, name, OS version and screen size; and, when `@wdio/junit-reporter` is installed and not already configured, the JUnit XML it writes (only for a run that is a single batch, since it holds every test the run ran) | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
 | The commit sha, ref, repository and Actions job URL | all modes |
 | The sha actually checked out (`git rev-parse HEAD`), and this action's version | `agent` |
@@ -81,8 +81,10 @@ is the text of every element on that screen: labels, field values your test
 typed (the platforms normally show password fields masked; Peeps masks
 nothing), and for a WebView its HTML as the page serialises it, including
 hidden inputs and any token or state embedded in the markup. Nothing redacts either before upload.
-Passing tests send neither. If that is not acceptable for a suite, use test
-accounts and data in it, or do not run `report`/`run` modes for it.
+Passing tests send neither. A test that calls `browser.peepsScreen(name)` sends
+that screenshot whether it passes or fails, also unredacted. If that is not
+acceptable for a suite, use test accounts and data in it, or do not run
+`report`/`run` modes for it.
 
 **Device tools read the app under test, live.** With `device-tools: true`,
 an agent session can read whatever the app shows: the page source of any
@@ -256,11 +258,12 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
   WebdriverIO's whole process group (SIGTERM, then SIGKILL after 3 seconds);
   a hard kill of the action itself (SIGKILL) can leave it behind, and
   `git_commit_push` never stages a `.peeps-*.wdio.conf.*` file. The wrapper
-  adds `dist/appium-reporter.js` from this repository: a reporter and two
-  hooks (and in `run` mode a mocha root hook that skips unplanned tests) that
+  adds `dist/appium-reporter.js` from this repository: a reporter and three
+  hooks (one registers `browser.peepsScreen`; and in `run` mode a mocha root hook that skips unplanned tests) that
   use only Node's standard library,
   read the plan file the action names, save a failed test's screenshot and
-  page source into the action's temporary directory, and send results to
+  page source, and any screen a test names, into the action's temporary
+  directory, and send results to
   Peeps. In `agent` mode with `device-tools: true`, the collector runs once more
   (`--capabilities`) to read the config's capabilities the same way; it
   imports the config only, not the specs.

@@ -12,10 +12,10 @@ import path from "node:path";
 import { runAgent, stopForSignal, summarizeArgs } from "../src/agent";
 import { readAppiumCapabilities, writeWrapperConfig } from "../src/appium";
 import { firstCapabilities } from "../src/appium-collect";
+import { pngSize } from "../src/appium-reporter";
 import {
   createDeviceTools,
   DEVICE_TOOL_SPECS,
-  pngSize,
   resolveAppiumBinary,
   SCREENSHOT_INLINE_BASE64,
   sessionCapabilities,

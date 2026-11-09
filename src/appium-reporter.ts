@@ -13,6 +13,10 @@
  *                        attachments the reporter lists on that test's final
  *                        `test_end`, in the pytest evidence shape
  *                        (`PytestTestEndEvidence`).
+ *   peepsBefore          a `before` hook: registers `browser.peepsScreen(name)`,
+ *                        which saves a named screen of the running test for
+ *                        Peeps' visual diffs, listed on its passed or failed
+ *                        `test_end` with the device it was taken on.
  *   mochaHooks           run mode's mocha root hook: skips every test whose
  *                        (spec file, title path) the plan does not name.
  *   withPeeps            what the wrapper config exports: the customer's
@@ -35,6 +39,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { makeRedactor } from "./redact";
 import type { PlanEntry } from "./reporter";
 
 export const TITLE_PATH_SEPARATOR = " › ";
@@ -224,6 +229,9 @@ let specFileRetries = 0;
 export function resetForTests(): void {
   cachedPlan = undefined;
   captured.clear();
+  screens.clear();
+  currentRunId = null;
+  cachedDevice = undefined;
   specFileRetries = 0;
 }
 
@@ -284,23 +292,34 @@ interface Captured {
 /** What this worker captured, by run id: the latest attempt only. */
 const captured = new Map<string, Captured>();
 
-function discardCaptured(runId: string): void {
-  for (const file of captured.get(runId)?.files ?? []) {
+function removeFiles(files: string[]): void {
+  for (const file of files) {
     try {
       unlinkSync(file);
     } catch {
       // Already gone.
     }
   }
+}
+
+function discardFailureEvidence(runId: string): void {
+  removeFiles(captured.get(runId)?.files ?? []);
   captured.delete(runId);
 }
 
-function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+/** Drop everything the attempt captured: its failure evidence and its named screens. */
+function discardCaptured(runId: string): void {
+  discardFailureEvidence(runId);
+  removeFiles([...(screens.get(runId)?.shots.values() ?? [])].map((shot) => shot.file));
+  screens.delete(runId);
+}
+
+function withTimeout<T>(promise: Promise<T>, label: string, ms = CAPTURE_TIMEOUT_MS): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   return Promise.race([
     promise,
     new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out after ${CAPTURE_TIMEOUT_MS} ms`)), CAPTURE_TIMEOUT_MS);
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
     }),
   ]).finally(() => clearTimeout(timer));
 }
@@ -325,7 +344,7 @@ export interface CaptureBrowser {
 export async function captureEvidence(runId: string, browser: CaptureBrowser): Promise<void> {
   const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
   if (!artifacts) return;
-  discardCaptured(runId);
+  discardFailureEvidence(runId);
   const dir = path.join(artifacts, "upload");
   const out: Captured = { attachments: [], omitted: [], context: null, files: [] };
   const keep = (name: string, file: string) => {
@@ -438,6 +457,275 @@ export async function peepsAfterHook(
 }
 
 // ---------------------------------------------------------------------------
+// Named screens: browser.peepsScreen(name), for visual diffs
+// ---------------------------------------------------------------------------
+
+/** Distinct names kept per test; a new name past it is listed as omitted, not captured. */
+export const MAX_SCREENS_PER_TEST = 10;
+/** A name is 1 to this many characters, after trimming. */
+const MAX_SCREEN_NAME = 80;
+const STABLE_FRAME_CAPTURES = 5;
+const STABLE_FRAME_INTERVAL_MS = 300;
+/** How long the status bar query may take before it counts as unknown. */
+const DEVICE_QUERY_TIMEOUT_MS = 5_000;
+
+/** The device a test's screens were taken on, as Peeps keys their baselines. */
+export interface ScreenDevice {
+  platform: "ios" | "android";
+  deviceName: string;
+  /**
+   * When the session reports one (UiAutomator2's `deviceModel`): UiAutomator2
+   * rewrites `deviceName` to the device serial, so Peeps keys on this first.
+   */
+  deviceModel?: string;
+  platformVersion: string;
+  /** The screenshot's own pixel size. */
+  width: number;
+  height: number;
+  /** In screenshot pixels; 0 when unknown. */
+  statusBarHeight: number;
+}
+
+interface Screens {
+  /**
+   * The kept screens by name, in the order they were (last) taken: a repeated
+   * name replaces its earlier capture. `file` is staged, absolute.
+   */
+  shots: Map<string, { slug: string; file: string; size: number }>;
+  omitted: Array<{ name: string; reason: string }>;
+  /** Names kept or being captured, so calls that were not awaited still respect the cap. */
+  names: Set<string>;
+  device: ScreenDevice | null;
+}
+
+/** Each run's named screens, this attempt only. */
+const screens = new Map<string, Screens>();
+
+/** The run of the test running now in this worker (set by the reporter), else null. */
+let currentRunId: string | null = null;
+
+/** The subset of a WebdriverIO browser `peepsScreen` calls. */
+export interface ScreenBrowser {
+  capabilities?: Record<string, unknown>;
+  takeScreenshot(): Promise<string>;
+  execute?(script: string, ...args: unknown[]): Promise<unknown>;
+  getSystemBars?(): Promise<unknown>;
+}
+
+/** Width and height from a PNG's IHDR chunk; null when it is not a PNG. */
+export function pngSize(bytes: Buffer): { width: number; height: number } | null {
+  if (bytes.length < 24 || bytes.readUInt32BE(0) !== 0x89504e47 || bytes.toString("ascii", 12, 16) !== "IHDR") return null;
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
+/**
+ * A screen's name in its file: lowercased, every run of characters outside
+ * `[a-z0-9]` one `-`, no `-` at either end, at most 60 characters. A name
+ * with nothing left (all non-Latin, say) is `screen`; its attachment keeps
+ * the name as given.
+ */
+export function screenSlug(name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60).replace(/-+$/, "");
+  return slug || "screen";
+}
+
+/**
+ * Up to five captures `intervalMs` apart, until two in a row are
+ * byte-identical (the screen has settled); else the last one.
+ */
+export async function stableFrame(take: () => Promise<Buffer>, intervalMs = STABLE_FRAME_INTERVAL_MS): Promise<Buffer> {
+  let last = await take();
+  for (let i = 1; i < STABLE_FRAME_CAPTURES; i++) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    const next = await take();
+    if (next.equals(last)) return next;
+    last = next;
+  }
+  return last;
+}
+
+/** What a worker's device is, apart from each screenshot's size. */
+export type DeviceFacts = Omit<ScreenDevice, "width" | "height">;
+
+/** The worker's device facts, asked once per worker. */
+let cachedDevice: Promise<DeviceFacts | null> | undefined;
+
+/**
+ * The device from the session's capabilities (Appium's `appium:` prefix or
+ * not; `deviceModel` only when the session reports one), and the status bar's height in screenshot pixels: iOS from
+ * `mobile: deviceScreenInfo` (points times its scale), else the session's
+ * `statBarHeight` times its `pixelRatio`; Android from `getSystemBars()`.
+ * Each query is bounded and best-effort: 0 when the driver does not say.
+ * Null when the session is not an iOS or Android one.
+ */
+export async function deviceFacts(browser: ScreenBrowser, timeoutMs = DEVICE_QUERY_TIMEOUT_MS): Promise<DeviceFacts | null> {
+  const caps = browser.capabilities ?? {};
+  const cap = (key: string): unknown => caps[key] ?? caps[`appium:${key}`];
+  const text = (key: string): string => {
+    const value = cap(key);
+    return typeof value === "string" || typeof value === "number" ? String(value) : "";
+  };
+  const platform = text("platformName").toLowerCase();
+  if (platform !== "ios" && platform !== "android") return null;
+  const positive = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
+  let statusBarHeight = 0;
+  try {
+    if (platform === "ios") {
+      type ScreenInfo = { statusBarSize?: { height?: unknown }; scale?: unknown } | null;
+      let info: ScreenInfo = null;
+      try {
+        if (typeof browser.execute === "function") {
+          info = (await withTimeout(Promise.resolve(browser.execute("mobile: deviceScreenInfo")), "deviceScreenInfo", timeoutMs)) as ScreenInfo;
+        }
+      } catch {
+        // Older XCUITest drivers: the session's own numbers below.
+      }
+      statusBarHeight =
+        positive(info?.statusBarSize?.height) * (positive(info?.scale) || 1) ||
+        positive(cap("statBarHeight")) * (positive(cap("pixelRatio")) || 1);
+    } else if (typeof browser.getSystemBars === "function") {
+      const bars = (await withTimeout(Promise.resolve(browser.getSystemBars()), "getSystemBars", timeoutMs)) as {
+        statusBar?: { height?: unknown };
+      } | null;
+      statusBarHeight = positive(bars?.statusBar?.height);
+    }
+  } catch {
+    // Unknown: 0.
+  }
+  const deviceModel = text("deviceModel");
+  return {
+    platform,
+    deviceName: text("deviceName"),
+    ...(deviceModel ? { deviceModel } : {}),
+    platformVersion: text("platformVersion"),
+    statusBarHeight: Math.round(statusBarHeight),
+  };
+}
+
+/**
+ * Save a settled screenshot of the screen as `name` for one run, into
+ * `PEEPS_ARTIFACTS_DIR/upload`, as `<runId>-evidence-screen-<slug>.png` (a
+ * slug another name of this test holds gets `-2`, `-3`…). A name already
+ * kept is replaced: its earlier file is deleted. The test's first screen
+ * also records the device. Never throws: a failure is logged and listed as
+ * omitted, and leaves any earlier capture of the name in place.
+ */
+export async function captureScreen(
+  runId: string,
+  browser: ScreenBrowser,
+  name: string,
+  intervalMs = STABLE_FRAME_INTERVAL_MS,
+): Promise<void> {
+  const label = `screen:${name}`;
+  const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
+  if (!artifacts) {
+    console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: PEEPS_ARTIFACTS_DIR is not set`);
+    return;
+  }
+  const out: Screens = screens.get(runId) ?? { shots: new Map(), omitted: [], names: new Set<string>(), device: null };
+  screens.set(runId, out);
+  if (!out.names.has(name) && out.names.size >= MAX_SCREENS_PER_TEST) {
+    console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: at most ${MAX_SCREENS_PER_TEST} screens per test`);
+    out.omitted.push({ name: label, reason: "screen_limit" });
+    return;
+  }
+  out.names.add(name);
+  try {
+    const frame = await stableFrame(
+      async () => Buffer.from(String(await withTimeout(Promise.resolve(browser.takeScreenshot()), "takeScreenshot")), "base64"),
+      intervalMs,
+    );
+    const size = pngSize(frame);
+    if (!size) throw new Error("the screenshot is not a PNG");
+    if (frame.length > MAX_ATTACHMENT_BYTES) throw new Error(`larger than ${MAX_ATTACHMENT_BYTES} bytes`);
+    const earlier = out.shots.get(name);
+    if (earlier) {
+      removeFiles([earlier.file]);
+      out.shots.delete(name);
+    }
+    const taken = new Set([...out.shots.values()].map((shot) => shot.slug));
+    const base = screenSlug(name);
+    let slug = base;
+    for (let n = 2; taken.has(slug); n++) slug = `${base}-${n}`;
+    const dir = path.join(artifacts, "upload");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, evidenceFileName(runId, `screen-${slug}.png`));
+    writeFileSync(file, frame);
+    out.shots.set(name, { slug, file, size: frame.length });
+    if (!out.device) {
+      cachedDevice ??= deviceFacts(browser);
+      const facts = await cachedDevice;
+      if (facts) {
+        const { platform, deviceName, deviceModel, platformVersion, statusBarHeight } = facts;
+        out.device = {
+          platform,
+          deviceName,
+          ...(deviceModel ? { deviceModel } : {}),
+          platformVersion,
+          width: size.width,
+          height: size.height,
+          statusBarHeight,
+        };
+      }
+    }
+  } catch (error) {
+    if (!out.shots.has(name)) out.names.delete(name);
+    console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: ${String(error).split("\n")[0]}`);
+    out.omitted.push({ name: label, reason: reasonOf(error) });
+  }
+}
+
+/**
+ * `browser.peepsScreen(name)`: a named screen of the running test. Resolves,
+ * never rejects, whatever happens: a bad name, no test running, or a failed
+ * capture is a logged warning and the test carries on.
+ */
+async function peepsScreen(this: ScreenBrowser, name: unknown): Promise<void> {
+  try {
+    const trimmed = typeof name === "string" ? name.trim() : "";
+    if (trimmed.length < 1 || trimmed.length > MAX_SCREEN_NAME) {
+      console.log(`[peeps] peepsScreen: the name must be 1 to ${MAX_SCREEN_NAME} characters; got ${JSON.stringify(name)}`);
+      return;
+    }
+    if (!currentRunId) {
+      console.log(`[peeps] peepsScreen(${JSON.stringify(trimmed)}) not captured: no Peeps test is running`);
+      return;
+    }
+    await captureScreen(currentRunId, this, trimmed);
+  } catch (error) {
+    console.log(`[peeps] peepsScreen not captured: ${String(error)}`);
+  }
+}
+
+/**
+ * WebdriverIO's `before(capabilities, specs, browser)`: registers
+ * `peepsScreen` on the worker's browser. Never throws.
+ */
+export function peepsBefore(
+  _capabilities: unknown,
+  _specs: unknown,
+  browser: { addCommand?: (name: string, fn: typeof peepsScreen) => unknown } | undefined,
+): void {
+  try {
+    const host = browser ?? (globalThis as { browser?: typeof browser }).browser;
+    if (typeof host?.addCommand !== "function") return;
+    host.addCommand("peepsScreen", peepsScreen);
+  } catch (error) {
+    console.log(`[peeps] peepsScreen not registered: ${String(error)}`);
+  }
+}
+
+/** Add a run's named screens, and the device they were taken on, to its final `test_end`. */
+function attachScreens(event: PeepsEvent, runId: string): void {
+  const shots = screens.get(runId);
+  if (!shots) return;
+  const attachments = [...shots.shots].map(([name, shot]) => ({ name: `screen:${name}`, path: `data/${path.basename(shot.file)}`, size: shot.size }));
+  if (attachments.length) event.attachments = [...(event.attachments ?? []), ...attachments];
+  if (shots.omitted.length) event.attachmentsOmitted = [...(event.attachmentsOmitted ?? []), ...shots.omitted];
+  if (shots.device) event.properties = [...(event.properties ?? []), { name: "peeps_device", value: JSON.stringify(shots.device) }];
+}
+
+// ---------------------------------------------------------------------------
 // Run mode: only planned tests execute
 // ---------------------------------------------------------------------------
 
@@ -513,6 +801,21 @@ export interface PeepsEvent {
   attachmentsOmitted?: Array<{ name: string; reason: string }>;
 }
 
+/**
+ * The error with the job's secret values masked in its message and stack,
+ * before anything cuts them (PQA-2748): a value cut first could leave part of
+ * itself behind, unmatched.
+ */
+function redactError(error: WdioError | undefined): WdioError | undefined {
+  if (!error) return error;
+  const redact = makeRedactor(process.env);
+  return {
+    ...error,
+    ...(error.message !== undefined ? { message: redact(error.message) } : {}),
+    ...(error.stack !== undefined ? { stack: redact(error.stack) } : {}),
+  };
+}
+
 /** The pytest plugin's traceback trim: keep the head and the tail. */
 function trimMiddle(text: string, head = 2000, tail = 10000): string {
   if (text.length <= head + tail) return text;
@@ -567,6 +870,8 @@ export class PeepsAppiumReporter {
   private readonly retriable: boolean = false;
   private inflight = 0;
   private file: string | undefined;
+  /** This worker's spec files, from `runner:start`. */
+  private specs: string[] = [];
 
   constructor(_options?: unknown) {
     this.plan = loadPlan();
@@ -586,6 +891,7 @@ export class PeepsAppiumReporter {
     if (!this.plan) return;
     switch (event) {
       case "runner:start":
+        this.specs = payload.specs ?? [];
         console.log(
           this.plan.file.resultsDir
             ? "[peeps] recording results for the agent session"
@@ -618,6 +924,7 @@ export class PeepsAppiumReporter {
         if (payload.error && BEFORE_HOOK.test(payload.title ?? "")) this.onSetupFailure(payload);
         return;
       case "runner:end":
+        this.onSessionError((payload as { error?: unknown }).error);
         for (const runId of this.queues.keys()) this.flush(runId);
         return;
       default:
@@ -654,7 +961,8 @@ export class PeepsAppiumReporter {
 
   private onTestStart(payload: WdioEventPayload): void {
     const entry = this.entryOf(payload);
-    if (entry && !this.ended.has(entry.runId)) this.begin(entry, payload.title ?? "");
+    // What `peepsScreen` saves its screens for, until the test ends.
+    currentRunId = entry && !this.ended.has(entry.runId) && this.begin(entry, payload.title ?? "") ? entry.runId : null;
   }
 
   private onTestEnd(payload: WdioEventPayload, status: "passed" | "failed" | "skipped"): void {
@@ -669,7 +977,7 @@ export class PeepsAppiumReporter {
     if (this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
     // `it.skip` is reported without ever starting.
     if (!this.attemptStart.has(entry.runId) && !this.begin(entry, payload.title ?? "")) return;
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     const event: PeepsEvent = {
       type: "test_end",
       timestamp: Date.now(),
@@ -682,6 +990,8 @@ export class PeepsAppiumReporter {
       if (error?.stack) event.errorStack = error.stack.slice(0, 8000);
       Object.assign(event, failureEvidence(error, "call", captured.get(entry.runId)));
     }
+    if (status === "skipped") discardCaptured(entry.runId);
+    else attachScreens(event, entry.runId);
     this.close(entry, event);
   }
 
@@ -689,7 +999,7 @@ export class PeepsAppiumReporter {
   private onTestRetry(payload: WdioEventPayload): void {
     const entry = this.entryOf(payload);
     if (!entry || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) return;
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     this.enqueue(entry.runId, {
       type: "test_end",
       timestamp: Date.now(),
@@ -700,6 +1010,7 @@ export class PeepsAppiumReporter {
       ...(error?.stack ? { errorStack: error.stack.slice(0, 8000) } : {}),
     });
     this.attemptStart.delete(entry.runId);
+    if (currentRunId === entry.runId) currentRunId = null;
     // Only the final attempt's evidence is reported, as under pytest.
     discardCaptured(entry.runId);
   }
@@ -717,13 +1028,13 @@ export class PeepsAppiumReporter {
     const owner = payload.parent === "" ? 0 : this.suites.lastIndexOf(payload.parent ?? "") + 1;
     const scope = owner > 0 || payload.parent === "" ? this.suites.slice(0, owner) : this.suites;
     const prefix = scope.length ? scope.join(TITLE_PATH_SEPARATOR) + TITLE_PATH_SEPARATOR : "";
-    const error = payload.error ?? payload.errors?.[0];
+    const error = redactError(payload.error ?? payload.errors?.[0]);
     for (const entry of this.plan!.entries.values()) {
       if (entry.path !== rel || !entry.titlePath.startsWith(prefix) || this.ended.has(entry.runId)) continue;
       const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
       if (!this.attemptStart.has(entry.runId) && !this.begin(entry, testName)) continue;
       const message = `${payload.title ?? "a before hook"} failed: ${error?.message ?? ""}`;
-      this.close(entry, {
+      const event: PeepsEvent = {
         type: "test_end",
         timestamp: Date.now(),
         testName,
@@ -732,6 +1043,42 @@ export class PeepsAppiumReporter {
         error: message.slice(0, 4000),
         ...(error?.stack ? { errorStack: error.stack.slice(0, 8000) } : {}),
         ...failureEvidence(error, "setup", captured.get(entry.runId)),
+      };
+      attachScreens(event, entry.runId);
+      this.close(entry, event);
+    }
+  }
+
+  /**
+   * WebdriverIO 9 reports a session that could not start (no app at the
+   * path, no booted device, a bad capability) only as `runner:end`'s
+   * `error`, with no test events. Each planned test of this worker's spec
+   * files that has no result fails at setup with that error, redacted of
+   * the job's secrets and clipped like any failure. A clean `runner:end`
+   * changes nothing.
+   */
+  private onSessionError(raw: unknown): void {
+    const text = typeof raw === "string" ? raw : (raw as { message?: unknown } | null)?.message;
+    if (typeof text !== "string" || !text) return;
+    const error = redactError({ name: "SessionNotCreated", message: text, stack: text })!;
+    const message = error.message!;
+    const specs = new Set(
+      this.specs
+        .map((spec) => repoRelative(this.plan!.file.workspace, spec.startsWith("file://") ? fileURLToPath(spec) : spec))
+        .filter((rel): rel is string => rel !== null),
+    );
+    for (const entry of this.plan!.entries.values()) {
+      if (!specs.has(entry.path) || this.ended.has(entry.runId) || this.suppressed.has(entry.runId)) continue;
+      const testName = entry.titlePath.split(TITLE_PATH_SEPARATOR).pop() ?? "";
+      if (!this.attemptStart.has(entry.runId) && !this.begin(entry, testName)) continue;
+      this.close(entry, {
+        type: "test_end",
+        timestamp: Date.now(),
+        testName,
+        status: "failed",
+        duration: 0,
+        error: `Appium session could not start: ${message}`.slice(0, 4000),
+        ...failureEvidence(error, "setup", undefined),
       });
     }
   }
@@ -747,6 +1094,7 @@ export class PeepsAppiumReporter {
   private close(entry: PlanEntry, event: PeepsEvent): void {
     this.ended.add(entry.runId);
     this.attemptStart.delete(entry.runId);
+    if (currentRunId === entry.runId) currentRunId = null;
     if (event.status === "failed" && this.retriable) {
       // WebdriverIO will run this spec file again on this worker: like a
       // mocha retry, a failed attempt without evidence, the run left open.
@@ -882,6 +1230,7 @@ export function withPeeps(base: Record<string, unknown>, options: PeepsWdioOptio
     reporters,
     afterTest: [...hooksOf(base.afterTest), peepsAfterTest],
     afterHook: [...hooksOf(base.afterHook), peepsAfterHook],
+    before: [...hooksOf(base.before), peepsBefore],
     // Room for the last test's events to reach Peeps before the worker exits.
     reporterSyncTimeout: Math.max(Number(base.reporterSyncTimeout) || 5000, 60_000),
   };

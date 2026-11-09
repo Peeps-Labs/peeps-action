@@ -262,8 +262,9 @@ How each mode works for Appium:
 - **report** and **run**: the action runs `npx wdio run` with a temporary
   config beside yours (`.peeps-<id>.wdio.conf.mts`, removed afterwards, and
   at once if the job is cancelled, when WebdriverIO is stopped too) that
-  imports yours and adds Peeps' reporter and an `afterTest` hook; your own
-  reporters, hooks and services stay. `run` narrows the spec files to the
+  imports yours and adds Peeps' reporter, an `afterTest` hook and a `before`
+  hook that registers `browser.peepsScreen`; your own reporters, hooks and
+  services stay. `run` narrows the spec files to the
   planned ones, passes a mocha grep over the planned titles, and adds a mocha
   root `beforeEach` (through `mochaOpts.require`, beside any of yours) that
   skips any test whose spec file and title path together are not planned, so
@@ -292,9 +293,80 @@ mocha runs none of them), and `attachments`:
 When the driver reports one, `properties` holds the Appium context the test
 failed in: `[{ "name": "context", "value": "WEBVIEW_com.example" }]`.
 
+When the device session cannot start (no app at the configured path, no
+booted device, a capability the driver refuses), WebdriverIO runs none of the
+worker's tests. Each planned test of that worker's spec files is then
+reported failed in the `setup` phase, with `exceptionType`
+`SessionNotCreated` and the session's error as the message (job secrets
+masked as `[redacted]`); a test that already has a result is left alone.
+Every failure's message, traceback and error text is masked the same way
+before it is cut to length, whatever failed.
+
 A capture that fails or exceeds 25 MB is listed in `attachmentsOmitted` with
 its reason. Under mocha retries each retried attempt sends a failed
 `test_end` and only the final attempt's evidence is kept.
+
+### Named screens for visual diffs
+
+To have Peeps compare a screen from run to run, name it in the test:
+
+```ts
+it("shows the order summary", async () => {
+  await CheckoutPage.open();
+  await browser.peepsScreen?.("Order summary");
+  // …
+});
+```
+
+`withPeeps` registers `browser.peepsScreen(name)` in a `before` hook, so
+nothing is installed or imported. The `?.` keeps the spec running where the
+action is not (a local `npx wdio run`), and TypeScript needs one declaration
+somewhere in your specs' compilation:
+
+```ts
+declare global {
+  namespace WebdriverIO {
+    interface Browser {
+      peepsScreen?(name: string): Promise<void>;
+    }
+  }
+}
+export {};
+```
+
+Each call waits for the screen to settle: it takes screenshots 300 ms apart
+until two in a row are identical, at most five (so a blinking cursor or a
+running animation keeps the fifth). The settled PNG is saved for the test
+running now and listed on its final `test_end`, **passed or failed**, as
+`{ "name": "screen:Order summary", "path": "data/<runId>-evidence-screen-order-summary.png", "size": … }`
+(the file name is the name lowercased, other characters as `-`, at most 60;
+another name that comes out the same gets `-2`, `-3`…), after a failure's
+own `screenshot.png` and page source. Calling it again with a name the test
+already used replaces that screen: the earlier file is deleted and only the
+later capture is sent (a later capture that fails leaves the earlier one). The same `test_end` carries the device, for Peeps to keep one
+baseline per device: `properties` gets
+`{ "name": "peeps_device", "value": "{\"platform\":\"android\",\"deviceName\":…,\"deviceModel\":…,\"platformVersion\":…,\"width\":1080,\"height\":2400,\"statusBarHeight\":63}" }`,
+from the session's capabilities, the PNG's own size, and the status bar's
+height in screenshot pixels (iOS: `mobile: deviceScreenInfo`; Android:
+`getSystemBars()`; 0 when the driver does not say). `deviceModel` is there
+only when the session reports one: UiAutomator2 does (`deviceModel`, for
+example `sdk_gphone64_x86_64` or `SM-S911B`), and since it rewrites
+`deviceName` to the device serial (`emulator-5554`), Peeps keys a device on
+the model first; an iOS session normally has none, and its `deviceName` is
+the simulator's or device's own name.
+
+The name is 1 to 80 characters. The call never fails the test: a bad name, a
+call outside a test (in an `afterEach`, say), or a screenshot that fails is
+logged in the job, and a failed capture is listed in `attachmentsOmitted`.
+Call it in the test body or a `beforeEach`.
+
+What it costs: two to five screenshots and 0.3 to 1.2 seconds of waiting per
+call, plus one PNG upload (a few hundred KB to a couple of MB per phone
+screen). Up to 10 distinct names per test are kept, so a test sends at most
+10 screens beside its failure evidence; a call with an 11th name is not
+captured and is listed in `attachmentsOmitted` with reason `screen_limit`. A retried
+attempt's screens are discarded with its other evidence, and a skipped
+test sends none.
 
 One capability per config (one platform per config, named in `config`) is
 the supported shape. With several, each test is reported once, from the
@@ -625,6 +697,23 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## 1.11.0
+
+- Appium: `browser.peepsScreen(name)` saves a named screen of the running test for
+  Peeps' visual diffs. It waits for the screen to settle, and the screen is sent on
+  the test's result whether it passed or failed, with the device it was taken on
+  (platform, device name, device model when the driver reports one, OS version,
+  screen size, status bar height). Up to 10 names per test, and a repeated name
+  replaces its earlier screen; the call never fails a test.
+- Appium: when the device session cannot start (no app at the configured path, no
+  booted device, a bad capability), each planned test of that worker's spec files is
+  reported failed at setup with the session's error (`SessionNotCreated`, redacted of
+  the job's secrets), instead of every run reading "The CI job finished without
+  reporting a result". A test that already has a result is not reported again.
+- Appium failure messages are now redacted of the job's secret values: the message,
+  traceback and error of a failed test, a retried attempt and a failed hook, masked
+  before they are cut to length.
 
 ## 1.10.1
 

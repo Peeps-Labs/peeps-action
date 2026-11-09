@@ -786,6 +786,38 @@ var import_node_url2 = require("node:url");
 // src/appium-reporter.ts
 var import_node_fs2 = require("node:fs");
 var import_node_path7 = __toESM(require("node:path"));
+
+// src/redact.ts
+function makeRedactor(env) {
+  const values = Object.entries(env).filter(([k, v]) => v && v.length >= 8 && isSecretish(k)).map(([, v]) => v).sort((a, b) => b.length - a.length);
+  if (values.length === 0) return (t) => t;
+  const pattern = new RegExp(values.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+  return (text2) => text2.replace(pattern, "[redacted]");
+}
+function isSecretish(key) {
+  if (ALWAYS_MASK_KEYS.has(key)) return true;
+  if (SAFE_ENV_KEYS.has(key)) return false;
+  return !/^(GITHUB|RUNNER|ACTIONS|INPUT|CI)_/.test(key);
+}
+var ALWAYS_MASK_KEYS = /* @__PURE__ */ new Set([
+  "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+  "ACTIONS_RUNTIME_TOKEN",
+  "GITHUB_TOKEN",
+  // GitLab's `CI_` variables are exempt by prefix like GitHub's, except the
+  // ones that are credentials: the job token (and the clone URL it is in),
+  // the legacy job JWTs, and the registry, deploy and proxy passwords.
+  "CI_JOB_TOKEN",
+  "CI_REPOSITORY_URL",
+  "CI_JOB_JWT",
+  "CI_JOB_JWT_V1",
+  "CI_JOB_JWT_V2",
+  "CI_REGISTRY_PASSWORD",
+  "CI_DEPLOY_PASSWORD",
+  "CI_DEPENDENCY_PROXY_PASSWORD"
+]);
+var SAFE_ENV_KEYS = /* @__PURE__ */ new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
+
+// src/appium-reporter.ts
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function repoRelative(workspace, abs) {
   const attempt = (root, file) => {
@@ -807,6 +839,10 @@ function pageSourceExtension(source, context) {
   if (/^<\?xml|^<hierarchy[\s>]|^<AppiumAUT[\s>]/i.test(head)) return "xml";
   if (/^<!doctype html|<html[\s>]/i.test(head)) return "html";
   return context && /^NATIVE/i.test(context) ? "xml" : "html";
+}
+function pngSize(bytes) {
+  if (bytes.length < 24 || bytes.readUInt32BE(0) !== 2303741511 || bytes.toString("ascii", 12, 16) !== "IHDR") return null;
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
 }
 
 // src/pytest.ts
@@ -1912,10 +1948,6 @@ function sessionCapabilities(raw) {
   if (idle !== 0 && !(idle >= SESSION_IDLE_SECONDS)) caps["appium:newCommandTimeout"] = SESSION_IDLE_SECONDS;
   return caps;
 }
-function pngSize(bytes) {
-  if (bytes.length < 24 || bytes.readUInt32BE(0) !== 2303741511 || bytes.toString("ascii", 12, 16) !== "IHDR") return null;
-  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
-}
 var DeviceError = class extends Error {
   constructor(message, code = null) {
     super(message);
@@ -2963,34 +2995,6 @@ async function commitPaths(workspace, value) {
   }
   return [...out];
 }
-function makeRedactor(env) {
-  const values = Object.entries(env).filter(([k, v]) => v && v.length >= 8 && isSecretish(k)).map(([, v]) => v).sort((a, b) => b.length - a.length);
-  if (values.length === 0) return (t) => t;
-  const pattern = new RegExp(values.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
-  return (text2) => text2.replace(pattern, "[redacted]");
-}
-function isSecretish(key) {
-  if (ALWAYS_MASK_KEYS.has(key)) return true;
-  if (SAFE_ENV_KEYS.has(key)) return false;
-  return !/^(GITHUB|RUNNER|ACTIONS|INPUT|CI)_/.test(key);
-}
-var ALWAYS_MASK_KEYS = /* @__PURE__ */ new Set([
-  "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-  "ACTIONS_RUNTIME_TOKEN",
-  "GITHUB_TOKEN",
-  // GitLab's `CI_` variables are exempt by prefix like GitHub's, except the
-  // ones that are credentials: the job token (and the clone URL it is in),
-  // the legacy job JWTs, and the registry, deploy and proxy passwords.
-  "CI_JOB_TOKEN",
-  "CI_REPOSITORY_URL",
-  "CI_JOB_JWT",
-  "CI_JOB_JWT_V1",
-  "CI_JOB_JWT_V2",
-  "CI_REGISTRY_PASSWORD",
-  "CI_DEPLOY_PASSWORD",
-  "CI_DEPENDENCY_PROXY_PASSWORD"
-]);
-var SAFE_ENV_KEYS = /* @__PURE__ */ new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
 function createToolServer(env, deps = {}) {
   const workspace = env.workspace;
   const redact = makeRedactor(process.env);
@@ -3601,7 +3605,7 @@ function runCapture(cmd, args, cwd, timeoutMs, extraEnv = {}) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.10.1";
+var ACTION_VERSION = "1.11.0";
 
 // src/agent.ts
 var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process7.execFile);
