@@ -486,25 +486,27 @@ test("unnamed, another project's finished status does not stop a ready preview",
 // Inside the Playwright container the checkout belongs to the runner's uid and
 // git refuses a repository another user owns: a heal on v1.12.0 logged "could
 // not read the checked-out commit" and tested nothing. Git's own test switch
-// makes it treat the repository as someone else's.
+// makes it treat the repository as someone else's. The system and global
+// configs are left out: GitHub's runner trusts every directory system-wide.
 test("headSha reads a checkout another user owns, as in the Playwright container", () => {
   const repo = mkdtempSync(path.join(tmpdir(), "peeps-head-"));
+  const isolated = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
   const git = (...args: string[]) =>
-    execFileSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }).trim();
+    execFileSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, ...isolated } }).trim();
   git("init", "-q");
   git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x");
   const sha = git("rev-parse", "HEAD");
-  const before = { owner: process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER, global: process.env.GIT_CONFIG_GLOBAL };
-  process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
-  process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+  const overrides: Record<string, string> = { ...isolated, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" };
+  const before = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, overrides);
   try {
     assert.throws(() => execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, stdio: "pipe" }));
     assert.equal(headSha(repo), sha);
   } finally {
-    if (before.owner === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
-    else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = before.owner;
-    if (before.global === undefined) delete process.env.GIT_CONFIG_GLOBAL;
-    else process.env.GIT_CONFIG_GLOBAL = before.global;
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
   assert.equal(headSha(mkdtempSync(path.join(tmpdir(), "peeps-nogit-"))), null);
 });
