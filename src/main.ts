@@ -31,6 +31,7 @@ import {
   runAttachStep,
 } from "./attach";
 import { warnIfBrowsersMissing } from "./browser-check";
+import { previewBaseUrl, takeGithubToken } from "./preview";
 import {
   resolveFramework,
   runPytestDispatched,
@@ -48,6 +49,9 @@ function onDefaultBranch(env: RunnerEnv): boolean {
 }
 
 async function main(): Promise<void> {
+  // First, before anything can spawn: no test process, inventory or agent
+  // tool may inherit the repository token (preview.ts).
+  const githubToken = takeGithubToken(process.env);
   // The attach steps sit in the customer's own workflow, around their own test step, so
   // nothing in them may fail the job: not even an environment Peeps cannot read.
   const requested = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
@@ -72,6 +76,10 @@ async function main(): Promise<void> {
   console.log(
     `[peeps] mode=${mode} repo=${env.repository ?? "?"} sha=${env.sha?.slice(0, 7) ?? "?"} ref=${env.ref ?? "?"} peeps=${env.peepsUrl}`,
   );
+
+  // `preview: vercel` on a pull request: test that pull request's own preview.
+  const previewUrl = await previewBaseUrl(mode, process.env, githubToken);
+  if (previewUrl) process.env.BASE_URL = previewUrl;
 
   // A pytest or Appium suite takes its own path through every mode that runs
   // tests; a Playwright one falls through to the switch below, exactly as before.

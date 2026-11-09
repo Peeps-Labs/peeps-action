@@ -394,6 +394,56 @@ Video records throughout each test and is discarded for passing attempts, so it
 adds recording work. Kept screenshots and video are included in the uploaded
 HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
 
+## Vercel previews
+
+With Vercel's GitHub integration every pull request gets its own preview.
+`preview: vercel` tests it: on a `pull_request` event the action waits for the
+GitHub deployment Vercel recorded for the pull request's head commit
+(environment `Preview` or `Preview – <project>`) and sets `BASE_URL` to its
+URL. A `BASE_URL` your workflow sets itself wins, and on any other event the
+input does nothing.
+
+```yaml
+permissions:
+  contents: read
+  deployments: read   # the preview Vercel recorded
+  statuses: read      # tell "deployment events off" apart from "still building"
+  id-token: write
+steps:
+  - uses: actions/checkout@v7
+  - run: npm ci
+  - uses: Peeps-Labs/peeps-action@v1
+    with:
+      mode: ${{ inputs.mode }}
+      session-id: ${{ inputs.sessionId }}
+      preview: vercel
+```
+
+Run the workflow on `pull_request`, not on Vercel's `deployment_status`
+event: Peeps counts a job as the pull request's tests only when it runs on
+the pull request. `pull_request_target` and pull requests from forks are
+refused: a fork's preview runs the fork's code, and `pull_request_target`
+would hand it the base repository's secrets and OIDC token.
+
+When a commit has previews of several Vercel projects (a monorepo), name the
+one to test with `preview-project`; the action stops and lists them
+otherwise. A deployment that GitHub later marked `inactive` (another
+preview succeeded after it) still counts, and an older failed deployment
+does not fail the job while a newer one builds.
+
+pytest-playwright reads its base URL from `--base-url` or
+`PYTEST_BASE_URL`, not `BASE_URL`: pass `--base-url "$BASE_URL"` in
+`pytest.ini`'s `addopts`, or read `BASE_URL` in a `base_url` fixture. Vercel records GitHub deployments only with the project's
+**deployment_status Events** switch on (Settings > Git); with it off the
+action stops at once and says so, instead of waiting out the timeout.
+
+Vercel's Deployment Protection puts previews behind a login. Add the
+repository as a GitHub Actions Trusted Source in Vercel and send the job's
+OIDC token as `x-vercel-trusted-oidc-idp-token` from a Playwright fixture.
+GitHub's tokens last five minutes and Vercel sets no cookie for them, so the
+fixture requests its own: see
+https://docs.peepsai.com/repository/vercel-previews.
+
 ## Inputs
 
 | Input | Required | What it is |
@@ -404,6 +454,10 @@ HTML report, once per batch. See [SECURITY.md](SECURITY.md) for what leaves CI.
 | `working-directory` | no | Where to run Playwright, pytest or WebdriverIO, relative to the repository root |
 | `framework` | no, defaults to `auto` | `playwright`, `pytest`, `appium`, or `auto` (see above) |
 | `device-tools` | no, defaults to `false` | `agent` mode, Appium suite: offer the `device_*` tools (see "Agent mode for an Appium suite"). Peeps passes it on dispatch |
+| `preview` | no | `vercel`: on a pull request, wait for that pull request's Vercel preview and set `BASE_URL` to it (see "Vercel previews") |
+| `preview-project` | with several Vercel projects | The Vercel project whose preview to test: the `<name>` of the deployment environment `Preview – <name>` |
+| `preview-timeout` | no, defaults to `600` | Seconds to wait for the preview |
+| `github-token` | no, defaults to the job's `GITHUB_TOKEN` | Reads the pull request's deployments for `preview`. Removed from the action's environment before anything runs, so test processes don't inherit it |
 
 ## Modes
 
@@ -625,6 +679,19 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## 1.11.0
+
+- `preview: vercel`: on a pull request, wait for that pull request's Vercel
+  preview and set `BASE_URL` to it, so the workflow needs no wait step. Stops
+  at once, with the fix, when the Vercel project records no GitHub
+  deployments ("deployment_status Events" off), and names the missing
+  `deployments: read` / `statuses: read` permission when GitHub refuses. A
+  `BASE_URL` the workflow sets still wins. `preview-project` picks one of
+  several Vercel projects. `pull_request_target` and forks are refused. The
+  `github-token` input is removed from the environment before anything runs,
+  so test processes don't inherit it.
+  See "Vercel previews".
 
 ## 1.10.1
 
