@@ -31,6 +31,7 @@ import {
   runAttachStep,
 } from "./attach";
 import { warnIfBrowsersMissing } from "./browser-check";
+import { readPreviewRequest, waitForVercelPreview } from "./preview";
 import {
   resolveFramework,
   runPytestDispatched,
@@ -72,6 +73,18 @@ async function main(): Promise<void> {
   console.log(
     `[peeps] mode=${mode} repo=${env.repository ?? "?"} sha=${env.sha?.slice(0, 7) ?? "?"} ref=${env.ref ?? "?"} peeps=${env.peepsUrl}`,
   );
+
+  // `preview: vercel` on a pull request: test that pull request's own preview.
+  // A BASE_URL the workflow set itself wins, as it does over a Peeps
+  // environment's (environment.ts).
+  if (mode === "report" && !process.env.BASE_URL) {
+    const preview = readPreviewRequest(process.env);
+    if (preview) {
+      console.log(`[peeps] waiting for the Vercel preview of ${preview.sha.slice(0, 7)}`);
+      process.env.BASE_URL = await waitForVercelPreview(preview);
+      console.log(`[peeps] BASE_URL ${process.env.BASE_URL} (Vercel preview of ${preview.sha.slice(0, 7)})`);
+    }
+  }
 
   // A pytest or Appium suite takes its own path through every mode that runs
   // tests; a Playwright one falls through to the switch below, exactly as before.

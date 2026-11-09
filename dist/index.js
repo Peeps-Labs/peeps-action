@@ -3601,7 +3601,7 @@ function runCapture(cmd, args, cwd, timeoutMs, extraEnv = {}) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.10.1";
+var ACTION_VERSION = "1.11.0";
 
 // src/agent.ts
 var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process7.execFile);
@@ -3970,6 +3970,93 @@ async function warnIfBrowsersMissing(workingDirectory, platform) {
   console.log(platform === "github" ? `::warning title=Playwright browsers missing::${message}` : `[peeps] warning: ${message}`);
 }
 
+// src/preview.ts
+var import_node_fs8 = require("node:fs");
+function readPreviewRequest(env) {
+  const provider = env["INPUT_PREVIEW"]?.trim().toLowerCase();
+  if (!provider) return null;
+  if (provider !== "vercel") throw new Error(`preview: "${provider}" is not supported (supported: vercel)`);
+  if (env.GITHUB_EVENT_NAME !== "pull_request" && env.GITHUB_EVENT_NAME !== "pull_request_target") return null;
+  const sha = pullRequestHeadSha(env.GITHUB_EVENT_PATH);
+  const repository = env.GITHUB_REPOSITORY;
+  const token = env["INPUT_GITHUB-TOKEN"]?.trim() || env.GITHUB_TOKEN;
+  if (!sha || !repository) throw new Error("preview: vercel needs a pull_request event with a head commit");
+  if (!token) throw new Error("preview: vercel needs the github-token input (it defaults to the job's GITHUB_TOKEN)");
+  const timeoutS = Number(env["INPUT_PREVIEW-TIMEOUT"]?.trim() || "600");
+  if (!Number.isFinite(timeoutS) || timeoutS <= 0) throw new Error("preview-timeout must be a positive number of seconds");
+  return {
+    provider: "vercel",
+    repository,
+    sha,
+    token,
+    timeoutMs: timeoutS * 1e3,
+    apiUrl: (env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/+$/, "")
+  };
+}
+function pullRequestHeadSha(eventPath) {
+  if (!eventPath) return null;
+  try {
+    const payload = JSON.parse((0, import_node_fs8.readFileSync)(eventPath, "utf8"));
+    const sha = payload.pull_request?.head?.sha;
+    return typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+var isVercelPreview = (environment) => environment === "Preview" || environment.startsWith("Preview \u2013 ");
+async function waitForVercelPreview(request, deps = {}) {
+  const doFetch = deps.fetch ?? fetch;
+  const sleep2 = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const now = deps.now ?? Date.now;
+  const pollMs = deps.pollMs ?? 1e4;
+  const short = request.sha.slice(0, 7);
+  const github = async (path14) => {
+    const res = await doFetch(`${request.apiUrl}/repos/${request.repository}${path14}`, {
+      headers: {
+        authorization: `Bearer ${request.token}`,
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28"
+      }
+    });
+    if (res.status === 403 || res.status === 404) {
+      throw new Error(
+        `GitHub refused ${path14} (${res.status}). Give the job \`deployments: read\` and \`statuses: read\` in its permissions.`
+      );
+    }
+    if (!res.ok) throw new Error(`GitHub ${path14}: ${res.status} ${(await res.text()).slice(0, 300)}`);
+    return await res.json();
+  };
+  const deadline = now() + request.timeoutMs;
+  for (; ; ) {
+    const deployments = (await github(`/deployments?sha=${request.sha}&per_page=100`)).filter(
+      (d) => isVercelPreview(d.environment)
+    );
+    for (const deployment of deployments) {
+      const [latest] = await github(`/deployments/${deployment.id}/statuses?per_page=1`);
+      if (!latest) continue;
+      if (latest.state === "success") {
+        const url = latest.environment_url || latest.target_url;
+        if (url) return url;
+      }
+      if (latest.state === "failure" || latest.state === "error") {
+        throw new Error(`Vercel's ${deployment.environment} deployment of ${short} failed: ${latest.target_url ?? ""}`);
+      }
+    }
+    if (deployments.length === 0) {
+      const statuses = await github(`/commits/${request.sha}/statuses?per_page=100`);
+      if (statuses.some((s2) => s2.context === "Vercel" && s2.state === "success")) {
+        throw new Error(
+          `Vercel deployed ${short} but recorded no GitHub deployment, so there is no preview URL to test. Turn on "deployment_status Events" in the Vercel project (Settings > Git) and push again.`
+        );
+      }
+    }
+    if (now() >= deadline) {
+      throw new Error(`No successful Vercel preview of ${short} after ${Math.round(request.timeoutMs / 1e3)}s`);
+    }
+    await sleep2(pollMs);
+  }
+}
+
 // src/main.ts
 function onDefaultBranch(env) {
   if (env.defaultBranch) return env.ref === `refs/heads/${env.defaultBranch}`;
@@ -3992,6 +4079,14 @@ async function main() {
   console.log(
     `[peeps] mode=${mode} repo=${env.repository ?? "?"} sha=${env.sha?.slice(0, 7) ?? "?"} ref=${env.ref ?? "?"} peeps=${env.peepsUrl}`
   );
+  if (mode === "report" && !process.env.BASE_URL) {
+    const preview = readPreviewRequest(process.env);
+    if (preview) {
+      console.log(`[peeps] waiting for the Vercel preview of ${preview.sha.slice(0, 7)}`);
+      process.env.BASE_URL = await waitForVercelPreview(preview);
+      console.log(`[peeps] BASE_URL ${process.env.BASE_URL} (Vercel preview of ${preview.sha.slice(0, 7)})`);
+    }
+  }
   const framework = mode === "agent" ? "playwright" : resolveFramework(env);
   if (framework === "pytest" || framework === "appium") {
     console.log(`[peeps] framework=${framework}`);

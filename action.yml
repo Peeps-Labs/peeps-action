@@ -26,6 +26,17 @@ inputs:
   working-directory:
     description: "Directory to run the tests in, relative to the repository root (default: the repository root)"
     required: false
+  preview:
+    description: "vercel: on a pull request, wait for that pull request's Vercel preview and set BASE_URL to it (needs `deployments: read` and `statuses: read`). A BASE_URL the workflow sets wins"
+    required: false
+  preview-timeout:
+    description: "Seconds to wait for the preview (default 600)"
+    required: false
+    default: "600"
+  github-token:
+    description: "Token for reading the pull request's deployments (default: the job's GITHUB_TOKEN)"
+    required: false
+    default: "${{ github.token }}"
 runs:
   using: "node24"
   main: "dist/index.js"
