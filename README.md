@@ -431,6 +431,15 @@ otherwise. A deployment that GitHub later marked `inactive` (another
 preview succeeded after it) still counts, and an older failed deployment
 does not fail the job while a newer one builds.
 
+In a job Peeps starts (a heal, a fix's verification, a run from Peeps),
+`preview: vercel` looks for the preview of the commit the job checked out and
+uses it wherever Peeps sends no `BASE_URL`: a Peeps environment's `BASE_URL`
+and your workflow's own still win. A heal of a pull request's failure checks
+out that pull request's head, so it reproduces and verifies on the preview
+the failure came from; a fix's verification waits while Vercel deploys the
+fix's own commit. A commit Vercel is not deploying (your default branch, for
+example) is left alone at once.
+
 pytest-playwright reads its base URL from `--base-url` or
 `PYTEST_BASE_URL`, not `BASE_URL`: pass `--base-url "$BASE_URL"` in
 `pytest.ini`'s `addopts`, or read `BASE_URL` in a `base_url` fixture. Vercel records GitHub deployments only with the project's
@@ -679,6 +688,15 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## 1.12.0
+
+- `preview: vercel` in a job Peeps starts (`run`, `agent`): the Vercel preview
+  of the checked-out commit becomes `BASE_URL` where Peeps sends none, so a
+  heal of a pull request's failure reproduces and verifies on that pull
+  request's preview instead of on nothing. A Peeps environment's `BASE_URL`
+  and the workflow's own still win. The job waits only while Vercel is
+  deploying that commit.
 
 ## 1.11.0
 

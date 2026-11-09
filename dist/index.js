@@ -713,10 +713,17 @@ function hideEnvironmentUrls(vars) {
   return (text2) => hidden.reduce((out, value) => out.split(value).join("<unreadable URL>"), text2);
 }
 function planEnvironmentVariables(planEnv, current) {
-  if (!planEnv) return { vars: {}, log: "" };
+  const preview = current.PEEPS_PREVIEW_URL;
+  const previewFallback = (prefix) => preview && !current.BASE_URL ? { BASE_URL: preview, log: `${prefix}BASE_URL ${urlForLog(preview)} (the Vercel preview of the checked-out commit)` } : null;
+  if (!planEnv) {
+    const fallback = previewFallback("[peeps] no Peeps environment; ");
+    return fallback ? { vars: { BASE_URL: fallback.BASE_URL }, log: fallback.log } : { vars: {}, log: "" };
+  }
   const vars = { PEEPS_ENVIRONMENT: planEnv.name };
   const name = nameForLog(planEnv.name);
   if (!planEnv.baseUrl) {
+    const fallback = previewFallback(`[peeps] environment ${name} (no BASE_URL in Peeps); `);
+    if (fallback) return { vars: { ...vars, BASE_URL: fallback.BASE_URL }, log: fallback.log };
     return { vars, log: `[peeps] environment ${name} (no BASE_URL in Peeps)` };
   }
   vars.PEEPS_BASE_URL = planEnv.baseUrl;
@@ -2993,7 +3000,7 @@ var ALWAYS_MASK_KEYS = /* @__PURE__ */ new Set([
   "CI_DEPLOY_PASSWORD",
   "CI_DEPENDENCY_PROXY_PASSWORD"
 ]);
-var SAFE_ENV_KEYS = /* @__PURE__ */ new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
+var SAFE_ENV_KEYS = /* @__PURE__ */ new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL", "PEEPS_PREVIEW_URL"]);
 function createToolServer(env, deps = {}) {
   const workspace = env.workspace;
   const redact = makeRedactor(process.env);
@@ -3604,7 +3611,7 @@ function runCapture(cmd, args, cwd, timeoutMs, extraEnv = {}) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.11.0";
+var ACTION_VERSION = "1.12.0";
 
 // src/agent.ts
 var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process7.execFile);
@@ -3974,6 +3981,7 @@ async function warnIfBrowsersMissing(workingDirectory, platform) {
 }
 
 // src/preview.ts
+var import_node_child_process9 = require("node:child_process");
 var import_node_fs8 = require("node:fs");
 var GITHUB_TOKEN_INPUT = "INPUT_GITHUB-TOKEN";
 function takeGithubToken(env) {
@@ -4120,6 +4128,9 @@ async function waitForVercelPreview(request, deps = {}) {
     }
     if (candidates.length === 0) {
       const statuses = await github(`/commits/${request.sha}/statuses?per_page=100`);
+      if (deps.onlyIfDeploying && !statuses.some((s2) => isVercelContextFor(s2.context, request.project))) {
+        throw new Error(`Vercel is not deploying ${short}`);
+      }
       if (statuses.some((s2) => s2.state === "success" && isVercelContextFor(s2.context, request.project))) {
         throw new Error(
           `Vercel deployed ${short} but recorded no GitHub deployment${request.project ? ` for ${nameForLog(request.project)}` : ""}, so there is no preview URL to test. Turn on "deployment_status Events" in the Vercel project (Settings > Git) and push again.`
@@ -4141,6 +4152,41 @@ async function previewBaseUrl(mode, env, githubToken, deps = {}, log = console.l
   const url = await waitForVercelPreview(request, deps);
   log(`[peeps] BASE_URL ${urlForLog(url)} (Vercel preview of ${request.sha.slice(0, 7)})`);
   return url;
+}
+var PREVIEW_URL_VAR = "PEEPS_PREVIEW_URL";
+async function dispatchedPreviewUrl(mode, env, githubToken, checkedOutSha, deps = {}, log = console.log) {
+  if (mode !== "run" && mode !== "agent" || env.BASE_URL) return null;
+  if (env["INPUT_PREVIEW"]?.trim().toLowerCase() !== "vercel") return null;
+  if (env.GITHUB_EVENT_NAME !== "workflow_dispatch" || !githubToken || !env.GITHUB_REPOSITORY) return null;
+  const sha = checkedOutSha();
+  if (!sha || !/^[0-9a-f]{40}$/.test(sha)) return null;
+  const short = sha.slice(0, 7);
+  try {
+    const url = await waitForVercelPreview(
+      {
+        provider: "vercel",
+        repository: env.GITHUB_REPOSITORY,
+        sha,
+        token: githubToken,
+        timeoutMs: Number(env["INPUT_PREVIEW-TIMEOUT"]?.trim() || "600") * 1e3 || 6e5,
+        apiUrl: (env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/+$/, ""),
+        project: env["INPUT_PREVIEW-PROJECT"]?.trim() || null
+      },
+      { ...deps, onlyIfDeploying: true }
+    );
+    log(`[peeps] Vercel preview of ${short}: ${urlForLog(url)} (used when Peeps sends no BASE_URL)`);
+    return url;
+  } catch (error) {
+    log(`[peeps] no Vercel preview of ${short} to test: ${nameForLog(error instanceof Error ? error.message : String(error))}`);
+    return null;
+  }
+}
+function headSha(cwd) {
+  try {
+    return (0, import_node_child_process9.execFileSync)("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return null;
+  }
 }
 
 // src/main.ts
@@ -4168,6 +4214,8 @@ async function main() {
   );
   const previewUrl2 = await previewBaseUrl(mode, process.env, githubToken);
   if (previewUrl2) process.env.BASE_URL = previewUrl2;
+  const dispatched = await dispatchedPreviewUrl(mode, process.env, githubToken, () => headSha(env.workspace));
+  if (dispatched) process.env[PREVIEW_URL_VAR] = dispatched;
   const framework = mode === "agent" ? "playwright" : resolveFramework(env);
   if (framework === "pytest" || framework === "appium") {
     console.log(`[peeps] framework=${framework}`);

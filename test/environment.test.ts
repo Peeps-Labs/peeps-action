@@ -116,3 +116,25 @@ test("hideEnvironmentUrls hides only the values with an @, whole", () => {
   assert.equal(hideEnvironmentUrls({ BASE_URL: "https://x.example.com" })("at https://x.example.com"), "at https://x.example.com");
   assert.equal(hideEnvironmentUrls({})("anything"), "anything");
 });
+
+test("a Peeps-dispatched job's Vercel preview fills in where Peeps sends no BASE_URL", () => {
+  const preview = { PEEPS_PREVIEW_URL: "https://shop-abc.vercel.app" };
+  const none = planEnvironmentVariables(null, preview);
+  assert.deepEqual(none.vars, { BASE_URL: "https://shop-abc.vercel.app" });
+  assert.match(none.log, /no Peeps environment; BASE_URL https:\/\/shop-abc\.vercel\.app/);
+  const noUrl = planEnvironmentVariables({ name: "PREVIEW", baseUrl: null }, preview);
+  assert.deepEqual(noUrl.vars, { PEEPS_ENVIRONMENT: "PREVIEW", BASE_URL: "https://shop-abc.vercel.app" });
+});
+
+test("a Peeps environment's BASE_URL and the workflow's own still win over the preview", () => {
+  const named = planEnvironmentVariables(
+    { name: "STAGING", baseUrl: "https://staging.example" },
+    { PEEPS_PREVIEW_URL: "https://shop-abc.vercel.app" },
+  );
+  assert.equal(named.vars.BASE_URL, "https://staging.example");
+  const workflow = planEnvironmentVariables(null, {
+    PEEPS_PREVIEW_URL: "https://shop-abc.vercel.app",
+    BASE_URL: "https://mine.example",
+  });
+  assert.deepEqual(workflow.vars, {});
+});

@@ -18,6 +18,7 @@
  * with that fix instead of timing out.
  */
 
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { nameForLog, urlForLog } from "./environment";
 
@@ -178,6 +179,11 @@ function verdictOf(statuses: DeploymentStatus[]): Verdict {
 }
 
 export interface WaitDeps {
+  /**
+   * Stop at once when Vercel has neither a deployment nor a commit status for
+   * the commit: it is not deploying it, so there is nothing to wait for.
+   */
+  onlyIfDeploying?: boolean;
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -263,6 +269,9 @@ export async function waitForVercelPreview(request: PreviewRequest, deps: WaitDe
     }
     if (candidates.length === 0) {
       const statuses = await github<CommitStatus[]>(`/commits/${request.sha}/statuses?per_page=100`);
+      if (deps.onlyIfDeploying && !statuses.some((s) => isVercelContextFor(s.context, request.project))) {
+        throw new Error(`Vercel is not deploying ${short}`);
+      }
       if (statuses.some((s) => s.state === "success" && isVercelContextFor(s.context, request.project))) {
         throw new Error(
           `Vercel deployed ${short} but recorded no GitHub deployment${request.project ? ` for ${nameForLog(request.project)}` : ""}, so there is no preview URL to test. ` +
@@ -299,4 +308,67 @@ export async function previewBaseUrl(
   const url = await waitForVercelPreview(request, deps);
   log(`[peeps] BASE_URL ${urlForLog(url)} (Vercel preview of ${request.sha.slice(0, 7)})`);
   return url;
+}
+
+/** The environment variable a Peeps-dispatched job keeps a found preview in (environment.ts reads it). */
+export const PREVIEW_URL_VAR = "PEEPS_PREVIEW_URL";
+
+/**
+ * For a job Peeps starts (`run`, `agent`): the Vercel preview of the commit
+ * the job checked out, or null. A heal of a pull request's failure checks out
+ * that pull request's head, and its run reported that commit's preview, so the
+ * heal reproduces and verifies there instead of on nothing. A fix's
+ * verification checks out the fix's own commit, whose preview Vercel may
+ * still be building, so the job waits up to preview-timeout while Vercel is
+ * deploying the commit, and not at all when it is not (the default branch,
+ * a repository Vercel does not deploy). A commit with no usable preview
+ * (events off, several projects with none named) leaves BASE_URL to the
+ * Peeps environment, as before.
+ *
+ * Kept apart from BASE_URL so a Peeps environment the run named still wins
+ * (`planEnvironmentVariables`): the preview only fills in where Peeps sends no
+ * BASE_URL.
+ */
+export async function dispatchedPreviewUrl(
+  mode: string,
+  env: NodeJS.ProcessEnv,
+  githubToken: string | null,
+  checkedOutSha: () => string | null,
+  deps: WaitDeps = {},
+  log: (line: string) => void = console.log,
+): Promise<string | null> {
+  if ((mode !== "run" && mode !== "agent") || env.BASE_URL) return null;
+  if (env["INPUT_PREVIEW"]?.trim().toLowerCase() !== "vercel") return null;
+  if (env.GITHUB_EVENT_NAME !== "workflow_dispatch" || !githubToken || !env.GITHUB_REPOSITORY) return null;
+  const sha = checkedOutSha();
+  if (!sha || !/^[0-9a-f]{40}$/.test(sha)) return null;
+  const short = sha.slice(0, 7);
+  try {
+    const url = await waitForVercelPreview(
+      {
+        provider: "vercel",
+        repository: env.GITHUB_REPOSITORY,
+        sha,
+        token: githubToken,
+        timeoutMs: Number(env["INPUT_PREVIEW-TIMEOUT"]?.trim() || "600") * 1000 || 600_000,
+        apiUrl: (env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/+$/, ""),
+        project: env["INPUT_PREVIEW-PROJECT"]?.trim() || null,
+      },
+      { ...deps, onlyIfDeploying: true },
+    );
+    log(`[peeps] Vercel preview of ${short}: ${urlForLog(url)} (used when Peeps sends no BASE_URL)`);
+    return url;
+  } catch (error) {
+    log(`[peeps] no Vercel preview of ${short} to test: ${nameForLog(error instanceof Error ? error.message : String(error))}`);
+    return null;
+  }
+}
+
+/** The commit checked out in `cwd`, or null outside a git checkout. */
+export function headSha(cwd: string): string | null {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return null;
+  }
 }
