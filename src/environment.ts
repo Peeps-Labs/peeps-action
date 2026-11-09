@@ -57,10 +57,22 @@ export function planEnvironmentVariables(
   planEnv: PlanEnvironment | null | undefined,
   current: NodeJS.ProcessEnv,
 ): { vars: Record<string, string>; log: string } {
-  if (!planEnv) return { vars: {}, log: "" };
+  // `preview: vercel` in a job Peeps started: the checked-out commit's
+  // preview, used only where neither Peeps nor the workflow names a BASE_URL.
+  const preview = current.PEEPS_PREVIEW_URL;
+  const previewFallback = (prefix: string) =>
+    preview && !current.BASE_URL
+      ? { BASE_URL: preview, log: `${prefix}BASE_URL ${urlForLog(preview)} (the Vercel preview of the checked-out commit)` }
+      : null;
+  if (!planEnv) {
+    const fallback = previewFallback("[peeps] no Peeps environment; ");
+    return fallback ? { vars: { BASE_URL: fallback.BASE_URL }, log: fallback.log } : { vars: {}, log: "" };
+  }
   const vars: Record<string, string> = { PEEPS_ENVIRONMENT: planEnv.name };
   const name = nameForLog(planEnv.name);
   if (!planEnv.baseUrl) {
+    const fallback = previewFallback(`[peeps] environment ${name} (no BASE_URL in Peeps); `);
+    if (fallback) return { vars: { ...vars, BASE_URL: fallback.BASE_URL }, log: fallback.log };
     return { vars, log: `[peeps] environment ${name} (no BASE_URL in Peeps)` };
   }
   vars.PEEPS_BASE_URL = planEnv.baseUrl;

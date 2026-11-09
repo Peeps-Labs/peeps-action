@@ -503,7 +503,7 @@ const ALWAYS_MASK_KEYS = new Set([
   "CI_DEPLOY_PASSWORD",
   "CI_DEPENDENCY_PROXY_PASSWORD",
 ]);
-const SAFE_ENV_KEYS = new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
+const SAFE_ENV_KEYS = new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL", "PEEPS_PREVIEW_URL"]);
 
 export interface ToolServerDeps {
   /** For tests: run this instead of `npx wdio run <config>` for an Appium suite. */

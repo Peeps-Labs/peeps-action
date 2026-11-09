@@ -31,7 +31,7 @@ import {
   runAttachStep,
 } from "./attach";
 import { warnIfBrowsersMissing } from "./browser-check";
-import { previewBaseUrl, takeGithubToken } from "./preview";
+import { PREVIEW_URL_VAR, dispatchedPreviewUrl, headSha, previewBaseUrl, takeGithubToken } from "./preview";
 import {
   resolveFramework,
   runPytestDispatched,
@@ -80,6 +80,10 @@ async function main(): Promise<void> {
   // `preview: vercel` on a pull request: test that pull request's own preview.
   const previewUrl = await previewBaseUrl(mode, process.env, githubToken);
   if (previewUrl) process.env.BASE_URL = previewUrl;
+  // A job Peeps started (a heal, a run): the checked-out commit's preview, for
+  // where Peeps sends no BASE_URL (environment.ts).
+  const dispatched = await dispatchedPreviewUrl(mode, process.env, githubToken, () => headSha(env.workspace));
+  if (dispatched) process.env[PREVIEW_URL_VAR] = dispatched;
 
   // A pytest or Appium suite takes its own path through every mode that runs
   // tests; a Playwright one falls through to the switch below, exactly as before.

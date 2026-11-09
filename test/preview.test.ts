@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   GITHUB_TOKEN_INPUT,
+  dispatchedPreviewUrl,
   previewBaseUrl,
   readPreviewRequest,
   takeGithubToken,
@@ -315,4 +316,167 @@ test("previewBaseUrl returns the pull request's preview in report mode", async (
   const url = await previewBaseUrl("report", prEnv(), "t", { fetch: fetchFn, ...instant }, (l) => lines.push(l));
   assert.equal(url, "https://shop-abc.vercel.app");
   assert.match(lines.join("\n"), /BASE_URL https:\/\/shop-abc\.vercel\.app \(Vercel preview of aaaaaaa\)/);
+});
+
+const dispatchEnv = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+  INPUT_PREVIEW: "vercel",
+  GITHUB_EVENT_NAME: "workflow_dispatch",
+  GITHUB_REPOSITORY: "acme/shop",
+  ...extra,
+});
+
+test("a Peeps-dispatched job finds the checked-out commit's preview", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[{ id: 7, environment: "Preview", creator: VERCEL }]],
+    "/deployments/7/statuses": [[{ state: "success", environment_url: "https://shop-abc.vercel.app" }]],
+  });
+  const lines: string[] = [];
+  const url = await dispatchedPreviewUrl("agent", dispatchEnv(), "t", () => SHA, { fetch: fetchFn, ...instant }, (l) =>
+    lines.push(l),
+  );
+  assert.equal(url, "https://shop-abc.vercel.app");
+  assert.match(lines.join("\n"), /used when Peeps sends no BASE_URL/);
+});
+
+test("a dispatched job waits while Vercel deploys its commit (a fix's own commit)", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[], [{ id: 8, environment: "Preview", creator: VERCEL }]],
+    [`/commits/${SHA}/statuses`]: [[{ context: "Vercel", state: "pending" }]],
+    "/deployments/8/statuses": [[{ state: "success", environment_url: "https://shop-fix.vercel.app" }]],
+  });
+  const url = await dispatchedPreviewUrl("run", dispatchEnv(), "t", () => SHA, { fetch: fetchFn, ...instant }, () => {});
+  assert.equal(url, "https://shop-fix.vercel.app");
+});
+
+test("a dispatched job whose commit Vercel is not deploying carries on at once", async () => {
+  const { fetchFn } = fakeGitHub({ "/deployments?": [[{ id: 1, environment: "Production", creator: VERCEL }]] });
+  const lines: string[] = [];
+  let slept = false;
+  const url = await dispatchedPreviewUrl(
+    "run",
+    dispatchEnv(),
+    "t",
+    () => SHA,
+    { fetch: fetchFn, pollMs: 10_000, sleep: async () => void (slept = true) },
+    (l) => lines.push(l),
+  );
+  assert.equal(url, null);
+  assert.equal(slept, false);
+  assert.match(lines.join("\n"), /no Vercel preview of aaaaaaa to test/);
+});
+
+test("dispatchedPreviewUrl stays out of report mode, other events, a workflow BASE_URL and a bad checkout", async () => {
+  const quiet = () => {};
+  const never = (async () => {
+    throw new Error("no request expected");
+  }) as unknown as typeof fetch;
+  const deps = { fetch: never, ...instant };
+  assert.equal(await dispatchedPreviewUrl("report", dispatchEnv(), "t", () => SHA, deps, quiet), null);
+  assert.equal(await dispatchedPreviewUrl("agent", dispatchEnv({ GITHUB_EVENT_NAME: "push" }), "t", () => SHA, deps, quiet), null);
+  assert.equal(await dispatchedPreviewUrl("agent", dispatchEnv({ BASE_URL: "https://mine.example" }), "t", () => SHA, deps, quiet), null);
+  assert.equal(await dispatchedPreviewUrl("agent", dispatchEnv({ INPUT_PREVIEW: "" }), "t", () => SHA, deps, quiet), null);
+  assert.equal(await dispatchedPreviewUrl("agent", dispatchEnv(), null, () => SHA, deps, quiet), null);
+  assert.equal(await dispatchedPreviewUrl("agent", dispatchEnv(), "t", () => null, deps, quiet), null);
+});
+
+test("a dispatched job on a Production-only commit stops at once, whatever Vercel's status", async () => {
+  for (const state of ["failure", "pending", "success"]) {
+    const { fetchFn } = fakeGitHub({
+      "/deployments?": [[{ id: 1, environment: "Production", creator: VERCEL }]],
+      [`/commits/${SHA}/statuses`]: [[{ context: "Vercel", state }]],
+    });
+    let slept = false;
+    const lines: string[] = [];
+    const url = await dispatchedPreviewUrl(
+      "run",
+      dispatchEnv(),
+      "t",
+      () => SHA,
+      { fetch: fetchFn, pollMs: 10_000, sleep: async () => void (slept = true) },
+      (l) => lines.push(l),
+    );
+    assert.equal(url, null, state);
+    assert.equal(slept, false, state);
+    assert.match(lines.join("\n"), /not deploying a preview of aaaaaaa/, state);
+  }
+});
+
+test("a dispatched job stops at once when Vercel's build of the commit failed", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[]],
+    [`/commits/${SHA}/statuses`]: [[{ context: "Vercel", state: "failure" }]],
+  });
+  let slept = false;
+  const url = await dispatchedPreviewUrl(
+    "agent",
+    dispatchEnv(),
+    "t",
+    () => SHA,
+    { fetch: fetchFn, pollMs: 10_000, sleep: async () => void (slept = true) },
+    () => {},
+  );
+  assert.equal(url, null);
+  assert.equal(slept, false);
+});
+
+test("a dispatched job says when it cannot read its commit, and when preview-timeout is not a number", async () => {
+  const lines: string[] = [];
+  await dispatchedPreviewUrl("agent", dispatchEnv(), "t", () => null, instant, (l) => lines.push(l));
+  assert.match(lines.join("\n"), /could not read the checked-out commit/);
+  const { fetchFn } = fakeGitHub({ "/deployments?": [[]] });
+  const more: string[] = [];
+  await dispatchedPreviewUrl("agent", dispatchEnv({ "INPUT_PREVIEW-TIMEOUT": "soon" }), "t", () => SHA, { fetch: fetchFn, ...instant }, (l) =>
+    more.push(l),
+  );
+  assert.match(more.join("\n"), /preview-timeout must be a positive number of seconds; waiting up to 600/);
+});
+
+test("only each context's newest status counts: a rebuild after a failure is waited for, a failure after a pending is not", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[]],
+    // Newest first, as GitHub lists them.
+    [`/commits/${SHA}/statuses`]: [[{ context: "Vercel", state: "failure" }, { context: "Vercel", state: "pending" }]],
+  });
+  let slept = false;
+  const url = await dispatchedPreviewUrl(
+    "run",
+    dispatchEnv(),
+    "t",
+    () => SHA,
+    { fetch: fetchFn, pollMs: 10_000, sleep: async () => void (slept = true) },
+    () => {},
+  );
+  assert.equal(url, null);
+  assert.equal(slept, false);
+});
+
+test("a named project ignores another project's Production deployment", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[{ id: 1, environment: "Production – docs", creator: VERCEL }], [{ id: 2, environment: "Preview – web", creator: VERCEL }]],
+    [`/commits/${SHA}/statuses`]: [[{ context: "Vercel – web", state: "pending" }]],
+    "/deployments/2/statuses": [[{ state: "success", environment_url: "https://web.vercel.app" }]],
+  });
+  const url = await dispatchedPreviewUrl(
+    "run",
+    dispatchEnv({ "INPUT_PREVIEW-PROJECT": "web" }),
+    "t",
+    () => SHA,
+    { fetch: fetchFn, ...instant },
+    () => {},
+  );
+  assert.equal(url, "https://web.vercel.app");
+});
+
+test("unnamed, another project's finished status does not stop a ready preview", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[{ id: 1, environment: "Preview – web", creator: VERCEL }]],
+    "/deployments/1/statuses": [[{ state: "success", environment_url: "https://web.vercel.app" }]],
+    [`/commits/${SHA}/statuses`]: [
+      [
+        { context: "Vercel – web", state: "success" },
+        { context: "Vercel – docs", state: "success" },
+      ],
+    ],
+  });
+  assert.equal(await waitForVercelPreview(request, { fetch: fetchFn, ...instant }), "https://web.vercel.app");
 });
