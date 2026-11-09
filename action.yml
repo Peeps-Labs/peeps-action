@@ -29,12 +29,15 @@ inputs:
   preview:
     description: "vercel: on a pull request, wait for that pull request's Vercel preview and set BASE_URL to it (needs `deployments: read` and `statuses: read`). A BASE_URL the workflow sets wins"
     required: false
+  preview-project:
+    description: "With preview, the Vercel project whose preview to test, for a repository that deploys several (the <name> of the deployment environment \"Preview – <name>\")"
+    required: false
   preview-timeout:
     description: "Seconds to wait for the preview (default 600)"
     required: false
     default: "600"
   github-token:
-    description: "Token for reading the pull request's deployments (default: the job's GITHUB_TOKEN)"
+    description: "Token for reading the pull request's deployments with preview (default: the job's GITHUB_TOKEN). The action removes it from its environment before anything runs, so no test process sees it"
     required: false
     default: "${{ github.token }}"
 runs:

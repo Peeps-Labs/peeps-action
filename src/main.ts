@@ -31,8 +31,7 @@ import {
   runAttachStep,
 } from "./attach";
 import { warnIfBrowsersMissing } from "./browser-check";
-import { readPreviewRequest, waitForVercelPreview } from "./preview";
-import { urlForLog } from "./environment";
+import { previewBaseUrl, takeGithubToken } from "./preview";
 import {
   resolveFramework,
   runPytestDispatched,
@@ -50,6 +49,9 @@ function onDefaultBranch(env: RunnerEnv): boolean {
 }
 
 async function main(): Promise<void> {
+  // First, before anything can spawn: no test process, inventory or agent
+  // tool may inherit the repository token (preview.ts).
+  const githubToken = takeGithubToken(process.env);
   // The attach steps sit in the customer's own workflow, around their own test step, so
   // nothing in them may fail the job: not even an environment Peeps cannot read.
   const requested = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
@@ -76,16 +78,8 @@ async function main(): Promise<void> {
   );
 
   // `preview: vercel` on a pull request: test that pull request's own preview.
-  // A BASE_URL the workflow set itself wins, as it does over a Peeps
-  // environment's (environment.ts).
-  if (mode === "report" && !process.env.BASE_URL) {
-    const preview = readPreviewRequest(process.env);
-    if (preview) {
-      console.log(`[peeps] waiting for the Vercel preview of ${preview.sha.slice(0, 7)}`);
-      process.env.BASE_URL = await waitForVercelPreview(preview);
-      console.log(`[peeps] BASE_URL ${urlForLog(process.env.BASE_URL)} (Vercel preview of ${preview.sha.slice(0, 7)})`);
-    }
-  }
+  const previewUrl = await previewBaseUrl(mode, process.env, githubToken);
+  if (previewUrl) process.env.BASE_URL = previewUrl;
 
   // A pytest or Appium suite takes its own path through every mode that runs
   // tests; a Playwright one falls through to the switch below, exactly as before.
