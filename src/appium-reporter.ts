@@ -310,7 +310,7 @@ function discardFailureEvidence(runId: string): void {
 /** Drop everything the attempt captured: its failure evidence and its named screens. */
 function discardCaptured(runId: string): void {
   discardFailureEvidence(runId);
-  removeFiles(screens.get(runId)?.files ?? []);
+  removeFiles([...(screens.get(runId)?.shots.values() ?? [])].map((shot) => shot.file));
   screens.delete(runId);
 }
 
@@ -460,7 +460,7 @@ export async function peepsAfterHook(
 // Named screens: browser.peepsScreen(name), for visual diffs
 // ---------------------------------------------------------------------------
 
-/** Named screens kept per test; a call past it is listed as omitted, not captured. */
+/** Distinct names kept per test; a new name past it is listed as omitted, not captured. */
 export const MAX_SCREENS_PER_TEST = 10;
 /** A name is 1 to this many characters, after trimming. */
 const MAX_SCREEN_NAME = 80;
@@ -487,13 +487,14 @@ export interface ScreenDevice {
 }
 
 interface Screens {
-  attachments: Array<{ name: string; path: string; size: number }>;
+  /**
+   * The kept screens by name, in the order they were (last) taken: a repeated
+   * name replaces its earlier capture. `file` is staged, absolute.
+   */
+  shots: Map<string, { slug: string; file: string; size: number }>;
   omitted: Array<{ name: string; reason: string }>;
-  /** The staged files, absolute, so a retried attempt's can be removed. */
-  files: string[];
-  slugs: Set<string>;
-  /** Captures started, so calls that were not awaited still respect the cap. */
-  reserved: number;
+  /** Names kept or being captured, so calls that were not awaited still respect the cap. */
+  names: Set<string>;
   device: ScreenDevice | null;
 }
 
@@ -604,9 +605,10 @@ export async function deviceFacts(browser: ScreenBrowser, timeoutMs = DEVICE_QUE
 /**
  * Save a settled screenshot of the screen as `name` for one run, into
  * `PEEPS_ARTIFACTS_DIR/upload`, as `<runId>-evidence-screen-<slug>.png` (a
- * slug already taken in this test gets `-2`, `-3`…). The test's first
- * screen also records the device. Never throws: a failure is logged and
- * listed as omitted.
+ * slug another name of this test holds gets `-2`, `-3`…). A name already
+ * kept is replaced: its earlier file is deleted. The test's first screen
+ * also records the device. Never throws: a failure is logged and listed as
+ * omitted, and leaves any earlier capture of the name in place.
  */
 export async function captureScreen(
   runId: string,
@@ -620,14 +622,14 @@ export async function captureScreen(
     console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: PEEPS_ARTIFACTS_DIR is not set`);
     return;
   }
-  const out = screens.get(runId) ?? { attachments: [], omitted: [], files: [], slugs: new Set<string>(), reserved: 0, device: null };
+  const out: Screens = screens.get(runId) ?? { shots: new Map(), omitted: [], names: new Set<string>(), device: null };
   screens.set(runId, out);
-  if (out.reserved >= MAX_SCREENS_PER_TEST) {
+  if (!out.names.has(name) && out.names.size >= MAX_SCREENS_PER_TEST) {
     console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: at most ${MAX_SCREENS_PER_TEST} screens per test`);
     out.omitted.push({ name: label, reason: "screen_limit" });
     return;
   }
-  out.reserved += 1;
+  out.names.add(name);
   try {
     const frame = await stableFrame(
       async () => Buffer.from(String(await withTimeout(Promise.resolve(browser.takeScreenshot()), "takeScreenshot")), "base64"),
@@ -636,16 +638,20 @@ export async function captureScreen(
     const size = pngSize(frame);
     if (!size) throw new Error("the screenshot is not a PNG");
     if (frame.length > MAX_ATTACHMENT_BYTES) throw new Error(`larger than ${MAX_ATTACHMENT_BYTES} bytes`);
+    const earlier = out.shots.get(name);
+    if (earlier) {
+      removeFiles([earlier.file]);
+      out.shots.delete(name);
+    }
+    const taken = new Set([...out.shots.values()].map((shot) => shot.slug));
     const base = screenSlug(name);
     let slug = base;
-    for (let n = 2; out.slugs.has(slug); n++) slug = `${base}-${n}`;
-    out.slugs.add(slug);
+    for (let n = 2; taken.has(slug); n++) slug = `${base}-${n}`;
     const dir = path.join(artifacts, "upload");
     mkdirSync(dir, { recursive: true });
     const file = path.join(dir, evidenceFileName(runId, `screen-${slug}.png`));
     writeFileSync(file, frame);
-    out.files.push(file);
-    out.attachments.push({ name: label, path: `data/${path.basename(file)}`, size: frame.length });
+    out.shots.set(name, { slug, file, size: frame.length });
     if (!out.device) {
       cachedDevice ??= deviceFacts(browser);
       const facts = await cachedDevice;
@@ -663,7 +669,7 @@ export async function captureScreen(
       }
     }
   } catch (error) {
-    out.reserved -= 1;
+    if (!out.shots.has(name)) out.names.delete(name);
     console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: ${String(error).split("\n")[0]}`);
     out.omitted.push({ name: label, reason: reasonOf(error) });
   }
@@ -713,7 +719,8 @@ export function peepsBefore(
 function attachScreens(event: PeepsEvent, runId: string): void {
   const shots = screens.get(runId);
   if (!shots) return;
-  if (shots.attachments.length) event.attachments = [...(event.attachments ?? []), ...shots.attachments];
+  const attachments = [...shots.shots].map(([name, shot]) => ({ name: `screen:${name}`, path: `data/${path.basename(shot.file)}`, size: shot.size }));
+  if (attachments.length) event.attachments = [...(event.attachments ?? []), ...attachments];
   if (shots.omitted.length) event.attachmentsOmitted = [...(event.attachmentsOmitted ?? []), ...shots.omitted];
   if (shots.device) event.properties = [...(event.properties ?? []), { name: "peeps_device", value: JSON.stringify(shots.device) }];
 }

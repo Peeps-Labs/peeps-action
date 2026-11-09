@@ -965,6 +965,63 @@ test("at most ten named screens per test; the rest are listed as omitted, not ca
   }
 });
 
+test("a repeated name in one test replaces the earlier capture: its file is deleted and its attachment dropped", async () => {
+  const peeps = await fakePeeps();
+  try {
+    const file = "/w/mobile/a.spec.ts";
+    const dir = usePlan(peeps.url, [run("r-1", "mobile/a.spec.ts", "A › b")]);
+    const upload = path.join(dir, "evidence", "upload");
+    let frame = fakePng(1080, 2400, 64);
+    const browser = screenBrowser({ takeScreenshot: async () => frame.toString("base64") });
+    const reporter = new PeepsAppiumReporter({});
+    reporter.emit("suite:start", { title: "A", file });
+    reporter.emit("test:start", { title: "b", file });
+    await captureScreen("r-1", browser, "Home", 0);
+    // Another name with the same slug keeps its own file.
+    await captureScreen("r-1", browser, "home", 0);
+    frame = fakePng(1080, 2400, 128);
+    await captureScreen("r-1", browser, "Home", 0);
+    // A re-capture that fails leaves the one before it.
+    await captureScreen("r-1", screenBrowser({ takeScreenshot: async () => Promise.reject(new Error("gone")) }), "Home", 0);
+    reporter.emit("test:pass", { title: "b", file });
+    await synchronised(reporter);
+    const end = peeps.received.events.get("r-1")!.find((e) => e.type === "test_end")!;
+    assert.deepEqual(end.attachments, [
+      { name: "screen:home", path: "data/r-1-evidence-screen-home-2.png", size: 64 },
+      { name: "screen:Home", path: "data/r-1-evidence-screen-home.png", size: 128 },
+    ]);
+    assert.deepEqual(end.attachmentsOmitted, [{ name: "screen:Home", reason: "capture failed: gone" }]);
+    assert.deepEqual(readdirSync(upload).sort(), ["r-1-evidence-screen-home-2.png", "r-1-evidence-screen-home.png"]);
+    assert.deepEqual(readFileSync(path.join(upload, "r-1-evidence-screen-home.png")), fakePng(1080, 2400, 128));
+  } finally {
+    peeps.close();
+  }
+});
+
+test("the ten-screen cap counts distinct names: repeating a kept name is not refused", async () => {
+  const peeps = await fakePeeps();
+  try {
+    const file = "/w/mobile/a.spec.ts";
+    usePlan(peeps.url, [run("r-1", "mobile/a.spec.ts", "A › b")]);
+    const browser = screenBrowser();
+    const reporter = new PeepsAppiumReporter({});
+    reporter.emit("suite:start", { title: "A", file });
+    reporter.emit("test:start", { title: "b", file });
+    for (let i = 1; i <= 10; i++) await captureScreen("r-1", browser, `step ${i}`, 0);
+    await captureScreen("r-1", browser, "step 3", 0);
+    await captureScreen("r-1", browser, "step 11", 0);
+    reporter.emit("test:pass", { title: "b", file });
+    await synchronised(reporter);
+    const end = peeps.received.events.get("r-1")!.find((e) => e.type === "test_end")!;
+    const names = (end.attachments as Array<{ name: string }>).map((a) => a.name);
+    assert.equal(names.length, 10);
+    assert.equal(names.at(-1), "screen:step 3");
+    assert.deepEqual(end.attachmentsOmitted, [{ name: "screen:step 11", reason: "screen_limit" }]);
+  } finally {
+    peeps.close();
+  }
+});
+
 test("a retried attempt's screens are discarded, files and all; the final attempt's are sent", async () => {
   const peeps = await fakePeeps();
   try {

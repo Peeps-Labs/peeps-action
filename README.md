@@ -340,8 +340,10 @@ running animation keeps the fifth). The settled PNG is saved for the test
 running now and listed on its final `test_end`, **passed or failed**, as
 `{ "name": "screen:Order summary", "path": "data/<runId>-evidence-screen-order-summary.png", "size": … }`
 (the file name is the name lowercased, other characters as `-`, at most 60;
-a repeated one gets `-2`, `-3`…), after a failure's own `screenshot.png` and
-page source. The same `test_end` carries the device, for Peeps to keep one
+another name that comes out the same gets `-2`, `-3`…), after a failure's
+own `screenshot.png` and page source. Calling it again with a name the test
+already used replaces that screen: the earlier file is deleted and only the
+later capture is sent (a later capture that fails leaves the earlier one). The same `test_end` carries the device, for Peeps to keep one
 baseline per device: `properties` gets
 `{ "name": "peeps_device", "value": "{\"platform\":\"android\",\"deviceName\":…,\"deviceModel\":…,\"platformVersion\":…,\"width\":1080,\"height\":2400,\"statusBarHeight\":63}" }`,
 from the session's capabilities, the PNG's own size, and the status bar's
@@ -360,8 +362,9 @@ Call it in the test body or a `beforeEach`.
 
 What it costs: two to five screenshots and 0.3 to 1.2 seconds of waiting per
 call, plus one PNG upload (a few hundred KB to a couple of MB per phone
-screen). Up to 10 screens per test are kept; later calls are not captured
-and are listed in `attachmentsOmitted` with reason `screen_limit`. A retried
+screen). Up to 10 distinct names per test are kept, so a test sends at most
+10 screens beside its failure evidence; a call with an 11th name is not
+captured and is listed in `attachmentsOmitted` with reason `screen_limit`. A retried
 attempt's screens are discarded with its other evidence, and a skipped
 test sends none.
 
@@ -701,8 +704,8 @@ access token Peeps was given (Maintainer).
   Peeps' visual diffs. It waits for the screen to settle, and the screen is sent on
   the test's result whether it passed or failed, with the device it was taken on
   (platform, device name, device model when the driver reports one, OS version,
-  screen size, status bar height). Up to 10 per
-  test; the call never fails a test.
+  screen size, status bar height). Up to 10 names per test, and a repeated name
+  replaces its earlier screen; the call never fails a test.
 - Appium: when the device session cannot start (no app at the configured path, no
   booted device, a bad capability), each planned test of that worker's spec files is
   reported failed at setup with the session's error (`SessionNotCreated`, redacted of

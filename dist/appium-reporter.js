@@ -261,7 +261,7 @@ function discardFailureEvidence(runId) {
 }
 function discardCaptured(runId) {
   discardFailureEvidence(runId);
-  removeFiles(screens.get(runId)?.files ?? []);
+  removeFiles([...screens.get(runId)?.shots.values() ?? []].map((shot) => shot.file));
   screens.delete(runId);
 }
 function withTimeout(promise, label, ms = CAPTURE_TIMEOUT_MS) {
@@ -426,14 +426,14 @@ async function captureScreen(runId, browser, name, intervalMs = STABLE_FRAME_INT
     console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: PEEPS_ARTIFACTS_DIR is not set`);
     return;
   }
-  const out = screens.get(runId) ?? { attachments: [], omitted: [], files: [], slugs: /* @__PURE__ */ new Set(), reserved: 0, device: null };
+  const out = screens.get(runId) ?? { shots: /* @__PURE__ */ new Map(), omitted: [], names: /* @__PURE__ */ new Set(), device: null };
   screens.set(runId, out);
-  if (out.reserved >= MAX_SCREENS_PER_TEST) {
+  if (!out.names.has(name) && out.names.size >= MAX_SCREENS_PER_TEST) {
     console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: at most ${MAX_SCREENS_PER_TEST} screens per test`);
     out.omitted.push({ name: label, reason: "screen_limit" });
     return;
   }
-  out.reserved += 1;
+  out.names.add(name);
   try {
     const frame = await stableFrame(
       async () => Buffer.from(String(await withTimeout(Promise.resolve(browser.takeScreenshot()), "takeScreenshot")), "base64"),
@@ -442,16 +442,20 @@ async function captureScreen(runId, browser, name, intervalMs = STABLE_FRAME_INT
     const size = pngSize(frame);
     if (!size) throw new Error("the screenshot is not a PNG");
     if (frame.length > MAX_ATTACHMENT_BYTES) throw new Error(`larger than ${MAX_ATTACHMENT_BYTES} bytes`);
+    const earlier = out.shots.get(name);
+    if (earlier) {
+      removeFiles([earlier.file]);
+      out.shots.delete(name);
+    }
+    const taken = new Set([...out.shots.values()].map((shot) => shot.slug));
     const base = screenSlug(name);
     let slug = base;
-    for (let n = 2; out.slugs.has(slug); n++) slug = `${base}-${n}`;
-    out.slugs.add(slug);
+    for (let n = 2; taken.has(slug); n++) slug = `${base}-${n}`;
     const dir = import_node_path.default.join(artifacts, "upload");
     (0, import_node_fs.mkdirSync)(dir, { recursive: true });
     const file = import_node_path.default.join(dir, evidenceFileName(runId, `screen-${slug}.png`));
     (0, import_node_fs.writeFileSync)(file, frame);
-    out.files.push(file);
-    out.attachments.push({ name: label, path: `data/${import_node_path.default.basename(file)}`, size: frame.length });
+    out.shots.set(name, { slug, file, size: frame.length });
     if (!out.device) {
       cachedDevice ??= deviceFacts(browser);
       const facts = await cachedDevice;
@@ -469,7 +473,7 @@ async function captureScreen(runId, browser, name, intervalMs = STABLE_FRAME_INT
       }
     }
   } catch (error) {
-    out.reserved -= 1;
+    if (!out.shots.has(name)) out.names.delete(name);
     console.log(`[peeps] peepsScreen(${JSON.stringify(name)}) not captured: ${String(error).split("\n")[0]}`);
     out.omitted.push({ name: label, reason: reasonOf(error) });
   }
@@ -502,7 +506,8 @@ function peepsBefore(_capabilities, _specs, browser) {
 function attachScreens(event, runId) {
   const shots = screens.get(runId);
   if (!shots) return;
-  if (shots.attachments.length) event.attachments = [...event.attachments ?? [], ...shots.attachments];
+  const attachments = [...shots.shots].map(([name, shot]) => ({ name: `screen:${name}`, path: `data/${import_node_path.default.basename(shot.file)}`, size: shot.size }));
+  if (attachments.length) event.attachments = [...event.attachments ?? [], ...attachments];
   if (shots.omitted.length) event.attachmentsOmitted = [...event.attachmentsOmitted ?? [], ...shots.omitted];
   if (shots.device) event.properties = [...event.properties ?? [], { name: "peeps_device", value: JSON.stringify(shots.device) }];
 }
