@@ -18,8 +18,9 @@ sets, and nothing at all when none is set:
 ``PEEPS_PLAN_FILE``
     While tests run, stream ``run_start`` / ``test_start`` / ``test_end`` /
     ``run_end`` for every planned node id to ``POST /api/v1/runs/{id}/events``,
-    the same events the action's Playwright reporter sends. The plan maps node
-    ids to Peeps run ids and per-run credentials; the action wrote it.
+    the same events the action's Playwright reporter sends. The plan maps each
+    node id to its Peeps runs, one per project planning it, with per-run
+    credentials; the action wrote it.
     ``PEEPS_RESULTS_OUT`` additionally records, per node id, the directory
     pytest-playwright wrote that test's traces, screenshots and videos to, so
     the action can upload them under the run they belong to.
@@ -48,6 +49,7 @@ Standard library only: this runs inside the customer's Python, whatever it has.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -71,6 +73,11 @@ USER_AGENT = "peeps-action/0.1"
 
 #: How long the session's end waits for undelivered events.
 DELIVERY_DRAIN_SECONDS = 60
+
+#: Delivery threads when a test has several runs: posts grow with the projects
+#: holding it, and one thread could outrun the drain and leave the tail unread.
+#: A run posts once, when it closes, so its events can't arrive out of order.
+OVERLAP_DELIVERY_THREADS = 4
 
 #: The user property a test's pytest-playwright output directory rides on.
 OUTPUT_DIR_PROPERTY = "peeps_output_dir"
@@ -327,6 +334,13 @@ def artifacts_key(nodeid: str) -> str:
     return hashlib.sha1(nodeid.encode("utf-8")).hexdigest()[:16]
 
 
+def _link_or_copy(source: str, target: str) -> None:
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+
+
 def upload_name(run_id: str, name: str, taken: set) -> str:
     """The file name one attachment is staged and uploaded under (the batch
     path is ``data/`` + this): the run, ``-evidence-``, then the file's own
@@ -460,10 +474,14 @@ class _AttachmentStager:
         self.session_bytes = 0
 
     def stage(
-        self, nodeid: str, run_id: str, attached: List[Dict[str, Any]]
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-        """(attachments, omitted): what was staged and what was not, and why."""
-        staged: List[Dict[str, Any]] = []
+        self, nodeid: str, run_ids: List[str], attached: List[Dict[str, Any]]
+    ) -> Dict[str, Tuple[List[Dict[str, Any]], List[Dict[str, str]]]]:
+        """Per run, (attachments, omitted): what was staged and what was not,
+        and why. The first run takes the file and the others a link to it, so
+        a test spends its caps once however many runs it has."""
+        lead = run_ids[0]
+        staged: Dict[str, List[Dict[str, Any]]] = {run_id: [] for run_id in run_ids}
+        omitted_by_run: Dict[str, List[Dict[str, str]]] = {run_id: [] for run_id in run_ids}
         omitted: List[Dict[str, str]] = []
         candidates: List[Tuple[str, str]] = []  # (source, name)
         key = artifacts_key(nodeid)
@@ -501,7 +519,7 @@ class _AttachmentStager:
                 omitted.append({"name": name, "reason": "not a regular file"})
                 continue
             reason = None
-            if len(staged) >= MAX_ATTACHMENTS_PER_TEST:
+            if len(staged[lead]) >= MAX_ATTACHMENTS_PER_TEST:
                 reason = f"more than {MAX_ATTACHMENTS_PER_TEST} files"
             elif info.st_size > MAX_ATTACHMENT_BYTES:
                 reason = f"larger than {MAX_ATTACHMENT_BYTES} bytes"
@@ -514,24 +532,36 @@ class _AttachmentStager:
             if reason:
                 omitted.append({"name": name, "reason": reason})
                 continue
-            staged_name = upload_name(run_id, name, taken)
+            staged_name = upload_name(lead, name, taken)
+            moved = os.path.join(self.upload_dir, staged_name)
             try:
                 # Moved out of the per-test directories, which are ours: the
                 # next attempt or test starts from empty ones anyway.
-                shutil.move(source, os.path.join(self.upload_dir, staged_name))
+                shutil.move(source, moved)
             except OSError as error:
                 omitted.append({"name": name, "reason": f"unreadable: {error.strerror}"})
                 continue
             test_bytes += info.st_size
             self.session_files += 1
             self.session_bytes += info.st_size
-            staged.append({"name": name, "path": f"data/{staged_name}", "size": info.st_size})
-        for entry in omitted:
+            staged[lead].append({"name": name, "path": f"data/{staged_name}", "size": info.st_size})
+            for run_id in run_ids[1:]:
+                sibling_name = upload_name(run_id, name, taken)
+                try:
+                    _link_or_copy(moved, os.path.join(self.upload_dir, sibling_name))
+                except OSError as error:
+                    omitted_by_run[run_id].append({"name": name, "reason": f"unreadable: {error.strerror}"})
+                    continue
+                staged[run_id].append({"name": name, "path": f"data/{sibling_name}", "size": info.st_size})
+        for entry in omitted + [e for own in omitted_by_run.values() for e in own]:
             print(f"[peeps] attachment of {nodeid} not uploaded: {entry['name']} ({entry['reason']})", flush=True)
-        omitted = omitted[:MAX_OMITTED_LISTED]
-        for entry in staged + omitted:
-            entry["name"] = entry["name"][:MAX_PROPERTY_NAME_CHARS]
-        return staged, omitted
+        results = {}
+        for run_id in run_ids:
+            listed = copy.deepcopy((omitted + omitted_by_run[run_id])[:MAX_OMITTED_LISTED])
+            for entry in staged[run_id] + listed:
+                entry["name"] = entry["name"][:MAX_PROPERTY_NAME_CHARS]
+            results[run_id] = (staged[run_id], listed)
+        return results
 
     def discard(self, nodeid: str) -> None:
         """Remove what is left of a finished test's files: whatever was not
@@ -756,7 +786,7 @@ class _Streamer:
         with open(plan_path, encoding="utf-8") as handle:
             plan = json.load(handle)
         self.peeps_url: str = plan["peepsUrl"]
-        self.runs: Dict[str, Dict[str, Any]] = plan["runs"]
+        self.runs: Dict[str, List[Dict[str, Any]]] = plan["runs"]
         self.results_out = results_out
         self.stager = stager
         self.started: set = set()
@@ -768,32 +798,37 @@ class _Streamer:
         # `retry`. Counted across logfinish calls, because
         # pytest-rerunfailures 16 gives every attempt its own.
         self.attempts_ended: Dict[str, int] = {}
-        # One delivery thread, in order; drained at session finish.
+        # One delivery thread, in order, unless a test has several runs; drained
+        # at session finish.
         self.outbox: "queue.Queue[Any]" = queue.Queue()
-        threading.Thread(
-            target=self._deliver_forever, name="peeps-events", daemon=True
-        ).start()
+        overlapping = any(len(entries) > 1 for entries in self.runs.values())
+        for _ in range(OVERLAP_DELIVERY_THREADS if overlapping else 1):
+            threading.Thread(
+                target=self._deliver_forever, name="peeps-events", daemon=True
+            ).start()
+        planned = sum(len(entries) for entries in self.runs.values())
         print(
-            f"[peeps] reporting {len(self.runs)} planned run(s) to {self.peeps_url}",
+            f"[peeps] reporting {planned} planned run(s) to {self.peeps_url}",
             flush=True,
         )
 
     # -- pytest hooks -------------------------------------------------------
 
     def pytest_runtest_logstart(self, nodeid: str, location: Any) -> None:
-        entry = self.runs.get(nodeid)
         self.phases[nodeid] = []
-        if entry is None:
+        entries = self.runs.get(nodeid)
+        if not entries:
             return
         now = _now()
-        run_id = entry["runId"]
-        if run_id not in self.started:
-            self.started.add(run_id)
-            self._enqueue(run_id, {"type": "run_start", "timestamp": now})
-        self._enqueue(
-            run_id,
-            {"type": "test_start", "timestamp": now, "testName": _test_name(nodeid)},
-        )
+        for entry in entries:
+            run_id = entry["runId"]
+            if run_id not in self.started:
+                self.started.add(run_id)
+                self._enqueue(run_id, {"type": "run_start", "timestamp": now})
+            self._enqueue(
+                run_id,
+                {"type": "test_start", "timestamp": now, "testName": _test_name(nodeid)},
+            )
 
     def pytest_runtest_logreport(self, report: Any) -> None:
         for name, value in getattr(report, "user_properties", None) or []:
@@ -802,7 +837,7 @@ class _Streamer:
         self.phases.setdefault(report.nodeid, []).append(phase_record(report))
 
     def pytest_runtest_logfinish(self, nodeid: str, location: Any) -> None:
-        entry = self.runs.get(nodeid)
+        entries = self.runs.get(nodeid)
         # A logfinish with no reports at all (the test never reached setup)
         # still owes the run its end.
         for phases in attempts(self.phases.pop(nodeid, [])) or [[]]:
@@ -823,7 +858,7 @@ class _Streamer:
             self.statuses[nodeid] = settled["status"]
             retry = self.attempts_ended.get(nodeid, 0)
             self.attempts_ended[nodeid] = retry + 1
-            if entry is None:
+            if not entries:
                 if not retried:
                     print(
                         f"[peeps] not planned, not reported: {nodeid} ({settled['status']})",
@@ -844,42 +879,50 @@ class _Streamer:
                 event["error"] = settled["error"][:4000]
             if settled.get("errorStack"):
                 event["errorStack"] = settled["errorStack"][:8000]
-            if not retried:
-                # Evidence of the final attempt only: a retried attempt's
-                # test_end stays as it was, so nothing is reported twice.
-                event.update(self._evidence(nodeid, entry, phases, settled["status"]))
-            self._enqueue(entry["runId"], event)
-            if not retried:
-                self._enqueue(entry["runId"], {"type": "run_end", "timestamp": _now()})
-                self._flush(entry)
+            # Evidence of the final attempt only: a retried attempt's test_end
+            # stays as it was, so nothing is reported twice.
+            evidence = {} if retried else self._evidence(nodeid, entries, phases, settled["status"])
+            for entry in entries:
+                self._enqueue(entry["runId"], {**event, **evidence.get(entry["runId"], {})})
+                if not retried:
+                    self._enqueue(entry["runId"], {"type": "run_end", "timestamp": _now()})
+                    self._flush(entry)
         # Only once the test is over: under xdist a worker may already be in
         # the next attempt, whose setup clears the directories itself.
         if self.stager is not None and not retried:
             self.stager.discard(nodeid)
 
     def _evidence(
-        self, nodeid: str, entry: Dict[str, Any], phases: List[Dict[str, Any]], status: str
-    ) -> Dict[str, Any]:
+        self, nodeid: str, entries: List[Dict[str, Any]], phases: List[Dict[str, Any]], status: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """The evidence fields of each run's final ``test_end``, by run id."""
         # Evidence is a bonus on top of the result: a bug here must never cost
         # the test_end itself.
         try:
             fields, attached = evidence_fields(phases, status)
-            if self.stager is not None:
-                staged, omitted = self.stager.stage(nodeid, entry["runId"], attached)
+            run_ids = [entry["runId"] for entry in entries]
+            stored = self.stager.stage(nodeid, run_ids, attached) if self.stager is not None else {}
+            by_run = {}
+            for run_id in run_ids:
+                # Its own copy: `bound_evidence` trims in place.
+                own = copy.deepcopy(fields)
+                staged, omitted = stored.get(run_id, ([], []))
                 if staged:
-                    fields["attachments"] = staged
+                    own["attachments"] = staged
                 if omitted:
-                    fields["attachmentsOmitted"] = omitted
-            return bound_evidence(fields)
+                    own["attachmentsOmitted"] = omitted
+                by_run[run_id] = bound_evidence(own)
+            return by_run
         except Exception as error:  # pragma: no cover - defensive
             print(f"[peeps] evidence for {nodeid} not reported: {error!r}", flush=True)
             return {}
 
     def pytest_sessionfinish(self, session: Any) -> None:
         # A run interrupted mid-test still delivers what it queued.
-        for entry in self.runs.values():
-            if self.queues.get(entry["runId"]):
-                self._flush(entry)
+        for entries in self.runs.values():
+            for entry in entries:
+                if self.queues.get(entry["runId"]):
+                    self._flush(entry)
         # Every event handed off is delivered, or given up on, before pytest
         # exits and takes the daemon thread with it — within a bound, so a
         # Peeps outage costs the job at most that long, not a retry cycle per

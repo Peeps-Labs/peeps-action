@@ -1,0 +1,284 @@
+{
+  "exitCode": 1,
+  "announce": {
+    "sha": "0123456789abcdef0123456789abcdef01234567",
+    "jobUrl": null,
+    "baseUrl": null,
+    "tests": [
+      {
+        "path": "suite/tests/test_camera.py",
+        "titlePath": "test_unsupported_model",
+        "pwProject": ""
+      },
+      {
+        "path": "suite/tests/test_camera.py",
+        "titlePath": "test_thermal",
+        "pwProject": ""
+      },
+      {
+        "path": "suite/tests/test_camera.py",
+        "titlePath": "test_sharpness",
+        "pwProject": ""
+      },
+      {
+        "path": "suite/tests/test_camera.py",
+        "titlePath": "test_saves_frame",
+        "pwProject": ""
+      },
+      {
+        "path": "suite/tests/test_camera.py",
+        "titlePath": "test_camera_offline",
+        "pwProject": ""
+      }
+    ],
+    "files": [
+      {
+        "path": "suite/tests/test_camera.py",
+        "blobSha": "0d2a6baf162edbdf3afe5f02a8a420ad6f03055a",
+        "content": "import logging\nimport sys\n\nimport pytest\n\nMODEL = \"X\"\n\n\ndef test_unsupported_model():\n    pytest.skip(f\"not supported on model {MODEL}\")\n\n\n@pytest.mark.skipif(MODEL == \"X\", reason=\"needs a thermal sensor\")\ndef test_thermal():\n    pass\n\n\ndef test_sharpness(record_property):\n    sharpness = 0.41\n    record_property(\"sharpness\", sharpness)\n    record_property(\"exposure_ms\", 12)\n    record_property(\"lens\", \"wide\")\n    record_property(\"roi\", {\"x\": 10, \"y\": 20})\n    record_property(\"noise\", float(\"nan\"))\n    print(\"focusing on target 3\")\n    print(\"sensor warm\", file=sys.stderr)\n    logging.getLogger(\"camera\").warning(\"autofocus hunting\")\n    assert sharpness >= 0.6\n\n\ndef test_saves_frame(peeps_artifacts_dir, record_property, tmp_path, session_log):\n    (peeps_artifacts_dir / \"frame.png\").write_bytes(b\"\\x89PNG\\r\\n\\x1a\\n fake frame\")\n    (peeps_artifacts_dir / \"raw\").mkdir()\n    (peeps_artifacts_dir / \"raw\" / \"frame.npy\").write_bytes(b\"\\x93NUMPY fake\")\n    # Refused even in the artifacts directory, as the agent tools refuse it.\n    (peeps_artifacts_dir / \".env\").write_text(\"CAMERA_TOKEN=secret\\n\")\n    histogram = tmp_path / \"histogram.csv\"\n    histogram.write_text(\"bin,count\\n0,1\\n\")\n    record_property(\"peeps_attachment\", str(histogram))\n    # Outside the workspace and pytest's temporary directory: refused.\n    record_property(\"peeps_attachment\", \"/etc/hosts\")\n    record_property(\"frames\", 2)\n\n\ndef test_camera_offline(camera):\n    pass\n"
+      }
+    ]
+  },
+  "events": {
+    "only-test_camera_offline": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "test_camera_offline"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "test_camera_offline",
+        "status": "failed",
+        "duration": "<ms>",
+        "retry": 0,
+        "error": "conftest.CameraError: camera 2 did not answer",
+        "errorStack": "<present>",
+        "failure": {
+          "phase": "setup",
+          "exceptionType": "conftest.CameraError",
+          "message": "camera 2 did not answer",
+          "traceback": "<present>"
+        }
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-test_saves_frame": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "test_saves_frame"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "test_saves_frame",
+        "status": "passed",
+        "duration": "<ms>",
+        "retry": 0,
+        "properties": [
+          {
+            "name": "frames",
+            "value": 2
+          }
+        ],
+        "attachments": [
+          {
+            "name": "frame.png",
+            "path": "data/only-test_saves_frame-evidence-frame.png",
+            "size": 19
+          },
+          {
+            "name": "raw/frame.npy",
+            "path": "data/only-test_saves_frame-evidence-raw-frame.npy.dat",
+            "size": 11
+          },
+          {
+            "name": "histogram.csv",
+            "path": "data/only-test_saves_frame-evidence-histogram.csv",
+            "size": 14
+          },
+          {
+            "name": "session.log",
+            "path": "data/only-test_saves_frame-evidence-session.log",
+            "size": 7
+          }
+        ],
+        "attachmentsOmitted": [
+          {
+            "name": ".env",
+            "reason": "refused name"
+          },
+          {
+            "name": "hosts",
+            "reason": "outside the workspace"
+          }
+        ]
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-test_sharpness": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "test_sharpness"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "test_sharpness",
+        "status": "failed",
+        "duration": "<ms>",
+        "retry": 0,
+        "error": "assert 0.41 >= 0.6",
+        "errorStack": "<present>",
+        "failure": {
+          "phase": "call",
+          "exceptionType": "AssertionError",
+          "message": "assert 0.41 >= 0.6",
+          "traceback": "<present>"
+        },
+        "output": [
+          {
+            "name": "Captured stdout call",
+            "text": "focusing on target 3\n"
+          },
+          {
+            "name": "Captured stderr call",
+            "text": "sensor warm\n"
+          },
+          {
+            "name": "Captured log call",
+            "text": "WARNING  camera:test_camera.py:27 autofocus hunting"
+          }
+        ],
+        "properties": [
+          {
+            "name": "rig",
+            "value": "bench-2"
+          },
+          {
+            "name": "sharpness",
+            "value": 0.41
+          },
+          {
+            "name": "exposure_ms",
+            "value": 12
+          },
+          {
+            "name": "lens",
+            "value": "wide"
+          },
+          {
+            "name": "roi",
+            "value": "{\"x\": 10, \"y\": 20}"
+          },
+          {
+            "name": "noise",
+            "value": "nan"
+          }
+        ]
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-test_thermal": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "test_thermal"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "test_thermal",
+        "status": "skipped",
+        "duration": "<ms>",
+        "retry": 0,
+        "skipReason": "needs a thermal sensor"
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-test_unsupported_model": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "test_unsupported_model"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "test_unsupported_model",
+        "status": "skipped",
+        "duration": "<ms>",
+        "retry": 0,
+        "skipReason": "not supported on model X"
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ]
+  },
+  "eventPosts": 5,
+  "report": {
+    "files": [
+      "data/only-test_saves_frame-evidence-frame.png",
+      "data/only-test_saves_frame-evidence-histogram.csv",
+      "data/only-test_saves_frame-evidence-raw-frame.npy.dat",
+      "data/only-test_saves_frame-evidence-session.log"
+    ],
+    "hashedFiles": []
+  },
+  "complete": [
+    [
+      "/api/v1/ci/batches/batch-only/complete",
+      {
+        "reportUploaded": false
+      }
+    ]
+  ],
+  "lines": [
+    "[peeps] attachment of tests/test_camera.py::test_saves_frame not uploaded: hosts (outside the workspace)",
+    "[peeps] framework=pytest",
+    "[peeps] mode=report repo=? sha=0123456 ref=refs/heads/feature peeps=<peeps>",
+    "[peeps] planned 5 run(s) in 1 batch(es); 0 test(s) unknown to Peeps",
+    "[peeps] pytest exited with 1",
+    "[peeps] report: 5 tests at 0123456 (refs/heads/feature)",
+    "[peeps] reporting 5 planned run(s) to <peeps>",
+    "[peeps] uploaded 0 artifact file(s) for batch 1",
+    "[peeps] uploaded 4 test attachment(s) for batch 1"
+  ]
+}

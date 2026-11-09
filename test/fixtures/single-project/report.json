@@ -1,0 +1,272 @@
+{
+  "exitCode": 1,
+  "announce": {
+    "sha": "0123456789abcdef0123456789abcdef01234567",
+    "jobUrl": null,
+    "baseUrl": null,
+    "tests": [
+      {
+        "path": "suite/tests/shop.spec.ts",
+        "titlePath": "passes",
+        "pwProject": ""
+      },
+      {
+        "path": "suite/tests/shop.spec.ts",
+        "titlePath": "fails then passes",
+        "pwProject": ""
+      },
+      {
+        "path": "suite/tests/shop.spec.ts",
+        "titlePath": "always fails",
+        "pwProject": ""
+      },
+      {
+        "path": "suite/tests/shop.spec.ts",
+        "titlePath": "skipped",
+        "pwProject": ""
+      },
+      {
+        "path": "suite/tests/shop.spec.ts",
+        "titlePath": "a group › first fails",
+        "pwProject": ""
+      },
+      {
+        "path": "suite/tests/shop.spec.ts",
+        "titlePath": "a group › second never runs",
+        "pwProject": ""
+      }
+    ],
+    "files": [
+      {
+        "path": "suite/tests/shop.spec.ts",
+        "blobSha": "31bf528b830129152aebf7ee2e42d726d2cd8eef",
+        "content": "import { test, expect } from \"@playwright/test\";\ntest(\"passes\", async ({}, info) => {\n  await info.attach(\"note\", { body: \"kept in the report\", contentType: \"text/plain\" });\n});\ntest(\"fails then passes\", async ({}, info) => { expect(info.retry).toBe(1); });\ntest(\"always fails\", async () => { expect(1).toBe(2); });\ntest.skip(\"skipped\", async () => {});\ntest.describe.serial(\"a group\", () => {\n  test(\"first fails\", async () => { expect(1).toBe(2); });\n  test(\"second never runs\", async () => {});\n});\n"
+      }
+    ]
+  },
+  "events": {
+    "only-a_group_first_fails": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "first fails"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "first fails",
+        "status": "failed",
+        "duration": "<ms>",
+        "error": "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 2\nReceived: 1",
+        "errorStack": "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 2\nReceived: 1\n    at <root>/suite/tests/shop.spec.ts:9:47",
+        "retry": 0
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "first fails"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "first fails",
+        "status": "failed",
+        "duration": "<ms>",
+        "error": "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 2\nReceived: 1",
+        "errorStack": "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 2\nReceived: 1\n    at <root>/suite/tests/shop.spec.ts:9:47",
+        "retry": 1
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-a_group_second_never_runs": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "second never runs"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "second never runs",
+        "status": "skipped",
+        "duration": "<ms>",
+        "retry": 0
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "second never runs"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "second never runs",
+        "status": "skipped",
+        "duration": "<ms>",
+        "retry": 1
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-always_fails": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "always fails"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "always fails",
+        "status": "failed",
+        "duration": "<ms>",
+        "error": "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 2\nReceived: 1",
+        "errorStack": "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 2\nReceived: 1\n    at <root>/suite/tests/shop.spec.ts:6:46",
+        "retry": 0
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "always fails"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "always fails",
+        "status": "failed",
+        "duration": "<ms>",
+        "error": "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 2\nReceived: 1",
+        "errorStack": "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 2\nReceived: 1\n    at <root>/suite/tests/shop.spec.ts:6:46",
+        "retry": 1
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-fails_then_passes": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "fails then passes"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "fails then passes",
+        "status": "failed",
+        "duration": "<ms>",
+        "error": "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 1\nReceived: 0",
+        "errorStack": "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 1\nReceived: 0\n    at <root>/suite/tests/shop.spec.ts:5:68",
+        "retry": 0
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "fails then passes"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "fails then passes",
+        "status": "passed",
+        "duration": "<ms>",
+        "retry": 1
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-passes": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "passes"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "passes",
+        "status": "passed",
+        "duration": "<ms>",
+        "retry": 0
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-skipped": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "skipped"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "skipped",
+        "status": "skipped",
+        "duration": "<ms>",
+        "retry": 0
+      }
+    ]
+  },
+  "eventPosts": 6,
+  "report": {
+    "files": [
+      "index.html"
+    ],
+    "hashedFiles": [
+      ".md",
+      ".md",
+      ".md"
+    ]
+  },
+  "complete": [
+    [
+      "/api/v1/ci/batches/batch-only/complete",
+      {
+        "reportUploaded": true
+      }
+    ]
+  ],
+  "lines": [
+    "[peeps] mode=report repo=? sha=0123456 ref=refs/heads/feature peeps=<peeps>",
+    "[peeps] planned 6 run(s) in 1 batch(es); 0 test(s) unknown to Peeps",
+    "[peeps] playwright exited with 1",
+    "[peeps] report: 6 tests at 0123456 (refs/heads/feature)",
+    "[peeps] reporting 6 planned run(s) to <peeps>",
+    "[peeps] uploaded 4 report file(s) for batch 1"
+  ]
+}

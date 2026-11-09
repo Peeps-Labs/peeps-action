@@ -1,0 +1,237 @@
+{
+  "events": {
+    "only-Shop_Broken_first": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "first"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "first",
+        "status": "failed",
+        "duration": "<ms>",
+        "error": "\"before each\" hook for Broken failed: app did not launch",
+        "errorStack": "Error: app did not launch\n    at spec:1:1",
+        "failure": {
+          "phase": "setup",
+          "exceptionType": "Error",
+          "message": "app did not launch",
+          "traceback": "Error: app did not launch\n    at spec:1:1"
+        },
+        "attachments": [
+          {
+            "name": "screenshot.png",
+            "path": "data/only-Shop_Broken_first-evidence-screenshot.png",
+            "size": 4
+          },
+          {
+            "name": "page-source.xml",
+            "path": "data/only-Shop_Broken_first-evidence-page-source.xml.dat",
+            "size": 62
+          }
+        ],
+        "properties": [
+          {
+            "name": "context",
+            "value": "NATIVE_APP"
+          }
+        ]
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-Shop_Broken_second": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "second"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "second",
+        "status": "failed",
+        "duration": "<ms>",
+        "error": "\"before each\" hook for Broken failed: app did not launch",
+        "errorStack": "Error: app did not launch\n    at spec:1:1",
+        "failure": {
+          "phase": "setup",
+          "exceptionType": "Error",
+          "message": "app did not launch",
+          "traceback": "Error: app did not launch\n    at spec:1:1"
+        }
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-Shop_declines": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "declines"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "declines",
+        "status": "failed",
+        "duration": "<ms>",
+        "error": "expected Paid",
+        "errorStack": "AssertionError: expected Paid\n    at spec:9:5",
+        "failure": {
+          "phase": "call",
+          "exceptionType": "AssertionError",
+          "message": "expected Paid",
+          "traceback": "AssertionError: expected Paid\n    at spec:9:5"
+        },
+        "attachments": [
+          {
+            "name": "screenshot.png",
+            "path": "data/only-Shop_declines-evidence-screenshot.png",
+            "size": 4
+          },
+          {
+            "name": "page-source.xml",
+            "path": "data/only-Shop_declines-evidence-page-source.xml.dat",
+            "size": 62
+          }
+        ],
+        "properties": [
+          {
+            "name": "context",
+            "value": "NATIVE_APP"
+          }
+        ]
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-Shop_pays": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "pays"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "pays",
+        "status": "passed",
+        "duration": "<ms>"
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-Shop_refunds": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "refunds"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "refunds",
+        "status": "skipped",
+        "duration": "<ms>"
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ],
+    "only-Shop_retries": [
+      {
+        "type": "run_start",
+        "timestamp": "<time>"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "retries"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "retries",
+        "status": "failed",
+        "duration": "<ms>",
+        "error": "flake"
+      },
+      {
+        "type": "test_start",
+        "timestamp": "<time>",
+        "testName": "retries"
+      },
+      {
+        "type": "test_end",
+        "timestamp": "<time>",
+        "testName": "retries",
+        "status": "passed",
+        "duration": "<ms>"
+      },
+      {
+        "type": "run_end",
+        "timestamp": "<time>"
+      }
+    ]
+  },
+  "posts": 6,
+  "uploaded": [
+    "data/only-Shop_Broken_first-evidence-page-source.xml.dat",
+    "data/only-Shop_Broken_first-evidence-screenshot.png",
+    "data/only-Shop_declines-evidence-page-source.xml.dat",
+    "data/only-Shop_declines-evidence-screenshot.png"
+  ],
+  "complete": [
+    [
+      "/api/v1/ci/batches/batch-only/complete",
+      {
+        "reportUploaded": false
+      }
+    ]
+  ],
+  "captures": [
+    "screenshot only-Shop_declines-evidence-screenshot.png",
+    "page source",
+    "screenshot only-Shop_retries-evidence-screenshot.png",
+    "page source",
+    "screenshot only-Shop_Broken_first-evidence-screenshot.png",
+    "page source"
+  ],
+  "lines": [
+    "[peeps] reporting 6 planned run(s) to <peeps>",
+    "[peeps] uploaded 4 test attachment(s) for batch 1",
+    "[peeps] wdio exited with 1"
+  ]
+}
