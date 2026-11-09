@@ -457,7 +457,7 @@ https://docs.peepsai.com/repository/vercel-previews.
 | `preview` | no | `vercel`: on a pull request, wait for that pull request's Vercel preview and set `BASE_URL` to it (see "Vercel previews") |
 | `preview-project` | with several Vercel projects | The Vercel project whose preview to test: the `<name>` of the deployment environment `Preview – <name>` |
 | `preview-timeout` | no, defaults to `600` | Seconds to wait for the preview |
-| `github-token` | no, defaults to the job's `GITHUB_TOKEN` | Reads the pull request's deployments for `preview`. Removed from the action's environment before anything runs, so no test process sees it |
+| `github-token` | no, defaults to the job's `GITHUB_TOKEN` | Reads the pull request's deployments for `preview`. Removed from the action's environment before anything runs, so test processes don't inherit it |
 
 ## Modes
 
@@ -689,7 +689,8 @@ access token Peeps was given (Maintainer).
   `deployments: read` / `statuses: read` permission when GitHub refuses. A
   `BASE_URL` the workflow sets still wins. `preview-project` picks one of
   several Vercel projects. `pull_request_target` and forks are refused. The
-  `github-token` input is removed from the environment before anything runs.
+  `github-token` input is removed from the environment before anything runs,
+  so test processes don't inherit it.
   See "Vercel previews".
 
 ## 1.10.1

@@ -40,10 +40,12 @@ export interface PreviewRequest {
 }
 
 /**
- * The `github-token` input, removed from `env` so no test process, inventory
- * or agent tool ever inherits it: every child copies the action's environment,
- * and the agent's output redactor leaves `INPUT_` variables alone. Call it
- * before anything spawns.
+ * The `github-token` input, removed from `env` so test processes, the
+ * inventory and agent tools don't inherit it: every child copies the action's
+ * environment, and the agent's output redactor leaves `INPUT_` variables
+ * alone. Call it before anything spawns. Code running as the same user can
+ * still read it from the action process's initial environment
+ * (`/proc/<pid>/environ`), as it can the runner's own tokens.
  */
 export function takeGithubToken(env: NodeJS.ProcessEnv): string | null {
   const token = env[GITHUB_TOKEN_INPUT]?.trim() || null;
@@ -119,6 +121,16 @@ interface CommitStatus {
 const VERCEL_BOT = "vercel[bot]";
 const PREVIEW_PREFIX = "Preview – ";
 
+/**
+ * Whether a commit status is Vercel's, and for `project` when one is named:
+ * Vercel posts "Vercel" for a repository with one project and
+ * "Vercel – <project>" for each project of a monorepo.
+ */
+function isVercelContextFor(context: string, project: string | null): boolean {
+  if (project === null) return context === "Vercel" || context.startsWith("Vercel – ");
+  return context === `Vercel – ${project}`;
+}
+
 /** The Vercel project a preview environment names, or "" for the plain "Preview". */
 function previewProject(d: Deployment): string | null {
   if (d.creator?.login !== VERCEL_BOT) return null;
@@ -188,7 +200,10 @@ export async function waitForVercelPreview(request: PreviewRequest, deps: WaitDe
         "x-github-api-version": "2022-11-28",
       },
     });
-    if ((res.status === 403 || res.status === 429) && res.headers.get("x-ratelimit-remaining") === "0") {
+    if (
+      (res.status === 403 || res.status === 429) &&
+      (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.has("retry-after"))
+    ) {
       throw new Error(`GitHub's API rate limit ran out while waiting for the Vercel preview of ${short}`);
     }
     if (res.status === 403 || res.status === 404) {
@@ -220,7 +235,21 @@ export async function waitForVercelPreview(request: PreviewRequest, deps: WaitDe
     const failures: string[] = [];
     for (const { d } of candidates) {
       const verdict = verdictOf(await github<DeploymentStatus[]>(`/deployments/${d.id}/statuses?per_page=20`));
-      if (verdict.kind === "ready") return verdict.url;
+      if (verdict.kind === "ready") {
+        // Unnamed, one project's preview can be ready before another
+        // project's deployment appears: Vercel's commit statuses, one per
+        // project, say whether there is more than one.
+        if (request.project === null) {
+          const statuses = await github<CommitStatus[]>(`/commits/${request.sha}/statuses?per_page=100`);
+          const contexts = [...new Set(statuses.map((s) => s.context).filter((c) => isVercelContextFor(c, null)))];
+          if (contexts.length > 1) {
+            throw new Error(
+              `This commit has Vercel previews of ${contexts.length} projects (${contexts.map((c) => nameForLog(c)).join(", ")}). Name the one to test with preview-project.`,
+            );
+          }
+        }
+        return verdict.url;
+      }
       if (verdict.kind === "pending") {
         failures.length = 0;
         break;
@@ -234,7 +263,7 @@ export async function waitForVercelPreview(request: PreviewRequest, deps: WaitDe
     }
     if (candidates.length === 0) {
       const statuses = await github<CommitStatus[]>(`/commits/${request.sha}/statuses?per_page=100`);
-      if (statuses.some((s) => s.context.startsWith("Vercel") && s.state === "success")) {
+      if (statuses.some((s) => s.state === "success" && isVercelContextFor(s.context, request.project))) {
         throw new Error(
           `Vercel deployed ${short} but recorded no GitHub deployment${request.project ? ` for ${nameForLog(request.project)}` : ""}, so there is no preview URL to test. ` +
             'Turn on "deployment_status Events" in the Vercel project (Settings > Git) and push again.',
@@ -242,7 +271,10 @@ export async function waitForVercelPreview(request: PreviewRequest, deps: WaitDe
       }
     }
     if (now() >= deadline) {
-      throw new Error(`No successful Vercel preview of ${short} after ${Math.round(request.timeoutMs / 1000)}s`);
+      const others = request.project && projects.length > 0
+        ? ` This commit has previews of: ${projects.map((p) => nameForLog(p) || "Preview").join(", ")}; check preview-project.`
+        : "";
+      throw new Error(`No successful Vercel preview of ${short}${request.project ? ` for ${nameForLog(request.project)}` : ""} after ${Math.round(request.timeoutMs / 1000)}s.${others}`);
     }
     await sleep(pollMs);
   }

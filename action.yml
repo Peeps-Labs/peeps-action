@@ -37,7 +37,7 @@ inputs:
     required: false
     default: "600"
   github-token:
-    description: "Token for reading the pull request's deployments with preview (default: the job's GITHUB_TOKEN). The action removes it from its environment before anything runs, so no test process sees it"
+    description: "Token for reading the pull request's deployments with preview (default: the job's GITHUB_TOKEN). The action removes it from its environment before anything runs, so test processes don't inherit it"
     required: false
     default: "${{ github.token }}"
 runs:

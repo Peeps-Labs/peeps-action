@@ -90,6 +90,10 @@ function fakeGitHub(routes: Record<string, unknown[]>, headers: Record<string, s
     const key = url.pathname.replace("/repos/acme/shop", "") + url.search;
     calls.push(key);
     const route = Object.keys(routes).find((k) => key.startsWith(k));
+    // Commit statuses default to none, so a test names them only when they matter.
+    if (!route && key.startsWith("/commits/") && Object.keys(routes).length > 0) {
+      return new Response("[]", { status: 200 });
+    }
     if (!route) return new Response("refused", { status, headers });
     const answers = routes[route]!;
     const body = answers.length > 1 ? answers.shift() : answers[0];
@@ -211,12 +215,65 @@ test("times out when no preview arrives", async () => {
   );
 });
 
-test("names the missing permission when GitHub refuses, and a spent rate limit as that", async () => {
+test("names the missing permission when GitHub refuses, and a rate limit as that", async () => {
   await assert.rejects(waitForVercelPreview(request, { fetch: fakeGitHub({}, {}, 403).fetchFn, ...instant }), /deployments: read/);
   await assert.rejects(
     waitForVercelPreview(request, { fetch: fakeGitHub({}, { "x-ratelimit-remaining": "0" }, 403).fetchFn, ...instant }),
     /rate limit/,
   );
+  // GitHub's secondary rate limit leaves requests remaining and says when to retry.
+  await assert.rejects(
+    waitForVercelPreview(request, {
+      fetch: fakeGitHub({}, { "x-ratelimit-remaining": "4000", "retry-after": "60" }, 403).fetchFn,
+      ...instant,
+    }),
+    /rate limit/,
+  );
+});
+
+test("a named project waits for its own deployment despite another project's status", async () => {
+  let clock = 0;
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[{ id: 2, environment: "Preview – docs", creator: VERCEL }]],
+    "/deployments/2/statuses": [[{ state: "success", environment_url: "https://docs.vercel.app" }]],
+    [`/commits/${SHA}/statuses`]: [[{ context: "Vercel – docs", state: "success" }]],
+  });
+  await assert.rejects(
+    waitForVercelPreview(
+      { ...request, project: "web" },
+      { fetch: fetchFn, pollMs: 10_000, now: () => clock, sleep: async (ms) => void (clock += ms) },
+    ),
+    (error: Error) => {
+      assert.doesNotMatch(error.message, /deployment_status Events/);
+      assert.match(error.message, /for web after 30s\. This commit has previews of: docs; check preview-project/);
+      return true;
+    },
+  );
+});
+
+test("a named project's own status with no deployment means deployment events are off", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[]],
+    [`/commits/${SHA}/statuses`]: [[{ context: "Vercel – web", state: "success" }]],
+  });
+  await assert.rejects(
+    waitForVercelPreview({ ...request, project: "web" }, { fetch: fetchFn, ...instant }),
+    /no GitHub deployment for web.*deployment_status Events/,
+  );
+});
+
+test("unnamed, a second project's status stops a first project's ready preview", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[{ id: 1, environment: "Preview – web", creator: VERCEL }]],
+    "/deployments/1/statuses": [[{ state: "success", environment_url: "https://web.vercel.app" }]],
+    [`/commits/${SHA}/statuses`]: [
+      [
+        { context: "Vercel – web", state: "success" },
+        { context: "Vercel – docs", state: "pending" },
+      ],
+    ],
+  });
+  await assert.rejects(waitForVercelPreview(request, { fetch: fetchFn, ...instant }), /Name the one to test with preview-project/);
 });
 
 test("refuses a preview URL that is not https or carries credentials", async () => {

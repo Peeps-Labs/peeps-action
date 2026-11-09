@@ -4027,6 +4027,10 @@ function pullRequestHead(eventPath) {
 }
 var VERCEL_BOT = "vercel[bot]";
 var PREVIEW_PREFIX = "Preview \u2013 ";
+function isVercelContextFor(context, project) {
+  if (project === null) return context === "Vercel" || context.startsWith("Vercel \u2013 ");
+  return context === `Vercel \u2013 ${project}`;
+}
 function previewProject(d) {
   if (d.creator?.login !== VERCEL_BOT) return null;
   if (d.environment === "Preview") return "";
@@ -4068,7 +4072,7 @@ async function waitForVercelPreview(request, deps = {}) {
         "x-github-api-version": "2022-11-28"
       }
     });
-    if ((res.status === 403 || res.status === 429) && res.headers.get("x-ratelimit-remaining") === "0") {
+    if ((res.status === 403 || res.status === 429) && (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.has("retry-after"))) {
       throw new Error(`GitHub's API rate limit ran out while waiting for the Vercel preview of ${short}`);
     }
     if (res.status === 403 || res.status === 404) {
@@ -4093,7 +4097,18 @@ async function waitForVercelPreview(request, deps = {}) {
     const failures = [];
     for (const { d } of candidates) {
       const verdict = verdictOf(await github(`/deployments/${d.id}/statuses?per_page=20`));
-      if (verdict.kind === "ready") return verdict.url;
+      if (verdict.kind === "ready") {
+        if (request.project === null) {
+          const statuses = await github(`/commits/${request.sha}/statuses?per_page=100`);
+          const contexts = [...new Set(statuses.map((s2) => s2.context).filter((c) => isVercelContextFor(c, null)))];
+          if (contexts.length > 1) {
+            throw new Error(
+              `This commit has Vercel previews of ${contexts.length} projects (${contexts.map((c) => nameForLog(c)).join(", ")}). Name the one to test with preview-project.`
+            );
+          }
+        }
+        return verdict.url;
+      }
       if (verdict.kind === "pending") {
         failures.length = 0;
         break;
@@ -4105,14 +4120,15 @@ async function waitForVercelPreview(request, deps = {}) {
     }
     if (candidates.length === 0) {
       const statuses = await github(`/commits/${request.sha}/statuses?per_page=100`);
-      if (statuses.some((s2) => s2.context.startsWith("Vercel") && s2.state === "success")) {
+      if (statuses.some((s2) => s2.state === "success" && isVercelContextFor(s2.context, request.project))) {
         throw new Error(
           `Vercel deployed ${short} but recorded no GitHub deployment${request.project ? ` for ${nameForLog(request.project)}` : ""}, so there is no preview URL to test. Turn on "deployment_status Events" in the Vercel project (Settings > Git) and push again.`
         );
       }
     }
     if (now() >= deadline) {
-      throw new Error(`No successful Vercel preview of ${short} after ${Math.round(request.timeoutMs / 1e3)}s`);
+      const others = request.project && projects.length > 0 ? ` This commit has previews of: ${projects.map((p) => nameForLog(p) || "Preview").join(", ")}; check preview-project.` : "";
+      throw new Error(`No successful Vercel preview of ${short}${request.project ? ` for ${nameForLog(request.project)}` : ""} after ${Math.round(request.timeoutMs / 1e3)}s.${others}`);
     }
     await sleep2(pollMs);
   }
