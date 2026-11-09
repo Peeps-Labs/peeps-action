@@ -1,11 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   GITHUB_TOKEN_INPUT,
   dispatchedPreviewUrl,
+  headSha,
   previewBaseUrl,
   readPreviewRequest,
   takeGithubToken,
@@ -479,4 +481,32 @@ test("unnamed, another project's finished status does not stop a ready preview",
     ],
   });
   assert.equal(await waitForVercelPreview(request, { fetch: fetchFn, ...instant }), "https://web.vercel.app");
+});
+
+// Inside the Playwright container the checkout belongs to the runner's uid and
+// git refuses a repository another user owns: a heal on v1.12.0 logged "could
+// not read the checked-out commit" and tested nothing. Git's own test switch
+// makes it treat the repository as someone else's. The system and global
+// configs are left out: GitHub's runner trusts every directory system-wide.
+test("headSha reads a checkout another user owns, as in the Playwright container", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "peeps-head-"));
+  const isolated = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, ...isolated } }).trim();
+  git("init", "-q");
+  git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x");
+  const sha = git("rev-parse", "HEAD");
+  const overrides: Record<string, string> = { ...isolated, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" };
+  const before = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, overrides);
+  try {
+    assert.throws(() => execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, stdio: "pipe" }));
+    assert.equal(headSha(repo), sha);
+  } finally {
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.equal(headSha(mkdtempSync(path.join(tmpdir(), "peeps-nogit-"))), null);
 });
