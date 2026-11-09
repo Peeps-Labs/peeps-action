@@ -17,6 +17,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { nameForLog, urlForLog } from "./environment";
 
 export type PreviewProvider = "vercel";
 
@@ -70,6 +71,7 @@ function pullRequestHeadSha(eventPath: string | undefined): string | null {
 interface Deployment {
   id: number;
   environment: string;
+  creator?: { login?: string } | null;
 }
 interface DeploymentStatus {
   state: string;
@@ -81,8 +83,24 @@ interface CommitStatus {
   state: string;
 }
 
-const isVercelPreview = (environment: string) =>
-  environment === "Preview" || environment.startsWith("Preview – ");
+/** Vercel's GitHub App records its deployments; anyone else's are not Vercel's preview. */
+const VERCEL_BOT = "vercel[bot]";
+
+const isVercelPreview = (d: Deployment) =>
+  d.creator?.login === VERCEL_BOT && (d.environment === "Preview" || d.environment.startsWith("Preview – "));
+
+/**
+ * The deployment's URL, when it is one a browser should be pointed at: https
+ * and no credentials. Anything else is refused rather than set as BASE_URL.
+ */
+function previewUrl(raw: string | null | undefined): string | null {
+  if (!raw || raw.includes("@")) return null;
+  try {
+    return new URL(raw).protocol === "https:" ? raw : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface WaitDeps {
   fetch?: typeof fetch;
@@ -118,18 +136,24 @@ export async function waitForVercelPreview(request: PreviewRequest, deps: WaitDe
 
   const deadline = now() + request.timeoutMs;
   for (;;) {
-    const deployments = (await github<Deployment[]>(`/deployments?sha=${request.sha}&per_page=100`)).filter((d) =>
-      isVercelPreview(d.environment),
+    const deployments = (await github<Deployment[]>(`/deployments?sha=${request.sha}&per_page=100`)).filter(
+      isVercelPreview,
     );
     for (const deployment of deployments) {
       const [latest] = await github<DeploymentStatus[]>(`/deployments/${deployment.id}/statuses?per_page=1`);
       if (!latest) continue;
       if (latest.state === "success") {
-        const url = latest.environment_url || latest.target_url;
+        const raw = latest.environment_url || latest.target_url;
+        const url = previewUrl(raw);
         if (url) return url;
+        throw new Error(
+          `Vercel's ${nameForLog(deployment.environment)} deployment of ${short} has no https URL to test: ${urlForLog(raw ?? "")}`,
+        );
       }
       if (latest.state === "failure" || latest.state === "error") {
-        throw new Error(`Vercel's ${deployment.environment} deployment of ${short} failed: ${latest.target_url ?? ""}`);
+        throw new Error(
+          `Vercel's ${nameForLog(deployment.environment)} deployment of ${short} failed: ${urlForLog(latest.target_url ?? "")}`,
+        );
       }
     }
     if (deployments.length === 0) {

@@ -4003,7 +4003,16 @@ function pullRequestHeadSha(eventPath) {
     return null;
   }
 }
-var isVercelPreview = (environment) => environment === "Preview" || environment.startsWith("Preview \u2013 ");
+var VERCEL_BOT = "vercel[bot]";
+var isVercelPreview = (d) => d.creator?.login === VERCEL_BOT && (d.environment === "Preview" || d.environment.startsWith("Preview \u2013 "));
+function previewUrl(raw) {
+  if (!raw || raw.includes("@")) return null;
+  try {
+    return new URL(raw).protocol === "https:" ? raw : null;
+  } catch {
+    return null;
+  }
+}
 async function waitForVercelPreview(request, deps = {}) {
   const doFetch = deps.fetch ?? fetch;
   const sleep2 = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -4029,17 +4038,23 @@ async function waitForVercelPreview(request, deps = {}) {
   const deadline = now() + request.timeoutMs;
   for (; ; ) {
     const deployments = (await github(`/deployments?sha=${request.sha}&per_page=100`)).filter(
-      (d) => isVercelPreview(d.environment)
+      isVercelPreview
     );
     for (const deployment of deployments) {
       const [latest] = await github(`/deployments/${deployment.id}/statuses?per_page=1`);
       if (!latest) continue;
       if (latest.state === "success") {
-        const url = latest.environment_url || latest.target_url;
+        const raw = latest.environment_url || latest.target_url;
+        const url = previewUrl(raw);
         if (url) return url;
+        throw new Error(
+          `Vercel's ${nameForLog(deployment.environment)} deployment of ${short} has no https URL to test: ${urlForLog(raw ?? "")}`
+        );
       }
       if (latest.state === "failure" || latest.state === "error") {
-        throw new Error(`Vercel's ${deployment.environment} deployment of ${short} failed: ${latest.target_url ?? ""}`);
+        throw new Error(
+          `Vercel's ${nameForLog(deployment.environment)} deployment of ${short} failed: ${urlForLog(latest.target_url ?? "")}`
+        );
       }
     }
     if (deployments.length === 0) {
@@ -4084,7 +4099,7 @@ async function main() {
     if (preview) {
       console.log(`[peeps] waiting for the Vercel preview of ${preview.sha.slice(0, 7)}`);
       process.env.BASE_URL = await waitForVercelPreview(preview);
-      console.log(`[peeps] BASE_URL ${process.env.BASE_URL} (Vercel preview of ${preview.sha.slice(0, 7)})`);
+      console.log(`[peeps] BASE_URL ${urlForLog(process.env.BASE_URL)} (Vercel preview of ${preview.sha.slice(0, 7)})`);
     }
   }
   const framework = mode === "agent" ? "playwright" : resolveFramework(env);

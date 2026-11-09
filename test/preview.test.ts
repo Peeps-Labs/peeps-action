@@ -82,7 +82,7 @@ const instant = { sleep: async () => {}, pollMs: 0 };
 
 test("returns the preview URL once Vercel's deployment succeeds", async () => {
   const { fetchFn } = fakeGitHub({
-    "/deployments?": [[{ id: 7, environment: "Preview – shop" }]],
+    "/deployments?": [[{ id: 7, environment: "Preview – shop", creator: { login: "vercel[bot]" } }]],
     "/deployments/7/statuses": [
       [{ state: "in_progress" }],
       [{ state: "success", environment_url: "https://shop-git-x-acme.vercel.app" }],
@@ -92,15 +92,17 @@ test("returns the preview URL once Vercel's deployment succeeds", async () => {
   assert.equal(url, "https://shop-git-x-acme.vercel.app");
 });
 
-test("ignores production and other environments", async () => {
+test("ignores production, other environments and deployments Vercel did not make", async () => {
   const { fetchFn } = fakeGitHub({
     "/deployments?": [
       [
-        { id: 1, environment: "Production – shop" },
-        { id: 2, environment: "Preview" },
+        { id: 1, environment: "Production – shop", creator: { login: "vercel[bot]" } },
+        { id: 3, environment: "Preview", creator: { login: "someone-else" } },
+        { id: 2, environment: "Preview", creator: { login: "vercel[bot]" } },
       ],
     ],
     "/deployments/1/statuses": [[{ state: "success", environment_url: "https://prod.example" }]],
+    "/deployments/3/statuses": [[{ state: "success", environment_url: "https://attacker.example" }]],
     "/deployments/2/statuses": [[{ state: "success", environment_url: "https://preview.example" }]],
   });
   assert.equal(await waitForVercelPreview(request, { fetch: fetchFn, ...instant }), "https://preview.example");
@@ -116,7 +118,7 @@ test("fails fast when Vercel deployed but recorded no GitHub deployment", async 
 
 test("says when the preview deployment failed", async () => {
   const { fetchFn } = fakeGitHub({
-    "/deployments?": [[{ id: 7, environment: "Preview" }]],
+    "/deployments?": [[{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }]],
     "/deployments/7/statuses": [[{ state: "failure", target_url: "https://vercel.com/acme/shop/abc" }]],
   });
   await assert.rejects(waitForVercelPreview(request, { fetch: fetchFn, ...instant }), /deployment of aaaaaaa failed/);
@@ -141,4 +143,27 @@ test("times out when no preview arrives", async () => {
 test("names the missing permission when GitHub refuses", async () => {
   const { fetchFn } = fakeGitHub({});
   await assert.rejects(waitForVercelPreview(request, { fetch: fetchFn, ...instant }), /deployments: read/);
+});
+
+test("refuses a preview URL that is not https or carries credentials", async () => {
+  for (const bad of ["http://shop.vercel.app", "https://user:pw@shop.vercel.app", "javascript:alert(1)"]) {
+    const { fetchFn } = fakeGitHub({
+      "/deployments?": [[{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }]],
+      "/deployments/7/statuses": [[{ state: "success", environment_url: bad }]],
+    });
+    await assert.rejects(waitForVercelPreview(request, { fetch: fetchFn, ...instant }), /no https URL/);
+  }
+});
+
+test("keeps workflow commands out of an error built from GitHub's answer", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[{ id: 7, environment: "Preview – x\n::error::injected ##[warning]y", creator: { login: "vercel[bot]" } }]],
+    "/deployments/7/statuses": [[{ state: "failure", target_url: "https://vercel.com/a?token=secret" }]],
+  });
+  await assert.rejects(waitForVercelPreview(request, { fetch: fetchFn, ...instant }), (error: Error) => {
+    assert.ok(!error.message.includes("\n"));
+    assert.ok(!error.message.includes("##["));
+    assert.ok(!error.message.includes("token=secret"));
+    return true;
+  });
 });

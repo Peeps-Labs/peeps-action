@@ -19,7 +19,7 @@ export interface PlanEnvironment {
  * a workflow command on a line of its own, and GitHub's legacy `##[` command
  * works anywhere in a line.
  */
-function nameForLog(name: string): string {
+export function nameForLog(name: string): string {
   return name.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/##\[/g, "## [");
 }
 
@@ -30,7 +30,7 @@ function nameForLog(name: string): string {
  * line. Query and fragment stay out too. The test process still gets the value
  * Peeps sent.
  */
-function urlForLog(baseUrl: string): string {
+export function urlForLog(baseUrl: string): string {
   if (baseUrl.includes("@")) return "<unreadable URL>";
   try {
     const url = new URL(baseUrl);

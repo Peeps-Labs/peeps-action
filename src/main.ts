@@ -32,6 +32,7 @@ import {
 } from "./attach";
 import { warnIfBrowsersMissing } from "./browser-check";
 import { readPreviewRequest, waitForVercelPreview } from "./preview";
+import { urlForLog } from "./environment";
 import {
   resolveFramework,
   runPytestDispatched,
@@ -82,7 +83,7 @@ async function main(): Promise<void> {
     if (preview) {
       console.log(`[peeps] waiting for the Vercel preview of ${preview.sha.slice(0, 7)}`);
       process.env.BASE_URL = await waitForVercelPreview(preview);
-      console.log(`[peeps] BASE_URL ${process.env.BASE_URL} (Vercel preview of ${preview.sha.slice(0, 7)})`);
+      console.log(`[peeps] BASE_URL ${urlForLog(process.env.BASE_URL)} (Vercel preview of ${preview.sha.slice(0, 7)})`);
     }
   }
 
