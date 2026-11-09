@@ -4128,13 +4128,15 @@ async function waitForVercelPreview(request, deps = {}) {
     }
     if (candidates.length === 0) {
       const statuses = await github(`/commits/${request.sha}/statuses?per_page=100`);
-      if (deps.onlyIfDeploying && !statuses.some((s2) => isVercelContextFor(s2.context, request.project))) {
-        throw new Error(`Vercel is not deploying ${short}`);
-      }
-      if (statuses.some((s2) => s2.state === "success" && isVercelContextFor(s2.context, request.project))) {
+      const vercelStatuses = statuses.filter((s2) => isVercelContextFor(s2.context, request.project));
+      const onlyOtherEnvironments = all.some((d) => d.creator?.login === VERCEL_BOT);
+      if (!onlyOtherEnvironments && vercelStatuses.some((s2) => s2.state === "success")) {
         throw new Error(
           `Vercel deployed ${short} but recorded no GitHub deployment${request.project ? ` for ${nameForLog(request.project)}` : ""}, so there is no preview URL to test. Turn on "deployment_status Events" in the Vercel project (Settings > Git) and push again.`
         );
+      }
+      if (deps.onlyIfDeploying && (onlyOtherEnvironments || !vercelStatuses.some((s2) => s2.state === "pending"))) {
+        throw new Error(`Vercel is not deploying a preview of ${short}`);
       }
     }
     if (now() >= deadline) {
@@ -4159,8 +4161,14 @@ async function dispatchedPreviewUrl(mode, env, githubToken, checkedOutSha, deps 
   if (env["INPUT_PREVIEW"]?.trim().toLowerCase() !== "vercel") return null;
   if (env.GITHUB_EVENT_NAME !== "workflow_dispatch" || !githubToken || !env.GITHUB_REPOSITORY) return null;
   const sha = checkedOutSha();
-  if (!sha || !/^[0-9a-f]{40}$/.test(sha)) return null;
+  if (!sha || !/^[0-9a-f]{40}$/.test(sha)) {
+    log("[peeps] preview: vercel could not read the checked-out commit (git rev-parse HEAD), so no preview is looked up");
+    return null;
+  }
   const short = sha.slice(0, 7);
+  const timeoutS = Number(env["INPUT_PREVIEW-TIMEOUT"]?.trim() || "600");
+  const validTimeout = Number.isFinite(timeoutS) && timeoutS > 0;
+  if (!validTimeout) log("[peeps] preview-timeout must be a positive number of seconds; waiting up to 600");
   try {
     const url = await waitForVercelPreview(
       {
@@ -4168,7 +4176,7 @@ async function dispatchedPreviewUrl(mode, env, githubToken, checkedOutSha, deps 
         repository: env.GITHUB_REPOSITORY,
         sha,
         token: githubToken,
-        timeoutMs: Number(env["INPUT_PREVIEW-TIMEOUT"]?.trim() || "600") * 1e3 || 6e5,
+        timeoutMs: (validTimeout ? timeoutS : 600) * 1e3,
         apiUrl: (env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/+$/, ""),
         project: env["INPUT_PREVIEW-PROJECT"]?.trim() || null
       },

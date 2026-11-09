@@ -437,8 +437,12 @@ uses it wherever Peeps sends no `BASE_URL`: a Peeps environment's `BASE_URL`
 and your workflow's own still win. A heal of a pull request's failure checks
 out that pull request's head, so it reproduces and verifies on the preview
 the failure came from; a fix's verification waits while Vercel deploys the
-fix's own commit. A commit Vercel is not deploying (your default branch, for
-example) is left alone at once.
+fix's own commit. Where no preview of the commit can appear (Vercel deploys it
+only to Production, as on your default branch, or its build failed, or Vercel
+does not deploy it at all) the job carries on at once. The lookup runs before
+the job knows whether Peeps sends a `BASE_URL`, so a job whose Peeps
+environment has one can still wait while Vercel builds a preview of its
+commit; the preview is then not used.
 
 pytest-playwright reads its base URL from `--base-url` or
 `PYTEST_BASE_URL`, not `BASE_URL`: pass `--base-url "$BASE_URL"` in

@@ -269,14 +269,21 @@ export async function waitForVercelPreview(request: PreviewRequest, deps: WaitDe
     }
     if (candidates.length === 0) {
       const statuses = await github<CommitStatus[]>(`/commits/${request.sha}/statuses?per_page=100`);
-      if (deps.onlyIfDeploying && !statuses.some((s) => isVercelContextFor(s.context, request.project))) {
-        throw new Error(`Vercel is not deploying ${short}`);
-      }
-      if (statuses.some((s) => s.state === "success" && isVercelContextFor(s.context, request.project))) {
+      const vercelStatuses = statuses.filter((s) => isVercelContextFor(s.context, request.project));
+      // Vercel recorded deployments of this commit, none of them a preview:
+      // the default branch, deployed to Production.
+      const onlyOtherEnvironments = all.some((d) => d.creator?.login === VERCEL_BOT);
+      if (!onlyOtherEnvironments && vercelStatuses.some((s) => s.state === "success")) {
         throw new Error(
           `Vercel deployed ${short} but recorded no GitHub deployment${request.project ? ` for ${nameForLog(request.project)}` : ""}, so there is no preview URL to test. ` +
             'Turn on "deployment_status Events" in the Vercel project (Settings > Git) and push again.',
         );
+      }
+      // A job Peeps started waits only while a preview of this commit can
+      // still appear: Vercel is building it and has recorded no deployment of
+      // it in another environment.
+      if (deps.onlyIfDeploying && (onlyOtherEnvironments || !vercelStatuses.some((s) => s.state === "pending"))) {
+        throw new Error(`Vercel is not deploying a preview of ${short}`);
       }
     }
     if (now() >= deadline) {
@@ -320,8 +327,9 @@ export const PREVIEW_URL_VAR = "PEEPS_PREVIEW_URL";
  * heal reproduces and verifies there instead of on nothing. A fix's
  * verification checks out the fix's own commit, whose preview Vercel may
  * still be building, so the job waits up to preview-timeout while Vercel is
- * deploying the commit, and not at all when it is not (the default branch,
- * a repository Vercel does not deploy). A commit with no usable preview
+ * building a preview of the commit, and not at all otherwise: no Vercel status
+ * pending, or Vercel deployments of it only in other environments (the
+ * default branch's Production, whatever its build's state). A commit with no usable preview
  * (events off, several projects with none named) leaves BASE_URL to the
  * Peeps environment, as before.
  *
@@ -341,8 +349,15 @@ export async function dispatchedPreviewUrl(
   if (env["INPUT_PREVIEW"]?.trim().toLowerCase() !== "vercel") return null;
   if (env.GITHUB_EVENT_NAME !== "workflow_dispatch" || !githubToken || !env.GITHUB_REPOSITORY) return null;
   const sha = checkedOutSha();
-  if (!sha || !/^[0-9a-f]{40}$/.test(sha)) return null;
+  if (!sha || !/^[0-9a-f]{40}$/.test(sha)) {
+    log("[peeps] preview: vercel could not read the checked-out commit (git rev-parse HEAD), so no preview is looked up");
+    return null;
+  }
   const short = sha.slice(0, 7);
+  const timeoutS = Number(env["INPUT_PREVIEW-TIMEOUT"]?.trim() || "600");
+  const validTimeout = Number.isFinite(timeoutS) && timeoutS > 0;
+  // A job Peeps started must not fail on this input; say so and use the default.
+  if (!validTimeout) log("[peeps] preview-timeout must be a positive number of seconds; waiting up to 600");
   try {
     const url = await waitForVercelPreview(
       {
@@ -350,7 +365,7 @@ export async function dispatchedPreviewUrl(
         repository: env.GITHUB_REPOSITORY,
         sha,
         token: githubToken,
-        timeoutMs: Number(env["INPUT_PREVIEW-TIMEOUT"]?.trim() || "600") * 1000 || 600_000,
+        timeoutMs: (validTimeout ? timeoutS : 600) * 1000,
         apiUrl: (env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/+$/, ""),
         project: env["INPUT_PREVIEW-PROJECT"]?.trim() || null,
       },

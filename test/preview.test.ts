@@ -378,3 +378,55 @@ test("dispatchedPreviewUrl stays out of report mode, other events, a workflow BA
   assert.equal(await dispatchedPreviewUrl("agent", dispatchEnv(), null, () => SHA, deps, quiet), null);
   assert.equal(await dispatchedPreviewUrl("agent", dispatchEnv(), "t", () => null, deps, quiet), null);
 });
+
+test("a dispatched job on a Production-only commit stops at once, whatever Vercel's status", async () => {
+  for (const state of ["failure", "pending", "success"]) {
+    const { fetchFn } = fakeGitHub({
+      "/deployments?": [[{ id: 1, environment: "Production", creator: VERCEL }]],
+      [`/commits/${SHA}/statuses`]: [[{ context: "Vercel", state }]],
+    });
+    let slept = false;
+    const lines: string[] = [];
+    const url = await dispatchedPreviewUrl(
+      "run",
+      dispatchEnv(),
+      "t",
+      () => SHA,
+      { fetch: fetchFn, pollMs: 10_000, sleep: async () => void (slept = true) },
+      (l) => lines.push(l),
+    );
+    assert.equal(url, null, state);
+    assert.equal(slept, false, state);
+    assert.match(lines.join("\n"), /not deploying a preview of aaaaaaa/, state);
+  }
+});
+
+test("a dispatched job stops at once when Vercel's build of the commit failed", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[]],
+    [`/commits/${SHA}/statuses`]: [[{ context: "Vercel", state: "failure" }]],
+  });
+  let slept = false;
+  const url = await dispatchedPreviewUrl(
+    "agent",
+    dispatchEnv(),
+    "t",
+    () => SHA,
+    { fetch: fetchFn, pollMs: 10_000, sleep: async () => void (slept = true) },
+    () => {},
+  );
+  assert.equal(url, null);
+  assert.equal(slept, false);
+});
+
+test("a dispatched job says when it cannot read its commit, and when preview-timeout is not a number", async () => {
+  const lines: string[] = [];
+  await dispatchedPreviewUrl("agent", dispatchEnv(), "t", () => null, instant, (l) => lines.push(l));
+  assert.match(lines.join("\n"), /could not read the checked-out commit/);
+  const { fetchFn } = fakeGitHub({ "/deployments?": [[]] });
+  const more: string[] = [];
+  await dispatchedPreviewUrl("agent", dispatchEnv({ "INPUT_PREVIEW-TIMEOUT": "soon" }), "t", () => SHA, { fetch: fetchFn, ...instant }, (l) =>
+    more.push(l),
+  );
+  assert.match(more.join("\n"), /preview-timeout must be a positive number of seconds; waiting up to 600/);
+});
