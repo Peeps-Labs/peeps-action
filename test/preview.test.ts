@@ -430,3 +430,53 @@ test("a dispatched job says when it cannot read its commit, and when preview-tim
   );
   assert.match(more.join("\n"), /preview-timeout must be a positive number of seconds; waiting up to 600/);
 });
+
+test("only each context's newest status counts: a rebuild after a failure is waited for, a failure after a pending is not", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[]],
+    // Newest first, as GitHub lists them.
+    [`/commits/${SHA}/statuses`]: [[{ context: "Vercel", state: "failure" }, { context: "Vercel", state: "pending" }]],
+  });
+  let slept = false;
+  const url = await dispatchedPreviewUrl(
+    "run",
+    dispatchEnv(),
+    "t",
+    () => SHA,
+    { fetch: fetchFn, pollMs: 10_000, sleep: async () => void (slept = true) },
+    () => {},
+  );
+  assert.equal(url, null);
+  assert.equal(slept, false);
+});
+
+test("a named project ignores another project's Production deployment", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[{ id: 1, environment: "Production – docs", creator: VERCEL }], [{ id: 2, environment: "Preview – web", creator: VERCEL }]],
+    [`/commits/${SHA}/statuses`]: [[{ context: "Vercel – web", state: "pending" }]],
+    "/deployments/2/statuses": [[{ state: "success", environment_url: "https://web.vercel.app" }]],
+  });
+  const url = await dispatchedPreviewUrl(
+    "run",
+    dispatchEnv({ "INPUT_PREVIEW-PROJECT": "web" }),
+    "t",
+    () => SHA,
+    { fetch: fetchFn, ...instant },
+    () => {},
+  );
+  assert.equal(url, "https://web.vercel.app");
+});
+
+test("unnamed, another project's finished status does not stop a ready preview", async () => {
+  const { fetchFn } = fakeGitHub({
+    "/deployments?": [[{ id: 1, environment: "Preview – web", creator: VERCEL }]],
+    "/deployments/1/statuses": [[{ state: "success", environment_url: "https://web.vercel.app" }]],
+    [`/commits/${SHA}/statuses`]: [
+      [
+        { context: "Vercel – web", state: "success" },
+        { context: "Vercel – docs", state: "success" },
+      ],
+    ],
+  });
+  assert.equal(await waitForVercelPreview(request, { fetch: fetchFn, ...instant }), "https://web.vercel.app");
+});

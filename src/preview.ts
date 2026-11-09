@@ -132,6 +132,16 @@ function isVercelContextFor(context: string, project: string | null): boolean {
   return context === `Vercel – ${project}`;
 }
 
+/**
+ * Each context's newest status. GitHub lists a commit's statuses newest
+ * first, one per change, so a build that failed and is building again reads
+ * pending, not both.
+ */
+function latestPerContext(statuses: CommitStatus[]): CommitStatus[] {
+  const seen = new Set<string>();
+  return statuses.filter((s) => (seen.has(s.context) ? false : (seen.add(s.context), true)));
+}
+
 /** The Vercel project a preview environment names, or "" for the plain "Preview". */
 function previewProject(d: Deployment): string | null {
   if (d.creator?.login !== VERCEL_BOT) return null;
@@ -244,13 +254,21 @@ export async function waitForVercelPreview(request: PreviewRequest, deps: WaitDe
       if (verdict.kind === "ready") {
         // Unnamed, one project's preview can be ready before another
         // project's deployment appears: Vercel's commit statuses, one per
-        // project, say whether there is more than one.
+        // project, say whether another one is still building.
         if (request.project === null) {
-          const statuses = await github<CommitStatus[]>(`/commits/${request.sha}/statuses?per_page=100`);
-          const contexts = [...new Set(statuses.map((s) => s.context).filter((c) => isVercelContextFor(c, null)))];
-          if (contexts.length > 1) {
+          const statuses = latestPerContext(
+            await github<CommitStatus[]>(`/commits/${request.sha}/statuses?per_page=100`),
+          );
+          const own = previewProject(d);
+          const building = statuses.filter(
+            (s) =>
+              s.state === "pending" &&
+              isVercelContextFor(s.context, null) &&
+              s.context !== (own ? `Vercel – ${own}` : "Vercel"),
+          );
+          if (building.length > 0) {
             throw new Error(
-              `This commit has Vercel previews of ${contexts.length} projects (${contexts.map((c) => nameForLog(c)).join(", ")}). Name the one to test with preview-project.`,
+              `This commit has Vercel previews of more than one project (${[own || "Preview", ...building.map((s) => s.context)].map((c) => nameForLog(c)).join(", ")}). Name the one to test with preview-project.`,
             );
           }
         }
@@ -269,10 +287,14 @@ export async function waitForVercelPreview(request: PreviewRequest, deps: WaitDe
     }
     if (candidates.length === 0) {
       const statuses = await github<CommitStatus[]>(`/commits/${request.sha}/statuses?per_page=100`);
-      const vercelStatuses = statuses.filter((s) => isVercelContextFor(s.context, request.project));
-      // Vercel recorded deployments of this commit, none of them a preview:
-      // the default branch, deployed to Production.
-      const onlyOtherEnvironments = all.some((d) => d.creator?.login === VERCEL_BOT);
+      const vercelStatuses = latestPerContext(statuses).filter((s) => isVercelContextFor(s.context, request.project));
+      // Vercel recorded deployments of this commit (of the named project), none
+      // of them a preview: the default branch, deployed to Production.
+      const onlyOtherEnvironments = all.some(
+        (d) =>
+          d.creator?.login === VERCEL_BOT &&
+          (request.project === null || d.environment.endsWith(` – ${request.project}`)),
+      );
       if (!onlyOtherEnvironments && vercelStatuses.some((s) => s.state === "success")) {
         throw new Error(
           `Vercel deployed ${short} but recorded no GitHub deployment${request.project ? ` for ${nameForLog(request.project)}` : ""}, so there is no preview URL to test. ` +
