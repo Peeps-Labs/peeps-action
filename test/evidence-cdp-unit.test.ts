@@ -287,7 +287,7 @@ test("the baseline stays a late signal: an app script that ran before our start 
 });
 
 const popup = async (targetInfo: Record<string, unknown>) => {
-  const cdp = new FakeCdp({ "Profiler.takePreciseCoverage": () => ({ result: [] }) });
+  const cdp = new FakeCdp({ "Profiler.takePreciseCoverage": () => ({ result: [] }), "Runtime.getIsolateId": (_, sessionId) => ({ id: `iso-${sessionId}` }) });
   const coverage = new CdpCoverage(cdp, { browser: "chromium" });
   await coverage.begin();
   cdp.emit("Target.attachedToTarget", { sessionId: "p2", targetInfo: { targetId: "t-p2", type: "page", browserContextId: "ctx-a", ...targetInfo }, waitingForDebugger: true });
@@ -305,4 +305,51 @@ test("a popup that can reach its opener may share its isolate, whose counts its 
 test("a noopener popup, or a page with no opener, shares nothing", async () => {
   assert.equal((await popup({ openerId: "t-p1", canAccessOpener: false })).sharedIsolate, 0);
   assert.equal((await popup({})).sharedIsolate, 0);
+});
+
+// Two targets in one V8 isolate share its coverage counts: one's start or take resets what the
+// other ran. Any target that shared an isolate with another, or whose isolate can't be read, is partial.
+const isolates = async (ids: Record<string, string | Error>) => {
+  const cdp = new FakeCdp({
+    "Profiler.takePreciseCoverage": () => ({ result: [] }),
+    "Runtime.getIsolateId": (_, sessionId) => {
+      const id = ids[sessionId!];
+      return id instanceof Error ? Promise.reject(id) : { id };
+    },
+  });
+  const coverage = new CdpCoverage(cdp, { browser: "chromium" });
+  await coverage.begin();
+  for (const sessionId of Object.keys(ids)) cdp.emit("Target.attachedToTarget", { sessionId, targetInfo: { targetId: `t-${sessionId}`, type: "page", browserContextId: "ctx-a" }, waitingForDebugger: true });
+  await tick();
+  await coverage.settled();
+  return coverage.finish({ context: "ctx-a", last: true });
+};
+
+test("two unrelated pages in one isolate (the renderer limit): both partial", async () => {
+  assert.equal((await isolates({ a: "iso-1", b: "iso-1" })).sharedIsolate, 2);
+});
+
+test("pages in their own isolates share nothing", async () => {
+  assert.equal((await isolates({ a: "iso-1", b: "iso-2" })).sharedIsolate, 0);
+});
+
+test("an isolate that can't be read counts as shared: fail closed", async () => {
+  assert.equal((await isolates({ a: "iso-1", b: new Error("no Runtime.getIsolateId") })).sharedIsolate, 1);
+});
+
+test("a page that moved into another's isolate, by a later navigation, shares it", async () => {
+  const current: Record<string, string> = { a: "iso-1", b: "iso-2" };
+  const cdp = new FakeCdp({ "Profiler.takePreciseCoverage": () => ({ result: [] }), "Runtime.getIsolateId": (_, sessionId) => ({ id: current[sessionId!] }) });
+  const coverage = new CdpCoverage(cdp, { browser: "chromium" });
+  await coverage.begin();
+  for (const sessionId of ["a", "b"]) cdp.emit("Target.attachedToTarget", { sessionId, targetInfo: { targetId: `t-${sessionId}`, type: "page", browserContextId: "ctx-a" }, waitingForDebugger: true });
+  await tick();
+  await coverage.settled();
+  // b swaps into a's process, and back out, before the final take.
+  current.b = "iso-1";
+  cdp.emit("Page.frameNavigated", { frame: { id: "fb", url: "http://app/x" } }, "b");
+  await tick();
+  await coverage.settled();
+  current.b = "iso-3";
+  assert.equal((await coverage.finish({ context: "ctx-a", last: true })).sharedIsolate, 2);
 });

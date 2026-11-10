@@ -94,6 +94,8 @@ var CdpCoverage = class _CdpCoverage {
       target.finalTaken = false;
       if (target.profiler && (!DOCUMENTS.has(target.type) || target.css)) target.proven = true;
       target.ranBefore = false;
+      target.isolates.clear();
+      target.isolateUnknown = false;
     }
   }
   /** A delta from every live target: before each test action, so a navigation it starts loses nothing. */
@@ -128,6 +130,11 @@ var CdpCoverage = class _CdpCoverage {
         )
       )
     );
+    await Promise.all([...this.targets.values()].filter((t) => t.covered && !t.detached).map((t) => this.readIsolate(t)));
+    const covered = [...this.targets.values()].filter((t) => t.covered);
+    const sharing = covered.filter(
+      (t) => t.sharesIsolate || t.isolateUnknown || covered.some((u) => u !== t && [...t.isolates].some((id) => u.isolates.has(id)))
+    );
     const lost = [...this.targets.values()].filter((t) => t.covered && !t.finalTaken && !seen.has(t));
     const late = [...this.targets.values()].filter((t) => t.covered && (!t.proven || t.ranBefore));
     const a = this.attempt;
@@ -142,12 +149,28 @@ var CdpCoverage = class _CdpCoverage {
       covered: [...a.covered, ...[...this.sheets.values()].map((s) => s.url).filter((url) => url !== "")],
       lost: lost.length,
       late: late.length,
-      sharedIsolate: [...this.targets.values()].filter((t) => t.covered && t.sharesIsolate).length,
+      sharedIsolate: sharing.length,
       lateDetail: late.map((t) => ({ type: t.type, held: t.held, ranBefore: t.ranBefore })),
       lostDetail: lost.map((t) => ({ type: t.type, targetId: t.targetId, url: t.url, context: t.context ?? null, inScope: inScope(t), profiler: t.profiler, css: t.css, detached: t.detached })),
       errors: a.errors,
       navigations: a.navigations
     };
+  }
+  /** Which isolate the target runs in now, added to those it ran in. Unreadable is unknown, so shared. */
+  readIsolate(target) {
+    const read = this.cdp.send("Runtime.getIsolateId", {}, target.sessionId).then(
+      (answer) => {
+        const id = answer?.id;
+        if (typeof id === "string" && id !== "") target.isolates.add(id);
+        else if (!target.detached) target.isolateUnknown = true;
+      },
+      () => {
+        if (!target.detached) target.isolateUnknown = true;
+      }
+    );
+    this.setups.add(read);
+    void read.finally(() => this.setups.delete(read));
+    return read;
   }
   /** A take's functions that ran, into the attempt. */
   record(result) {
@@ -207,6 +230,8 @@ var CdpCoverage = class _CdpCoverage {
       }
     } else if (method === "Page.frameNavigated") {
       const frame = params.frame;
+      const navigated = this.targets.get(sessionId);
+      if (navigated?.covered && !frame.parentId) void this.readIsolate(navigated);
       if (frame.url === "about:blank") return;
       const key = `${sessionId}:${frame.id}`;
       if (this.documents.has(key)) this.attempt.navigations++;
@@ -233,6 +258,8 @@ var CdpCoverage = class _CdpCoverage {
       proven: false,
       held: waitingForDebugger === true,
       sharesIsolate: typeof targetInfo.openerId === "string" && targetInfo.canAccessOpener !== false,
+      isolates: /* @__PURE__ */ new Set(),
+      isolateUnknown: false,
       ranBefore: false
     };
     if (!duplicate) this.targets.set(sessionId, target);
@@ -266,6 +293,7 @@ var CdpCoverage = class _CdpCoverage {
     }
     job("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
     if (waitingForDebugger) job("Runtime.runIfWaitingForDebugger");
+    if (!duplicate && COVERED.has(target.type)) void this.readIsolate(target);
     if (!duplicate && COVERED.has(target.type)) {
       const baseline = send("Profiler.takePreciseCoverage").then(
         (answer) => {

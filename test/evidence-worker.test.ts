@@ -425,3 +425,37 @@ test("a same-site popup that keeps its opener (same isolate, no takeAll): the op
   assert.ok(ran("ranOnLoad") || partial, `the opener's code went missing while the attempt reads whole: ${explain([file!])}`);
   assert.ok(ran("startup") || partial, `the popup's code went missing while the attempt reads whole: ${explain([file!])}`);
 });
+
+for (const layout of ["one context", "two contexts"] as const) {
+  test(`at the renderer limit, two unrelated same-site pages (${layout}) share a process: the first page's code is kept, or the attempt reads partial`, async (t) => {
+    const { partialReasons } = await import("../src/evidence/browser/rules");
+    const dir = await mkdtemp(path.join(tmpdir(), "peeps-worker-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const url = await app(t);
+    const port = pickPort()!;
+    const listener = installCoverage({ dir, core, test: { info: () => ({ testId: "shared", retry: 0 }) }, port });
+    t.after(() => core._instrumentation.removeListener(listener));
+    // One renderer process for everything: unrelated pages share it, and its V8 isolate.
+    const browser = await core.chromium.launch({ args: [`--remote-debugging-port=${port}`, "--renderer-process-limit=1"] });
+    t.after(() => browser.close());
+    const first = await browser.newContext();
+    const a = await first.newPage();
+    // As production runs: no settled(), no delta between the pages.
+    await a.goto(url);
+    const second = layout === "one context" ? first : await browser.newContext();
+    const b = await second.newPage();
+    await b.goto(`${url}startup`);
+    await b.waitForFunction(() => document.body.dataset.ready === "1");
+    if (second !== first) await second.close();
+    await first.close();
+    const written = await files(dir);
+    assert.ok(written.length > 0, "a record was written");
+    for (const file of written) {
+      const ran = (name: string) => file.coverage.scripts.some((s) => s.functions.some((fn) => fn.name === name));
+      const partial = partialReasons(file.coverage).length > 0;
+      assert.ok(ran("ranOnLoad") || partial, `page A's code went missing while the attempt reads whole: ${explain(written)}`);
+      // When it went missing, it is because the pages shared an isolate, and that is what reads partial.
+      if (!ran("ranOnLoad")) assert.ok(partialReasons(file.coverage).includes("shared_isolate"), explain(written));
+    }
+  });
+}
