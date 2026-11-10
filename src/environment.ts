@@ -19,7 +19,7 @@ export interface PlanEnvironment {
  * a workflow command on a line of its own, and GitHub's legacy `##[` command
  * works anywhere in a line.
  */
-function nameForLog(name: string): string {
+export function nameForLog(name: string): string {
   return name.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/##\[/g, "## [");
 }
 
@@ -30,7 +30,7 @@ function nameForLog(name: string): string {
  * line. Query and fragment stay out too. The test process still gets the value
  * Peeps sent.
  */
-function urlForLog(baseUrl: string): string {
+export function urlForLog(baseUrl: string): string {
   if (baseUrl.includes("@")) return "<unreadable URL>";
   try {
     const url = new URL(baseUrl);
@@ -57,10 +57,22 @@ export function planEnvironmentVariables(
   planEnv: PlanEnvironment | null | undefined,
   current: NodeJS.ProcessEnv,
 ): { vars: Record<string, string>; log: string } {
-  if (!planEnv) return { vars: {}, log: "" };
+  // `preview: vercel` in a job Peeps started: the checked-out commit's
+  // preview, used only where neither Peeps nor the workflow names a BASE_URL.
+  const preview = current.PEEPS_PREVIEW_URL;
+  const previewFallback = (prefix: string) =>
+    preview && !current.BASE_URL
+      ? { BASE_URL: preview, log: `${prefix}BASE_URL ${urlForLog(preview)} (the Vercel preview of the checked-out commit)` }
+      : null;
+  if (!planEnv) {
+    const fallback = previewFallback("[peeps] no Peeps environment; ");
+    return fallback ? { vars: { BASE_URL: fallback.BASE_URL }, log: fallback.log } : { vars: {}, log: "" };
+  }
   const vars: Record<string, string> = { PEEPS_ENVIRONMENT: planEnv.name };
   const name = nameForLog(planEnv.name);
   if (!planEnv.baseUrl) {
+    const fallback = previewFallback(`[peeps] environment ${name} (no BASE_URL in Peeps); `);
+    if (fallback) return { vars: { ...vars, BASE_URL: fallback.BASE_URL }, log: fallback.log };
     return { vars, log: `[peeps] environment ${name} (no BASE_URL in Peeps)` };
   }
   vars.PEEPS_BASE_URL = planEnv.baseUrl;

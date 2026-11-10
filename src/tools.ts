@@ -488,6 +488,9 @@ const ALWAYS_MASK_KEYS = new Set([
   "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
   "ACTIONS_RUNTIME_TOKEN",
   "GITHUB_TOKEN",
+  // The `github-token` input. main.ts removes it before anything spawns; this
+  // is the backstop should it ever reach an environment the redactor reads.
+  "INPUT_GITHUB-TOKEN",
   // GitLab's `CI_` variables are exempt by prefix like GitHub's, except the
   // ones that are credentials: the job token (and the clone URL it is in),
   // the legacy job JWTs, and the registry, deploy and proxy passwords.
@@ -500,7 +503,7 @@ const ALWAYS_MASK_KEYS = new Set([
   "CI_DEPLOY_PASSWORD",
   "CI_DEPENDENCY_PROXY_PASSWORD",
 ]);
-const SAFE_ENV_KEYS = new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL"]);
+const SAFE_ENV_KEYS = new Set(["PATH", "HOME", "PWD", "SHELL", "LANG", "TERM", "NODE_OPTIONS", "CI", "BASE_URL", "PEEPS_API_URL", "PEEPS_PREVIEW_URL"]);
 
 export interface ToolServerDeps {
   /** For tests: run this instead of `npx wdio run <config>` for an Appium suite. */
