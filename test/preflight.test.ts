@@ -96,3 +96,55 @@ test("a preflight that never answers, a stalled token included, negotiates nothi
   await flush();
   assert.deepEqual(settled, NONE);
 });
+
+const KEY_HEX = "c03dd504d33c33f55a570a1a758d442e1cda0793b1a480482f0d67f9437320a6";
+const OTHER_HEX = "ab".repeat(32);
+const collect = { coverage: true, fingerprint: true, key: KEY_HEX, keyVersion: "V1" };
+const answer = (projects: unknown[]) => ({ scan: true, protocolVersion: 2, projects });
+
+test("collect: per project, only with protocol 2, a 64-hex key and a key version (contract §1)", () => {
+  const negotiated = readPreflight(answer([{ projectId: "p1", executionMode: "shadow", collect }, { projectId: "p2", executionMode: "shadow" }]));
+  assert.deepEqual(negotiated.collect, [{ projectId: "p1", coverage: true, fingerprint: true, key: Buffer.from(KEY_HEX, "hex"), keyVersion: "V1" }]);
+  for (const bad of [
+    { ...collect, key: "short" },
+    { ...collect, key: Buffer.from(KEY_HEX, "hex").toString("base64url") },
+    { ...collect, key: undefined },
+    { ...collect, keyVersion: "1" },
+    { ...collect, keyVersion: undefined },
+    { ...collect, coverage: false, fingerprint: false },
+    "yes",
+    null,
+  ]) {
+    assert.equal("collect" in readPreflight(answer([{ projectId: "p1", collect: bad }])), false, JSON.stringify(bad));
+  }
+  assert.equal("collect" in readPreflight(answer([{ collect }])), false, "no project id");
+  assert.deepEqual(readPreflight({ scan: true, protocolVersion: 1, projects: [{ projectId: "p1", collect }] }), NONE);
+  // A top-level collect is no project's.
+  assert.equal("collect" in readPreflight({ scan: true, protocolVersion: 2, collect }), false);
+});
+
+test("two projects, two keys", () => {
+  const negotiated = readPreflight(answer([{ projectId: "p1", collect }, { projectId: "p2", collect: { ...collect, key: OTHER_HEX, coverage: false } }]));
+  assert.deepEqual(negotiated.collect?.map((c) => [c.projectId, c.key.toString("hex"), c.coverage]), [["p1", KEY_HEX, true], ["p2", OTHER_HEX, false]]);
+});
+
+test("a server that doesn't ask collects nothing: today's answer reads exactly as before", () => {
+  assert.deepEqual(readPreflight({ scan: true, protocolVersion: 2, projects: [{ projectId: "p1", executionMode: "shadow" }] }), { protocol: true, scan: true });
+});
+
+test("every key is masked in the job's log the moment it arrives, and never printed", async () => {
+  const lines: string[] = [];
+  const { peeps } = fakePeeps(async () => answer([{ projectId: "p1", collect }, { projectId: "p2", collect: { ...collect, key: OTHER_HEX } }]));
+  const negotiated = await negotiateTargetedRuns(github("push"), peeps, (line) => lines.push(line));
+  assert.equal(negotiated.collect?.length, 2);
+  const spellings = (hex: string) => [`::add-mask::${hex}`, `::add-mask::${Buffer.from(hex, "hex").toString("base64url")}`];
+  assert.deepEqual(lines, [...spellings(KEY_HEX), ...spellings(OTHER_HEX)]);
+  const quiet: string[] = [];
+  await negotiateTargetedRuns(github("push"), fakePeeps(async () => ({ scan: false, protocolVersion: 2 })).peeps, (line) => quiet.push(line));
+  assert.deepEqual(quiet, []);
+});
+
+test("the key never reaches the announce", () => {
+  const negotiated = readPreflight(answer([{ projectId: "p1", collect }]));
+  assert.doesNotMatch(JSON.stringify(announceFieldsOf(negotiated)), new RegExp(KEY_HEX.slice(0, 16)));
+});

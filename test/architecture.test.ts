@@ -12,7 +12,8 @@ const read = (file: string) => readFileSync(path.join(root, file), "utf8");
 const IMPURE = /from "(?:node:(?:fs|fs\/promises|child_process|net|http|https|os|zlib)|@playwright\/test)"|\bfetch\(/;
 
 const adapters = readdirSync(path.join(root, "reach/adapters")).map((file) => `reach/adapters/${file}`);
-const PURE = ["footprint/rules.ts", "footprint/test-trace.ts", "reach/preflight.ts", "reach/limits.ts", "reach/checkout.ts", "reach/match.ts", "reach/scan.ts", "reach/graph.ts", "reach/walk.ts", "reach/text-graph.ts", "reach/parse.ts", "reach/syntax.ts", "reach/convention.ts", ...adapters];
+const EVIDENCE = ["evidence/port.ts", "evidence/hash.ts", "evidence/browser/rules.ts", "evidence/fingerprint/rules.ts", "evidence/fingerprint/source-map.ts", "evidence/fingerprint/wire.ts", "evidence/recording.ts", "evidence/codec.ts"];
+const PURE = [...EVIDENCE, "footprint/rules.ts", "footprint/test-trace.ts", "reach/preflight.ts", "reach/limits.ts", "reach/checkout.ts", "reach/match.ts", "reach/scan.ts", "reach/graph.ts", "reach/walk.ts", "reach/text-graph.ts", "reach/parse.ts", "reach/syntax.ts", "reach/convention.ts", ...adapters];
 
 for (const file of PURE) {
   test(`${file} touches no file system, git, Playwright or network`, () => {
@@ -31,4 +32,11 @@ for (const file of ["reach/scan.ts", "reach/walk.ts", "reach/graph.ts", "reach/t
 
 test("the footprint's decisions name no reporter", () => {
   assert.doesNotMatch(read("footprint/rules.ts"), /@playwright|from "\.\.\/reporter"/);
+});
+
+test("the action's own process never loads the parser: a fingerprint is the scanner's work", () => {
+  for (const file of ["evidence/job.ts", "evidence/upload.ts", "evidence/recording.ts", "evidence/hash.ts", "evidence/codec.ts", "evidence/port.ts", "evidence/fingerprint/wire.ts", "reach/preflight.ts", "report.ts"]) {
+    const values = read(file).split("\n").filter((line) => /^import (?!type )/.test(line));
+    assert.deepEqual(values.filter((line) => /"typescript"|fingerprint\/(?:rules|read-build)"/.test(line)), [], file);
+  }
 });

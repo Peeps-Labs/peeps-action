@@ -1,0 +1,253 @@
+{
+  "format": "PQA-3201 recording codec payload (peeps src/server/repo-backed/pr-impact/infrastructure/recording-codec.ts)",
+  "version": 1,
+  "note": "payloadHex is the payload before gzip. A stored blob is any valid gzip of it. Encoders must produce payloadHex exactly from value; decoders must return value exactly from payloadHex and refuse every invalid entry.",
+  "cases": [
+    {
+      "name": "a minimal fingerprint",
+      "value": {
+        "kind": "fingerprint",
+        "entities": [
+          {
+            "id": "fn:b",
+            "file": "file:a",
+            "layer": "browser",
+            "valueHash": "0102030405060708"
+          }
+        ],
+        "global": ["file:a"]
+      },
+      "payloadHex": "505149520101020666696c653a6104666e3a620101010001020304050607080100"
+    },
+    {
+      "name": "minimal footprints",
+      "value": {
+        "kind": "footprints",
+        "browser": {
+          "name": "chromium",
+          "version": "130.0.1"
+        },
+        "universe": {
+          "layers": ["browser"],
+          "measured": ["code", "route"],
+          "loadedFiles": ["file:a"],
+          "ambient": []
+        },
+        "members": [
+          {
+            "run": "r1",
+            "attempts": [
+              {
+                "retry": 0,
+                "passed": false
+              },
+              {
+                "retry": 1,
+                "passed": true
+              }
+            ],
+            "partial": ["css"],
+            "tokens": ["file:a", "fn:b", "route:/x"]
+          }
+        ]
+      },
+      "payloadHex": "505149520102030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e3101090100000102723102000001010403000000"
+    },
+    {
+      "name": "a fingerprint with every layer, no file and no layer",
+      "value": {
+        "kind": "fingerprint",
+        "entities": [
+          {
+            "id": "css:c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "file": null,
+            "layer": "browser",
+            "valueHash": "1111111111111111"
+          },
+          {
+            "id": "file:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "file": null,
+            "layer": null,
+            "valueHash": "2222222222222222"
+          },
+          {
+            "id": "file:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+            "file": null,
+            "layer": "server",
+            "valueHash": "3333333333333333"
+          },
+          {
+            "id": "fn:b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+            "file": "file:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "layer": "browser",
+            "valueHash": "4444444444444444"
+          },
+          {
+            "id": "fn:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+            "file": "file:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+            "layer": "server",
+            "valueHash": "5555555555555555"
+          },
+          {
+            "id": "fn:b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+            "file": "file:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+            "layer": "worker_thread",
+            "valueHash": "6666666666666666"
+          },
+          {
+            "id": "out:d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+            "file": null,
+            "layer": "build",
+            "valueHash": "7777777777777777"
+          },
+          {
+            "id": "route:/e1e1e1e1e1e1e1e1/:id",
+            "file": "file:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+            "layer": "server",
+            "valueHash": "8888888888888888"
+          },
+          {
+            "id": "route:/e2e2e2e2e2e2e2e2/**",
+            "file": null,
+            "layer": "worker_process",
+            "valueHash": "9999999999999999"
+          },
+          {
+            "id": "table:r:f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+            "file": null,
+            "layer": "database",
+            "valueHash": "aaaaaaaaaaaaaaaa"
+          }
+        ],
+        "global": [
+          "file:9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+          "file:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        ]
+      },
+      "payloadHex": "5051495201010b246373733a63316331633163316331633163316331633163316331633163316331633163312566696c653a39663966396639663966396639663966396639663966396639663966396639662566696c653a61316131613161316131613161316131613161316131613161316131613161312566696c653a613261326132613261326132613261326132613261326132613261326132613223666e3a623162316231623162316231623162316231623162316231623162316231623123666e3a623262326232623262326232623262326232623262326232623262326232623223666e3a6233623362336233623362336233623362336233623362336233623362336233246f75743a64316431643164316431643164316431643164316431643164316431643164311b726f7574653a2f653165316531653165316531653165312f3a69641a726f7574653a2f653265326532653265326532653265322f2a2a287461626c653a723a66316631663166316631663166316631663166316631663166316631663166310a00000011111111111111110200ff222222222222222203000133333333333333330403004444444444444444050401555555555555555506040266666666666666660700047777777777777777080401888888888888888809000399999999999999990a0005aaaaaaaaaaaaaaaa020100"
+    },
+    {
+      "name": "footprints with several members, retries and an empty test, and no browser",
+      "value": {
+        "kind": "footprints",
+        "browser": null,
+        "universe": {
+          "layers": ["browser", "server"],
+          "measured": ["code", "out", "css", "route"],
+          "loadedFiles": [
+            "file:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "file:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+            "file:a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+          ],
+          "ambient": [
+            "file:a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+            "fn:b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3"
+          ]
+        },
+        "members": [
+          {
+            "run": "0b3e1f52-6a4d-4c1e-9f0a-1d2c3b4a5f60",
+            "attempts": [
+              {
+                "retry": 0,
+                "passed": true
+              }
+            ],
+            "partial": [],
+            "tokens": [
+              "css:c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+              "file:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "fn:b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+              "route:/e1e1e1e1e1e1e1e1/:id"
+            ]
+          },
+          {
+            "run": "5d7c9e10-2b3a-4f6e-8c1d-0a9b8c7d6e5f",
+            "attempts": [
+              {
+                "retry": 0,
+                "passed": false
+              },
+              {
+                "retry": 1,
+                "passed": false
+              },
+              {
+                "retry": 2,
+                "passed": true
+              }
+            ],
+            "partial": ["code", "route"],
+            "tokens": [
+              "file:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+              "fn:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+              "out:d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+            ]
+          },
+          {
+            "run": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+            "attempts": [
+              {
+                "retry": 130,
+                "passed": true
+              }
+            ],
+            "partial": ["code", "out", "css", "route", "table"],
+            "tokens": []
+          }
+        ]
+      },
+      "payloadHex": "50514952010209246373733a63316331633163316331633163316331633163316331633163316331633163312566696c653a61316131613161316131613161316131613161316131613161316131613161312566696c653a61326132613261326132613261326132613261326132613261326132613261322566696c653a613361336133613361336133613361336133613361336133613361336133613323666e3a623162316231623162316231623162316231623162316231623162316231623123666e3a623262326232623262326232623262326232623262326232623262326232623223666e3a6233623362336233623362336233623362336233623362336233623362336233246f75743a64316431643164316431643164316431643164316431643164316431643164311b726f7574653a2f653165316531653165316531653165312f3a696400030f03010000020302032430623365316635322d366134642d346331652d396630612d3164326333623461356636300100010004000002032435643763396531302d326233612d346636652d386331642d3061396238633764366535660300000100020109030202012439613862376336642d356534662d346133622d386332642d316530663961386237633664018201011f00"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "another magic",
+      "payloadHex": "005149520102030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e3101090100000102723102000001010403000000"
+    },
+    {
+      "name": "version 2",
+      "payloadHex": "505149520202030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e3101090100000102723102000001010403000000"
+    },
+    {
+      "name": "an unknown kind",
+      "payloadHex": "505149520103030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e3101090100000102723102000001010403000000"
+    },
+    {
+      "name": "a truncated payload",
+      "payloadHex": "505149520102030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e31010901000001027231020000010104030000"
+    },
+    {
+      "name": "a trailing byte",
+      "payloadHex": "505149520102030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e310109010000010272310200000101040300000000"
+    },
+    {
+      "name": "a dictionary out of order",
+      "payloadHex": "5051495201010204666e3a620666696c653a6101000200010203040506070800"
+    },
+    {
+      "name": "an unreferenced dictionary entry",
+      "payloadHex": "505149520101030666696c653a6104666e3a6203783a6301010100010203040506070800"
+    },
+    {
+      "name": "a non-canonical varint",
+      "payloadHex": "50514952010182000666696c653a6104666e3a6201010100010203040506070800"
+    },
+    {
+      "name": "a passed byte of 2",
+      "payloadHex": "505149520102030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e3101090100000102723102000001020403000000"
+    },
+    {
+      "name": "an index past the dictionary",
+      "payloadHex": "505149520102030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e3101090100000102723102000001010403000001"
+    },
+    {
+      "name": "a browser byte of 2",
+      "payloadHex": "505149520102030666696c653a6104666e3a6208726f7574653a2f7802086368726f6d69756d073133302e302e3101090100000102723102000001010403000000"
+    },
+    {
+      "name": "a global id past the dictionary",
+      "payloadHex": "505149520101020666696c653a6104666e3a620101010001020304050607080102"
+    }
+  ]
+}

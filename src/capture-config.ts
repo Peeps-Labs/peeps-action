@@ -78,7 +78,39 @@ if (Array.isArray(config.projects))
  * Load in the original's module format, then unwrap default exactly once as
  * Playwright does; cross-format imports can silently discard a TS/CJS config.
  */
-export async function prepareCaptureConfig(env: RunnerEnv, options: { defaultRetries?: number; collectFootprints?: boolean } = {}): Promise<{
+/**
+ * Peeps asked to record what the tests ran (PQA-3201 PR 2b): in each worker, load the
+ * evidence worker module on the Playwright the runner loaded, and give Chromium a
+ * debugging port, top-level and in every project that runs Chromium. A project on
+ * another browser keeps its own launch options. Any failure records nothing, and the
+ * run goes on as configured.
+ */
+const recordCoverage = (worker: string, dir: string) => `if (process.env.TEST_WORKER_INDEX !== undefined) {
+  try {
+    const fs = require("node:fs");
+    const fromCli = require("node:module").createRequire(fs.realpathSync(process.argv[1]));
+    const fromPlaywright = require("node:module").createRequire(fromCli.resolve("playwright/package.json"));
+    const coverage = require(${JSON.stringify(worker)});
+    const port = coverage.pickPort();
+    if (port && coverage.installCoverage({ dir: ${JSON.stringify(dir)}, core: fromPlaywright("playwright-core"), test: fromPlaywright("playwright/test").test, port })) {
+      const withPort = (launchOptions) => ({ ...launchOptions, args: [...(launchOptions?.args ?? []), "--remote-debugging-port=" + port] });
+      const isChromium = (use) => (use?.browserName ?? withEvidence.use?.browserName ?? "chromium") === "chromium";
+      const topLaunch = withEvidence.use?.launchOptions;
+      if (isChromium(withEvidence.use)) withEvidence.use = { ...withEvidence.use, launchOptions: withPort(topLaunch) };
+      if (Array.isArray(withEvidence.projects))
+        withEvidence.projects = withEvidence.projects.map((project) => {
+          if (!project || typeof project !== "object") return project;
+          const own = project.use?.launchOptions ?? topLaunch;
+          return { ...project, use: { ...project.use, launchOptions: isChromium(project.use) ? withPort(own) : own } };
+        });
+    }
+  } catch (error) {
+    console.warn("[peeps] not recording browser coverage in this worker: " + String(error));
+  }
+}
+`;
+
+export async function prepareCaptureConfig(env: RunnerEnv, options: { defaultRetries?: number; collectFootprints?: boolean; coverage?: { worker: string; dir: string } } = {}): Promise<{
   configPath: string;
   cleanup: () => Promise<void>;
 }> {
@@ -127,7 +159,7 @@ const withEvidence = {
     video: config.use?.video === undefined ? defaultVideo : config.use.video,
   },
 };
-${options.collectFootprints ? RECORD_TRACES : ""}`;
+${options.collectFootprints ? RECORD_TRACES : ""}${options.coverage ? recordCoverage(options.coverage.worker, options.coverage.dir) : ""}`;
   // Await both raw CJS exports and the unwrapped value, matching Playwright's
   // async loader. Export a default envelope so its own unwrap cannot discard
   // an original config's unrelated `default` property.

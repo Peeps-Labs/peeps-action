@@ -27,7 +27,14 @@ import {
 } from "./narrow";
 import { PeepsHttpError, type PeepsClient } from "./peeps";
 import { workspaceTestSources } from "./footprint/test-sources";
+import type { AttemptFile } from "./evidence/browser/worker";
+import { prepareImpact, type PreparedImpact, type PreparedProject } from "./evidence/job";
+import { coverageConflictIn } from "./evidence/browser/conflict";
+import { membersOf, type AttemptRecord, type ContextMarker } from "./evidence/members";
+import { openScratch } from "./evidence/scratch";
+import { peepsTransport, uploadEvidence } from "./evidence/upload";
 import { computeReach } from "./reach";
+import { localRepository } from "./reach/git";
 import { announceFieldsOf, negotiateTargetedRuns } from "./reach/preflight";
 import type { PlanFile } from "./reporter";
 
@@ -125,17 +132,40 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
     files,
     ...announceFieldsOf(negotiated),
   };
+  // Only when Peeps asked: the head build's fingerprint, whose receipt the announce cites.
+  let impact = negotiated.collect
+    ? await prepareImpact({
+        appDir: env.workingDirectory,
+        sha: env.sha,
+        eventName: env.eventName,
+        leg: process.env.GITHUB_JOB ?? "",
+        collect: negotiated.collect,
+        repository: await localRepository(env.workspace),
+        transport: peepsTransport(env.peepsUrl, () => peeps.token()),
+      })
+    : null;
   let reach = computed;
   let response: BatchResponse;
   try {
-    response = await peeps.post<BatchResponse>("/api/v1/ci/batches", { ...announce, ...(reach ? { reach } : {}) });
+    response = await peeps.post<BatchResponse>("/api/v1/ci/batches", { ...announce, ...(reach ? { reach } : {}), ...(impact ? { impact: { receipts: impact.projects.slice(0, MAX_RECEIPTS).map(({ receipt }) => receipt) } } : {}) });
   } catch (error) {
-    // A reach the server won't take costs that run its narrowing, never the job.
-    if (!reach || !(error instanceof PeepsHttpError) || error.status >= 500 || error.status === 401 || error.status === 403) throw error;
-    console.log(`[peeps] Peeps refused what this pull request reaches (${error.status}), so everything runs`);
+    // A reach or an impact receipt the server won't take costs that run its narrowing and recording, never the job.
+    if ((!reach && !impact) || !(error instanceof PeepsHttpError) || error.status >= 500 || error.status === 401 || error.status === 403) throw error;
+    console.log(`[peeps] Peeps refused what this ${reach ? "pull request reaches" : "job recorded"} (${error.status}), so everything runs and nothing is recorded`);
     reach = undefined;
+    impact = null;
     response = await peeps.post<BatchResponse>("/api/v1/ci/batches", announce);
   }
+  // Each project Peeps took a receipt for: its footprints follow after the run, under its own batch, for its runs.
+  const recorded = impact?.projects
+    .slice(0, MAX_RECEIPTS)
+    .map((project) => ({ project, batch: response.batches.find((b) => b.projectId === project.projectId) }))
+    .filter((p): p is { project: PreparedProject; batch: BatchResponse["batches"][number] } => p.batch !== undefined)
+    .map(({ project, batch }) => ({ ...project, batchId: batch.batchId, runIds: batch.runs.map((run) => run.runId) }));
+  // Fail safe: a suite that may run precise coverage itself resets ours (see `conflict.ts`).
+  const conflict = recorded?.some((p) => p.collect.coverage) ? await coverageConflictIn([rootDirAbs, env.workingDirectory]) : null;
+  if (conflict) console.log(`[peeps] not recording browser coverage: ${conflict}`);
+  const recording = impact && recorded && recorded.length > 0 ? { impact: { fingerprint: impact.fingerprint, projects: recorded, coverage: conflict === null } } : {};
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
   console.log(
@@ -154,14 +184,14 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
     footprints = { origins: response.batches.flatMap((b) => b.footprintOrigins ?? []), hiddenRequests: sources.hiddenRequests, record: sources.reasons.length === 0 };
   }
   if (!answeredNarrowed(response)) {
-    await executeAndReport(env, peeps, { rootDir, runs, batches, footprints, executed: reach && { mode: "full", tests: tests.length } });
+    await executeAndReport(env, peeps, { ...recording, rootDir, runs, batches, footprints, executed: reach && { mode: "full", tests: tests.length } });
     return;
   }
   const listed = listedTestsOf(list, rootDir);
   const reporterRuns = withReporterTitles(runs, listed);
   if (!isNarrowed(response)) {
     console.log("[peeps] not narrowing, running the full suite: Peeps did not narrow every project's batch");
-    await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, ranFullSuite: true, executed: reach && { mode: "full", tests: tests.length } });
+    await executeAndReport(env, peeps, { ...recording, rootDir, runs: reporterRuns, batches, ranFullSuite: true, executed: reach && { mode: "full", tests: tests.length } });
     return;
   }
   // An unmatched test has no run to report to, but it is still attempted.
@@ -174,11 +204,11 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   }
   const grep = await verifiedGrep(env, selected, listed, rootDir);
   if (grep === null) {
-    await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, ranFullSuite: true, executed: reach && { mode: "full", tests: tests.length } });
+    await executeAndReport(env, peeps, { ...recording, rootDir, runs: reporterRuns, batches, ranFullSuite: true, executed: reach && { mode: "full", tests: tests.length } });
     return;
   }
   console.log(`[peeps] narrowed to ${selected.length} test(s) for this pull request`);
-  await executeAndReport(env, peeps, { rootDir, runs: reporterRuns, batches, selection: { files: [], grep }, narrowed: true, executed: reach && { mode: "targeted", tests: selected.length } });
+  await executeAndReport(env, peeps, { ...recording, rootDir, runs: reporterRuns, batches, selection: { files: [], grep }, narrowed: true, executed: reach && { mode: "targeted", tests: selected.length } });
 }
 
 const named = (tests: Array<{ path: string; titlePath: string }>) =>
@@ -255,6 +285,8 @@ export async function executeAndReport(
     footprints?: NonNullable<PlanFile["footprints"]> & { record: boolean };
     /** This job sent a reach: each batch's `complete` says what it ran. */
     executed?: Executed;
+    /** Peeps took this job's fingerprint: record what its tests ran (`evidence/`), per project. */
+    impact?: { fingerprint: PreparedImpact["fingerprint"]; projects: RecordedProject[]; coverage: boolean };
   },
 ): Promise<void> {
   const scratch = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-"));
@@ -263,9 +295,25 @@ export async function executeAndReport(
   const plan: PlanFile = { peepsUrl: env.peepsUrl, rootDir: input.rootDir, runs: input.runs };
   if (input.narrowed) plan.narrowed = true;
   if (input.footprints) plan.footprints = { origins: input.footprints.origins, hiddenRequests: input.footprints.hiddenRequests };
+  const evidence = input.impact ? await openScratch(process.env.RUNNER_TEMP ?? tmpdir()).catch(() => null) : null;
+  if (evidence) plan.evidence = { dir: evidence.dir };
   await writeFile(planFile, JSON.stringify(plan), { mode: 0o600 });
 
-  const exitCode = await runPlaywright(env, planFile, reportDir, input.selection, input.extraEnv, input.narrowed, input.footprints?.record === true);
+  let exitCode: number;
+  try {
+    const coverage = evidence && input.impact?.coverage && input.impact.projects.some((p) => p.collect.coverage) ? { worker: path.join(__dirname, "evidence-worker.js"), dir: evidence.dir } : undefined;
+    exitCode = await runPlaywright(env, planFile, reportDir, input.selection, input.extraEnv, input.narrowed, input.footprints?.record === true, coverage);
+    if (evidence && input.impact) {
+      // Evidence never fails a run: whatever goes wrong reading or sending it, Playwright's
+      // own exit status stands, and the report and the batches still go up.
+      await recordEvidence(env, peeps, input.impact, evidence, { coverage: coverage !== undefined, har: input.footprints?.record === true }).catch((error: unknown) => {
+        console.log(`[peeps] not recording what this job's tests ran: ${String(error).slice(0, 300)}`);
+      });
+    }
+  } finally {
+    // Best effort: a scratch directory that can't be removed fails nothing.
+    await evidence?.dispose().catch((error: unknown) => console.log(`[peeps] could not remove the evidence scratch directory: ${String(error).slice(0, 300)}`));
+  }
 
   let reportUploaded = false;
   for (const b of input.batches) {
@@ -290,6 +338,62 @@ export async function executeAndReport(
   if (exitCode !== 0) process.exitCode = exitCode;
 }
 
+/** A project Peeps took a fingerprint for, with the batch and runs the announce gave it. */
+type RecordedProject = PreparedProject & { batchId: string; runIds: string[] };
+
+/** One receipt per project, and at most this many per announce (contract §3). */
+const MAX_RECEIPTS = 16;
+
+/**
+ * After the tests, before the batches complete: each project's footprints up under its
+ * batch, its own runs only, keyed with its own key (contract §4). The upload publishes.
+ * Any failure records nothing for that project; its staging snapshot is swept by age.
+ */
+async function recordEvidence(
+  env: RunnerEnv,
+  peeps: PeepsClient,
+  impact: { fingerprint: PreparedImpact["fingerprint"]; projects: RecordedProject[] },
+  scratch: { read(prefix: string): unknown[] },
+  collected: { coverage: boolean; har: boolean },
+): Promise<void> {
+  const records = scratch.read("att-") as AttemptRecord[];
+  const coverage = scratch.read("cov-") as AttemptFile[];
+  const contexts = scratch.read("ctx-") as ContextMarker[];
+  const taints = scratch.read("taint-") as Array<{ testId: string; retry: number }>;
+  const transport = peepsTransport(env.peepsUrl, () => peeps.token());
+  for (const project of impact.projects) {
+    const runs = new Set(project.runIds);
+    const own = records.filter((record) => runs.has(record.runId));
+    const tests = new Set(own.map((record) => record.testId));
+    let job: ReturnType<typeof membersOf>;
+    try {
+      job = membersOf(
+        own,
+        coverage.filter((file) => tests.has(file.testId)),
+        impact.fingerprint,
+        { coverage: collected.coverage && project.collect.coverage, har: collected.har },
+        contexts,
+        taints,
+      );
+    } catch (error) {
+      // Evidence never fails a job: this project records nothing, and its batch still completes.
+      console.log(`[peeps] not recording what this job's tests ran: its evidence couldn't be read (${String(error).slice(0, 300)})`);
+      continue;
+    }
+    if (job.measured.length === 0) continue;
+    const ok = await uploadEvidence(transport, {
+      batchId: project.batchId,
+      key: project.collect.key,
+      layers: job.layers,
+      measured: job.measured,
+      loadedFiles: job.loadedFiles,
+      browser: job.browser,
+      members: job.members,
+    });
+    if (ok) console.log(`[peeps] recorded what ${job.members.length} test(s) ran`);
+  }
+}
+
 async function runPlaywright(
   env: RunnerEnv,
   planFile: string,
@@ -298,6 +402,7 @@ async function runPlaywright(
   extraEnv: Record<string, string> = {},
   narrowed = false,
   collectFootprints = false,
+  coverage?: { worker: string; dir: string },
 ): Promise<number> {
   const reporterPath = path.join(__dirname, "reporter.js");
   const args = ["playwright", "test", `--reporter=${reporterPath},list,html`];
@@ -306,6 +411,7 @@ async function runPlaywright(
     capture = await prepareCaptureConfig(env, {
       ...(narrowed ? { defaultRetries: NARROWED_DEFAULT_RETRIES } : {}),
       ...(collectFootprints ? { collectFootprints } : {}),
+      ...(coverage ? { coverage } : {}),
     });
   } catch (error) {
     console.warn(`[peeps] screenshot/video defaults could not be applied; using the original config: ${String(error)}`);

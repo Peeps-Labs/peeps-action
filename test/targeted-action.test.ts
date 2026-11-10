@@ -13,8 +13,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { readRunnerEnv } from "../src/env";
+import { gunzipSync } from "node:zlib";
+import { decodePayload } from "../src/evidence/codec";
+import { parseProjectKey, pathToken, tokenOf } from "../src/evidence/hash";
 import { readZip } from "../src/footprint/trace-file";
 import { computeReach } from "../src/reach";
+import { BASE as NEXT_BUILD, nextBuild } from "./support/next-build";
 
 const action = path.resolve(__dirname, "../dist/index.js");
 const modules = path.resolve(__dirname, "../node_modules");
@@ -72,10 +76,16 @@ async function suite(t: TestContext, config: string, spec = SPEC) {
  * `on` and `off`: a server that speaks protocol 2, with or without the switch. `legacy`:
  * one from before it, which answers `scan` alone. `v3`: a later protocol, with the switch.
  */
-type Preflight = "on" | "off" | "legacy" | "v3" | "missing" | "error" | "hang" | "garbage";
+type Preflight = "on" | "off" | "legacy" | "v3" | "missing" | "error" | "hang" | "garbage" | "collect";
+/** The project key a `collect` preflight hands over: masked, and never printed otherwise. */
+const COLLECT_KEY = "c03dd504d33c33f55a570a1a758d442e1cda0793b1a480482f0d67f9437320a6";
 
-async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, leaveOut: (test: Planned) => boolean = () => false, preflight: Preflight = "off", refuseReach = 0) {
+async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, leaveOut: (test: Planned) => boolean = () => false, preflight: Preflight = "off", refuseReach = 0, refuseImpact = 0) {
   const preflights: string[] = [];
+  const fingerprints: string[] = [];
+  /** Evidence parts and finalize, in order, with what else the job said to Peeps between them. */
+  const evidence: Array<{ path: string; bytes: Buffer }> = [];
+  const order: string[] = [];
   const announces: Array<Record<string, unknown>> = [];
   const completes: Array<Record<string, unknown>> = [];
   const artifacts = new Map<string, Buffer>();
@@ -100,12 +110,16 @@ async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, le
         res.end("<html>");
         return;
       }
-      response = preflight === "legacy" ? { scan: true } : preflight === "v3" ? { scan: true, protocolVersion: 3 } : { scan: preflight === "on", protocolVersion: 2, projects: [{ projectId: "project", executionMode: "shadow" }] };
+      response = preflight === "legacy" ? { scan: true } : preflight === "v3" ? { scan: true, protocolVersion: 3 } : { scan: preflight === "on" || preflight === "collect", protocolVersion: 2, projects: [{ projectId: "project", executionMode: "shadow" }] };
+      if (preflight === "collect") response = { ...(response as object), projects: [{ projectId: "project", executionMode: "shadow", collect: { coverage: true, fingerprint: true, key: COLLECT_KEY, keyVersion: "V1" } }] };
+    } else if (url.pathname === "/api/v1/ci/impact/fingerprint") {
+      fingerprints.push(url.search);
+      response = { uploadId: "upload-1" };
     } else if (url.pathname === "/api/v1/ci/batches") {
       const input = JSON.parse(bytes.toString()) as { tests: Planned[] };
       announces.push(input as unknown as Record<string, unknown>);
-      if (refuseReach && (input as { reach?: unknown }).reach) {
-        res.writeHead(refuseReach);
+      if ((refuseReach && (input as { reach?: unknown }).reach) || (refuseImpact && (input as { impact?: unknown }).impact)) {
+        res.writeHead(refuseReach || refuseImpact);
         res.end();
         return;
       }
@@ -115,7 +129,11 @@ async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, le
         return { ...v, runId: `run-${i}`, credential: { exp: 99, sig: "signature" } };
       });
       response = { batches: [{ projectId: "project", batchId: "batch", batchNumber: 1, runs, unmatched: input.tests.filter(leaveOut), ...batchExtra }], failures: [] };
+    } else if (url.pathname.includes("/evidence")) {
+      order.push("evidence");
+      evidence.push({ path: `${url.pathname}${url.search}`, bytes });
     } else if (url.pathname.endsWith("/complete")) {
+      order.push("complete");
       completes.push(JSON.parse(bytes.toString()) as Record<string, unknown>);
     } else if (url.pathname.endsWith("/artifacts")) {
       artifacts.set(url.searchParams.get("path") ?? "", bytes);
@@ -137,7 +155,7 @@ async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, le
     server.closeAllConnections();
     server.close(() => resolve());
   }));
-  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, announces, completes, artifacts, sent, preflights };
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, announces, completes, artifacts, sent, preflights, fingerprints, evidence, order };
 }
 
 async function runAction(root: string, url: string, extra: NodeJS.ProcessEnv = {}) {
@@ -479,6 +497,203 @@ test("a server that refuses the reach still gets the announce, and the job runs"
   assert.equal(result.code, 0, result.output);
   assert.equal(peeps.announces.at(-1)!.reach, undefined, "sent again without it");
   assert.deepEqual(peeps.completes, [{ reportUploaded: true }], "and says nothing of a reach it didn't send");
+});
+
+test("Peeps asks to record: the build's fingerprint goes up first, and a refused receipt still announces and runs", async (t) => {
+  const pr = await mergedPullRequest(t);
+  for (const [file, text] of nextBuild(NEXT_BUILD)) {
+    await mkdir(path.dirname(path.join(pr.root, ".next", file)), { recursive: true });
+    await writeFile(path.join(pr.root, ".next", file), text);
+  }
+  const peeps = await fakePeeps(t, {}, undefined, "collect", 0, 422);
+  const result = await runAction(pr.root, peeps.url, { GITHUB_SHA: pr.merge, GITHUB_REF: "refs/pull/1/merge", GITHUB_EVENT_NAME: "pull_request" });
+  assert.equal(result.code, 0, result.output);
+  assert.equal(peeps.fingerprints.length, 1, "uploaded before the announce");
+  assert.equal(new URLSearchParams(peeps.fingerprints[0]).get("base"), pr.base);
+  assert.deepEqual((peeps.announces[0]!.impact as { receipts: Array<{ uploadId: string; digest: string }> }).receipts.map((r) => r.uploadId), ["upload-1"]);
+  assert.equal(peeps.announces.at(-1)!.impact, undefined, "sent again without it");
+  assert.equal(peeps.announces.at(-1)!.reach, undefined);
+  assert.deepEqual(peeps.evidence, [], "nothing follows a receipt Peeps refused");
+  assert.deepEqual(peeps.completes, [{ reportUploaded: true }]);
+  // The key is printed only to mask it, and reaches no announce.
+  assert.deepEqual(result.output.split("\n").filter((line) => line.includes(COLLECT_KEY)), [`::add-mask::${COLLECT_KEY}`]);
+  assert.ok(peeps.announces.every((announce) => !JSON.stringify(announce).includes(COLLECT_KEY)));
+});
+
+/** The fixture Next app's client chunk, served as a build serves it, and a page that runs it. */
+async function nextApp(t: TestContext): Promise<string> {
+  const build = nextBuild(NEXT_BUILD);
+  const page = `<!doctype html><html><head><link rel="stylesheet" href="/_next/static/chunks/${NEXT_BUILD.hash}c3.css"></head><body><div class="Badge-module__badge">b</div>
+<script src="/_next/static/chunks/${NEXT_BUILD.hash}c1.js"></script>
+<script>
+  const exported = {};
+  const context = { i: () => ({ badge: "b", ok: "o" }), s: (names) => Object.assign(exported, names), v: () => {} };
+  for (const factories of globalThis.TURBOPACK) for (const factory of Object.values(factories[1])) factory(context);
+  exported.LoginForm()({ token: "t" });
+</script></body></html>`;
+  const server = createServer((req, res) => {
+    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    const body = pathname === "/login" ? page : build.get(pathname.replace(/^\/_next\//, ""));
+    if (body === undefined) return void res.writeHead(404).end();
+    res.writeHead(200, { "Content-Type": pathname.endsWith(".css") ? "text/css" : pathname.endsWith(".js") ? "text/javascript" : "text/html" }).end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+/** Every regular file under a directory, symlinks not followed. */
+async function filesUnder(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...(await filesUnder(full)));
+    else if (entry.isFile()) out.push(full);
+  }
+  return out;
+}
+
+test("a push recorded: coverage and paths per test, uploaded under the batch before it completes; the key goes nowhere", async (t) => {
+  const app = await nextApp(t);
+  const root = await suite(t, COMMON(""), `import { test, expect } from "@playwright/test";
+import { writeFileSync } from "node:fs";
+test("logs in", async ({ page }) => {
+  // The probe: everything a test process can see of its environment.
+  writeFileSync(${JSON.stringify("ENV_DUMP")}, JSON.stringify(process.env));
+  await page.goto("/login");
+  await expect(page.locator(".Badge-module__badge")).toHaveText("b");
+});
+`);
+  await writeFile(path.join(root, ".gitignore"), "node_modules\n.next\nsuite/results\nsuite/playwright-report\nreport*\nenv-dump.json\n");
+  for (const [file, text] of nextBuild(NEXT_BUILD)) {
+    await mkdir(path.dirname(path.join(root, ".next", file)), { recursive: true });
+    await writeFile(path.join(root, ".next", file), text);
+  }
+  const specFile = path.join(root, "suite/specs/cart.spec.ts");
+  await writeFile(specFile, (await readFile(specFile, "utf8")).replace("ENV_DUMP", path.join(root, "env-dump.json")));
+  git(root, "init", "-q", "-b", "main");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "first");
+  const sha = git(root, "rev-parse", "HEAD");
+  const peeps = await fakePeeps(t, { collectFootprints: true }, undefined, "collect");
+  const result = await runAction(root, peeps.url, { GITHUB_SHA: sha, GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "push", BASE_URL: app });
+  assert.equal(result.code, 0, result.output);
+
+  const [receipt] = (peeps.announces[0]!.impact as { receipts: Array<{ uploadId: string; digest: string }> }).receipts;
+  assert.equal(receipt!.uploadId, "upload-1");
+  assert.match(receipt!.digest, /^[0-9a-f]{64}$/);
+  assert.equal(new URLSearchParams(peeps.fingerprints[0]).get("projectId"), "project");
+  assert.equal(new URLSearchParams(peeps.fingerprints[0]).has("base"), false, "a push sends no base");
+  // One request, which publishes, before the batch completes (contract §4).
+  assert.deepEqual(peeps.order, ["evidence", "complete"], result.output);
+  assert.equal(peeps.evidence[0]!.path, "/api/v1/ci/batches/batch/evidence?protocolVersion=2");
+  const key = parseProjectKey(COLLECT_KEY)!;
+  const blob = decodePayload(gunzipSync(peeps.evidence[0]!.bytes));
+  assert.equal(blob.kind, "footprints");
+  if (blob.kind !== "footprints") return;
+  assert.deepEqual([blob.universe.layers, blob.universe.measured], [["browser"], ["code", "css", "route"]]);
+  assert.equal(blob.browser?.name, "chromium");
+  assert.match(blob.browser?.version ?? "", /^\d+\.\d+\.\d+\.\d+$/);
+  assert.ok(blob.universe.loadedFiles.includes(tokenOf(key, "file:src/app/login/LoginForm.tsx")));
+  const [member] = blob.members;
+  assert.deepEqual([blob.members.length, member!.run, member!.attempts, member!.partial], [1, "run-0", [{ retry: 0, passed: true }], []], result.output);
+  for (const plain of ["fn:browser:src/app/login/LoginForm.tsx:onSuccess", "file:src/app/login/LoginForm.tsx", "css:src/components/common/Badge.module.css"]) {
+    assert.ok(member!.tokens.includes(tokenOf(key, plain)), plain);
+  }
+  assert.ok(member!.tokens.includes(pathToken(key, "/login")));
+
+  // V9: in no line but its mask, no child's environment, no file the job left in RUNNER_TEMP.
+  const spellings = [COLLECT_KEY, key.toString("base64url"), key.toString("base64")];
+  assert.deepEqual(result.output.split("\n").filter((line) => spellings.some((s) => line.includes(s))), [`::add-mask::${COLLECT_KEY}`, `::add-mask::${key.toString("base64url")}`]);
+  const dump = await readFile(path.join(root, "env-dump.json"), "utf8");
+  assert.ok(spellings.every((s) => !dump.includes(s)), "a test process's environment");
+  for (const file of await filesUnder(root)) {
+    const bytes = await readFile(file);
+    assert.ok(!bytes.includes(key) && spellings.every((s) => !bytes.includes(s)), file);
+  }
+  // The scratch directory is gone.
+  assert.deepEqual((await readdir(root)).filter((name) => name.startsWith("peeps-evidence-")), []);
+});
+
+test("a suite that runs precise coverage itself is not collected: routes only, and it says why", async (t) => {
+  const app = await nextApp(t);
+  const root = await suite(t, COMMON(""), `import { test, expect } from "@playwright/test";
+test("logs in", async ({ page }) => {
+  await page.coverage.startJSCoverage();
+  await page.goto("/login");
+  await expect(page.locator(".Badge-module__badge")).toHaveText("b");
+});
+`);
+  await writeFile(path.join(root, ".gitignore"), "node_modules\n.next\nsuite/results\nsuite/playwright-report\nreport*\n");
+  for (const [file, text] of nextBuild(NEXT_BUILD)) {
+    await mkdir(path.dirname(path.join(root, ".next", file)), { recursive: true });
+    await writeFile(path.join(root, ".next", file), text);
+  }
+  git(root, "init", "-q", "-b", "main");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "first");
+  const peeps = await fakePeeps(t, { collectFootprints: true }, undefined, "collect");
+  const result = await runAction(root, peeps.url, { GITHUB_SHA: git(root, "rev-parse", "HEAD"), GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "push", BASE_URL: app });
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /not recording browser coverage: .*cart\.spec\.ts runs precise coverage itself/);
+  const blob = decodePayload(gunzipSync(peeps.evidence[0]!.bytes));
+  assert.ok(blob.kind === "footprints" && JSON.stringify(blob.universe.measured) === JSON.stringify(["route"]), JSON.stringify(blob));
+});
+
+test("evidence that can't be read is dropped, and the batch still completes", async (t) => {
+  const app = await nextApp(t);
+  const root = await suite(t, COMMON(""), `import { test, expect } from "@playwright/test";
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+test("logs in", async ({ page }) => {
+  // A record the action can't read, planted where the worker writes.
+  const { evidence } = JSON.parse(readFileSync(process.env.PEEPS_PLAN_FILE, "utf8"));
+  writeFileSync(path.join(evidence.dir, "cov-0000000000000000-0-planted.json"), JSON.stringify({ testId: test.info().testId, retry: 0, contextId: "planted", coverage: null }));
+  await page.goto("/login");
+  await expect(page.locator(".Badge-module__badge")).toHaveText("b");
+});
+`);
+  await writeFile(path.join(root, ".gitignore"), "node_modules\n.next\nsuite/results\nsuite/playwright-report\nreport*\n");
+  for (const [file, text] of nextBuild(NEXT_BUILD)) {
+    await mkdir(path.dirname(path.join(root, ".next", file)), { recursive: true });
+    await writeFile(path.join(root, ".next", file), text);
+  }
+  git(root, "init", "-q", "-b", "main");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "first");
+  const peeps = await fakePeeps(t, { collectFootprints: true }, undefined, "collect");
+  const result = await runAction(root, peeps.url, { GITHUB_SHA: git(root, "rev-parse", "HEAD"), GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "push", BASE_URL: app });
+  assert.equal(result.code, 0, result.output);
+  assert.deepEqual(peeps.evidence, []);
+  assert.deepEqual(peeps.completes, [{ reportUploaded: true }]);
+  assert.match(result.output, /not recording what this job's tests ran: its evidence couldn't be read/);
+});
+
+test("a scratch directory gone by the end drops the evidence, and a passing run still passes and completes", async (t) => {
+  const app = await nextApp(t);
+  const root = await suite(t, COMMON(""), `import { test, expect } from "@playwright/test";
+import { readFileSync, rmSync } from "node:fs";
+test("logs in", async ({ page }) => {
+  await page.goto("/login");
+  await expect(page.locator(".Badge-module__badge")).toHaveText("b");
+  // Gone before the action reads it: the runner's temp cleaned, a disk filled.
+  rmSync(JSON.parse(readFileSync(process.env.PEEPS_PLAN_FILE, "utf8")).evidence.dir, { recursive: true, force: true });
+});
+`);
+  await writeFile(path.join(root, ".gitignore"), "node_modules\n.next\nsuite/results\nsuite/playwright-report\nreport*\n");
+  for (const [file, text] of nextBuild(NEXT_BUILD)) {
+    await mkdir(path.dirname(path.join(root, ".next", file)), { recursive: true });
+    await writeFile(path.join(root, ".next", file), text);
+  }
+  git(root, "init", "-q", "-b", "main");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "first");
+  const peeps = await fakePeeps(t, { collectFootprints: true }, undefined, "collect");
+  const result = await runAction(root, peeps.url, { GITHUB_SHA: git(root, "rev-parse", "HEAD"), GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "push", BASE_URL: app });
+  assert.equal(result.code, 0, result.output);
+  assert.deepEqual(peeps.evidence, []);
+  assert.deepEqual(peeps.completes, [{ reportUploaded: true }]);
+  assert.match(result.output, /not recording what this job's tests ran/);
 });
 
 test("git runs under the budget: past it, everything runs", async (t) => {

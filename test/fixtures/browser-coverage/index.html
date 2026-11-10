@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>spike-3 index</title>
+<link rel="stylesheet" href="/styles.css">
+<script>
+function inlineFn() { document.documentElement.dataset.inline = "1"; }
+inlineFn();
+</script>
+<script src="/app.js"></script>
+</head>
+<body>
+<div class="used-rule">index</div>
+<a id="to-page2" href="/page2.html">page 2</a>
+<a id="to-page2-xsite" href="#">page 2 cross-site</a>
+<a id="popup" href="/popup.html" target="_blank">popup</a>
+<a id="popup-xsite" href="#" target="_blank">popup cross-site</a>
+<a id="popup-close" href="/popup-close.html" target="_blank">popup that closes</a>
+<button id="nav-js" onclick="navSoonFn()">navigate from script</button>
+<button id="route" onclick="window.__done = routeFn('/route-b')">route</button>
+<button id="iframe" onclick="window.__done = loadIframe('/frame.html')">iframe</button>
+<button id="iframe-xsite" onclick="window.__done = loadIframe(otherOrigin() + '/frame-x.html')">iframe cross-site</button>
+<button id="worker" onclick="window.__done = startWorker('/worker.js', false)">worker</button>
+<button id="worker-term" onclick="window.__done = startWorker('/worker-term.js', true)">worker terminated</button>
+<button id="sw" onclick="window.__done = startSW()">service worker</button>
+<button id="delayed" onclick="window.__done = loadDelayed()">delayed</button>
+<button id="inject" onclick="window.__done = injectStyles()">inject styles</button>
+<div id="out"></div>
+</body>
+</html>

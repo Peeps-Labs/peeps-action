@@ -1,0 +1,400 @@
+{
+  "format": "PQA-3201 impact id vectors (peeps src/server/repo-backed/pr-impact/infrastructure/impact-key.ts, domain/route-hash.ts)",
+  "notes": [
+    "projectKey = HKDF-SHA256(ikm = root, salt = empty, info, 32 bytes). info = each field as a 2-byte big-endian length then UTF-8: 'pqa-3201 impact ids', organizationId, projectId. A later 'generation' field is appended only when it is non-zero, so these keys never change.",
+    "token = '<kind>:' + hex(HMAC-SHA256(projectKey, namespace + NUL + value))[0:32], where namespace is the kind, except 'table' for both table:r and table:w (one table's two directions share an id). A file's value is its repo-relative, /-separated path with no leading ./ or /, case kept.",
+    "route literal = hex(HMAC-SHA256(projectKey, 'route-segment' + NUL + literal))[0:16], the literal decoded and lowercased. Route encoding per domain/route-hash.ts: split on /, strip ;..., drop empty, decode (undecodable -> :id), classify markers per side before lowercasing, hash literals.",
+    "meetRows: surfaceMeetsPath's table; plaintext and encoded (surface as matcher, path as path) must give 'meets'.",
+    "nextManifestRows / nextSourceRows: the action's nextEntry gives 'normalised' (null = file entity only); encoding it as a matcher gives encodedMatcher. 'normalised' is written in Next's bracket form; any spelling that encodes to encodedMatcher is equivalent."
+  ],
+  "rootKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "keyVersion": "V1",
+  "project": {
+    "organizationId": "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
+    "projectId": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+  },
+  "infoHex": "00137071612d3332303120696d7061637420696473002436663163326433652d346135622d346336642d386537662d306131623263336434653566002431613262336334642d356536662d346137622d386339642d306531663261336234633564",
+  "projectKeyHex": "c03dd504d33c33f55a570a1a758d442e1cda0793b1a480482f0d67f9437320a6",
+  "tokens": [
+    {
+      "kind": "file",
+      "value": "src/app/page.tsx",
+      "token": "file:8b359d1fc968e38d9d1c43c34da7b929"
+    },
+    {
+      "kind": "file",
+      "value": "apps/web/app/(shop)/cart/page.tsx",
+      "token": "file:8279d3e24cdc57a9bbe9ef3a380abe03"
+    },
+    {
+      "kind": "file",
+      "value": "apps/web/src/components/Badge.module.css",
+      "token": "file:e7faa81a539a8270422839f2a6c2ee7a"
+    },
+    {
+      "kind": "file",
+      "value": "src/lib/café.ts",
+      "token": "file:ad50576727ac5da7ac73a0325168bdd6"
+    },
+    {
+      "kind": "fn",
+      "value": "browser:src/components/LoginForm.tsx:onSuccess",
+      "token": "fn:56bc3f82e180c6a1255f155077812594"
+    },
+    {
+      "kind": "fn",
+      "value": "server:apps/web/app/(shop)/cart/page.tsx:default",
+      "token": "fn:bb934f1098410a39e9bf8ec55382f4b3"
+    },
+    {
+      "kind": "css",
+      "value": "apps/web/src/components/Badge.module.css",
+      "token": "css:0a1438cc038618c90beaa8220fcf1eb3"
+    },
+    {
+      "kind": "out",
+      "value": "server/app/sso.html",
+      "token": "out:caaeec4f2d83d82b523f2f80db8f4260"
+    },
+    {
+      "kind": "table:r",
+      "value": "orders",
+      "token": "table:r:7c204b4cba4bbb43237bd4b347781c63"
+    },
+    {
+      "kind": "table:w",
+      "value": "orders",
+      "token": "table:w:7c204b4cba4bbb43237bd4b347781c63"
+    }
+  ],
+  "routes": [
+    {
+      "side": "matcher",
+      "route": "/",
+      "encoded": "/"
+    },
+    {
+      "side": "matcher",
+      "route": "/cart",
+      "encoded": "/509e4ffc4c07715c"
+    },
+    {
+      "side": "matcher",
+      "route": "/api/health",
+      "encoded": "/14ea0213fafa2107/f6a1d978c818510c"
+    },
+    {
+      "side": "matcher",
+      "route": "/Orders/:orderId/*",
+      "encoded": "/865c3893b47688ae/:id/*"
+    },
+    {
+      "side": "matcher",
+      "route": "/shop/[id]/[...slug]",
+      "encoded": "/a82db7ea3f9d0120/:id/*"
+    },
+    {
+      "side": "matcher",
+      "route": "/docs/[[...slug]]",
+      "encoded": "/4c9346328ba36d25/**"
+    },
+    {
+      "side": "matcher",
+      "route": "/settings/**",
+      "encoded": "/067c836708f6eb52/**"
+    },
+    {
+      "side": "matcher",
+      "route": "/caf%C3%A9;v=1/",
+      "encoded": "/aea118df0d55dc64"
+    },
+    {
+      "side": "matcher",
+      "route": "/%E0%A4%A",
+      "encoded": "/:id"
+    },
+    {
+      "side": "path",
+      "route": "/cart",
+      "encoded": "/509e4ffc4c07715c"
+    },
+    {
+      "side": "path",
+      "route": "/CART",
+      "encoded": "/509e4ffc4c07715c"
+    },
+    {
+      "side": "path",
+      "route": "/orders/:id",
+      "encoded": "/865c3893b47688ae/:id"
+    },
+    {
+      "side": "path",
+      "route": "/orders/:ID",
+      "encoded": "/865c3893b47688ae/fe37831dd3491801"
+    },
+    {
+      "side": "path",
+      "route": "/orders/7",
+      "encoded": "/865c3893b47688ae/da518f2662ca10de"
+    },
+    {
+      "side": "path",
+      "route": "//café/",
+      "encoded": "/aea118df0d55dc64"
+    },
+    {
+      "side": "path",
+      "route": "/cart;jsessionid=abc/items",
+      "encoded": "/509e4ffc4c07715c/c155ad8bfc0e8802"
+    },
+    {
+      "side": "path",
+      "route": "/[id]",
+      "encoded": "/d762171b8167ce2b"
+    },
+    {
+      "side": "path",
+      "route": "/%ZZ",
+      "encoded": "/:id"
+    }
+  ],
+  "meetRows": [
+    {
+      "surface": "/:orgSlug/test-cases",
+      "path": "/peepsai/test-cases",
+      "meets": true
+    },
+    {
+      "surface": "/:orgSlug",
+      "path": "/acme",
+      "meets": true
+    },
+    {
+      "surface": "/settings/**",
+      "path": "/settings/billing",
+      "meets": true
+    },
+    {
+      "surface": "/settings/**",
+      "path": "/settings",
+      "meets": true
+    },
+    {
+      "surface": "/docs/*",
+      "path": "/docs/a/b",
+      "meets": true
+    },
+    {
+      "surface": "/docs/*",
+      "path": "/docs",
+      "meets": false
+    },
+    {
+      "surface": "/cart",
+      "path": "/cart/items",
+      "meets": false
+    },
+    {
+      "surface": "/cart/items",
+      "path": "/cart",
+      "meets": false
+    },
+    {
+      "surface": "/cart",
+      "path": "/CART",
+      "meets": true
+    },
+    {
+      "surface": "/orders/:id",
+      "path": "/orders/:id",
+      "meets": true
+    },
+    {
+      "surface": "/invite/accept",
+      "path": "/invite/:id",
+      "meets": true
+    },
+    {
+      "surface": "/api/trpc/runs.list",
+      "path": "/api/trpc/runs.list",
+      "meets": true
+    },
+    {
+      "surface": "/api/trpc/runs.list",
+      "path": "/api/trpc/runs.get",
+      "meets": false
+    },
+    {
+      "surface": "/cart/",
+      "path": "/cart",
+      "meets": true
+    },
+    {
+      "surface": "/café",
+      "path": "/caf%C3%A9",
+      "meets": true
+    },
+    {
+      "surface": "/my page",
+      "path": "/my%20page",
+      "meets": true
+    },
+    {
+      "surface": "/caf%C3%A9",
+      "path": "/café",
+      "meets": true
+    },
+    {
+      "surface": "/my%20page",
+      "path": "/my page",
+      "meets": true
+    },
+    {
+      "surface": "/caf%C3%A9",
+      "path": "/CAF%C3%89",
+      "meets": true
+    },
+    {
+      "surface": "/orders/:id",
+      "path": "/orders/a%20b",
+      "meets": true
+    },
+    {
+      "surface": "/my%20page",
+      "path": "/other%20page",
+      "meets": false
+    },
+    {
+      "surface": "/cart",
+      "path": "/cart;jsessionid=abc",
+      "meets": true
+    },
+    {
+      "surface": "/cart;v=1",
+      "path": "/cart",
+      "meets": true
+    },
+    {
+      "surface": "/cart/items",
+      "path": "/cart;a=1/items;b=2",
+      "meets": true
+    },
+    {
+      "surface": "/cart",
+      "path": "/cart/;jsessionid=abc",
+      "meets": true
+    },
+    {
+      "surface": "/cart",
+      "path": "/other;jsessionid=abc",
+      "meets": false
+    },
+    {
+      "surface": "/cart",
+      "path": "/%ZZ",
+      "meets": true
+    },
+    {
+      "surface": "/%ZZ",
+      "path": "/cart",
+      "meets": true
+    },
+    {
+      "surface": "/cart/items",
+      "path": "/cart/%E0%A4%A",
+      "meets": true
+    },
+    {
+      "surface": "/cart/items",
+      "path": "/%ZZ/other",
+      "meets": false
+    },
+    {
+      "surface": "/orders/7",
+      "path": "/orders/:ID",
+      "meets": false
+    }
+  ],
+  "nextManifestRows": [
+    {
+      "manifestKey": "/(shop)/cart/page",
+      "manifestValue": "app/(shop)/cart/page.js",
+      "roots": [""],
+      "normalised": "/cart",
+      "encodedMatcher": "/509e4ffc4c07715c"
+    },
+    {
+      "manifestKey": "/api/health/route",
+      "manifestValue": "app/api/health/route.js",
+      "roots": [""],
+      "normalised": "/api/health",
+      "encodedMatcher": "/14ea0213fafa2107/f6a1d978c818510c"
+    },
+    {
+      "manifestKey": "/@modal/login/page",
+      "manifestValue": "app/@modal/login/page.js",
+      "roots": [""],
+      "normalised": "/login",
+      "encodedMatcher": "/819e5dcb2a06d549"
+    },
+    {
+      "manifestKey": "/(.)photo/[id]/page",
+      "manifestValue": "app/(.)photo/[id]/page.js",
+      "roots": [""],
+      "normalised": null,
+      "encodedMatcher": null
+    },
+    {
+      "manifestKey": "/_private/page",
+      "manifestValue": "app/_private/page.js",
+      "roots": [""],
+      "normalised": null,
+      "encodedMatcher": null
+    },
+    {
+      "manifestKey": "/orders/[id]/page",
+      "manifestValue": "app/orders/[id]/page.js",
+      "roots": [""],
+      "normalised": "/orders/[id]",
+      "encodedMatcher": "/865c3893b47688ae/:id"
+    },
+    {
+      "manifestKey": "/blog/[...slug]/page",
+      "manifestValue": "app/blog/[...slug]/page.js",
+      "roots": [""],
+      "normalised": "/blog/[...slug]",
+      "encodedMatcher": "/2fa75461c33b912b/*"
+    },
+    {
+      "manifestKey": "/docs/[[...slug]]/page",
+      "manifestValue": "app/docs/[[...slug]]/page.js",
+      "roots": [""],
+      "normalised": "/docs/[[...slug]]",
+      "encodedMatcher": "/4c9346328ba36d25/**"
+    }
+  ],
+  "nextSourceRows": [
+    {
+      "file": "apps/web/app/(shop)/cart/page.tsx",
+      "roots": ["apps/web"],
+      "normalised": "/cart",
+      "encodedMatcher": "/509e4ffc4c07715c",
+      "fileToken": "file:8279d3e24cdc57a9bbe9ef3a380abe03"
+    },
+    {
+      "file": "apps/web/app/api/health/route.ts",
+      "roots": ["apps/web"],
+      "normalised": "/api/health",
+      "encodedMatcher": "/14ea0213fafa2107/f6a1d978c818510c",
+      "fileToken": "file:4c538a4730e90a65815e4e140a04c470"
+    },
+    {
+      "file": "app/(shop)/cart/page.tsx",
+      "roots": [""],
+      "normalised": "/cart",
+      "encodedMatcher": "/509e4ffc4c07715c",
+      "fileToken": "file:2392d3680584ed274b2a62eea2f25f17"
+    }
+  ]
+}
