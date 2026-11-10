@@ -32,6 +32,7 @@ var appium_reporter_exports = {};
 __export(appium_reporter_exports, {
   DATA_EXTENSIONS: () => DATA_EXTENSIONS,
   MAX_ATTACHMENT_BYTES: () => MAX_ATTACHMENT_BYTES,
+  MAX_VIDEO_BYTES: () => MAX_VIDEO_BYTES,
   PeepsAppiumReporter: () => PeepsAppiumReporter,
   TITLE_PATH_SEPARATOR: () => TITLE_PATH_SEPARATOR,
   captureEvidence: () => captureEvidence,
@@ -43,11 +44,17 @@ __export(appium_reporter_exports, {
   pageSourceExtension: () => pageSourceExtension,
   peepsAfterHook: () => peepsAfterHook,
   peepsAfterTest: () => peepsAfterTest,
+  peepsBeforeHook: () => peepsBeforeHook,
+  peepsBeforeTest: () => peepsBeforeTest,
+  recordingOptions: () => recordingOptions,
   repoRelative: () => repoRelative,
   resetForTests: () => resetForTests,
+  setVideoToolsForTests: () => setVideoToolsForTests,
+  videoFrameOffsets: () => videoFrameOffsets,
   withPeeps: () => withPeeps
 });
 module.exports = __toCommonJS(appium_reporter_exports);
+var import_node_child_process = require("node:child_process");
 var import_node_crypto = require("node:crypto");
 var import_node_fs = require("node:fs");
 var import_node_path = __toESM(require("node:path"));
@@ -82,9 +89,9 @@ var Plan = class {
   constructor(file, claimsDir = null) {
     this.file = file;
     this.claimsDir = claimsDir;
-    for (const run of file.runs) {
-      const key = identityKey(run);
-      if (!this.entries.has(key)) this.entries.set(key, run);
+    for (const run2 of file.runs) {
+      const key = identityKey(run2);
+      if (!this.entries.has(key)) this.entries.set(key, run2);
     }
   }
   entries = /* @__PURE__ */ new Map();
@@ -111,6 +118,10 @@ var Plan = class {
     const holder = (0, import_node_fs.readFileSync)(owner, "utf8");
     if (holder !== worker) return { state: "other", owner: holder };
     return { state: (0, import_node_fs.existsSync)(import_node_path.default.join(this.claimsDir, `${fileSafe(runId)}.ended`)) ? "ended" : "continue" };
+  }
+  /** Whether Peeps asked for this run to be recorded. */
+  recordsVideo(runId) {
+    return this.file.recordVideoRunIds?.includes(runId) ?? false;
   }
   /** The run's `run_end` was sent: a later attempt of its worker must not reopen it. */
   markEnded(runId) {
@@ -170,6 +181,9 @@ function resetForTests() {
   cachedPlan = void 0;
   captured.clear();
   specFileRetries = 0;
+  recording = null;
+  recorderBroken = null;
+  videoTools = defaultVideoTools;
 }
 var DATA_EXTENSIONS = /* @__PURE__ */ new Set([
   "dat",
@@ -214,21 +228,22 @@ function discardCaptured(runId) {
   }
   captured.delete(runId);
 }
-function withTimeout(promise, label) {
+function withTimeout(promise, label, ms = CAPTURE_TIMEOUT_MS) {
   let timer;
   return Promise.race([
     promise,
     new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out after ${CAPTURE_TIMEOUT_MS} ms`)), CAPTURE_TIMEOUT_MS);
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
     })
   ]).finally(() => clearTimeout(timer));
 }
 function reasonOf(error) {
   return `capture failed: ${(error instanceof Error ? error.message : String(error)).split("\n")[0].slice(0, 200)}`;
 }
-async function captureEvidence(runId, browser) {
+async function captureEvidence(runId, browser, options = {}) {
   const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
   if (!artifacts) return;
+  const noted = options.keepVideo ? [...captured.get(runId)?.omitted ?? []] : [];
   discardCaptured(runId);
   const dir = import_node_path.default.join(artifacts, "upload");
   const out = { attachments: [], omitted: [], context: null, files: [] };
@@ -272,26 +287,232 @@ async function captureEvidence(runId, browser) {
   } catch (error) {
     console.log(`[peeps] evidence for ${runId} not captured: ${String(error)}`);
   }
+  out.omitted.push(...noted);
   captured.set(runId, out);
 }
 function workerBrowser() {
   const browser = globalThis.browser;
   return browser && typeof browser.saveScreenshot === "function" && typeof browser.getPageSource === "function" ? browser : null;
 }
+var MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+var VIDEO_TIME_LIMIT_S = 1800;
+var ANDROID_LIMIT_WITHOUT_FFMPEG_S = 180;
+var START_TIMEOUT_MS = 15e3;
+var STOP_TIMEOUT_MS = 12e4;
+var FRAME_TIMEOUT_MS = 1e4;
+var VIDEO_HOOK_BUDGET_MS = STOP_TIMEOUT_MS + 8 * FRAME_TIMEOUT_MS + 3e4;
+var FRAME_OFFSETS_MS = [2e4, 12e3, 8e3, 5e3, 3e3, 2e3, 1e3, 200];
+var FRAME_WIDTH = 720;
+function recordingOptions(browser, ffmpeg) {
+  if (browser.isIOS) {
+    if (!ffmpeg) return null;
+    return {
+      videoType: "libx264",
+      videoQuality: "medium",
+      videoFps: 10,
+      videoScale: `${FRAME_WIDTH}:-2`,
+      pixelFormat: "yuv420p",
+      timeLimit: VIDEO_TIME_LIMIT_S,
+      forceRestart: true
+    };
+  }
+  return { bitRate: 1e6, timeLimit: ffmpeg ? VIDEO_TIME_LIMIT_S : ANDROID_LIMIT_WITHOUT_FFMPEG_S, forceRestart: true };
+}
+function videoFrameOffsets(durationMs) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return [];
+  const positions = /* @__PURE__ */ new Set();
+  for (const before of FRAME_OFFSETS_MS) positions.add(Math.max(0, Math.round(durationMs - before)));
+  return [...positions].sort((a, b) => a - b);
+}
+function run(file, args, timeout) {
+  return new Promise((resolve, reject) => {
+    (0, import_node_child_process.execFile)(file, args, { timeout, maxBuffer: 1024 * 1024 }, (error, stdout) => error ? reject(error) : resolve(stdout));
+  });
+}
+var defaultVideoTools = {
+  async durationMs(video) {
+    const out = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video], FRAME_TIMEOUT_MS);
+    return Math.round(Number.parseFloat(out.trim()) * 1e3);
+  },
+  async frame(video, positionMs, out) {
+    await run(
+      "ffmpeg",
+      [
+        "-v",
+        "error",
+        "-y",
+        "-ss",
+        (positionMs / 1e3).toFixed(3),
+        "-i",
+        video,
+        "-frames:v",
+        "1",
+        "-vf",
+        `scale='min(${FRAME_WIDTH},iw)':-2`,
+        "-q:v",
+        "4",
+        out
+      ],
+      FRAME_TIMEOUT_MS
+    );
+  }
+};
+var videoTools = defaultVideoTools;
+function setVideoToolsForTests(tools) {
+  videoTools = tools ?? defaultVideoTools;
+}
+var recording = null;
+var recorderBroken = null;
+function capturedFor(runId) {
+  let out = captured.get(runId);
+  if (!out) {
+    out = { attachments: [], omitted: [], context: null, files: [] };
+    captured.set(runId, out);
+  }
+  return out;
+}
+function canRecord(browser) {
+  return Boolean(browser.isMobile) && typeof browser.startRecordingScreen === "function" && typeof browser.stopRecordingScreen === "function";
+}
+async function startVideo(plan, runId, browser) {
+  if (!plan.recordsVideo(runId) || !canRecord(browser) || recording?.runId === runId) return;
+  recording = null;
+  discardCaptured(runId);
+  if (recorderBroken) {
+    capturedFor(runId).omitted.push({ name: "video.mp4", reason: recorderBroken });
+    return;
+  }
+  const options = recordingOptions(browser, plan.file.ffmpeg === true);
+  if (!options) {
+    capturedFor(runId).omitted.push({ name: "video.mp4", reason: "not recorded: ffmpeg was not found on the runner" });
+    return;
+  }
+  try {
+    await withTimeout(Promise.resolve(browser.startRecordingScreen(options)), "startRecordingScreen", START_TIMEOUT_MS);
+    recording = { runId };
+  } catch (error) {
+    recorderBroken = reasonOf(error);
+    console.log(`[peeps] screen recording is not available in this worker: ${recorderBroken}`);
+    capturedFor(runId).omitted.push({ name: "video.mp4", reason: recorderBroken });
+  }
+}
+function extendTimeout(test) {
+  try {
+    if (typeof test?.timeout !== "function") return;
+    const current = Number(test.timeout());
+    if (!Number.isFinite(current) || current <= 0) return;
+    test.timeout(Math.max(current, VIDEO_HOOK_BUDGET_MS));
+  } catch {
+  }
+}
+async function stopVideo(plan, runId, browser, failed) {
+  if (recording?.runId !== runId) return;
+  recording = null;
+  const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
+  const out = capturedFor(runId);
+  let base64;
+  try {
+    base64 = String(await withTimeout(Promise.resolve(browser.stopRecordingScreen()), "stopRecordingScreen", STOP_TIMEOUT_MS));
+  } catch (error) {
+    out.omitted.push({ name: "video.mp4", reason: reasonOf(error) });
+    return;
+  }
+  if (!artifacts) return;
+  try {
+    const dir = import_node_path.default.join(artifacts, "upload");
+    (0, import_node_fs.mkdirSync)(dir, { recursive: true });
+    const file = import_node_path.default.join(dir, evidenceFileName(runId, "video.mp4"));
+    (0, import_node_fs.writeFileSync)(file, Buffer.from(base64, "base64"));
+    const size = (0, import_node_fs.statSync)(file).size;
+    if (size === 0) {
+      (0, import_node_fs.unlinkSync)(file);
+      out.omitted.push({ name: "video.mp4", reason: "the recording was empty" });
+      return;
+    }
+    const tooBig = size > MAX_VIDEO_BYTES;
+    if (!tooBig) {
+      out.files.push(file);
+      out.attachments.push({ name: "video.mp4", path: `data/${import_node_path.default.basename(file)}`, size });
+    }
+    if (failed) await cutFrames(plan, runId, file, dir, out);
+    if (tooBig) {
+      (0, import_node_fs.unlinkSync)(file);
+      out.omitted.push({ name: "video.mp4", reason: `larger than ${MAX_VIDEO_BYTES} bytes` });
+    }
+  } catch (error) {
+    out.omitted.push({ name: "video.mp4", reason: reasonOf(error) });
+  }
+}
+async function cutFrames(plan, runId, video, dir, out) {
+  if (plan.file.ffmpeg !== true) {
+    out.omitted.push({ name: "video frames", reason: "not extracted: ffmpeg was not found on the runner" });
+    return;
+  }
+  try {
+    for (const positionMs of videoFrameOffsets(await videoTools.durationMs(video))) {
+      const name = `video-frame-${String(positionMs).padStart(7, "0")}.jpg`;
+      const file = import_node_path.default.join(dir, evidenceFileName(runId, name));
+      try {
+        await videoTools.frame(video, positionMs, file);
+        const size = (0, import_node_fs.statSync)(file).size;
+        if (size === 0 || size > MAX_ATTACHMENT_BYTES) {
+          (0, import_node_fs.unlinkSync)(file);
+          continue;
+        }
+        out.files.push(file);
+        out.attachments.push({ name, path: `data/${import_node_path.default.basename(file)}`, size });
+      } catch {
+      }
+    }
+  } catch (error) {
+    out.omitted.push({ name: "video frames", reason: reasonOf(error) });
+  }
+}
 function titlesOf(test) {
   return test && typeof test.titlePath === "function" ? test.titlePath() : null;
 }
 async function peepsAfterTest(_test, context, result) {
   try {
-    if (!result || result.passed || !result.error) return;
+    if (!result) return;
+    const failed = !result.passed && Boolean(result.error);
     const plan = loadPlan();
     const titles = titlesOf(context?.test);
     const browser = workerBrowser();
     if (!plan || !titles || !browser) return;
     const entry = plan.entryFor(context?.test?.file, titles);
-    if (entry) await captureEvidence(entry.runId, browser);
+    if (!entry) return;
+    const recorded = recording?.runId === entry.runId;
+    if (recorded) extendTimeout(context?.test);
+    if (failed) await captureEvidence(entry.runId, browser, { keepVideo: true });
+    if (recorded) await stopVideo(plan, entry.runId, browser, failed);
   } catch (error) {
     console.log(`[peeps] afterTest evidence not captured: ${String(error)}`);
+  }
+}
+function beforeEntry(context, hook) {
+  const plan = loadPlan();
+  const test = hook ? context?.currentTest : context?.test ?? context?.currentTest;
+  const titles = titlesOf(test);
+  const browser = workerBrowser();
+  if (!plan || !titles || !browser) return null;
+  const entry = plan.entryFor(test?.file, titles);
+  return entry ? { plan, entry, browser } : null;
+}
+async function peepsBeforeTest(_test, context) {
+  try {
+    const found = beforeEntry(context, false);
+    if (found) await startVideo(found.plan, found.entry.runId, found.browser);
+  } catch (error) {
+    console.log(`[peeps] beforeTest recording not started: ${String(error)}`);
+  }
+}
+async function peepsBeforeHook(_hook, context) {
+  try {
+    if (!/^"before each" hook/.test(context?.test?.title ?? "")) return;
+    const found = beforeEntry(context, true);
+    if (found) await startVideo(found.plan, found.entry.runId, found.browser);
+  } catch (error) {
+    console.log(`[peeps] beforeHook recording not started: ${String(error)}`);
   }
 }
 async function peepsAfterHook(_hook, context, result) {
@@ -302,7 +523,9 @@ async function peepsAfterHook(_hook, context, result) {
     const browser = workerBrowser();
     if (!plan || !titles || !browser) return;
     const entry = plan.entryFor(context?.currentTest?.file, titles);
-    if (entry) await captureEvidence(entry.runId, browser);
+    if (!entry) return;
+    await captureEvidence(entry.runId, browser, { keepVideo: true });
+    if (recording?.runId === entry.runId) await stopVideo(plan, entry.runId, browser, true);
   } catch (error) {
     console.log(`[peeps] afterHook evidence not captured: ${String(error)}`);
   }
@@ -461,6 +684,10 @@ var PeepsAppiumReporter = class {
       if (error?.message) event.error = error.message.slice(0, 4e3);
       if (error?.stack) event.errorStack = error.stack.slice(0, 8e3);
       Object.assign(event, failureEvidence(error, "call", captured.get(entry.runId)));
+    } else if (status === "passed") {
+      const evidence = captured.get(entry.runId);
+      if (evidence?.attachments.length) event.attachments = evidence.attachments;
+      if (evidence?.omitted.length) event.attachmentsOmitted = evidence.omitted;
     }
     this.close(entry, event);
   }
@@ -541,7 +768,7 @@ var PeepsAppiumReporter = class {
     const events = this.queues.get(runId) ?? [];
     if (events.length === 0) return;
     this.queues.set(runId, []);
-    const entry = this.plan.file.runs.find((run) => run.runId === runId);
+    const entry = this.plan.file.runs.find((run2) => run2.runId === runId);
     if (!entry) return;
     const resultsDir = this.plan.file.resultsDir;
     if (resultsDir) {
@@ -609,6 +836,8 @@ function withPeeps(base, options = {}) {
   const config = {
     ...base,
     reporters,
+    beforeHook: [...hooksOf(base.beforeHook), peepsBeforeHook],
+    beforeTest: [...hooksOf(base.beforeTest), peepsBeforeTest],
     afterTest: [...hooksOf(base.afterTest), peepsAfterTest],
     afterHook: [...hooksOf(base.afterHook), peepsAfterHook],
     // Room for the last test's events to reach Peeps before the worker exits.
@@ -646,6 +875,7 @@ function withPeeps(base, options = {}) {
 0 && (module.exports = {
   DATA_EXTENSIONS,
   MAX_ATTACHMENT_BYTES,
+  MAX_VIDEO_BYTES,
   PeepsAppiumReporter,
   TITLE_PATH_SEPARATOR,
   captureEvidence,
@@ -657,7 +887,12 @@ function withPeeps(base, options = {}) {
   pageSourceExtension,
   peepsAfterHook,
   peepsAfterTest,
+  peepsBeforeHook,
+  peepsBeforeTest,
+  recordingOptions,
   repoRelative,
   resetForTests,
+  setVideoToolsForTests,
+  videoFrameOffsets,
   withPeeps
 });

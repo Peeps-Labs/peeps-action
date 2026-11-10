@@ -815,6 +815,10 @@ function pageSourceExtension(source, context) {
   if (/^<!doctype html|<html[\s>]/i.test(head)) return "html";
   return context && /^NATIVE/i.test(context) ? "xml" : "html";
 }
+var MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+var STOP_TIMEOUT_MS = 12e4;
+var FRAME_TIMEOUT_MS = 1e4;
+var VIDEO_HOOK_BUDGET_MS = STOP_TIMEOUT_MS + 8 * FRAME_TIMEOUT_MS + 3e4;
 
 // src/pytest.ts
 var import_node_child_process3 = require("node:child_process");
@@ -1225,8 +1229,9 @@ async function uploadEvidence(peeps, batchId, files) {
   for (const file of files) {
     try {
       const info = await (0, import_promises5.lstat)(file.abs);
-      if (!info.isFile() || info.size > MAX_EVIDENCE_BYTES) {
-        console.log(`[peeps] skipping attachment ${file.name}: not a file within ${MAX_EVIDENCE_BYTES} bytes`);
+      const cap = /-evidence-video\.mp4$/.test(file.name) ? MAX_VIDEO_BYTES : MAX_EVIDENCE_BYTES;
+      if (!info.isFile() || info.size > cap) {
+        console.log(`[peeps] skipping attachment ${file.name}: not a file within ${cap} bytes`);
         continue;
       }
       await peeps.postBytes(
@@ -1442,6 +1447,15 @@ async function runAppiumInventory(env, peeps) {
   const result = await peeps.post("/api/v1/ci/inventory", request);
   console.log(`[peeps] inventory accepted: ${JSON.stringify(result.results)}`);
 }
+function recordVideoRunIdsOf(batches) {
+  return batches.filter((b) => b.recordVideo === true).flatMap((b) => b.runs.map((r) => r.runId));
+}
+async function ffmpegAvailable(pathEnv = process.env.PATH ?? "") {
+  const runs = (bin) => new Promise((resolve) => {
+    (0, import_node_child_process4.execFile)(bin, ["-version"], { timeout: 1e4, env: { ...process.env, PATH: pathEnv } }, (error) => resolve(!error));
+  });
+  return await runs("ffmpeg") && await runs("ffprobe");
+}
 async function runAppiumReport(env, peeps) {
   if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const configPath = wdioConfigPath(env);
@@ -1465,6 +1479,7 @@ async function runAppiumReport(env, peeps) {
   await executeAppiumAndReport(env, peeps, {
     configPath,
     runs,
+    recordVideoRunIds: recordVideoRunIdsOf(response.batches),
     batches: response.batches.map((b) => ({
       batchId: b.batchId,
       batchNumber: b.batchNumber,
@@ -1536,6 +1551,7 @@ async function runAppiumDispatched(env, peeps) {
   await executeAppiumAndReport(env, peeps, {
     configPath,
     runs: matched,
+    recordVideoRunIds: plan.recordVideo === true ? matched.map((r) => r.runId) : [],
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
     selection: { specs, capabilitySpecs, grep: mochaGrepFor(matched.map((r) => r.titlePath)) },
     extraEnv: environment.vars
@@ -1648,6 +1664,13 @@ async function executeAppiumAndReport(env, peeps, input2) {
   await (0, import_promises6.mkdir)(artifactsDir);
   const plan = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: input2.runs };
   if (input2.selection) plan.onlyPlanned = true;
+  if (input2.recordVideoRunIds?.length) {
+    plan.recordVideoRunIds = input2.recordVideoRunIds;
+    plan.ffmpeg = await (input2.ffmpegCheck ?? (() => ffmpegAvailable()))();
+    console.log(
+      `[peeps] Record video is on: recording ${input2.recordVideoRunIds.length} run(s)` + (plan.ffmpeg ? "" : "; ffmpeg is not on this runner, so iOS does not record, Android stops at 3 minutes and no frames are cut")
+    );
+  }
   await (0, import_promises6.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
   const junitDir = hasPackage("@wdio/junit-reporter", import_node_path9.default.dirname(input2.configPath)) ? import_node_path9.default.join(scratch, "junit") : null;
   const options = { junitDir };
@@ -3611,7 +3634,7 @@ function runCapture(cmd, args, cwd, timeoutMs, extraEnv = {}) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.12.1";
+var ACTION_VERSION = "1.13.0";
 
 // src/agent.ts
 var execFileAsync3 = (0, import_node_util3.promisify)(import_node_child_process7.execFile);
