@@ -314,6 +314,55 @@ export async function ffmpegAvailable(pathEnv = process.env.PATH ?? ""): Promise
   return (await runs("ffmpeg")) && (await runs("ffprobe"));
 }
 
+/**
+ * The shell command that installs ffmpeg (with ffprobe) on this runner, or
+ * null where there is none to try. `sudo -n` fails at once instead of asking
+ * for a password a CI job cannot type.
+ */
+export function ffmpegInstallCommand(platform: NodeJS.Platform = process.platform): string | null {
+  if (platform === "linux") {
+    return "sudo -n apt-get update -qq && sudo -n apt-get install -y -qq --no-install-recommends ffmpeg";
+  }
+  if (platform === "darwin") return "HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ffmpeg";
+  return null;
+}
+
+/** At most this long installing ffmpeg; past it the job goes on without it. */
+const FFMPEG_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+function installFfmpeg(): Promise<void> {
+  const command = ffmpegInstallCommand();
+  if (!command) return Promise.reject(new Error(`no installer for ${process.platform}`));
+  return new Promise((resolve, reject) => {
+    execFile("bash", ["-c", command], { timeout: FFMPEG_INSTALL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }, (error, _out, err) =>
+      error ? reject(new Error(err.trim().split("\n").pop() || error.message)) : resolve(),
+    );
+  });
+}
+
+/**
+ * Whether ffmpeg is here, installing it first when it is missing. Only a job
+ * that records video calls this, so a job with Record video off never pays
+ * for the install. Best effort: a failed install is logged and the job goes
+ * on, recording what it can without ffmpeg.
+ */
+export async function ensureFfmpeg(
+  deps: { available: () => Promise<boolean>; install: () => Promise<void> } = {
+    available: () => ffmpegAvailable(),
+    install: installFfmpeg,
+  },
+): Promise<boolean> {
+  if (await deps.available()) return true;
+  console.log("[peeps] Record video: ffmpeg is not on this runner; installing it");
+  try {
+    await deps.install();
+  } catch (error) {
+    console.log(`[peeps] Record video: could not install ffmpeg (${error instanceof Error ? error.message : String(error)})`);
+    return false;
+  }
+  return deps.available();
+}
+
 /** `report`: run this workflow's whole suite and report every planned test. */
 export async function runAppiumReport(env: RunnerEnv, peeps: PeepsClient): Promise<void> {
   if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
@@ -617,7 +666,7 @@ export async function executeAppiumAndReport(
     extraEnv?: Record<string, string>;
     /** The runs whose project has "Record video" on. */
     recordVideoRunIds?: string[];
-    /** For tests: instead of looking for ffmpeg on the runner. */
+    /** For tests: instead of looking for (and installing) ffmpeg on the runner. */
     ffmpegCheck?: () => Promise<boolean>;
     /** For tests: run this instead of `npx wdio run <config>`. */
     runner?: (configPath: string, extraEnv: Record<string, string>) => Promise<number>;
@@ -632,7 +681,7 @@ export async function executeAppiumAndReport(
   if (input.selection) plan.onlyPlanned = true;
   if (input.recordVideoRunIds?.length) {
     plan.recordVideoRunIds = input.recordVideoRunIds;
-    plan.ffmpeg = await (input.ffmpegCheck ?? (() => ffmpegAvailable()))();
+    plan.ffmpeg = await (input.ffmpegCheck ?? (() => ensureFfmpeg()))();
     console.log(
       `[peeps] Record video is on: recording ${input.recordVideoRunIds.length} run(s)` +
         (plan.ffmpeg ? "" : "; ffmpeg is not on this runner, so iOS does not record, Android stops at 3 minutes and no frames are cut"),

@@ -1456,6 +1456,40 @@ async function ffmpegAvailable(pathEnv = process.env.PATH ?? "") {
   });
   return await runs("ffmpeg") && await runs("ffprobe");
 }
+function ffmpegInstallCommand(platform = process.platform) {
+  if (platform === "linux") {
+    return "sudo -n apt-get update -qq && sudo -n apt-get install -y -qq --no-install-recommends ffmpeg";
+  }
+  if (platform === "darwin") return "HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ffmpeg";
+  return null;
+}
+var FFMPEG_INSTALL_TIMEOUT_MS = 10 * 60 * 1e3;
+function installFfmpeg() {
+  const command = ffmpegInstallCommand();
+  if (!command) return Promise.reject(new Error(`no installer for ${process.platform}`));
+  return new Promise((resolve, reject) => {
+    (0, import_node_child_process4.execFile)(
+      "bash",
+      ["-c", command],
+      { timeout: FFMPEG_INSTALL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
+      (error, _out, err) => error ? reject(new Error(err.trim().split("\n").pop() || error.message)) : resolve()
+    );
+  });
+}
+async function ensureFfmpeg(deps = {
+  available: () => ffmpegAvailable(),
+  install: installFfmpeg
+}) {
+  if (await deps.available()) return true;
+  console.log("[peeps] Record video: ffmpeg is not on this runner; installing it");
+  try {
+    await deps.install();
+  } catch (error) {
+    console.log(`[peeps] Record video: could not install ffmpeg (${error instanceof Error ? error.message : String(error)})`);
+    return false;
+  }
+  return deps.available();
+}
 async function runAppiumReport(env, peeps) {
   if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const configPath = wdioConfigPath(env);
@@ -1666,7 +1700,7 @@ async function executeAppiumAndReport(env, peeps, input2) {
   if (input2.selection) plan.onlyPlanned = true;
   if (input2.recordVideoRunIds?.length) {
     plan.recordVideoRunIds = input2.recordVideoRunIds;
-    plan.ffmpeg = await (input2.ffmpegCheck ?? (() => ffmpegAvailable()))();
+    plan.ffmpeg = await (input2.ffmpegCheck ?? (() => ensureFfmpeg()))();
     console.log(
       `[peeps] Record video is on: recording ${input2.recordVideoRunIds.length} run(s)` + (plan.ffmpeg ? "" : "; ffmpeg is not on this runner, so iOS does not record, Android stops at 3 minutes and no frames are cut")
     );

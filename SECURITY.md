@@ -90,7 +90,9 @@ Record video setting on (off by default), every planned test's screen is
 recorded for as long as it runs: every screen it reaches, everything typed
 where the platform shows it, any code or token the app displays. Nothing is
 masked or blurred. Turn it on only for suites that use test accounts and
-data.
+data. A job that records and finds no ffmpeg installs it on the runner
+(`sudo -n apt-get install ffmpeg` on Linux, `brew install ffmpeg` on macOS);
+with the setting off, the action installs nothing.
 
 **Device tools read the app under test, live.** With `device-tools: true`,
 an agent session can read whatever the app shows: the page source of any

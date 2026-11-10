@@ -21,7 +21,7 @@ import {
   type AppiumPlanFile,
   type CaptureBrowser,
 } from "../src/appium-reporter";
-import { executeAppiumAndReport, ffmpegAvailable, recordVideoRunIdsOf } from "../src/appium";
+import { ensureFfmpeg, executeAppiumAndReport, ffmpegAvailable, ffmpegInstallCommand, recordVideoRunIdsOf } from "../src/appium";
 import { readRunnerEnv } from "../src/env";
 import { uploadEvidence } from "../src/pytest";
 import { PeepsClient } from "../src/peeps";
@@ -628,4 +628,39 @@ test("a run with video asked for tells its workers which runs, and whether ffmpe
 test("ffmpeg is found only when both ffmpeg and ffprobe run", async () => {
   assert.equal(await ffmpegAvailable(), HAS_FFMPEG);
   assert.equal(await ffmpegAvailable("/nonexistent/bin"), false);
+});
+
+test("ffmpeg is installed only when recording needs it and it is missing", async () => {
+  const calls: string[] = [];
+  const there = await ensureFfmpeg({
+    available: async () => (calls.push("check"), true),
+    install: async () => void calls.push("install"),
+  });
+  assert.equal(there, true);
+  assert.deepEqual(calls, ["check"]);
+
+  let installed = false;
+  const after = await ensureFfmpeg({
+    available: async () => installed,
+    install: async () => {
+      installed = true;
+    },
+  });
+  assert.equal(after, true);
+});
+
+test("a failed ffmpeg install leaves recording without it and never throws", async () => {
+  const there = await ensureFfmpeg({
+    available: async () => false,
+    install: async () => {
+      throw new Error("E: Unable to locate package ffmpeg");
+    },
+  });
+  assert.equal(there, false);
+});
+
+test("ffmpeg installs with apt on Linux and Homebrew on macOS, never prompting for a password", () => {
+  assert.match(ffmpegInstallCommand("linux")!, /^sudo -n apt-get .*install -y .*ffmpeg/);
+  assert.match(ffmpegInstallCommand("darwin")!, /brew install ffmpeg/);
+  assert.equal(ffmpegInstallCommand("win32"), null);
 });

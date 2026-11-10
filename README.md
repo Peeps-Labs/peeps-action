@@ -313,9 +313,11 @@ healer.
 - iOS (XCUITest): H.264 (`yuv420p`), 10 fps, 720 px wide, up to 30 minutes.
 - **ffmpeg on the runner** (the machine Appium runs on): iOS needs it to
   record at all, Android needs it to record past 3 minutes, and the frames
-  need `ffmpeg` and `ffprobe`. Peeps' Appium workflow installs it when the
-  runner has none. Without it the run goes on and each test lists what was
-  not captured in `attachmentsOmitted`.
+  need `ffmpeg` and `ffprobe`. When the project records video and the
+  runner has none, the action installs it first (`sudo -n apt-get` on
+  Linux, `brew` on macOS, at most 10 minutes); a job that records nothing
+  never installs it. If the install fails, the run goes on and each test
+  lists what was not captured in `attachmentsOmitted`.
 - A video is capped at 100 MB (other files at 25 MB); a larger one is listed
   as omitted, and its frames are still sent.
 - Recording never fails a test or the job: a driver that cannot record is
@@ -727,9 +729,9 @@ access token Peeps was given (Maintainer).
 - Appium: **Record video**. When the project's setting is on in Peeps, each
   planned test is recorded on the device and its MP4 is sent with its result,
   pass or fail; a failure also sends frames from the end of its video for
-  failure analysis and the healer. Off unless Peeps asks, so a project that
-  has not turned it on, and an older Peeps, record nothing. A video may be up
-  to 100 MB.
+  failure analysis. Off unless Peeps asks, so a project that has not turned
+  it on, and an older Peeps, record nothing. A video may be up to 100 MB.
+  A job that records installs ffmpeg when the runner lacks it.
 
 ## 1.12.1
 
