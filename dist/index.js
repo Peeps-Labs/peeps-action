@@ -4429,7 +4429,7 @@ async function warnIfBrowsersMissing(workingDirectory, platform) {
 }
 
 // src/preview.ts
-var import_node_child_process9 = require("node:child_process");
+var import_node_child_process11 = require("node:child_process");
 var import_node_fs8 = require("node:fs");
 var GITHUB_TOKEN_INPUT = "INPUT_GITHUB-TOKEN";
 function takeGithubToken(env) {
@@ -4524,8 +4524,8 @@ async function waitForVercelPreview(request, deps = {}) {
   const now = deps.now ?? Date.now;
   const pollMs = deps.pollMs ?? 1e4;
   const short = request.sha.slice(0, 7);
-  const github = async (path14) => {
-    const res = await doFetch(`${request.apiUrl}/repos/${request.repository}${path14}`, {
+  const github = async (path17) => {
+    const res = await doFetch(`${request.apiUrl}/repos/${request.repository}${path17}`, {
       headers: {
         authorization: `Bearer ${request.token}`,
         accept: "application/vnd.github+json",
@@ -4537,10 +4537,10 @@ async function waitForVercelPreview(request, deps = {}) {
     }
     if (res.status === 403 || res.status === 404) {
       throw new Error(
-        `GitHub refused ${path14} (${res.status}). Give the job \`deployments: read\` and \`statuses: read\` in its permissions.`
+        `GitHub refused ${path17} (${res.status}). Give the job \`deployments: read\` and \`statuses: read\` in its permissions.`
       );
     }
-    if (!res.ok) throw new Error(`GitHub ${path14}: ${res.status} ${nameForLog((await res.text()).slice(0, 300))}`);
+    if (!res.ok) throw new Error(`GitHub ${path17}: ${res.status} ${nameForLog((await res.text()).slice(0, 300))}`);
     return await res.json();
   };
   const deadline = now() + request.timeoutMs;
@@ -4650,7 +4650,7 @@ async function dispatchedPreviewUrl(mode, env, githubToken, checkedOutSha, deps 
 }
 function headSha(cwd) {
   try {
-    return (0, import_node_child_process9.execFileSync)("git", ["-c", `safe.directory=${cwd}`, "rev-parse", "HEAD"], {
+    return (0, import_node_child_process11.execFileSync)("git", ["-c", `safe.directory=${cwd}`, "rev-parse", "HEAD"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
