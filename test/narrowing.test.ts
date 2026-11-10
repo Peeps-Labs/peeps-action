@@ -66,7 +66,9 @@ async function fakePeeps(
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const text = Buffer.concat(chunks).toString();
     let response: unknown = {};
-    if (url.pathname === "/api/v1/ci/batches") {
+    // A server that speaks the targeted runs protocol, so this job may narrow.
+    if (url.pathname === "/api/v1/ci/targeted-runs") response = { scan: false, protocolVersion: 2, projects: [] };
+    else if (url.pathname === "/api/v1/ci/batches") {
       const input = JSON.parse(text) as { tests: Planned[] };
       announces.push(input as unknown as Record<string, unknown>);
       const { runs, unmatched = [], narrowed, failures = [] } = answer(input.tests);

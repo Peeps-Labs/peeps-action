@@ -1172,9 +1172,13 @@ test("run mode gives WebdriverIO the Peeps environment's variables beside the pl
 // ---------------------------------------------------------------------------
 
 /** The Peeps client `runAppiumReport` needs: it answers the announce, and records the rest. */
-function announceAnswering(answer: (tests: PlannedTest[]) => Record<string, unknown>) {
+function announceAnswering(answer: (tests: PlannedTest[]) => Record<string, unknown>, preflight: unknown = { scan: false, protocolVersion: 2, projects: [] }) {
   const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
   const peeps = {
+    get: async () => {
+      if (preflight instanceof Error) throw preflight;
+      return preflight;
+    },
     post: async (p: string, body: Record<string, unknown>) => {
       posts.push({ path: p, body });
       if (p !== "/api/v1/ci/batches") return {};
@@ -1189,7 +1193,7 @@ const asRun = (t: PlannedTest, i: number): PlanEntry => ({ ...t, runId: `r-${i}`
 const LOGIN = "Login › signs in with a valid account @smoke";
 const WEBVIEW = "Checkout web view › pays with a card";
 
-async function reportWith(answer: (tests: PlannedTest[]) => Record<string, unknown>, brokenSpec = false, mochaOpts?: string) {
+async function reportWith(answer: (tests: PlannedTest[]) => Record<string, unknown>, brokenSpec = false, mochaOpts?: string, preflight?: unknown) {
   const { root, suite } = workspace();
   if (brokenSpec) writeFileSync(path.join(suite, "test", "specs", "broken.spec.ts"), 'import "./not-a-module";\n');
   if (mochaOpts) {
@@ -1197,7 +1201,7 @@ async function reportWith(answer: (tests: PlannedTest[]) => Record<string, unkno
     writeFileSync(file, readFileSync(file, "utf8").replace('mochaOpts: { ui: "bdd", timeout: 60_000 }', `mochaOpts: ${mochaOpts}`));
   }
   const env = envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile" });
-  const { peeps, posts } = announceAnswering(answer);
+  const { peeps, posts } = announceAnswering(answer, preflight);
   let seen: { config: Record<string, unknown>; plan: AppiumPlanFile } | undefined;
   await runAppiumReport(env, peeps, async (wrapper, extra) => {
     const loaded = (await import(pathToFileURL(wrapper).href)) as { config: Record<string, unknown> };
@@ -1214,6 +1218,7 @@ test("a narrowed report runs its runs plus unmatched tests, by file and exact ti
     unmatched: tests.filter((t) => t.titlePath === WEBVIEW),
   }));
   assert.equal(posts[0]!.body.canNarrow, true);
+  assert.equal(posts[0]!.body.protocolVersion, 2);
   assert.ok(seen, "wdio ran");
   assert.equal(seen.plan.onlyPlanned, true);
   assert.deepEqual(seen.plan.runs.map((r) => r.titlePath), [LOGIN]);
@@ -1224,6 +1229,14 @@ test("a narrowed report runs its runs plus unmatched tests, by file and exact ti
   assert.equal(grep.test("opens without a describe"), false);
   assert.deepEqual(posts.at(-1), { path: "/api/v1/ci/batches/b-1/complete", body: { reportUploaded: false } }, "it narrowed: nothing to say");
 });
+
+for (const [name, preflight] of [["answers scan alone", { scan: true }], ["has no preflight", new Error("404")]] as const) {
+  test(`a server that ${name} hears no canNarrow from an Appium job`, async () => {
+    const { posts } = await reportWith(() => ({}), false, undefined, preflight);
+    assert.equal(posts[0]!.body.canNarrow, undefined);
+    assert.equal(posts[0]!.body.protocolVersion, undefined);
+  });
+}
 
 test("a narrowed report with an empty plan never starts wdio, and closes its batch", async () => {
   const { posts, seen } = await reportWith(() => ({ narrowed: true }));

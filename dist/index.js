@@ -794,8 +794,19 @@ async function computeReach(env, input2, options = {}) {
 // src/reach/preflight.ts
 var PREFLIGHT_PATH = "/api/v1/ci/targeted-runs";
 var PREFLIGHT_TIMEOUT_MS = 3e3;
-async function reachWanted(env, peeps) {
-  if (env.platform !== "github" || env.eventName !== "pull_request") return false;
+var TARGETED_RUNS_PROTOCOL = 2;
+var NONE = { protocol: false, scan: false };
+function readPreflight(answer) {
+  if (typeof answer !== "object" || answer === null) return NONE;
+  const { scan, protocolVersion } = answer;
+  if (typeof protocolVersion !== "number" || !Number.isSafeInteger(protocolVersion) || protocolVersion < TARGETED_RUNS_PROTOCOL) return NONE;
+  return { protocol: true, scan: scan === true };
+}
+function announceFieldsOf(negotiated) {
+  return negotiated.protocol ? { canNarrow: true, protocolVersion: TARGETED_RUNS_PROTOCOL } : {};
+}
+async function negotiateTargetedRuns(env, peeps) {
+  if (env.platform !== "github") return NONE;
   let timer;
   try {
     const answer = await Promise.race([
@@ -805,9 +816,10 @@ async function reachWanted(env, peeps) {
         timer = setTimeout(() => resolve(null), PREFLIGHT_TIMEOUT_MS);
       })
     ]);
-    return answer?.scan === true;
+    const negotiated = readPreflight(answer);
+    return { ...negotiated, scan: negotiated.scan && env.eventName === "pull_request" };
   } catch {
-    return false;
+    return NONE;
   } finally {
     clearTimeout(timer);
   }
@@ -853,7 +865,8 @@ async function runReport(env, peeps) {
   const files = await specFilePayload(env, list);
   const specFiles = specFilesOf(list).map((file) => import_node_path8.default.relative(env.workspace, import_node_path8.default.join(rootDirAbs, file)).split(import_node_path8.default.sep).join("/"));
   const started = Date.now();
-  const computed = await reachWanted(env, peeps) ? await computeReach(env, { specFiles }) : void 0;
+  const negotiated = await negotiateTargetedRuns(env, peeps);
+  const computed = negotiated.scan ? await computeReach(env, { specFiles }) : void 0;
   if (computed) console.log(`[peeps] reach in ${Date.now() - started} ms: ${computed.global ? `everything (${computed.why})` : `${computed.surfaces.length} surface(s)`}`);
   const announce = {
     sha: env.sha,
@@ -861,7 +874,7 @@ async function runReport(env, peeps) {
     baseUrl: process.env.BASE_URL ?? null,
     tests,
     files,
-    canNarrow: true
+    ...announceFieldsOf(negotiated)
   };
   let reach = computed;
   let response;
@@ -881,7 +894,7 @@ async function runReport(env, peeps) {
   for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} \u203A ${u.titlePath}`);
   const batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
   let footprints;
-  if (response.batches.some((b) => b.collectFootprints === true)) {
+  if (negotiated.protocol && response.batches.some((b) => b.collectFootprints === true)) {
     const globalSetups = [list.config.globalSetup ?? []].flat().map((file) => import_node_path8.default.relative(env.workspace, import_node_path8.default.resolve(rootDirAbs, file)).split(import_node_path8.default.sep).join("/"));
     const sources = await workspaceTestSources(env.workspace, specFiles, globalSetups);
     for (const { file, why } of sources.reasons.slice(0, 5)) console.log(`[peeps] not recording footprints: ${file}: ${why}`);
@@ -1838,7 +1851,7 @@ async function runAppiumReport(env, peeps, runner) {
     baseUrl: process.env.BASE_URL ?? null,
     tests,
     files: built.files,
-    canNarrow: true
+    ...announceFieldsOf(await negotiateTargetedRuns(env, peeps))
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);

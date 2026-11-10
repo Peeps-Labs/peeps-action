@@ -42,6 +42,7 @@ import { answeredNarrowed, isNarrowed } from "./narrow";
 import type { PeepsClient } from "./peeps";
 import { requestPlan } from "./plan";
 import { stagedEvidence, uploadEvidence, WDIO_CONFIG } from "./pytest";
+import { announceFieldsOf, negotiateTargetedRuns } from "./reach/preflight";
 import { completeBatches, plannedTestsOf, type PlannedTest } from "./report";
 import type { PlanEntry } from "./reporter";
 
@@ -322,7 +323,7 @@ export async function runAppiumReport(
     baseUrl: process.env.BASE_URL ?? null,
     tests,
     files: built.files,
-    canNarrow: true,
+    ...announceFieldsOf(await negotiateTargetedRuns(env, peeps)),
   });
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);

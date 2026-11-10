@@ -28,7 +28,7 @@ import {
 import { PeepsHttpError, type PeepsClient } from "./peeps";
 import { workspaceTestSources } from "./footprint/test-sources";
 import { computeReach } from "./reach";
-import { reachWanted } from "./reach/preflight";
+import { announceFieldsOf, negotiateTargetedRuns } from "./reach/preflight";
 import type { PlanFile } from "./reporter";
 
 export interface PlannedTest {
@@ -114,7 +114,8 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   const files = await specFilePayload(env, list);
   const specFiles = specFilesOf(list).map((file) => path.relative(env.workspace, path.join(rootDirAbs, file)).split(path.sep).join("/"));
   const started = Date.now();
-  const computed = (await reachWanted(env, peeps)) ? await computeReach(env, { specFiles }) : undefined;
+  const negotiated = await negotiateTargetedRuns(env, peeps);
+  const computed = negotiated.scan ? await computeReach(env, { specFiles }) : undefined;
   if (computed) console.log(`[peeps] reach in ${Date.now() - started} ms: ${computed.global ? `everything (${computed.why})` : `${computed.surfaces.length} surface(s)`}`);
   const announce = {
     sha: env.sha,
@@ -122,7 +123,7 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
     baseUrl: process.env.BASE_URL ?? null,
     tests,
     files,
-    canNarrow: true,
+    ...announceFieldsOf(negotiated),
   };
   let reach = computed;
   let response: BatchResponse;
@@ -144,7 +145,8 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
 
   const batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
   let footprints: { origins: string[]; hiddenRequests: string[]; record: boolean } | undefined;
-  if (response.batches.some((b) => b.collectFootprints === true)) {
+  // Only a server that negotiated the protocol is trusted to ask: an older one's request isn't recorded.
+  if (negotiated.protocol && response.batches.some((b) => b.collectFootprints === true)) {
     const globalSetups = [list.config.globalSetup ?? []].flat().map((file) => path.relative(env.workspace, path.resolve(rootDirAbs, file)).split(path.sep).join("/"));
     const sources = await workspaceTestSources(env.workspace, specFiles, globalSetups);
     for (const { file, why } of sources.reasons.slice(0, 5)) console.log(`[peeps] not recording footprints: ${file}: ${why}`);

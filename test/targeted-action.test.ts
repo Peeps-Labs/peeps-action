@@ -68,9 +68,13 @@ async function suite(t: TestContext, config: string, spec = SPEC) {
   return root;
 }
 
-type Preflight = "on" | "off" | "missing" | "error" | "hang" | "garbage";
+/**
+ * `on` and `off`: a server that speaks protocol 2, with or without the switch. `legacy`:
+ * one from before it, which answers `scan` alone. `v3`: a later protocol, with the switch.
+ */
+type Preflight = "on" | "off" | "legacy" | "v3" | "missing" | "error" | "hang" | "garbage";
 
-async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, leaveOut: (test: Planned) => boolean = () => false, preflight: Preflight = "missing", refuseReach = 0) {
+async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, leaveOut: (test: Planned) => boolean = () => false, preflight: Preflight = "off", refuseReach = 0) {
   const preflights: string[] = [];
   const announces: Array<Record<string, unknown>> = [];
   const completes: Array<Record<string, unknown>> = [];
@@ -96,7 +100,7 @@ async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, le
         res.end("<html>");
         return;
       }
-      response = { scan: preflight === "on" };
+      response = preflight === "legacy" ? { scan: true } : preflight === "v3" ? { scan: true, protocolVersion: 3 } : { scan: preflight === "on", protocolVersion: 2, projects: [{ projectId: "project", executionMode: "shadow" }] };
     } else if (url.pathname === "/api/v1/ci/batches") {
       const input = JSON.parse(bytes.toString()) as { tests: Planned[] };
       announces.push(input as unknown as Record<string, unknown>);
@@ -223,6 +227,17 @@ test("nothing changes when Peeps doesn't ask: an old server strips the field, an
   assert.deepEqual(uploadedTraces(peeps.artifacts), []);
   assert.deepEqual(peeps.completes, [{ reportUploaded: true }], "no executed: no reach was sent");
   assert.equal(peeps.announces[0]!.reach, undefined, "a push sends no reach");
+});
+
+test("a server from before protocol 2 that asks for footprints gets none, and no trace", async (t) => {
+  const app = await appServer(t);
+  const root = await suite(t, COMMON(""));
+  const peeps = await fakePeeps(t, { collectFootprints: true }, undefined, "legacy");
+  const result = await runAction(root, peeps.url, { BASE_URL: app });
+  assert.equal(result.code, 1, result.output);
+  for (const name of ["|passes", "|fails"]) assert.equal(ended(peeps.sent.get(name))[0]!.footprint, undefined, `${name}: ${result.output}`);
+  assert.deepEqual(uploadedTraces(peeps.artifacts), []);
+  assert.equal(peeps.announces[0]!.canNarrow, undefined);
 });
 
 test("retain-on-failure: the failure's trace stays with the customer's options, the pass's is gone", async (t) => {
@@ -595,7 +610,19 @@ test("a pull request's job sends its reach and says what it ran; no source goes 
     base: pr.base,
   });
   assert.ok(!JSON.stringify(peeps.announces[0]!.reach).includes("res.send"));
+  assert.equal(peeps.announces[0]!.canNarrow, true);
+  assert.equal(peeps.announces[0]!.protocolVersion, 2, "the protocol this action speaks");
   assert.deepEqual(peeps.completes, [{ reportUploaded: true, executed: { mode: "full", tests: 1 } }]);
+});
+
+test("a server on a later protocol hears this action's own version, 2, and gets the reach", async (t) => {
+  const pr = await mergedPullRequest(t);
+  const peeps = await fakePeeps(t, {}, undefined, "v3");
+  const result = await runAction(pr.root, peeps.url, { GITHUB_SHA: pr.merge, GITHUB_REF: "refs/pull/1/merge", GITHUB_EVENT_NAME: "pull_request" });
+  assert.equal(result.code, 0, result.output);
+  assert.equal(peeps.announces[0]!.canNarrow, true);
+  assert.equal(peeps.announces[0]!.protocolVersion, 2);
+  assert.notEqual(peeps.announces[0]!.reach, undefined);
 });
 
 test("a job that checks out the pull request's head reads not_merge, and the run goes on", async (t) => {
@@ -608,7 +635,7 @@ test("a job that checks out the pull request's head reads not_merge, and the run
   assert.deepEqual(peeps.announces[0]!.reach, { global: true, why: "not_merge", surfaces: [], reasons: [], changedFiles: [], changedTestFiles: [], base: null });
 });
 
-for (const answer of ["off", "missing", "error", "garbage", "hang"] as const) {
+for (const answer of ["off", "legacy", "missing", "error", "garbage", "hang"] as const) {
   test(`a preflight answering ${answer} means no scan, and a run identical to today's`, async (t) => {
     const pr = await mergedPullRequest(t);
     const peeps = await fakePeeps(t, {}, undefined, answer);
@@ -620,15 +647,21 @@ for (const answer of ["off", "missing", "error", "garbage", "hang"] as const) {
     assert.deepEqual(peeps.completes, [{ reportUploaded: true }], "today's body");
     assert.doesNotMatch(result.output, /\[peeps\] reach/);
     if (answer === "hang") assert.ok(Date.now() - started < 60_000, "bounded");
+    // Only a server that answered protocol 2 hears that this job could narrow.
+    const negotiated = answer === "off";
+    assert.equal(peeps.announces[0]!.canNarrow, negotiated ? true : undefined);
+    assert.equal(peeps.announces[0]!.protocolVersion, negotiated ? 2 : undefined);
   });
 }
 
-test("a push asks nothing", async (t) => {
+test("a push asks too, so it records with the protocol it'll use, and scans nothing", async (t) => {
   const pr = await mergedPullRequest(t);
   const peeps = await fakePeeps(t, {}, undefined, "on");
   const result = await runAction(pr.root, peeps.url, { GITHUB_SHA: pr.merge, GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "push" });
   assert.equal(result.code, 0, result.output);
-  assert.deepEqual(peeps.preflights, []);
+  assert.deepEqual(peeps.preflights, ["GET"]);
+  assert.equal(peeps.announces[0]!.reach, undefined);
+  assert.equal(peeps.announces[0]!.protocolVersion, 2);
 });
 
 test("GitLab sends no reach, whatever its event", async (t) => {
