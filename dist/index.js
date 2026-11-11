@@ -500,10 +500,11 @@ if (Array.isArray(config.projects))
   withEvidence.projects = config.projects.map((project) => project?.use?.trace === undefined ? project : { ...project, use: recordTrace(project.use) });
 `;
 var OWN_APP = `{
-  // Playwright's own default: one webServer with a port, and no baseURL, is http://localhost:<port>.
-  const servers = [withEvidence.webServer].flat().filter(Boolean);
-  if (servers.length === 1 && servers[0].port !== undefined && withEvidence.use?.baseURL === undefined)
-    withEvidence.use = { ...withEvidence.use, baseURL: "http://localhost:" + servers[0].port };
+  // Playwright's own default (1.63): a single webServer object with a port and no url, and no baseURL,
+  // is http://localhost:<port>. An array, of any length, gives none.
+  const server = withEvidence.webServer;
+  if (server && !Array.isArray(server) && server.port && !server.url && withEvidence.use?.baseURL === undefined)
+    withEvidence.use = { ...withEvidence.use, baseURL: "http://localhost:" + server.port };
   delete withEvidence.webServer;
 }
 `;
@@ -1490,21 +1491,26 @@ function builtFileOf2(url, nextDir) {
   if (rel === "" || rel.startsWith("..") || import_node_path12.default.isAbsolute(rel)) return null;
   return rel.split(import_node_path12.default.sep).join("/");
 }
-var RUNTIME = /\/(?:node_modules|corepack)\//;
+var RUNTIME = /\/node_modules\/|\/corepack\/v\d+\//;
 var NEXT_CONFIG = /^next\.config(?:\.compiled)?\.(?:js|mjs|cjs|ts|mts)$/;
 function sourceFileOf(url) {
   if (!url.startsWith("file:")) return null;
-  let file;
   try {
-    file = (0, import_node_url2.fileURLToPath)(url);
+    return (0, import_node_url2.fileURLToPath)(url).split(import_node_path12.default.sep).join("/");
   } catch {
     return null;
   }
-  const posix = file.split(import_node_path12.default.sep).join("/");
-  return RUNTIME.test(posix) ? null : posix;
 }
-function sourcesOf(file, sources) {
-  return [...sources].filter((source) => file === source || file.endsWith(`/${source}`));
+function sourcesOf(file, byName) {
+  return (byName.get(import_node_path12.default.posix.basename(file)) ?? []).filter((source) => file === source || file.endsWith(`/${source}`));
+}
+function byFileName(sources) {
+  const out = /* @__PURE__ */ new Map();
+  for (const source of sources) {
+    const name = import_node_path12.default.posix.basename(source);
+    out.set(name, [...out.get(name) ?? [], source]);
+  }
+  return out;
 }
 function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ new Set(), own = () => false) {
   const keys = /* @__PURE__ */ new Set();
@@ -1512,6 +1518,7 @@ function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ n
   let unmapped = 0;
   let outside = 0;
   let builtLoaded = false;
+  const named2 = byFileName(sources);
   for (const { result } of coverage.files) {
     for (const script of result) {
       const file = builtFileOf2(script.url, nextDir);
@@ -1520,12 +1527,12 @@ function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ n
         const rel = sourceFileOf(script.url);
         if (rel === null) continue;
         const ran = script.functions.some((fn) => (fn.ranges[0]?.count ?? 0) > 0);
-        const named2 = sourcesOf(rel, sources);
-        for (const source of named2) {
+        const matches = sourcesOf(rel, named2);
+        for (const source of matches) {
           loaded.add(`file:${source}`);
           if (ran) keys.add(`file:${source}`);
         }
-        if (ran && named2.length === 0 && !own(rel) && !NEXT_CONFIG.test(import_node_path12.default.posix.basename(rel))) outside++;
+        if (ran && matches.length === 0 && !RUNTIME.test(rel) && !own(rel) && !NEXT_CONFIG.test(import_node_path12.default.posix.basename(rel))) outside++;
         continue;
       }
       const index = scripts.get(file);

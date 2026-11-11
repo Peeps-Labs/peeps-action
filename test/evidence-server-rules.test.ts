@@ -135,3 +135,11 @@ test("a run whose registered processes never loaded the build: the server ran wi
 test("a coverage file from a process that never registered: something ran without the preload", () => {
   assert.deepEqual(partialOf({ covered: [101, 202] }), [["code"], ["unregistered"]]);
 });
+
+test("a fingerprinted source is keyed wherever it sits, even under a directory named corepack; only corepack's own cache is the runtime", () => {
+  const ran = (abs: string) => ({ url: pathToFileURL(abs).href, functions: [fn("handle", 3, 40)] });
+  const named = serverFootprint(invocation([ran("/home/runner/work/corepack/corepack/src/lib/csp.ts")]), fingerprint.scripts, NEXT, new Set(["src/lib/csp.ts"]));
+  assert.deepEqual([named.keys, named.reasons], [["file:src/lib/csp.ts"], []]);
+  const app = serverFootprint(invocation([ran("/home/runner/work/corepack/corepack/server/socket.js")]), fingerprint.scripts, NEXT);
+  assert.deepEqual(app.reasons, ["outside_build"]);
+});

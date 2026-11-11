@@ -387,4 +387,8 @@ test("when the action owns the app, a webServer's port still gives the base URL 
   assert.equal(own.use?.baseURL, "http://127.0.0.1:4000", "an explicit baseURL wins");
   const two = await load(`module.exports = { webServer: [{ command: "a", port: 3000 }, { command: "b", port: 4000 }], use: { video: "off" } };\n`);
   assert.equal(two.use?.baseURL, undefined, "two servers: Playwright derives none");
+  const one = await load(`module.exports = { webServer: [{ command: "a", port: 3000 }], use: { video: "off" } };\n`);
+  assert.equal(one.use?.baseURL, undefined, "an array, even of one: Playwright derives none");
+  const url = await load(`module.exports = { webServer: { command: "a", port: 3000, url: "http://localhost:3000/health" }, use: { video: "off" } };\n`);
+  assert.equal(url.use?.baseURL, undefined, "a url instead: Playwright derives none");
 });

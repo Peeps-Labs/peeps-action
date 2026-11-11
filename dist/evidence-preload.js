@@ -2,7 +2,7 @@
 
 // src/evidence/server/preload.cjs
 var dir = process.env.PEEPS_SERVER_COVERAGE;
-if (dir && process.env.NODE_V8_COVERAGE === dir) {
+if (dir && process.env.NODE_V8_COVERAGE === dir && require("node:worker_threads").isMainThread) {
   const fs = require("node:fs");
   const path = require("node:path");
   const v8 = require("node:v8");

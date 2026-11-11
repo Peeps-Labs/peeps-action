@@ -7,11 +7,13 @@
  * Partial on anything unknown: no process registered, one whose coverage was never taken,
  * a coverage file that didn't parse, a function that ran in the job's build with no key,
  * or trouble around the app (its reset, readiness, an early exit). A partial footprint is
- * unknown for code: those tests always run. `node_modules` and Node itself are the runtime,
- * which the fingerprint treats as global: neither keyed nor partial. Other code that ran
- * outside `.next` is keyed by the fingerprinted source it is; tracked source the fingerprint
- * doesn't name needs nothing (a change to it is unaccounted); anything else, such as a
- * compiled custom server's output, is unknown (`outside_build`).
+ * unknown for code: those tests always run. Code that ran outside `.next` is keyed by the
+ * fingerprinted source it is, wherever it sits. Otherwise the runtime (`node_modules`,
+ * corepack's cache, Node itself), Next's own `next.config` and the action's preload are no
+ * one's; anything else, such as a compiled custom server's output or source a spec may
+ * import too, is unknown (`outside_build`). A process that wrote coverage without
+ * registering is `unregistered`, and registered processes that never loaded the build
+ * mean the server ran without the preload (`no_build_ran`).
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,7 +68,7 @@ function builtFileOf(url: string, nextDir: string): string | null {
  * Where the runtime lives rather than the app: dependencies, and package managers
  * corepack keeps in its cache (`pnpm start` runs pnpm inside the app's process).
  */
-const RUNTIME = /\/(?:node_modules|corepack)\//;
+const RUNTIME = /\/node_modules\/|\/corepack\/v\d+\//;
 
 /** Next's own config, and the copy it compiles beside it: a change to it is no entity's, so it runs everything. */
 const NEXT_CONFIG = /^next\.config(?:\.compiled)?\.(?:js|mjs|cjs|ts|mts)$/;
@@ -78,22 +80,29 @@ const NEXT_CONFIG = /^next\.config(?:\.compiled)?\.(?:js|mjs|cjs|ts|mts)$/;
  */
 function sourceFileOf(url: string): string | null {
   if (!url.startsWith("file:")) return null;
-  let file: string;
   try {
-    file = fileURLToPath(url);
+    return fileURLToPath(url).split(path.sep).join("/");
   } catch {
     return null;
   }
-  const posix = file.split(path.sep).join("/");
-  return RUNTIME.test(posix) ? null : posix;
 }
 
 /**
  * The fingerprinted sources a file is. A source is repo-relative, so it's a suffix of the
  * file's absolute path wherever the app sits; matching more than one only over-attributes.
  */
-function sourcesOf(file: string, sources: ReadonlySet<string>): string[] {
-  return [...sources].filter((source) => file === source || file.endsWith(`/${source}`));
+function sourcesOf(file: string, byName: ReadonlyMap<string, readonly string[]>): string[] {
+  return (byName.get(path.posix.basename(file)) ?? []).filter((source) => file === source || file.endsWith(`/${source}`));
+}
+
+/** Sources by file name: each script the server ran is checked against its namesakes only. */
+function byFileName(sources: ReadonlySet<string>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const source of sources) {
+    const name = path.posix.basename(source);
+    out.set(name, [...(out.get(name) ?? []), source]);
+  }
+  return out;
 }
 
 export function serverFootprint(
@@ -110,6 +119,7 @@ export function serverFootprint(
   let unmapped = 0;
   let outside = 0;
   let builtLoaded = false;
+  const named = byFileName(sources);
   for (const { result } of coverage.files) {
     for (const script of result) {
       const file = builtFileOf(script.url, nextDir);
@@ -119,15 +129,16 @@ export function serverFootprint(
         if (rel === null) continue;
         // The join is by file until PR 4: a test whose run ran it holds its file.
         const ran = script.functions.some((fn) => (fn.ranges[0]?.count ?? 0) > 0);
-        const named = sourcesOf(rel, sources);
-        for (const source of named) {
+        const matches = sourcesOf(rel, named);
+        for (const source of matches) {
           loaded.add(`file:${source}`);
           if (ran) keys.add(`file:${source}`);
         }
         // Anything else the server ran is unknown: built output of a fingerprinted source
         // (a custom server's dist/), or source a spec may import too, so that a change to it
         // picks only that spec.
-        if (ran && named.length === 0 && !own(rel) && !NEXT_CONFIG.test(path.posix.basename(rel))) outside++;
+        // A fingerprinted source is keyed wherever it sits; otherwise the runtime is no one's.
+        if (ran && matches.length === 0 && !RUNTIME.test(rel) && !own(rel) && !NEXT_CONFIG.test(path.posix.basename(rel))) outside++;
         continue;
       }
       const index = scripts.get(file);

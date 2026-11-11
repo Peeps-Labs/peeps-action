@@ -157,3 +157,13 @@ runInvocation({ ...${JSON.stringify({ ...command, env: undefined })}, env: proce
   }
   assert.equal(alive, false, "the app outlived the action");
 });
+
+test("a worker thread's own take can't vouch for a main thread that stopped coverage", async () => {
+  const start = `node -e 'require("node:v8").takeCoverage(); require("node:v8").stopCoverage(); new (require("node:worker_threads").Worker)("1", { eval: true }); require("./server.js")'`;
+  const command = await app({ start });
+  const { coverage } = await runInvocation(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => {
+    await new Promise((r) => setTimeout(r, 500));
+    return 0;
+  });
+  assert.deepEqual(coverage.taken, []);
+});

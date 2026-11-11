@@ -78,10 +78,11 @@ if (Array.isArray(config.projects))
  * before its coverage is taken.
  */
 const OWN_APP = `{
-  // Playwright's own default: one webServer with a port, and no baseURL, is http://localhost:<port>.
-  const servers = [withEvidence.webServer].flat().filter(Boolean);
-  if (servers.length === 1 && servers[0].port !== undefined && withEvidence.use?.baseURL === undefined)
-    withEvidence.use = { ...withEvidence.use, baseURL: "http://localhost:" + servers[0].port };
+  // Playwright's own default (1.63): a single webServer object with a port and no url, and no baseURL,
+  // is http://localhost:<port>. An array, of any length, gives none.
+  const server = withEvidence.webServer;
+  if (server && !Array.isArray(server) && server.port && !server.url && withEvidence.use?.baseURL === undefined)
+    withEvidence.use = { ...withEvidence.use, baseURL: "http://localhost:" + server.port };
   delete withEvidence.webServer;
 }
 `;

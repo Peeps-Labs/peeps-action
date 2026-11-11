@@ -5,7 +5,9 @@
 // action set both variables to the same directory. Dependency-free, never throws.
 "use strict";
 const dir = process.env.PEEPS_SERVER_COVERAGE;
-if (dir && process.env.NODE_V8_COVERAGE === dir) {
+// The main thread only: a worker shares the pid, and its take must not vouch for the main
+// thread's. V8 writes a worker's own coverage when it ends.
+if (dir && process.env.NODE_V8_COVERAGE === dir && require("node:worker_threads").isMainThread) {
   const fs = require("node:fs");
   const path = require("node:path");
   const v8 = require("node:v8");
