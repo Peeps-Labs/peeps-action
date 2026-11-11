@@ -9,7 +9,7 @@
  * from Peeps instead of from Playwright's list; it reuses everything below.
  */
 
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { prepareCaptureConfig } from "./capture-config";
 import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -318,7 +318,6 @@ export async function executeAndReport(
         coverageDir: path.join(scratch, "server-coverage"),
         scripts: input.impact!.fingerprint.scripts,
         sources: new Set(input.impact!.fingerprint.files.values()),
-        tracked: plan.tracked,
         nextDir: plan.nextDir,
         runTests: (spec, index) =>
           runPlaywright(env, planFile, reportDir, undefined, { ...input.extraEnv, PEEPS_INVOCATION: spec === null ? "ambient" : "spec" }, input.narrowed, input.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : path.join(blobDir, `report-${index}.zip`) }),
@@ -513,20 +512,8 @@ export interface ServerPlan {
   specs: string[];
   /** The job's `.next`, real path: coverage outside it is the runtime. */
   nextDir: string;
-  /** Whether git tracks a real absolute path; none outside a repository, so unmatched code reads unknown. */
-  tracked: (file: string) => boolean;
 }
 
-/** Every file git tracks in the checkout holding `dir`, as real absolute paths; none when that can't be read. */
-function trackedFiles(dir: string): Set<string> {
-  try {
-    const root = realpathSync(execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
-    const listed = execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
-    return new Set(listed.split("\0").filter(Boolean).map((file) => path.join(root, file).split(path.sep).join("/")));
-  } catch {
-    return new Set();
-  }
-}
 
 /**
  * Server evidence is recorded only when the workflow gave the app to the action
@@ -559,8 +546,7 @@ export function serverPlanOf(
   }
   const specs = [...new Set(specFiles.map((file) => realOr(path.resolve(rootDirAbs, file))))].sort();
   console.log(`[peeps] recording server evidence: ${specs.length} spec file(s), each with the app to itself, after one ambient run`);
-  const tracked = trackedFiles(env.workingDirectory);
-  return { app: env.app, specs, nextDir, tracked: (file) => tracked.has(file) };
+  return { app: env.app, specs, nextDir };
 }
 
 /** The invocations' blob reports as the one HTML report the job uploads. */

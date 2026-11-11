@@ -1465,6 +1465,8 @@ function builtFileOf2(url, nextDir) {
   if (rel === "" || rel.startsWith("..") || import_node_path12.default.isAbsolute(rel)) return null;
   return rel.split(import_node_path12.default.sep).join("/");
 }
+var RUNTIME = /\/(?:node_modules|corepack)\//;
+var NEXT_CONFIG = /^next\.config(?:\.compiled)?\.(?:js|mjs|cjs|ts|mts)$/;
 function sourceFileOf(url) {
   if (!url.startsWith("file:")) return null;
   let file;
@@ -1474,20 +1476,21 @@ function sourceFileOf(url) {
     return null;
   }
   const posix = file.split(import_node_path12.default.sep).join("/");
-  return posix.includes("/node_modules/") ? null : posix;
+  return RUNTIME.test(posix) ? null : posix;
 }
-var NEXT_CONFIG = /^next\.config(?:\.compiled)?\.(?:js|mjs|cjs|ts|mts)$/;
 function sourcesOf(file, sources) {
   return [...sources].filter((source) => file === source || file.endsWith(`/${source}`));
 }
-function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ new Set(), tracked = () => false) {
+function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ new Set(), own = () => false) {
   const keys = /* @__PURE__ */ new Set();
   const loaded = /* @__PURE__ */ new Set();
   let unmapped = 0;
   let outside = 0;
+  let builtLoaded = false;
   for (const { result } of coverage.files) {
     for (const script of result) {
       const file = builtFileOf2(script.url, nextDir);
+      if (file !== null) builtLoaded = true;
       if (file === null) {
         const rel = sourceFileOf(script.url);
         if (rel === null) continue;
@@ -1497,7 +1500,7 @@ function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ n
           loaded.add(`file:${source}`);
           if (ran) keys.add(`file:${source}`);
         }
-        if (ran && named2.length === 0 && !tracked(rel) && !NEXT_CONFIG.test(import_node_path12.default.posix.basename(rel))) outside++;
+        if (ran && named2.length === 0 && !own(rel) && !NEXT_CONFIG.test(import_node_path12.default.posix.basename(rel))) outside++;
         continue;
       }
       const index = scripts.get(file);
@@ -1532,6 +1535,9 @@ function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ n
   if (coverage.started.some((pid) => !taken.has(pid))) reasons.push("not_taken");
   const covered = new Set(coverage.covered);
   if (coverage.started.some((pid) => !covered.has(pid))) reasons.push("no_coverage");
+  const registered = new Set(coverage.started);
+  if (coverage.covered.some((pid) => !registered.has(pid))) reasons.push("unregistered");
+  if (coverage.started.length > 0 && coverage.unreadable === 0 && !builtLoaded) reasons.push("no_build_ran");
   if (coverage.unreadable > 0) reasons.push("unreadable");
   if (unmapped > 0) reasons.push("unmapped");
   if (outside > 0) reasons.push("outside_build");
@@ -1547,7 +1553,7 @@ var elsewhere = { keys: [], loaded: [], partial: ["code"], reasons: ["other_invo
 async function recordServer(input2) {
   const invoke = input2.invoke ?? runInvocation;
   const preload = input2.preload.split(import_node_path13.default.sep).join("/");
-  const ownCode = (file) => file === preload || (input2.tracked?.(file) ?? false);
+  const ownCode = (file) => file === preload;
   const footprint = (coverage) => serverFootprint(coverage, input2.scripts, input2.nextDir, input2.sources, ownCode);
   const build = input2.buildDir ?? (() => {
     let snapshot = snapshotBuildDir(input2.nextDir);
@@ -1970,7 +1976,6 @@ async function executeAndReport(env, peeps, input2) {
         coverageDir: import_node_path15.default.join(scratch, "server-coverage"),
         scripts: input2.impact.fingerprint.scripts,
         sources: new Set(input2.impact.fingerprint.files.values()),
-        tracked: plan2.tracked,
         nextDir: plan2.nextDir,
         runTests: (spec, index) => runPlaywright(env, planFile, reportDir, void 0, { ...input2.extraEnv, PEEPS_INVOCATION: spec === null ? "ambient" : "spec" }, input2.narrowed, input2.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : import_node_path15.default.join(blobDir, `report-${index}.zip`) }),
         attempts: () => evidence.read("att-").map((record) => ({ testId: record.testId, file: typeof record.file === "string" ? realOr(record.file) : null }))
@@ -2112,15 +2117,6 @@ function realOr(file) {
     return file;
   }
 }
-function trackedFiles(dir) {
-  try {
-    const root = (0, import_node_fs6.realpathSync)((0, import_node_child_process5.execFileSync)("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
-    const listed = (0, import_node_child_process5.execFileSync)("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
-    return new Set(listed.split("\0").filter(Boolean).map((file) => import_node_path15.default.join(root, file).split(import_node_path15.default.sep).join("/")));
-  } catch {
-    return /* @__PURE__ */ new Set();
-  }
-}
 function serverPlanOf(env, recorded, rootDirAbs, specFiles, shard) {
   if (!env.app || !recorded.some((project) => project.collect.coverage)) return null;
   if (shard) {
@@ -2140,8 +2136,7 @@ function serverPlanOf(env, recorded, rootDirAbs, specFiles, shard) {
   }
   const specs = [...new Set(specFiles.map((file) => realOr(import_node_path15.default.resolve(rootDirAbs, file))))].sort();
   console.log(`[peeps] recording server evidence: ${specs.length} spec file(s), each with the app to itself, after one ambient run`);
-  const tracked = trackedFiles(env.workingDirectory);
-  return { app: env.app, specs, nextDir, tracked: (file) => tracked.has(file) };
+  return { app: env.app, specs, nextDir };
 }
 async function mergeReports(env, blobDir, reportDir) {
   if (!(0, import_node_fs6.existsSync)(blobDir)) return;

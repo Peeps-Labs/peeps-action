@@ -22,7 +22,8 @@ const invocation = (scripts: V8Script[], over: Partial<InvocationCoverage> = {})
   started: [101],
   taken: [101],
   covered: [101],
-  files: [{ result: scripts }],
+  // Every Next server process loads the build: a script under `.next`, nothing of it run.
+  files: [{ result: [script(SSR, []), ...scripts] }],
   unreadable: 0,
   problems: [],
   ...over,
@@ -48,16 +49,17 @@ test("what isn't the job's own build is the runtime: neither keyed nor partial",
   const internal = { url: "node:internal/main", functions: [fn("run", 1, 2)] };
   const sibling = { url: pathToFileURL(`/work/app/.next-other/${SSR}`).href, functions: [fn("onSuccess", onSuccess.start, onSuccess.end)] };
   const result = serverFootprint(invocation([elsewhere, internal]), fingerprint.scripts, NEXT);
-  assert.deepEqual([result.keys, result.loaded, result.partial], [[], [], []]);
-  // Another directory of the app, tracked, that no fingerprint names: no one's, never partial.
-  const beside = serverFootprint(invocation([sibling]), fingerprint.scripts, NEXT, new Set(), () => true);
-  assert.deepEqual([beside.keys, beside.reasons], [[], []]);
+  assert.deepEqual([result.keys, result.partial], [[], []]);
+  // Another directory of the app that no fingerprint names: unknown.
+  const beside = serverFootprint(invocation([sibling]), fingerprint.scripts, NEXT);
+  assert.deepEqual([beside.keys, beside.reasons], [[], ["outside_build"]]);
 });
 
 test("a script whose whole is its key: the key, run or loaded", () => {
   const manifest = "server/app/sso/page_client-reference-manifest.js";
   const result = serverFootprint(invocation([script(manifest, [fn("anon", 5, 9)])]), fingerprint.scripts, NEXT);
-  assert.deepEqual([result.keys, result.loaded], [[`out:${manifest}`], [`out:${manifest}`]]);
+  assert.deepEqual(result.keys, [`out:${manifest}`]);
+  assert.ok(result.loaded.includes(`out:${manifest}`));
 });
 
 test("a whole script whose only code is its top level still ran: its key", () => {
@@ -79,7 +81,7 @@ const partialOf = (over: Partial<InvocationCoverage>, scripts: V8Script[] = []) 
 };
 
 test("unknown is partial: no process, a process whose coverage wasn't taken, an unreadable file", () => {
-  assert.deepEqual(partialOf({ started: [], taken: [], files: [] }), [["code"], ["no_process"]]);
+  assert.deepEqual(partialOf({ started: [], taken: [], covered: [], files: [] }), [["code"], ["no_process"]]);
   assert.deepEqual(partialOf({ started: [101, 102], taken: [101] }), [["code"], ["not_taken", "no_coverage"]]);
   assert.deepEqual(partialOf({ unreadable: 1 }), [["code"], ["unreadable"]]);
 });
@@ -93,20 +95,6 @@ test("what went wrong around the app (a reset, readiness, an early exit) is part
   assert.deepEqual(partialOf({ problems: ["not_ready", "reset_failed"] }), [["code"], ["not_ready", "reset_failed"]]);
 });
 
-test("workspace code the server ran outside the build: a fingerprinted source holds its file; anything else is no one's (a change to it runs everything)", () => {
-  const ran = (rel: string) => ({ url: pathToFileURL(`/work/app/${rel}`).href, functions: [fn("handle", 3, 40)] });
-  const sources = new Set(["app/src/lib/csp.ts", "app/src/app/api/me/route.ts"]);
-  // A custom server running source the build also bundles, and next.config's own import.
-  const custom = serverFootprint(invocation([ran("src/app/api/me/route.ts"), ran("src/lib/csp.ts")]), fingerprint.scripts, NEXT, sources);
-  assert.deepEqual([custom.keys, custom.loaded, custom.partial], [["file:app/src/app/api/me/route.ts", "file:app/src/lib/csp.ts"], ["file:app/src/app/api/me/route.ts", "file:app/src/lib/csp.ts"], []]);
-  // Tracked, not fingerprinted: no key, and nothing partial.
-  const other = serverFootprint(invocation([ran("next.config.compiled.js"), ran("server/socket.js"), ran("node_modules/pg/lib/client.js")]), fingerprint.scripts, NEXT, sources, () => true);
-  assert.deepEqual([other.keys, other.partial], [[], []]);
-  // Loaded, nothing ran: loaded only.
-  const idle = serverFootprint(invocation([{ url: pathToFileURL("/work/app/src/lib/csp.ts").href, functions: [fn("idle", 3, 40, 0)] }]), fingerprint.scripts, NEXT, sources);
-  assert.deepEqual([idle.keys, idle.loaded], [[], ["file:app/src/lib/csp.ts"]]);
-});
-
 test("a monorepo sibling the server ran is held by its file too: sources are repo-relative, wherever the app sits", () => {
   const sibling = { url: pathToFileURL("/work/packages/shared/index.ts").href, functions: [fn("share", 3, 40)] };
   const result = serverFootprint(invocation([sibling]), fingerprint.scripts, NEXT, new Set(["packages/shared/index.ts"]));
@@ -117,20 +105,33 @@ test("a process whose take wrote no coverage file is partial, whatever its marke
   assert.deepEqual(partialOf({ started: [101, 102], taken: [101, 102], covered: [101] }), [["code"], ["no_coverage"]]);
 });
 
-test("code the server ran that git doesn't track and the fingerprint doesn't name (a compiled custom server's dist/) is unknown: partial", () => {
-  const ran = (abs: string) => ({ url: pathToFileURL(abs).href, functions: [fn("handle", 3, 40)] });
-  const tracked = (file: string) => file === "/work/app/server/socket.ts";
-  const sources = new Set(["app/src/lib/auth.ts"]);
-  const compiled = serverFootprint(invocation([ran("/work/app/dist/src/lib/auth.js")]), fingerprint.scripts, NEXT, sources, tracked);
-  assert.deepEqual([compiled.keys, compiled.reasons], [[], ["outside_build"]]);
-  // Tracked, not fingerprinted: a change to it is a file no entity accounts for, which runs everything.
-  const socket = serverFootprint(invocation([ran("/work/app/server/socket.ts")]), fingerprint.scripts, NEXT, sources, tracked);
-  assert.deepEqual([socket.keys, socket.reasons], [[], []]);
-  // Next compiles its own config next to it, untracked: a config change runs everything anyway.
-  const config = serverFootprint(invocation([ran("/work/app/next.config.compiled.js"), ran("/work/app/next.config.mjs")]), fingerprint.scripts, NEXT, sources, tracked);
-  assert.deepEqual(config.reasons, []);
-});
-
 test("a built script the fingerprint doesn't index ran, even only its top level: unmapped", () => {
   assert.deepEqual(partialOf({}, [script("server/chunks/late.js", [fn("", 0, 50)])]), [["code"], ["unmapped"]]);
+});
+
+test("code the server ran outside the build: a fingerprinted source holds its file; anything else is unknown, Next's own config and the runtime aside", () => {
+  const ran = (abs: string) => ({ url: pathToFileURL(abs).href, functions: [fn("handle", 3, 40)] });
+  const sources = new Set(["app/src/lib/csp.ts"]);
+  const named = serverFootprint(invocation([ran("/work/app/src/lib/csp.ts")]), fingerprint.scripts, NEXT, sources);
+  assert.deepEqual([named.keys, named.reasons], [["file:app/src/lib/csp.ts"], []]);
+  // Tracked or not: a spec may import it, so a change to it isn't sure to run everything.
+  for (const file of ["/work/app/config/redirects.js", "/work/app/dist/src/lib/auth.js"]) {
+    assert.deepEqual(serverFootprint(invocation([ran(file)]), fingerprint.scripts, NEXT, sources).reasons, ["outside_build"], file);
+  }
+  const runtime = [
+    "/work/app/next.config.compiled.js",
+    "/work/app/next.config.mjs",
+    "/work/app/node_modules/pg/lib/client.js",
+    "/home/runner/.cache/node/corepack/v1/pnpm/9.1.0/dist/pnpm.cjs",
+  ];
+  assert.deepEqual(serverFootprint(invocation(runtime.map(ran)), fingerprint.scripts, NEXT, sources).reasons, []);
+});
+
+test("a run whose registered processes never loaded the build: the server ran without the preload (a start script that replaced NODE_OPTIONS)", () => {
+  const wrapper = { url: pathToFileURL("/work/app/node_modules/npm/bin/npm-cli.js").href, functions: [fn("main", 3, 40)] };
+  assert.deepEqual(serverFootprint({ started: [1], taken: [1], covered: [1], files: [{ result: [wrapper] }], unreadable: 0, problems: [] }, fingerprint.scripts, NEXT).reasons, ["no_build_ran"]);
+});
+
+test("a coverage file from a process that never registered: something ran without the preload", () => {
+  assert.deepEqual(partialOf({ covered: [101, 202] }), [["code"], ["unregistered"]]);
 });

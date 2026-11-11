@@ -63,9 +63,18 @@ function builtFileOf(url: string, nextDir: string): string | null {
 }
 
 /**
- * Code the server ran from source outside `.next` and `node_modules`: what `next.config`
- * imports, a custom server running source the build also bundles, or a monorepo sibling
- * package. Its absolute path, or null for anything else.
+ * Where the runtime lives rather than the app: dependencies, and package managers
+ * corepack keeps in its cache (`pnpm start` runs pnpm inside the app's process).
+ */
+const RUNTIME = /\/(?:node_modules|corepack)\//;
+
+/** Next's own config, and the copy it compiles beside it: a change to it is no entity's, so it runs everything. */
+const NEXT_CONFIG = /^next\.config(?:\.compiled)?\.(?:js|mjs|cjs|ts|mts)$/;
+
+/**
+ * Code the server ran from source outside `.next` and the runtime: what `next.config`
+ * imports, a custom server, a monorepo sibling package. Its absolute path, or null for
+ * anything else.
  */
 function sourceFileOf(url: string): string | null {
   if (!url.startsWith("file:")) return null;
@@ -76,18 +85,13 @@ function sourceFileOf(url: string): string | null {
     return null;
   }
   const posix = file.split(path.sep).join("/");
-  return posix.includes("/node_modules/") ? null : posix;
+  return RUNTIME.test(posix) ? null : posix;
 }
 
 /**
  * The fingerprinted sources a file is. A source is repo-relative, so it's a suffix of the
  * file's absolute path wherever the app sits; matching more than one only over-attributes.
- * A file the fingerprint doesn't name needs nothing: a change to it is a file no entity
- * accounts for, which runs everything.
  */
-/** Next's own config, and the copy it compiles beside it: a change to it runs everything anyway. */
-const NEXT_CONFIG = /^next\.config(?:\.compiled)?\.(?:js|mjs|cjs|ts|mts)$/;
-
 function sourcesOf(file: string, sources: ReadonlySet<string>): string[] {
   return [...sources].filter((source) => file === source || file.endsWith(`/${source}`));
 }
@@ -98,16 +102,18 @@ export function serverFootprint(
   nextDir: string,
   /** Every source the fingerprint names (`Fingerprint.files`' values). */
   sources: ReadonlySet<string> = new Set(),
-  /** Whether git tracks this absolute path: by default nothing is, so unmatched code reads unknown. */
-  tracked: (file: string) => boolean = () => false,
+  /** The action's own code that runs in the app (the preload): no one's. */
+  own: (file: string) => boolean = () => false,
 ): ServerFootprint {
   const keys = new Set<string>();
   const loaded = new Set<string>();
   let unmapped = 0;
   let outside = 0;
+  let builtLoaded = false;
   for (const { result } of coverage.files) {
     for (const script of result) {
       const file = builtFileOf(script.url, nextDir);
+      if (file !== null) builtLoaded = true;
       if (file === null) {
         const rel = sourceFileOf(script.url);
         if (rel === null) continue;
@@ -118,8 +124,10 @@ export function serverFootprint(
           loaded.add(`file:${source}`);
           if (ran) keys.add(`file:${source}`);
         }
-        // Built output of a fingerprinted source (dist/), which no change names: unknown.
-        if (ran && named.length === 0 && !tracked(rel) && !NEXT_CONFIG.test(path.posix.basename(rel))) outside++;
+        // Anything else the server ran is unknown: built output of a fingerprinted source
+        // (a custom server's dist/), or source a spec may import too, so that a change to it
+        // picks only that spec.
+        if (ran && named.length === 0 && !own(rel) && !NEXT_CONFIG.test(path.posix.basename(rel))) outside++;
         continue;
       }
       const index = scripts.get(file);
@@ -159,6 +167,12 @@ export function serverFootprint(
   // A take reports an app's own stopCoverage on stderr, and writes nothing: the marker isn't enough.
   const covered = new Set(coverage.covered);
   if (coverage.started.some((pid) => !covered.has(pid))) reasons.push("no_coverage");
+  // Something wrote coverage without registering: it ran without the preload.
+  const registered = new Set(coverage.started);
+  if (coverage.covered.some((pid) => !registered.has(pid))) reasons.push("unregistered");
+  // Every Next server loads its build: when no registered process did, the server that
+  // served the tests ran without the preload (a start script that replaced NODE_OPTIONS).
+  if (coverage.started.length > 0 && coverage.unreadable === 0 && !builtLoaded) reasons.push("no_build_ran");
   if (coverage.unreadable > 0) reasons.push("unreadable");
   if (unmapped > 0) reasons.push("unmapped");
   if (outside > 0) reasons.push("outside_build");

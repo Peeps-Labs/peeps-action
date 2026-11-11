@@ -22,17 +22,3 @@ test("a config that shards its suite gets no server evidence: a file's own run w
   assert.notEqual(serverPlanOf(envOf(dir), recorded, dir, ["a.spec.ts"], null), null);
   assert.equal(serverPlanOf(envOf(dir), recorded, dir, ["a.spec.ts"], { current: 2, total: 2 }), null);
 });
-
-test("the plan knows which files git tracks, by real absolute path; outside a repository, none", () => {
-  const dir = require("node:fs").realpathSync(app());
-  const { execFileSync } = require("node:child_process");
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@e", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@e" } });
-  assert.equal(serverPlanOf(envOf(dir), recorded, dir, ["a.spec.ts"], null)!.tracked(path.join(dir, "a.spec.ts")), false, "no repository");
-  git("init", "-q");
-  git("add", "a.spec.ts");
-  git("commit", "-qm", "x");
-  writeFileSync(path.join(dir, "untracked.js"), "");
-  const plan = serverPlanOf(envOf(dir), recorded, dir, ["a.spec.ts"], null)!;
-  assert.equal(plan.tracked(path.join(dir, "a.spec.ts")), true);
-  assert.equal(plan.tracked(path.join(dir, "untracked.js")), false);
-});

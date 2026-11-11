@@ -25,8 +25,6 @@ export interface RecordServerInput {
   scripts: ReadonlyMap<string, ScriptIndex>;
   /** Every source the fingerprint names: workspace code the server ran is keyed by its file. */
   sources?: ReadonlySet<string>;
-  /** Whether git tracks an absolute path: unmatched untracked code reads unknown. */
-  tracked?: (file: string) => boolean;
   /** The job's `.next`, real path. */
   nextDir: string;
   /** Run Playwright on one spec file, or on none (null) for the ambient invocation. */
@@ -50,7 +48,7 @@ export async function recordServer(input: RecordServerInput): Promise<{ exitCode
   const invoke = input.invoke ?? runInvocation;
   // The preload runs in every app process, from wherever the action is installed: it's no one's code.
   const preload = input.preload.split(path.sep).join("/");
-  const ownCode = (file: string) => file === preload || (input.tracked?.(file) ?? false);
+  const ownCode = (file: string) => file === preload;
   const footprint = (coverage: Parameters<typeof serverFootprint>[0]) => serverFootprint(coverage, input.scripts, input.nextDir, input.sources, ownCode);
   const build =
     input.buildDir ??

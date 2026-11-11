@@ -988,15 +988,17 @@ test("calls the api", async ({ request }) => { expect((await request.get("/login
     await mkdir(path.dirname(path.join(root, ".next", file)), { recursive: true });
     await writeFile(path.join(root, ".next", file), text);
   }
-  // A custom server, committed with the app: tracked and not fingerprinted, so what it runs itself is no one's.
-  await writeFile(path.join(root, "app.cjs"), OWNED_APP(path.join(root, ".next", `server/chunks/ssr/${NEXT_BUILD.hash}s1.js`)));
+  // Stands in for `next start`, which runs from node_modules: the runtime, no one's code. (A custom
+  // server in the app's own source would read partial, outside_build.)
+  await mkdir(path.join(root, "vendor/node_modules/fake-next"), { recursive: true });
+  await writeFile(path.join(root, "vendor/node_modules/fake-next/start.cjs"), OWNED_APP(path.join(root, ".next", `server/chunks/ssr/${NEXT_BUILD.hash}s1.js`)));
   git(root, "init", "-q", "-b", "main");
   git(root, "add", ".");
   git(root, "commit", "-qm", "first");
   const peeps = await fakePeeps(t, {}, undefined, "collect");
   const result = await runAction(root, peeps.url, {
     GITHUB_SHA: git(root, "rev-parse", "HEAD"), GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "push", BASE_URL: app, APP_PORT: String(port),
-    "INPUT_APP-START": "node app.cjs", "INPUT_APP-READY-URL": `${app}/ready`, "INPUT_APP-RESET": "echo \"$PEEPS_INVOCATION\" >> resets.log",
+    "INPUT_APP-START": "node vendor/node_modules/fake-next/start.cjs", "INPUT_APP-READY-URL": `${app}/ready`, "INPUT_APP-RESET": "echo \"$PEEPS_INVOCATION\" >> resets.log",
   });
   assert.equal(result.code, 0, result.output);
   // Ambient first, then each of the three spec files, each reset and started on its own; the config's webServer never ran.
