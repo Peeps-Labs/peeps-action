@@ -124,3 +124,36 @@ test("an app that stopped coverage itself has no final take: not taken, so parti
   assert.equal(coverage.started.length, 1);
   assert.deepEqual(coverage.taken, [], "the final take wrote nothing, so no marker");
 });
+
+test("a signal to the action while a run owns the app stops the app's group too", async () => {
+  const command = await app();
+  const dir = path.join(command.cwd, "cov");
+  const runner = path.join(command.cwd, "runner.ts");
+  writeFileSync(
+    runner,
+    `import { runInvocation } from ${JSON.stringify(path.join(__dirname, "..", "src", "evidence", "server", "lifecycle"))};
+runInvocation({ ...${JSON.stringify({ ...command, env: undefined })}, env: process.env } as never, { dir: ${JSON.stringify(dir)}, preload: ${JSON.stringify(PRELOAD)}, kind: "spec" }, () => { console.log("TESTS"); return new Promise<number>(() => {}); });
+`,
+  );
+  const child = require("node:child_process").spawn(process.execPath, ["--import", "tsx", runner], { cwd: path.join(__dirname, ".."), env: command.env, stdio: ["ignore", "pipe", "inherit"] });
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("the runner never reached its tests")), 30_000);
+    child.stdout.on("data", (d: Buffer) => d.toString().includes("TESTS") && (clearTimeout(timer), resolve()));
+    child.on("exit", (code: number) => reject(new Error(`the runner exited first (${code})`)));
+  });
+  const appPid = Number(require("node:fs").readdirSync(dir).find((n: string) => n.startsWith("pid-"))!.slice(4, -5));
+  child.kill("SIGTERM");
+  await new Promise((resolve) => child.on("exit", resolve));
+  // A surviving app holds the pipe the runner gave it: let go, so a regression fails, not hangs.
+  child.stdout.destroy();
+  let alive = true;
+  for (let i = 0; i < 50 && alive; i++) {
+    try {
+      process.kill(appPid, 0);
+      await new Promise((r) => setTimeout(r, 100));
+    } catch {
+      alive = false;
+    }
+  }
+  assert.equal(alive, false, "the app outlived the action");
+});

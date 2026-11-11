@@ -205,7 +205,19 @@ function specFilesOf(list) {
   return [...files].sort();
 }
 function testFilesOf(list) {
-  return [...new Set(list.suites.flatMap((suite) => suite.file ? [suite.file] : []))].sort();
+  const support = new Set((list.config.projects ?? []).flatMap((p) => [...p.dependencies ?? [], ...p.teardown ? [p.teardown] : []]));
+  const projectsOf = (suite) => [
+    ...(suite.specs ?? []).flatMap((spec) => (spec.tests ?? []).map((t) => t.projectName ?? "")),
+    ...(suite.suites ?? []).flatMap(projectsOf)
+  ];
+  return [
+    ...new Set(
+      list.suites.flatMap((suite) => {
+        const projects = projectsOf(suite);
+        return suite.file && !(projects.length > 0 && projects.every((p) => support.has(p))) ? [suite.file] : [];
+      })
+    )
+  ].sort();
 }
 async function listTests(env, extraArgs = []) {
   const args = ["playwright", "test", "--list", "--reporter=json", ...extraArgs];
@@ -1407,6 +1419,18 @@ async function runInvocation(app, options, tests) {
       NODE_OPTIONS: `${app.env.NODE_OPTIONS ?? ""} --require ${JSON.stringify(options.preload)}`.trim()
     }
   });
+  const signals = ["SIGTERM", "SIGINT"];
+  const onSignal = (signal) => {
+    if (child.pid !== void 0) {
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+      }
+    }
+    for (const s2 of signals) process.off(s2, onSignal);
+    if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+  };
+  for (const s2 of signals) process.on(s2, onSignal);
   let exited = false;
   child.on("exit", () => exited = true);
   child.on("error", () => exited = true);
@@ -1433,6 +1457,7 @@ async function runInvocation(app, options, tests) {
     exitCode = await tests();
     at.push(Date.now());
   } finally {
+    for (const s2 of signals) process.off(s2, onSignal);
     if (exited && !problems.includes("app_exited")) problems.push("app_exited");
     const pid = child.pid;
     if (pid !== void 0 && groupAlive(pid)) {

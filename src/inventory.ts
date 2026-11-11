@@ -19,7 +19,7 @@ import type { PeepsClient } from "./peeps";
 const execFileAsync = promisify(execFile);
 
 export interface PlaywrightList {
-  config: { rootDir?: string; projects?: Array<{ name: string }>; globalSetup?: string | string[] | null; shard?: { current: number; total: number } | null };
+  config: { rootDir?: string; projects?: Array<{ name: string; dependencies?: string[]; teardown?: string }>; globalSetup?: string | string[] | null; shard?: { current: number; total: number } | null };
   suites: PlaywrightSuite[];
 }
 export interface PlaywrightSuite {
@@ -49,9 +49,25 @@ export function specFilesOf(list: PlaywrightList): string[] {
   return [...files].sort();
 }
 
-/** The test files themselves, relative to rootDir: Playwright's file suites, which its file filters select. */
+/**
+ * The test files themselves, relative to rootDir: Playwright's file suites, which its file
+ * filters select. A file only setup or teardown projects run is left out: Playwright runs
+ * those around every dependent file, and alone a teardown has no setup to clean up after.
+ */
 export function testFilesOf(list: PlaywrightList): string[] {
-  return [...new Set(list.suites.flatMap((suite) => (suite.file ? [suite.file] : [])))].sort();
+  const support = new Set((list.config.projects ?? []).flatMap((p) => [...(p.dependencies ?? []), ...(p.teardown ? [p.teardown] : [])]));
+  const projectsOf = (suite: PlaywrightSuite): string[] => [
+    ...(suite.specs ?? []).flatMap((spec) => ((spec as { tests?: Array<{ projectName?: string }> }).tests ?? []).map((t) => t.projectName ?? "")),
+    ...(suite.suites ?? []).flatMap(projectsOf),
+  ];
+  return [
+    ...new Set(
+      list.suites.flatMap((suite) => {
+        const projects = projectsOf(suite);
+        return suite.file && !(projects.length > 0 && projects.every((p) => support.has(p))) ? [suite.file] : [];
+      }),
+    ),
+  ].sort();
 }
 
 export async function listTests(env: RunnerEnv, extraArgs: string[] = []): Promise<PlaywrightList> {

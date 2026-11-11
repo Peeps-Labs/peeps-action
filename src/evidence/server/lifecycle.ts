@@ -134,6 +134,21 @@ export async function runInvocation(
       NODE_OPTIONS: `${app.env.NODE_OPTIONS ?? ""} --require ${JSON.stringify(options.preload)}`.trim(),
     },
   });
+  // The app is detached in its own group: if the action is told to stop, the app must too.
+  const signals = ["SIGTERM", "SIGINT"] as const;
+  const onSignal = (signal: NodeJS.Signals) => {
+    if (child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        // Already gone.
+      }
+    }
+    for (const s of signals) process.off(s, onSignal);
+    // Nothing else listening: end as the signal would have.
+    if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+  };
+  for (const s of signals) process.on(s, onSignal);
   let exited = false;
   child.on("exit", () => (exited = true));
   child.on("error", () => (exited = true));
@@ -160,6 +175,7 @@ export async function runInvocation(
     exitCode = await tests();
     at.push(Date.now());
   } finally {
+    for (const s of signals) process.off(s, onSignal);
     // An app that ended before its tests did may have served only some of them.
     if (exited && !problems.includes("app_exited")) problems.push("app_exited");
     const pid = child.pid;

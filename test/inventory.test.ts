@@ -38,3 +38,16 @@ test("the test files Playwright filters on are its file suites, not where a help
   assert.deepEqual(testFilesOf(list), ["a.spec.ts", "b.spec.ts"]);
   assert.deepEqual(specFilesOf(list), ["../helpers/shared.ts", "a.spec.ts"]);
 });
+
+test("a file only setup or teardown projects run isn't a test file of its own: Playwright runs it with every dependent file", () => {
+  const spec = (title: string, file: string, projectName: string) => ({ title, file, line: 1, tests: [{ projectName }] });
+  const list = {
+    config: { projects: [{ name: "setup", dependencies: [] }, { name: "cleanup" }, { name: "chromium", dependencies: ["setup"], teardown: "cleanup" }] },
+    suites: [
+      { title: "auth.setup.ts", file: "auth.setup.ts", specs: [spec("logs in", "auth.setup.ts", "setup")] },
+      { title: "db.teardown.ts", file: "db.teardown.ts", specs: [spec("cleans", "db.teardown.ts", "cleanup")] },
+      { title: "a.spec.ts", file: "a.spec.ts", specs: [spec("a", "a.spec.ts", "chromium")] },
+    ],
+  };
+  assert.deepEqual(testFilesOf(list as never), ["a.spec.ts"]);
+});
