@@ -59,35 +59,56 @@ function builtFileOf(url: string, nextDir: string): string | null {
 }
 
 /**
- * App code outside the build: a file under the app's directory, not in `.next` or
- * `node_modules`, other than Next's own config. A custom server can run source the
- * build also bundles, and the fingerprint keys only the bundle, so it reads unknown.
+ * App code the server ran from the workspace, outside `.next` and `node_modules`: what
+ * `next.config` imports, or a custom server running source the build also bundles. Its
+ * path under the app's directory, or null for anything else.
  */
-function outsideBuild(url: string, nextDir: string): boolean {
-  if (!url.startsWith("file:")) return false;
+function workspaceFileOf(url: string, nextDir: string): string | null {
+  if (!url.startsWith("file:")) return null;
   let file: string;
   try {
     file = fileURLToPath(url);
   } catch {
-    return false;
+    return null;
   }
   const rel = path.relative(path.dirname(nextDir), file);
-  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null;
   const parts = rel.split(path.sep);
-  if (parts[0] === path.basename(nextDir) || parts.includes("node_modules")) return false;
-  return !/^next\.config\.(?:js|mjs|cjs|ts|mts)$/.test(rel);
+  if (parts[0] === path.basename(nextDir) || parts.includes("node_modules")) return null;
+  return parts.join("/");
 }
 
-export function serverFootprint(coverage: InvocationCoverage, scripts: ReadonlyMap<string, ScriptIndex>, nextDir: string): ServerFootprint {
+/**
+ * The fingerprinted sources a workspace file is: a source is repo-relative, the file app-relative.
+ * One the fingerprint doesn't name needs nothing: a change to it is a file no entity accounts
+ * for, which runs everything.
+ */
+function sourcesOf(rel: string, sources: ReadonlySet<string>): string[] {
+  return [...sources].filter((source) => source === rel || source.endsWith(`/${rel}`));
+}
+
+export function serverFootprint(
+  coverage: InvocationCoverage,
+  scripts: ReadonlyMap<string, ScriptIndex>,
+  nextDir: string,
+  /** Every source the fingerprint names (`Fingerprint.files`' values). */
+  sources: ReadonlySet<string> = new Set(),
+): ServerFootprint {
   const keys = new Set<string>();
   const loaded = new Set<string>();
   let unmapped = 0;
-  let outside = 0;
   for (const { result } of coverage.files) {
     for (const script of result) {
       const file = builtFileOf(script.url, nextDir);
       if (file === null) {
-        if (outsideBuild(script.url, nextDir) && script.functions.some((fn) => (fn.ranges[0]?.count ?? 0) > 0)) outside++;
+        const rel = workspaceFileOf(script.url, nextDir);
+        if (rel === null) continue;
+        // The join is by file until PR 4: a test whose run ran it holds its file.
+        const ran = script.functions.some((fn) => (fn.ranges[0]?.count ?? 0) > 0);
+        for (const source of sourcesOf(rel, sources)) {
+          loaded.add(`file:${source}`);
+          if (ran) keys.add(`file:${source}`);
+        }
         continue;
       }
       const index = scripts.get(file);
@@ -121,6 +142,5 @@ export function serverFootprint(coverage: InvocationCoverage, scripts: ReadonlyM
   if (coverage.started.some((pid) => !taken.has(pid))) reasons.push("not_taken");
   if (coverage.unreadable > 0) reasons.push("unreadable");
   if (unmapped > 0) reasons.push("unmapped");
-  if (outside > 0) reasons.push("outside_build");
   return { keys: [...keys].sort(), loaded: [...loaded].sort(), partial: reasons.length > 0 ? ["code"] : [], reasons };
 }

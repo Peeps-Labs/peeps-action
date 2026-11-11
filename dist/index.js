@@ -1190,8 +1190,8 @@ function membersOf(records, coverage, fingerprint, collected, contexts, taints =
     if (!member) byRun.set(record.runId, member = { run: record.runId, attempts: [], evidence: [] });
     member.attempts.push({ retry: record.retry, passed: record.passed });
     if (collected.har) {
-      const missing = { keys: [], paths: [], partial: ["route"], reasons: ["har_missing"] };
-      member.evidence.push(record.har ? { keys: [], paths: record.har.paths, partial: record.har.complete ? [] : ["route"], reasons: record.har.complete ? [] : ["har_incomplete"] } : missing);
+      const missing = { keys: [], paths: [], partial: ["route"], layers: ["browser"], reasons: ["har_missing"] };
+      member.evidence.push(record.har ? { keys: [], paths: record.har.paths, partial: record.har.complete ? [] : ["route"], layers: ["browser"], reasons: record.har.complete ? [] : ["har_incomplete"] } : missing);
     }
     if (collected.coverage) {
       const files = covered.get(`${record.testId}\0${record.retry}`) ?? [];
@@ -1451,30 +1451,38 @@ function builtFileOf2(url, nextDir) {
   if (rel === "" || rel.startsWith("..") || import_node_path12.default.isAbsolute(rel)) return null;
   return rel.split(import_node_path12.default.sep).join("/");
 }
-function outsideBuild(url, nextDir) {
-  if (!url.startsWith("file:")) return false;
+function workspaceFileOf(url, nextDir) {
+  if (!url.startsWith("file:")) return null;
   let file;
   try {
     file = (0, import_node_url2.fileURLToPath)(url);
   } catch {
-    return false;
+    return null;
   }
   const rel = import_node_path12.default.relative(import_node_path12.default.dirname(nextDir), file);
-  if (rel === "" || rel.startsWith("..") || import_node_path12.default.isAbsolute(rel)) return false;
+  if (rel === "" || rel.startsWith("..") || import_node_path12.default.isAbsolute(rel)) return null;
   const parts = rel.split(import_node_path12.default.sep);
-  if (parts[0] === import_node_path12.default.basename(nextDir) || parts.includes("node_modules")) return false;
-  return !/^next\.config\.(?:js|mjs|cjs|ts|mts)$/.test(rel);
+  if (parts[0] === import_node_path12.default.basename(nextDir) || parts.includes("node_modules")) return null;
+  return parts.join("/");
 }
-function serverFootprint(coverage, scripts, nextDir) {
+function sourcesOf(rel, sources) {
+  return [...sources].filter((source) => source === rel || source.endsWith(`/${rel}`));
+}
+function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ new Set()) {
   const keys = /* @__PURE__ */ new Set();
   const loaded = /* @__PURE__ */ new Set();
   let unmapped = 0;
-  let outside = 0;
   for (const { result } of coverage.files) {
     for (const script of result) {
       const file = builtFileOf2(script.url, nextDir);
       if (file === null) {
-        if (outsideBuild(script.url, nextDir) && script.functions.some((fn) => (fn.ranges[0]?.count ?? 0) > 0)) outside++;
+        const rel = workspaceFileOf(script.url, nextDir);
+        if (rel === null) continue;
+        const ran = script.functions.some((fn) => (fn.ranges[0]?.count ?? 0) > 0);
+        for (const source of sourcesOf(rel, sources)) {
+          loaded.add(`file:${source}`);
+          if (ran) keys.add(`file:${source}`);
+        }
         continue;
       }
       const index = scripts.get(file);
@@ -1505,7 +1513,6 @@ function serverFootprint(coverage, scripts, nextDir) {
   if (coverage.started.some((pid) => !taken.has(pid))) reasons.push("not_taken");
   if (coverage.unreadable > 0) reasons.push("unreadable");
   if (unmapped > 0) reasons.push("unmapped");
-  if (outside > 0) reasons.push("outside_build");
   return { keys: [...keys].sort(), loaded: [...loaded].sort(), partial: reasons.length > 0 ? ["code"] : [], reasons };
 }
 
@@ -1517,7 +1524,7 @@ function specFilter(file) {
 var elsewhere = { keys: [], loaded: [], partial: ["code"], reasons: ["other_invocation"] };
 async function recordServer(input2) {
   const invoke = input2.invoke ?? runInvocation;
-  const footprint = (coverage) => serverFootprint(coverage, input2.scripts, input2.nextDir);
+  const footprint = (coverage) => serverFootprint(coverage, input2.scripts, input2.nextDir, input2.sources);
   const build = input2.buildDir ?? (() => {
     let snapshot = snapshotBuildDir(input2.nextDir);
     return { snapshot: () => snapshot = snapshotBuildDir(input2.nextDir), settle: () => settleBuildDir(input2.nextDir, snapshot) };
@@ -1834,7 +1841,7 @@ async function runReport(env, peeps) {
   const recorded = impact?.projects.slice(0, MAX_RECEIPTS).map((project) => ({ project, batch: response.batches.find((b) => b.projectId === project.projectId) })).filter((p) => p.batch !== void 0).map(({ project, batch }) => ({ ...project, batchId: batch.batchId, runIds: batch.runs.map((run) => run.runId) }));
   const conflict = recorded?.some((p) => p.collect.coverage) ? await coverageConflictIn([rootDirAbs, env.workingDirectory]) : null;
   if (conflict) console.log(`[peeps] not recording browser coverage: ${conflict}`);
-  const server = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list)) : null;
+  const server = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list), list.config.shard) : null;
   const recording = impact && recorded && recorded.length > 0 ? { impact: { fingerprint: impact.fingerprint, projects: recorded, coverage: conflict === null, ...server ? { server } : {} } } : {};
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -1933,6 +1940,7 @@ async function executeAndReport(env, peeps, input2) {
         preload: import_node_path15.default.join(__dirname, "evidence-preload.js"),
         coverageDir: import_node_path15.default.join(scratch, "server-coverage"),
         scripts: input2.impact.fingerprint.scripts,
+        sources: new Set(input2.impact.fingerprint.files.values()),
         nextDir: plan2.nextDir,
         runTests: (spec, index) => runPlaywright(env, planFile, reportDir, void 0, { ...input2.extraEnv, PEEPS_INVOCATION: spec === null ? "ambient" : "spec" }, input2.narrowed, input2.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : import_node_path15.default.join(blobDir, `report-${index}.zip`) }),
         attempts: () => evidence.read("att-").map((record) => ({ testId: record.testId, file: typeof record.file === "string" ? realOr(record.file) : null }))
@@ -2074,8 +2082,12 @@ function realOr(file) {
     return file;
   }
 }
-function serverPlanOf(env, recorded, rootDirAbs, specFiles) {
+function serverPlanOf(env, recorded, rootDirAbs, specFiles, shard) {
   if (!env.app || !recorded.some((project) => project.collect.coverage)) return null;
+  if (shard) {
+    console.log("[peeps] not recording server evidence: the config shards its suite");
+    return null;
+  }
   if (process.env.NODE_V8_COVERAGE) {
     console.log("[peeps] not recording server evidence: NODE_V8_COVERAGE is already set in this job");
     return null;

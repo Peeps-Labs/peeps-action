@@ -23,6 +23,8 @@ export interface RecordServerInput {
   /** A private directory: each invocation's raw coverage passes through a subdirectory of it. */
   coverageDir: string;
   scripts: ReadonlyMap<string, ScriptIndex>;
+  /** Every source the fingerprint names: workspace code the server ran is keyed by its file. */
+  sources?: ReadonlySet<string>;
   /** The job's `.next`, real path. */
   nextDir: string;
   /** Run Playwright on one spec file, or on none (null) for the ambient invocation. */
@@ -44,7 +46,7 @@ const elsewhere: ServerFootprint = { keys: [], loaded: [], partial: ["code"], re
 
 export async function recordServer(input: RecordServerInput): Promise<{ exitCode: number; server: ServerEvidence }> {
   const invoke = input.invoke ?? runInvocation;
-  const footprint = (coverage: Parameters<typeof serverFootprint>[0]) => serverFootprint(coverage, input.scripts, input.nextDir);
+  const footprint = (coverage: Parameters<typeof serverFootprint>[0]) => serverFootprint(coverage, input.scripts, input.nextDir, input.sources);
   const build =
     input.buildDir ??
     (() => {

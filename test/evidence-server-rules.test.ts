@@ -48,9 +48,9 @@ test("what isn't the job's own build is the runtime: neither keyed nor partial",
   const sibling = { url: pathToFileURL(`/work/app/.next-other/${SSR}`).href, functions: [fn("onSuccess", onSuccess.start, onSuccess.end)] };
   const result = serverFootprint(invocation([elsewhere, internal]), fingerprint.scripts, NEXT);
   assert.deepEqual([result.keys, result.loaded, result.partial], [[], [], []]);
-  // Another directory of the app is the app's code, not the build: unknown, never keyed.
+  // Another directory of the app that no fingerprint names: no one's, never partial.
   const beside = serverFootprint(invocation([sibling]), fingerprint.scripts, NEXT);
-  assert.deepEqual([beside.keys, beside.reasons], [[], ["outside_build"]]);
+  assert.deepEqual([beside.keys, beside.reasons], [[], []]);
 });
 
 test("a script whose whole is its key: the key, run or loaded", () => {
@@ -92,9 +92,16 @@ test("what went wrong around the app (a reset, readiness, an early exit) is part
   assert.deepEqual(partialOf({ problems: ["not_ready", "reset_failed"] }), [["code"], ["not_ready", "reset_failed"]]);
 });
 
-test("workspace code outside the build ran (a custom server, a script it loads) is unknown; next.config and node_modules aren't", () => {
+test("workspace code the server ran outside the build: a fingerprinted source holds its file; anything else is no one's (a change to it runs everything)", () => {
   const ran = (rel: string) => ({ url: pathToFileURL(`/work/app/${rel}`).href, functions: [fn("handle", 3, 40)] });
-  assert.deepEqual(partialOf({}, [ran("server/socket.js")]), [["code"], ["outside_build"]]);
-  assert.deepEqual(partialOf({}, [ran("next.config.mjs"), ran("node_modules/pg/lib/client.js")]), [[], []]);
-  assert.deepEqual(partialOf({}, [{ url: pathToFileURL("/work/app/server/idle.js").href, functions: [fn("idle", 3, 40, 0)] }]), [[], []], "loaded, nothing ran");
+  const sources = new Set(["apps/web/src/lib/csp.ts", "apps/web/src/app/api/me/route.ts"]);
+  // A custom server running source the build also bundles, and next.config's own import.
+  const custom = serverFootprint(invocation([ran("src/app/api/me/route.ts"), ran("src/lib/csp.ts")]), fingerprint.scripts, NEXT, sources);
+  assert.deepEqual([custom.keys, custom.loaded, custom.partial], [["file:apps/web/src/app/api/me/route.ts", "file:apps/web/src/lib/csp.ts"], ["file:apps/web/src/app/api/me/route.ts", "file:apps/web/src/lib/csp.ts"], []]);
+  // Not fingerprinted: no key, and nothing partial.
+  const other = serverFootprint(invocation([ran("next.config.compiled.js"), ran("server/socket.js"), ran("node_modules/pg/lib/client.js")]), fingerprint.scripts, NEXT, sources);
+  assert.deepEqual([other.keys, other.partial], [[], []]);
+  // Loaded, nothing ran: loaded only.
+  const idle = serverFootprint(invocation([{ url: pathToFileURL("/work/app/src/lib/csp.ts").href, functions: [fn("idle", 3, 40, 0)] }]), fingerprint.scripts, NEXT, sources);
+  assert.deepEqual([idle.keys, idle.loaded], [[], ["file:apps/web/src/lib/csp.ts"]]);
 });

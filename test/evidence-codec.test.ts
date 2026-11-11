@@ -83,7 +83,7 @@ const PEEPS_FIXTURES = process.env.PEEPS_FIXTURES ?? path.resolve(__dirname, "..
 const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 
 const PINNED = {
-  "recording-codec.golden.json": "17c2b9f2d9967b5df99db4e70310c9b2ac7b38eb9bc6ba6c584d6a691d7df2d5",
+  "recording-codec.golden.json": "cdd6831ef3834bfe891cd1b6ca6ce3d28aca2d9f09bd0fd7725d29692f619078",
   "impact-ids.vectors.json": "1cc7f0eb1f947eb669d9fb099e6d1f248882c303a6f7b8ef25dec913a18c0577",
 };
 

@@ -283,6 +283,8 @@ export function decodePayload(bytes: Uint8Array): RecordingBlob {
       if ((partialLayers.length === 0) !== (partial.length === 0)) fail("partial layers without partial kinds, or the reverse");
       members.push({ run, attempts, partial, partialLayers, tokens: indexList() });
     }
+    // With no member to carry partial layers, version 1 is this value's one encoding.
+    if (version === 2 && members.length === 0) fail("version 2 footprints with no members");
     value = { kind: "footprints", browser, universe: { layers: [...layers], measured, loadedFiles, ambient }, members };
   } else {
     fail(`unknown kind ${kind}`);

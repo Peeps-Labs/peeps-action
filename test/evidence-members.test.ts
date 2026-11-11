@@ -176,3 +176,9 @@ test("each collector's partial names its layer: the browser's, the server's, amb
   assert.deepEqual(layersOf("run-2", "server_not_taken"), ["server"]);
   assert.deepEqual(layersOf("run-1", "ambient_not_ready"), ["server"]);
 });
+
+test("an incomplete or missing HAR is the browser's: it never widens a member's partial to the server (PQA-3430)", () => {
+  const result = membersOfAll([record("t1", "run-1", 0, true, null)], [], fingerprint, { coverage: false, har: true }, [], [], undefined);
+  const har = result.members[0]!.evidence.find((e) => e.reasons.includes("har_missing"))!;
+  assert.deepEqual(har.layers, ["browser"]);
+});

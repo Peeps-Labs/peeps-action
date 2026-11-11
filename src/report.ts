@@ -167,7 +167,7 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   // Fail safe: a suite that may run precise coverage itself resets ours (see `conflict.ts`).
   const conflict = recorded?.some((p) => p.collect.coverage) ? await coverageConflictIn([rootDirAbs, env.workingDirectory]) : null;
   if (conflict) console.log(`[peeps] not recording browser coverage: ${conflict}`);
-  const server = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list)) : null;
+  const server = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list), list.config.shard) : null;
   const recording = impact && recorded && recorded.length > 0 ? { impact: { fingerprint: impact.fingerprint, projects: recorded, coverage: conflict === null, ...(server ? { server } : {}) } } : {};
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -317,6 +317,7 @@ export async function executeAndReport(
         preload: path.join(__dirname, "evidence-preload.js"),
         coverageDir: path.join(scratch, "server-coverage"),
         scripts: input.impact!.fingerprint.scripts,
+        sources: new Set(input.impact!.fingerprint.files.values()),
         nextDir: plan.nextDir,
         runTests: (spec, index) =>
           runPlaywright(env, planFile, reportDir, undefined, { ...input.extraEnv, PEEPS_INVOCATION: spec === null ? "ambient" : "spec" }, input.narrowed, input.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : path.join(blobDir, `report-${index}.zip`) }),
@@ -518,8 +519,19 @@ export interface ServerPlan {
  * (`app-start` and `app-ready-url`), Peeps asked for coverage, and nothing else in the job
  * collects V8 coverage. Anything else: browser evidence only, as before, said once.
  */
-export function serverPlanOf(env: RunnerEnv, recorded: Array<{ collect: { coverage: boolean } }>, rootDirAbs: string, specFiles: string[]): ServerPlan | null {
+export function serverPlanOf(
+  env: RunnerEnv,
+  recorded: Array<{ collect: { coverage: boolean } }>,
+  rootDirAbs: string,
+  specFiles: string[],
+  shard: { current: number; total: number } | null | undefined,
+): ServerPlan | null {
   if (!env.app || !recorded.some((project) => project.collect.coverage)) return null;
+  if (shard) {
+    // Each file's own run would shard that file again, and run none of its tests.
+    console.log("[peeps] not recording server evidence: the config shards its suite");
+    return null;
+  }
   if (process.env.NODE_V8_COVERAGE) {
     console.log("[peeps] not recording server evidence: NODE_V8_COVERAGE is already set in this job");
     return null;

@@ -83,8 +83,9 @@ export function membersOf(
     if (!member) byRun.set(record.runId, (member = { run: record.runId, attempts: [], evidence: [] }));
     member.attempts.push({ retry: record.retry, passed: record.passed });
     if (collected.har) {
-      const missing: AttemptEvidence = { keys: [], paths: [], partial: ["route"], reasons: ["har_missing"] };
-      member.evidence.push(record.har ? { keys: [], paths: record.har.paths, partial: record.har.complete ? [] : ["route"], reasons: record.har.complete ? [] : ["har_incomplete"] } : missing);
+      // The browser's requests: a partial HAR never says anything of the server (PQA-3430).
+      const missing: AttemptEvidence = { keys: [], paths: [], partial: ["route"], layers: ["browser"], reasons: ["har_missing"] };
+      member.evidence.push(record.har ? { keys: [], paths: record.har.paths, partial: record.har.complete ? [] : ["route"], layers: ["browser"], reasons: record.har.complete ? [] : ["har_incomplete"] } : missing);
     }
     if (collected.coverage) {
       const files = covered.get(`${record.testId}\u0000${record.retry}`) ?? [];
