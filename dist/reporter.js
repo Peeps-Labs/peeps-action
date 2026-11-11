@@ -35,12 +35,14 @@ __export(reporter_exports, {
   TITLE_PATH_SEPARATOR: () => TITLE_PATH_SEPARATOR,
   default: () => PeepsCiReporter,
   htmlReportDir: () => htmlReportDir,
-  identityOf: () => identityOf
+  identityOf: () => identityOf,
+  isLastAttempt: () => isLastAttempt,
+  narrowedOutcome: () => narrowedOutcome
 });
 module.exports = __toCommonJS(reporter_exports);
-var import_node_fs2 = require("node:fs");
+var import_node_fs3 = require("node:fs");
 var import_promises = require("node:fs/promises");
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path3 = __toESM(require("node:path"));
 
 // src/env.ts
 var import_node_fs = require("node:fs");
@@ -163,6 +165,252 @@ function readRunnerEnv(env = process.env) {
   };
 }
 
+// src/footprint/rules.ts
+var MAX_FOOTPRINT_PATHS = 300;
+var MAX_PATH_LENGTH = 512;
+var MAX_REQUEST_BYTES = 9e5;
+var MAX_REQUEST_EVENTS = 500;
+var APP_PROTOCOLS = /* @__PURE__ */ new Set(["http:", "https:", "ws:", "wss:"]);
+var STATIC_PREFIX = "/_next/static/";
+var NEXT_DATA = /^\/_next\/data\/[^/]+\/(.*)\.json$/;
+var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var OPAQUE = /^(?=.*\d)[A-Za-z0-9_-]{20,}$/;
+var JWT = /^[\w-]+\.[\w-]+\.[\w-]+$/;
+var DATE = /^\d{4}-\d{2}-\d{2}$/;
+var IP = /^(?:\d+\.\d+\.\d+\.\d+|\[.*\])$/;
+var LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]"]);
+function hostsFor({ baseUrls, origins }) {
+  const exact = /* @__PURE__ */ new Set();
+  const parents = /* @__PURE__ */ new Set();
+  let local = false;
+  let anyBase = false;
+  for (const url of baseUrls) {
+    const host = hostnameOf(url);
+    if (!host) continue;
+    anyBase = true;
+    if (LOOPBACK.has(host) || !host.includes(".")) local = true;
+    else if (IP.test(host)) exact.add(host);
+    else parents.add(host.split(".").slice(-2).join("."));
+  }
+  if (!anyBase) return null;
+  for (const url of origins) {
+    const host = hostnameOf(url);
+    if (host) exact.add(host);
+  }
+  return (host) => exact.has(host) || local && (LOOPBACK.has(host) || !host.includes(".")) || !IP.test(host) && parents.has(host.split(".").slice(-2).join("."));
+}
+function hostnameOf(url) {
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+function isPrivate(raw) {
+  let segment = raw;
+  try {
+    segment = decodeURIComponent(raw);
+  } catch {
+    return true;
+  }
+  if (DATE.test(segment)) return false;
+  if (segment.includes("@") || UUID.test(segment) || /\d{6,}/.test(segment) || OPAQUE.test(segment)) return true;
+  if (/^[+\d().\s_-]+$/.test(segment) && segment.replace(/\D/g, "").length >= 7) return true;
+  if (/^[A-Za-z0-9+/_-]+={1,2}$/.test(segment)) return true;
+  if (JWT.test(segment) && (segment.startsWith("eyJ") || segment.length >= 32)) return true;
+  if (/^[0-9a-f]{8,}$/i.test(segment) && /\d/.test(segment)) return true;
+  const mixed = /[a-z]/.test(segment) && /[A-Z]/.test(segment);
+  if (mixed && /^[\w-]{8,}$/.test(segment) && /\d/.test(segment)) return true;
+  return mixed && /^[A-Za-z]{16,}$/.test(segment);
+}
+function foldPath(path4) {
+  return path4.split("/").map((whole) => {
+    const segment = whole.split(";")[0];
+    return segment !== "" && isPrivate(segment) ? ":id" : segment;
+  }).join("/");
+}
+function eventBatches(events) {
+  const batches = [];
+  let current = [];
+  let bytes = 0;
+  for (const event of events) {
+    const size = Buffer.byteLength(JSON.stringify(event)) + 1;
+    if (current.length > 0 && (bytes + size > MAX_REQUEST_BYTES || current.length === MAX_REQUEST_EVENTS)) {
+      batches.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(event);
+    bytes += size;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+function requestPaths(url) {
+  const { pathname } = new URL(url);
+  const path4 = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  const batch = /^(.*\/trpc)\/([^/]*,[^/]*)$/.exec(path4);
+  const paths = batch ? batch[2].split(",").map((procedure) => `${batch[1]}/${procedure}`) : [path4];
+  const data = NEXT_DATA.exec(path4);
+  if (data) paths.push(data[1] === "index" ? "/" : `/${data[1]}`);
+  return paths.map(foldPath);
+}
+function sentFootprint(footprint, origins, attempt) {
+  const repeated = attempt.repeatEachIndex > 0 || attempt.repeatEach > 1;
+  return { ...footprint, complete: footprint.complete && !repeated && !attempt.hiddenRequests, attempt: { retry: attempt.retry }, origins };
+}
+function footprintFromText(traces, origins) {
+  const isApp = hostsFor(origins);
+  if (!isApp) return { paths: [], complete: false };
+  const paths = /* @__PURE__ */ new Set();
+  let complete = true;
+  let sawNetwork = false;
+  const add = (url) => {
+    const parsed = new URL(url, origins.baseUrls.find((base) => hostnameOf(base)));
+    if (!APP_PROTOCOLS.has(parsed.protocol) || !isApp(parsed.hostname)) return;
+    for (const path4 of requestPaths(parsed.href)) {
+      if (path4.startsWith(STATIC_PREFIX)) continue;
+      if (path4.length > MAX_PATH_LENGTH) complete = false;
+      else paths.add(path4);
+    }
+  };
+  for (const trace of traces) {
+    if (!trace) {
+      complete = false;
+      continue;
+    }
+    try {
+      for (const text of trace.network) {
+        for (const line of text.split("\n")) {
+          if (line === "") continue;
+          const event = JSON.parse(line);
+          if (event.type !== "resource-snapshot" || !event.snapshot?.request?.url) continue;
+          sawNetwork = true;
+          add(event.snapshot.request.url);
+        }
+      }
+      for (const text of trace.actions) {
+        for (const line of text.split("\n")) {
+          if (!line.includes('"goto"')) continue;
+          const event = JSON.parse(line);
+          if (event.type === "before" && event.method === "goto" && event.params?.url) add(event.params.url);
+        }
+      }
+    } catch {
+      complete = false;
+    }
+  }
+  const sorted = [...paths].sort();
+  return {
+    paths: sorted.slice(0, MAX_FOOTPRINT_PATHS),
+    complete: complete && sawNetwork && sorted.length > 0 && sorted.length <= MAX_FOOTPRINT_PATHS
+  };
+}
+function keepsTrace(policy, attempt) {
+  const failed = attempt.status !== attempt.expectedStatus;
+  switch (policy) {
+    case "off":
+      return false;
+    case "retain-on-failure":
+      return failed;
+    case "on-first-retry":
+    case "retry-with-trace":
+      return attempt.retry === 1;
+    case "on-all-retries":
+      return attempt.retry > 0;
+    case "retain-on-first-failure":
+      return attempt.retry === 0 && failed;
+    case "retain-on-failure-and-retries":
+      return failed || attempt.retry > 0;
+    default:
+      return true;
+  }
+}
+
+// src/footprint/trace-file.ts
+var import_node_fs2 = require("node:fs");
+var import_node_path2 = __toESM(require("node:path"));
+var import_node_zlib = require("node:zlib");
+var MAX_TRACE_BYTES = 512 * 1024 * 1024;
+function readZip(file, wanted, budget = { left: MAX_TRACE_BYTES }) {
+  const fd = (0, import_node_fs2.openSync)(file, "r");
+  try {
+    const size = (0, import_node_fs2.fstatSync)(fd).size;
+    const read = (position, length) => {
+      const buffer = Buffer.alloc(length);
+      (0, import_node_fs2.readSync)(fd, buffer, 0, length, position);
+      return buffer;
+    };
+    const tailLength = Math.min(size, 22 + 65535);
+    const tail = read(size - tailLength, tailLength);
+    const end = tail.lastIndexOf(Buffer.from([80, 75, 5, 6]));
+    if (end < 0) throw new Error("No zip end record");
+    const count = tail.readUInt16LE(end + 10);
+    const directorySize = tail.readUInt32LE(end + 12);
+    const directoryOffset = tail.readUInt32LE(end + 16);
+    if (count === 65535 || directoryOffset === 4294967295) throw new Error("A zip64 trace");
+    const directory = read(directoryOffset, directorySize);
+    const out = [];
+    for (let at = 0, n = 0; n < count; n++) {
+      if (directory.readUInt32LE(at) !== 33639248) throw new Error("A corrupt zip directory");
+      const method = directory.readUInt16LE(at + 10);
+      const compressed = directory.readUInt32LE(at + 20);
+      const plain = directory.readUInt32LE(at + 24);
+      const nameLength = directory.readUInt16LE(at + 28);
+      const extraLength = directory.readUInt16LE(at + 30);
+      const commentLength = directory.readUInt16LE(at + 32);
+      const offset = directory.readUInt32LE(at + 42);
+      const name = directory.toString("utf8", at + 46, at + 46 + nameLength);
+      at += 46 + nameLength + extraLength + commentLength;
+      if (!wanted(name)) continue;
+      budget.left -= plain;
+      if (budget.left < 0) throw new Error("A trace too large to read");
+      const header = read(offset, 30);
+      const start = offset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
+      const bytes = read(start, compressed);
+      if (method === 0) out.push(bytes.toString("utf8"));
+      else if (method === 8) out.push(plain === 0 ? "" : (0, import_node_zlib.inflateRawSync)(bytes, { maxOutputLength: plain }).toString("utf8"));
+      else throw new Error(`A zip entry compressed with method ${method}`);
+    }
+    return out;
+  } finally {
+    (0, import_node_fs2.closeSync)(fd);
+  }
+}
+function readTrace(file) {
+  try {
+    const budget = { left: MAX_TRACE_BYTES };
+    return {
+      network: readZip(file, (name) => name.endsWith(".network"), budget),
+      // The runner's own `test.trace` has steps, not the browser's actions.
+      actions: readZip(file, (name) => name.endsWith(".trace") && !name.endsWith("test.trace"), budget)
+    };
+  } catch {
+    return null;
+  }
+}
+function footprintFromTrace(traces, origins) {
+  return footprintFromText(traces.map(readTrace), origins);
+}
+function takeFootprint(attempt, use, origins, log = console.log) {
+  const traces = attempt.attachments.filter((a) => a.name === "trace" && a.contentType === "application/zip" && a.path);
+  const baseUrls = [process.env.BASE_URL, use.baseURL].filter((url) => typeof url === "string" && url !== "");
+  const footprint = footprintFromTrace(traces.map((a) => a.path), { baseUrls, origins });
+  const policy = typeof use.peepsCustomerTrace === "string" ? use.peepsCustomerTrace : void 0;
+  if (!keepsTrace(policy, attempt)) {
+    for (const trace of traces) {
+      attempt.attachments.splice(attempt.attachments.indexOf(trace), 1);
+      try {
+        (0, import_node_fs2.unlinkSync)(trace.path);
+        (0, import_node_fs2.rmdirSync)(import_node_path2.default.dirname(trace.path));
+      } catch (error) {
+        if (error.code !== "ENOTEMPTY") log(`[peeps] could not remove a recorded trace: ${String(error)}`);
+      }
+    }
+  }
+  return footprint;
+}
+
 // src/inventory.ts
 var import_node_child_process = require("node:child_process");
 var import_node_crypto = require("node:crypto");
@@ -185,9 +433,9 @@ function expiryOf(token) {
   }
 }
 var PeepsHttpError = class extends Error {
-  constructor(path3, status, body) {
-    super(`Peeps ${path3} \u2192 ${status}: ${body.slice(0, 500)}`);
-    this.path = path3;
+  constructor(path4, status, body) {
+    super(`Peeps ${path4} \u2192 ${status}: ${body.slice(0, 500)}`);
+    this.path = path4;
     this.status = status;
     this.body = body;
     this.name = "PeepsHttpError";
@@ -254,11 +502,11 @@ var PeepsClient = class {
     );
   }
   /** Raw upload (artifacts). Retries transient failures a couple of times. */
-  async postBytes(path3, bytes) {
+  async postBytes(path4, bytes) {
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await fetch(`${this.env.peepsUrl}${path3}`, {
+        const response = await fetch(`${this.env.peepsUrl}${path4}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${await this.token()}`,
@@ -272,9 +520,9 @@ var PeepsClient = class {
         if (response.ok) return;
         const text = await response.text();
         if (response.status < 500 && response.status !== 408 && response.status !== 429) {
-          throw new Error(`Peeps ${path3} \u2192 ${response.status}: ${text.slice(0, 300)}`);
+          throw new Error(`Peeps ${path4} \u2192 ${response.status}: ${text.slice(0, 300)}`);
         }
-        lastError = new Error(`Peeps ${path3} \u2192 ${response.status}`);
+        lastError = new Error(`Peeps ${path4} \u2192 ${response.status}`);
       } catch (error) {
         lastError = error;
       }
@@ -283,8 +531,8 @@ var PeepsClient = class {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
   /** GET that treats 204 as "nothing" (long-poll idle) instead of an error. */
-  async getOrNull(path3) {
-    const response = await fetch(`${this.env.peepsUrl}${path3}`, {
+  async getOrNull(path4) {
+    const response = await fetch(`${this.env.peepsUrl}${path4}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -295,26 +543,27 @@ var PeepsClient = class {
     if (response.status === 204) return null;
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path3, response.status, text);
+      throw new PeepsHttpError(path4, response.status, text);
     }
     return JSON.parse(text);
   }
-  async get(path3) {
-    const response = await fetch(`${this.env.peepsUrl}${path3}`, {
+  async get(path4, signal) {
+    const response = await fetch(`${this.env.peepsUrl}${path4}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
         "User-Agent": "peeps-action/0.1"
-      }
+      },
+      ...signal ? { signal } : {}
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path3, response.status, text);
+      throw new PeepsHttpError(path4, response.status, text);
     }
     return JSON.parse(text);
   }
-  async post(path3, body) {
-    const response = await fetch(`${this.env.peepsUrl}${path3}`, {
+  async post(path4, body) {
+    const response = await fetch(`${this.env.peepsUrl}${path4}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${await this.token()}`,
@@ -326,7 +575,7 @@ var PeepsClient = class {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path3, response.status, text);
+      throw new PeepsHttpError(path4, response.status, text);
     }
     return text ? JSON.parse(text) : {};
   }
@@ -335,7 +584,7 @@ var PeepsClient = class {
 // src/reporter.ts
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function identityOf(test, rootDirAbs, rootDirRepo) {
-  const rel = import_node_path2.default.relative(rootDirAbs, test.location.file).split(import_node_path2.default.sep).join("/");
+  const rel = import_node_path3.default.relative(rootDirAbs, test.location.file).split(import_node_path3.default.sep).join("/");
   const trimmedRoot = rootDirRepo.trim();
   const root = trimmedRoot === "" || trimmedRoot === "." || trimmedRoot === "./" ? "" : trimmedRoot.replace(/^\.\//, "").replace(/\/+$/, "");
   const repoPath = root === "" ? rel : `${root}/${rel}`;
@@ -378,6 +627,8 @@ var PeepsCiReporter = class {
   reportDir = null;
   /** Attach mode: planning missed its deadline, so a late answer must change nothing. */
   gaveUp = false;
+  /** A narrowed run's runs whose attempt ended with a retry still to come. */
+  awaitingRetry = /* @__PURE__ */ new Set();
   constructor(options = {}) {
     this.attachDir = options.attachDir ?? null;
     if (this.attachDir) {
@@ -386,7 +637,7 @@ var PeepsCiReporter = class {
     }
     const planPath = process.env.PEEPS_PLAN_FILE;
     if (!planPath) throw new Error("PEEPS_PLAN_FILE is not set");
-    this.plan = JSON.parse((0, import_node_fs2.readFileSync)(planPath, "utf8"));
+    this.plan = JSON.parse((0, import_node_fs3.readFileSync)(planPath, "utf8"));
     for (const entry of this.plan.runs) this.entries.set(key(entry), entry);
   }
   printsToStdio() {
@@ -446,17 +697,17 @@ var PeepsCiReporter = class {
     if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
     let workspace = env.workspace;
     try {
-      workspace = (0, import_node_fs2.realpathSync)(workspace);
+      workspace = (0, import_node_fs3.realpathSync)(workspace);
     } catch {
     }
-    const rootDir = import_node_path2.default.relative(workspace, config.rootDir).split(import_node_path2.default.sep).join("/") || ".";
+    const rootDir = import_node_path3.default.relative(workspace, config.rootDir).split(import_node_path3.default.sep).join("/") || ".";
     const tests = suite.allTests().map((t) => identityOf(t, config.rootDir, rootDir));
     const unique = [...new Map(tests.map((t) => [key(t), t])).values()];
     const files = [];
     for (const file of new Set(suite.allTests().map((t) => t.location.file))) {
       const bytes = await (0, import_promises.readFile)(file);
       files.push({
-        path: import_node_path2.default.relative(workspace, file).split(import_node_path2.default.sep).join("/"),
+        path: import_node_path3.default.relative(workspace, file).split(import_node_path3.default.sep).join("/"),
         blobSha: gitBlobSha(bytes),
         content: bytes.toString("utf8")
       });
@@ -479,7 +730,7 @@ var PeepsCiReporter = class {
   async writeAttachState() {
     if (!this.attachDir || this.batches.length === 0) return;
     await (0, import_promises.writeFile)(
-      import_node_path2.default.join(this.attachDir, "state.json"),
+      import_node_path3.default.join(this.attachDir, "state.json"),
       JSON.stringify({ batches: this.batches, reportDir: this.reportDir }),
       { mode: 384 }
     );
@@ -487,6 +738,7 @@ var PeepsCiReporter = class {
   testBegan(test, now) {
     const entry = this.entryFor(test);
     if (!entry) return;
+    this.awaitingRetry.delete(entry.runId);
     if (!this.started.has(entry.runId)) {
       this.started.add(entry.runId);
       this.enqueue(entry, { type: "run_start", timestamp: now });
@@ -494,30 +746,51 @@ var PeepsCiReporter = class {
     this.enqueue(entry, { type: "test_start", timestamp: now, testName: test.title });
   }
   testEnded(test, result, now) {
+    const footprint = this.plan.footprints ? takeFootprint(
+      { attachments: result.attachments, status: result.status, retry: result.retry, expectedStatus: test.expectedStatus },
+      test.parent.project()?.use ?? {},
+      this.plan.footprints.origins
+    ) : void 0;
     const entry = this.entryFor(test);
     if (!entry) {
       if (this.attachDir && this.batches.length === 0) return;
       console.log(`[peeps] not planned, not reported: ${test.titlePath().join(" \u203A ")} (${result.status})`);
       return;
     }
-    const error = result.errors[0];
+    const narrowed = this.plan.narrowed === true;
+    const outcome = narrowed ? narrowedOutcome(test, result) : null;
+    const error = outcome ? outcome.error : result.errors[0];
     this.enqueue(entry, {
       type: "test_end",
       timestamp: now,
       testName: test.title,
-      status: result.status,
+      status: outcome ? outcome.status : result.status,
       duration: Math.round(result.duration),
       error: error?.message?.slice(0, 4e3),
       errorStack: error?.stack?.slice(0, 8e3),
-      retry: result.retry
+      retry: result.retry,
+      ...footprint ? {
+        footprint: sentFootprint(footprint, this.plan.footprints?.origins ?? [], {
+          retry: result.retry,
+          repeatEachIndex: test.repeatEachIndex,
+          repeatEach: test.parent.project()?.repeatEach ?? 1,
+          hiddenRequests: this.plan.footprints?.hiddenRequests.includes(entry.path) ?? false
+        })
+      } : {}
     });
-    if (result.retry >= test.retries || result.status === "passed") {
+    if (narrowed ? isLastAttempt(test, result) : result.retry >= test.retries || result.status === "passed") {
       this.enqueue(entry, { type: "run_end", timestamp: now });
       this.pending.push(this.flush(entry));
+    } else if (narrowed) {
+      this.awaitingRetry.add(entry.runId);
     }
   }
   async onEnd() {
     if (this.planned) await this.planned;
+    for (const runId of this.awaitingRetry) {
+      const entry = this.plan.runs.find((r) => r.runId === runId);
+      if (entry) this.enqueue(entry, { type: "run_end", timestamp: Date.now() });
+    }
     for (const [runId, events] of this.queues) {
       if (events.length === 0) continue;
       const entry = this.plan.runs.find((r) => r.runId === runId);
@@ -544,6 +817,9 @@ var PeepsCiReporter = class {
     const events = this.queues.get(entry.runId) ?? [];
     if (events.length === 0) return;
     this.queues.set(entry.runId, []);
+    for (const batch of this.plan.footprints ? eventBatches(events) : [events]) await this.post(entry, batch);
+  }
+  async post(entry, events) {
     const url = `${this.plan.peepsUrl}/api/v1/runs/${entry.runId}/events`;
     const body = JSON.stringify({ events });
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -570,17 +846,34 @@ var PeepsCiReporter = class {
     }
   }
 };
+function narrowedOutcome(test, result) {
+  if (test.expectedStatus === "failed" && result.status === "failed") return { status: "passed" };
+  if (test.expectedStatus === "failed" && result.status === "passed") {
+    return { status: "failed", error: { message: "Expected to fail, but passed." } };
+  }
+  return { status: result.status, error: result.errors[0] };
+}
+function isLastAttempt(test, result) {
+  if (result.retry >= test.retries || result.status === "interrupted") return true;
+  return result.status === test.expectedStatus && !inSerialGroup(test);
+}
+function inSerialGroup(test) {
+  for (let suite = test.parent; suite; suite = suite.parent) {
+    if (suite._parallelMode === "serial") return true;
+  }
+  return false;
+}
 function htmlReportDir(config) {
   const html = config.reporter.find(([name]) => name === "html");
   if (!html) return null;
   const fromEnv = process.env.PLAYWRIGHT_HTML_OUTPUT_DIR || process.env.PLAYWRIGHT_HTML_REPORT;
-  if (fromEnv) return import_node_path2.default.resolve(fromEnv);
-  const configDir = config.configFile ? import_node_path2.default.dirname(config.configFile) : config.rootDir;
+  if (fromEnv) return import_node_path3.default.resolve(fromEnv);
+  const configDir = config.configFile ? import_node_path3.default.dirname(config.configFile) : config.rootDir;
   const options = html[1] ?? {};
-  if (options.outputFolder) return import_node_path2.default.resolve(configDir, options.outputFolder);
-  for (let dir = configDir; ; dir = import_node_path2.default.dirname(dir)) {
-    if ((0, import_node_fs2.existsSync)(import_node_path2.default.join(dir, "package.json"))) return import_node_path2.default.join(dir, "playwright-report");
-    if (import_node_path2.default.dirname(dir) === dir) return import_node_path2.default.resolve("playwright-report");
+  if (options.outputFolder) return import_node_path3.default.resolve(configDir, options.outputFolder);
+  for (let dir = configDir; ; dir = import_node_path3.default.dirname(dir)) {
+    if ((0, import_node_fs3.existsSync)(import_node_path3.default.join(dir, "package.json"))) return import_node_path3.default.join(dir, "playwright-report");
+    if (import_node_path3.default.dirname(dir) === dir) return import_node_path3.default.resolve("playwright-report");
   }
 }
 // Annotate the CommonJS export names for ESM import in node:
@@ -589,5 +882,7 @@ function htmlReportDir(config) {
   ATTACH_PLAN_DEADLINE_MS,
   TITLE_PATH_SEPARATOR,
   htmlReportDir,
-  identityOf
+  identityOf,
+  isLastAttempt,
+  narrowedOutcome
 });

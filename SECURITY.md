@@ -52,6 +52,8 @@ This is more than "test results". Concretely:
 | pytest only: skip reasons, `record_property` values, a failed test's captured stdout/stderr/log output, and the files a test saves in `peeps_artifacts_dir` or attaches with `record_property("peeps_attachment", path)` (only from inside the repository or pytest's temporary directory) | `report`, `run` |
 | Appium only: for each **failed** test, a **screenshot of the device screen**, the **page source** of the screen it failed on (the native view hierarchy as XML, or the WebView's HTML), and the Appium context name; and, when `@wdio/junit-reporter` is installed and not already configured, the JUnit XML it writes (only for a run that is a single batch, since it holds every test the run ran) | `report`, `run` |
 | `BASE_URL`, if your workflow sets it | `report`, `run` |
+| For targeted runs, on a **pull request's** job on GitHub: the commit it's based on, the names of the files it changed, and the application's routes those changes can reach (`/orders/:id`, `/api/trpc/runs.list`). **Never the source, and never a patch**: the action reads your code on your runner to work this out, and nothing of it leaves | `report`, on `pull_request`, only when Peeps answers that the project has targeted runs on |
+| For targeted runs, on a **push** of a project with them switched on: the application paths each test loaded and called, with no host and no query, and with what looks like an id, a token, a number or an address folded to `:id` (a best effort from each segment's shape: a private value shaped like a word stays). Only hosts sharing your base URL's last two labels, or listed in the project's settings, count | `report`, on a push |
 | The commit sha, ref, repository and Actions job URL | all modes |
 | The sha actually checked out (`git rev-parse HEAD`), and this action's version | `agent` |
 | Tool results in an agent session: file contents, diffs, test output (for a failed Playwright test, its `error-context.md`, which holds the page's accessibility snapshot at the failure: up to 16 KB each and 128 KB per run, masked like every result. It is read only when it is a regular file, not a symlink, named `error-context.md`, inside the workspace or a Playwright project's output directory. Those checks stop a mistaken attachment, not a hostile spec: the output directory comes from the Playwright config, which an agent can edit, and a hard link passes them; for a failed Appium test, its page source), and the sha256 of each changed file's contents (files up to 5 MB; symlinks are never followed) | `agent` |
@@ -68,8 +70,12 @@ fixtures, internal URLs, or credentials, those go too.
 Playwright config enables tracing, the report includes it. In Playwright
 `report`/`run` modes this action also enables failure screenshots and retained
 failure video when those settings are unset and its FFmpeg encoder is available. Explicit capture settings,
-including `"off"` at repository, project or test level, are respected; trace
-recording is never enabled by this action. Screenshots and video show page
+including `"off"` at repository, project or test level, are respected. This
+action enables trace recording only on a push of a project with targeted runs
+switched on, to read each test's paths, and it deletes every recording your own
+trace setting wouldn't have kept before the report is built, so what's uploaded
+is what you configured. A suite whose tests set their own trace with `test.use` is
+never recorded this way. Screenshots and video show page
 content. A trace records HTTP requests and responses, which means headers,
 cookies and bearer tokens your tests obtained against your app. Nothing
 redacts the report before upload. If that is not acceptable, turn tracing off

@@ -59,11 +59,17 @@ export interface AppiumPlanFile {
    */
   resultsDir?: string;
   /**
-   * Run mode: execute only the planned `(spec file, title path)` pairs. The
+   * Run mode and a narrowed report: execute only the planned `(spec file, title path)` pairs. The
    * mocha grep matches titles only, so a planned file can hold a same-titled
    * test of another file's plan entry; `mochaHooks` skips it.
    */
   onlyPlanned?: boolean;
+  /**
+   * With `onlyPlanned`: tests that run though they have no plan entry, so the
+   * hook leaves them be and nothing is reported for them. A narrowed pull
+   * request run's `unmatched` tests.
+   */
+  alsoRun?: Array<{ path: string; titlePath: string }>;
   /**
    * The runs whose project has "Record video" on: each is recorded from its
    * first `beforeEach` to its end. Absent (an older Peeps, agent mode) means
@@ -132,6 +138,7 @@ export type RunClaim = { state: "new" | "continue" | "ended" } | { state: "other
 
 class Plan {
   readonly entries = new Map<string, PlanEntry>();
+  private readonly alsoRun: Set<string>;
   constructor(
     readonly file: AppiumPlanFile,
     /** Beside the plan file: one owner file per run, shared by every worker. */
@@ -141,6 +148,14 @@ class Plan {
       const key = identityKey(run);
       if (!this.entries.has(key)) this.entries.set(key, run);
     }
+    this.alsoRun = new Set((file.alsoRun ?? []).map(identityKey));
+  }
+
+  /** Whether a test with no run of its own still runs (`AppiumPlanFile.alsoRun`). */
+  runsUnreported(file: string | undefined, titles: string[]): boolean {
+    if (!file || this.alsoRun.size === 0) return false;
+    const rel = repoRelative(this.file.workspace, file.startsWith("file://") ? fileURLToPath(file) : file);
+    return rel !== null && this.alsoRun.has(identityKey({ path: rel, titlePath: titles.join(TITLE_PATH_SEPARATOR) }));
   }
 
   /**
@@ -780,7 +795,7 @@ interface MochaHookContext {
  * then runs none of the remaining `beforeEach` hooks or the test body,
  * reports it pending (not a failure), and the reporter, finding no plan
  * entry, reports nothing for it. Inert unless the plan file says
- * `onlyPlanned` (run mode); report mode runs the whole suite.
+ * `onlyPlanned` (run mode and a narrowed report); any other report runs the whole suite.
  */
 export const mochaHooks = {
   beforeEach(this: MochaHookContext): void {
@@ -789,7 +804,7 @@ export const mochaHooks = {
     const test = this.currentTest;
     const titles = titlesOf(test);
     if (!titles) return;
-    if (!plan.entryFor(test?.file, titles)) this.skip();
+    if (!plan.entryFor(test?.file, titles) && !plan.runsUnreported(test?.file, titles)) this.skip();
   },
 };
 

@@ -1,0 +1,1141 @@
+{
+  "description": "Targeted runs (PQA-3201, PR 2): every doubt widens, and the customer's traces stay what their policy keeps. `build` mutants rebuild dist/, which the real-Playwright tests run.",
+  "mutants": [
+    {
+      "name": "a job on another commit is read as the merge",
+      "file": "src/reach/checkout.ts",
+      "find": "if ((await git(\"rev-parse\", \"HEAD\")).trim() !== sha) return { ok: false, why: \"not_merge\" };",
+      "replace": "",
+      "tests": [
+        "test/reach-checkout.test.ts"
+      ]
+    },
+    {
+      "name": "a head checkout, with no second parent, is read as the merge",
+      "file": "src/reach/checkout.ts",
+      "find": "await git(\"rev-parse\", \"--verify\", \"--quiet\", \"HEAD^2\");",
+      "replace": "",
+      "tests": [
+        "test/reach-checkout.test.ts"
+      ]
+    },
+    {
+      "name": "a full clone is deepened too",
+      "file": "src/reach/checkout.ts",
+      "find": "if ((await git(\"rev-parse\", \"--is-shallow-repository\")).trim() === \"true\") {",
+      "replace": "if (true) {",
+      "tests": [
+        "test/reach-checkout.test.ts"
+      ]
+    },
+    {
+      "name": "the diff is against the second parent, not the base",
+      "file": "src/reach/checkout.ts",
+      "find": "\"--dst-prefix=b/\", \"HEAD^1\", \"HEAD\",",
+      "replace": "\"--dst-prefix=b/\", \"HEAD^2\", \"HEAD\",",
+      "tests": [
+        "test/reach-checkout.test.ts"
+      ]
+    },
+    {
+      "name": "a rewritten changed file passes as clean",
+      "file": "src/reach/checkout.ts",
+      "find": "if (dirty.trim() !== \"\") return { ok: false, why: \"dirty_checkout\" };",
+      "replace": "",
+      "tests": [
+        "test/reach-checkout.test.ts"
+      ]
+    },
+    {
+      "name": "/cart meets /cart/items",
+      "file": "src/reach/match.ts",
+      "find": "return want.length === have.length;",
+      "replace": "return want.length <= have.length;",
+      "tests": [
+        "test/reach-match.test.ts"
+      ]
+    },
+    {
+      "name": "a folded segment no longer meets a literal",
+      "file": "src/reach/match.ts",
+      "find": "if (segment.startsWith(\":\") || have[i] === \":id\") continue;",
+      "replace": "if (segment.startsWith(\":\")) continue;",
+      "tests": [
+        "test/reach-match.test.ts"
+      ]
+    },
+    {
+      "name": "a layout misses its own beneath",
+      "file": "src/reach/match.ts",
+      "find": "if (segment === \"**\") return true;",
+      "replace": "if (segment === \"**\") return i === have.length;",
+      "tests": [
+        "test/reach-match.test.ts"
+      ]
+    },
+    {
+      "name": "an empty .network counts as a whole footprint",
+      "file": "src/footprint/rules.ts",
+      "find": "complete: complete && sawNetwork && sorted.length > 0",
+      "replace": "complete: complete && sorted.length > 0",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "the 301st path is dropped silently",
+      "file": "src/footprint/rules.ts",
+      "find": "sorted.length <= MAX_FOOTPRINT_PATHS,",
+      "replace": "true,",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a corrupt trace reads complete",
+      "file": "src/footprint/rules.ts",
+      "find": "    } catch {\n      complete = false;\n    }\n  }\n  const sorted",
+      "replace": "    } catch {\n    }\n  }\n  const sorted",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "any host counts as the application's",
+      "file": "src/footprint/rules.ts",
+      "find": "(!IP.test(host) && parents.has(host.split(\".\").slice(-2).join(\".\")));",
+      "replace": "true;",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a sibling host is dropped",
+      "file": "src/footprint/rules.ts",
+      "find": "else parents.add(host.split(\".\").slice(-2).join(\".\"));",
+      "replace": "else exact.add(host);",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a tRPC batch stays one path",
+      "file": "src/footprint/rules.ts",
+      "find": "const paths = batch ? batch[2]!.split(\",\").map((procedure) => `${batch[1]}/${procedure}`) : [path];",
+      "replace": "const paths = [path];",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "retain-on-failure keeps the passes",
+      "file": "src/footprint/rules.ts",
+      "find": "    case \"retain-on-failure\":\n      return failed;",
+      "replace": "    case \"retain-on-failure\":\n      return true;",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "on-first-retry keeps every retry",
+      "file": "src/footprint/rules.ts",
+      "find": "return attempt.retry === 1;",
+      "replace": "return attempt.retry >= 1;",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a customer's off keeps Peeps' recording",
+      "file": "src/footprint/rules.ts",
+      "find": "    case \"off\":\n      return false;",
+      "replace": "    case \"off\":\n      return true;",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a lockfile changing isn't global",
+      "file": "src/reach/scan.ts",
+      "find": "if (LOCKFILE.test(base) || ALWAYS_GLOBAL.test(base) || file.startsWith(\".github/\")) return true;",
+      "replace": "if (ALWAYS_GLOBAL.test(base) || file.startsWith(\".github/\")) return true;",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a changed symbol reaching no entry picks nothing",
+      "file": "src/reach/scan.ts",
+      "find": "throw new Global(placed ? \"no_entry\" : \"unplaced_file\", change.path);",
+      "replace": "continue;",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "an unparsed file is skipped",
+      "file": "src/reach/scan.ts",
+      "find": "        if (error instanceof Global) throw error;\n        throw new Global(\"unparsed_file\", file);",
+      "replace": "        if (error instanceof Global) throw error;",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a file over 1 MB is parsed anyway",
+      "file": "src/reach/scan.ts",
+      "find": "if (Buffer.byteLength(text) > MAX_FILE_BYTES) throw new Global(\"unparsed_file\", file);",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "more than 300 changed files is walked",
+      "file": "src/reach/scan.ts",
+      "find": "if (changes.length > MAX_CHANGED_FILES) throw new Global(\"too_many_files\");",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a deleted file picks nothing",
+      "file": "src/reach/scan.ts",
+      "find": "if (!entry) throw new Global(\"deleted_file\", change.path);",
+      "replace": "if (!entry) continue;",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a config that moves routes is ignored",
+      "file": "src/reach/adapters/next.ts",
+      "find": "refusal: () => (moved ? \"next_config_routing\" : null),",
+      "replace": "refusal: () => null,",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a workspace package is read as followed",
+      "file": "src/reach/scan.ts",
+      "find": "if (packages.some((dir) => file.startsWith(dir))) throw new Global(\"workspace_package\", changes[0]!.path);",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "removing code between symbols picks nothing",
+      "file": "src/reach/scan.ts",
+      "find": "      else wholeFile = true;\n    }\n  }\n  if (wholeFile)",
+      "replace": "    }\n  }\n  if (wholeFile)",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "the closure touching the root layout is walked",
+      "file": "src/reach/scan.ts",
+      "find": "if (isGlobalByNature(file, conventions)) throw new Global(\"global_file\", changes[0]!.path);",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a module effect is ignored",
+      "file": "src/reach/walk.ts",
+      "find": "if (node.sym.effect && served.surfaces.length === 0) doubt ??= \"module_effect\";",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a computed Express path is ignored",
+      "file": "src/reach/walk.ts",
+      "find": "if (served.unknown) doubt ??= \"unknown_route\";",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "reaching instrumentation is bounded",
+      "file": "src/reach/walk.ts",
+      "find": "if (this.conventions.some((convention) => convention.isGlobalSymbol?.(node.file))) doubt ??= \"global_file\";",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a Trigger task's callers aren't found",
+      "file": "src/reach/adapters/trigger.ts",
+      "find": "return id ? (holders.get(id) ?? []) : [];",
+      "replace": "return [];",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a route group adds a segment",
+      "file": "src/reach/adapters/next.ts",
+      "find": "if (part.startsWith(\"(\") && part.endsWith(\")\")) continue;",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a caller doesn't reach its procedure",
+      "file": "src/reach/adapters/trpc.ts",
+      "find": "for (const procedure of byPath.get(chain.slice(1, n).join(\".\")) ?? []) view.addEdge(procedure.sym, node);",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "the wrapper leaves a project's own trace",
+      "file": "src/capture-config.ts",
+      "find": "project?.use?.trace === undefined ? project : { ...project, use: recordTrace(project.use) }",
+      "replace": "project",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "off records no snapshots",
+      "file": "src/capture-config.ts",
+      "find": "? { mode: \"on\", snapshots: true, screenshots: false, sources: false }",
+      "replace": "? { mode: \"on\", snapshots: false, screenshots: false, sources: false }",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "the customer's options are dropped from what they keep",
+      "file": "src/capture-config.ts",
+      "find": ": { ...(typeof trace === \"object\" ? trace : {}), mode: \"on\" },",
+      "replace": ": { mode: \"on\", snapshots: true, screenshots: false, sources: false },",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "the attachment stays in the report after the file is gone",
+      "file": "src/footprint/trace-file.ts",
+      "find": "attempt.attachments.splice(attempt.attachments.indexOf(trace), 1);",
+      "replace": "",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a test Peeps didn't plan keeps Peeps' recording",
+      "file": "src/reporter.ts",
+      "find": "    const footprint = this.plan.footprints\n      ? takeFootprint(",
+      "replace": "    const footprint = this.plan.footprints && this.entryFor(test)\n      ? takeFootprint(",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a push sends a reach",
+      "file": "src/reach/index.ts",
+      "find": "if (env.platform !== \"github\" || env.eventName !== \"pull_request\" || !env.sha) return undefined;",
+      "replace": "if (env.platform !== \"github\" || !env.sha) return undefined;",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "GitLab sends a reach",
+      "file": "src/reach/index.ts",
+      "find": "if (env.platform !== \"github\" || env.eventName !== \"pull_request\" || !env.sha) return undefined;",
+      "replace": "if (env.eventName !== \"pull_request\" || !env.sha) return undefined;",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a dead scanner fails open with no reach",
+      "file": "src/reach/index.ts",
+      "find": "if (answer === null) return widened(\"scan_failed\", checkout.base, changedFiles);",
+      "replace": "if (answer === null) return undefined;",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a targeted run reads as full",
+      "file": "src/report.ts",
+      "find": "selection: { files: [], grep }, narrowed: true, executed: reach && { mode: \"targeted\", tests: selected.length } });",
+      "replace": "selection: { files: [], grep }, narrowed: true, executed: reach && { mode: \"full\", tests: selected.length } });",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "the size limit isn't counted",
+      "file": "src/footprint/rules.ts",
+      "find": "if (current.length > 0 && (bytes + size > MAX_REQUEST_BYTES || current.length === MAX_REQUEST_EVENTS)) {",
+      "replace": "if (current.length > 0 && current.length === MAX_REQUEST_EVENTS) {",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a footprint doesn't say which attempt it was",
+      "file": "src/footprint/rules.ts",
+      "find": "attempt: { retry: attempt.retry }, origins };",
+      "replace": "attempt: { retry: 0 }, origins };",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a repeated test reads whole",
+      "file": "src/footprint/rules.ts",
+      "find": "complete: footprint.complete && !repeated && !attempt.hiddenRequests,",
+      "replace": "complete: footprint.complete && !attempt.hiddenRequests,",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "the reporter doesn't say it's repeated",
+      "file": "src/reporter.ts",
+      "find": "repeatEach: test.parent.project()?.repeatEach ?? 1,",
+      "replace": "repeatEach: 1,",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a footprint doesn't say which origins it filtered with",
+      "file": "src/reporter.ts",
+      "find": "sentFootprint(footprint, this.plan.footprints?.origins ?? [], {",
+      "replace": "sentFootprint(footprint, [], {",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a job scans whatever the server says",
+      "file": "src/report.ts",
+      "find": "const computed = (await reachWanted(env, peeps)) ? await computeReach(env, { specFiles }) : undefined;",
+      "replace": "const computed = await computeReach(env, { specFiles });",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "any answer turns the scan on",
+      "file": "src/reach/preflight.ts",
+      "find": "return answer?.scan === true;",
+      "replace": "return answer !== null;",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a push asks too",
+      "file": "src/reach/preflight.ts",
+      "find": "if (env.platform !== \"github\" || env.eventName !== \"pull_request\") return false;",
+      "replace": "if (env.platform !== \"github\") return false;",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "GitLab asks too",
+      "file": "src/reach/preflight.ts",
+      "find": "if (env.platform !== \"github\" || env.eventName !== \"pull_request\") return false;",
+      "replace": "if (env.eventName !== \"pull_request\") return false;",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a flush of large footprints goes as one request",
+      "file": "src/reporter.ts",
+      "find": "for (const batch of this.plan.footprints ? eventBatches(events) : [events]) await this.post(entry, batch);",
+      "replace": "await this.post(entry, events);",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "hidden requests are ignored",
+      "file": "src/footprint/rules.ts",
+      "find": "complete: footprint.complete && !repeated && !attempt.hiddenRequests,",
+      "replace": "complete: footprint.complete && !repeated,",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "the spec's hidden requests aren't sent on",
+      "file": "src/reporter.ts",
+      "find": "hiddenRequests: this.plan.footprints?.hiddenRequests.includes(entry.path) ?? false,",
+      "replace": "hiddenRequests: false,",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a client navigation is only its data file",
+      "file": "src/footprint/rules.ts",
+      "find": "if (data) paths.push(data[1] === \"index\" ? \"/\" : `/${data[1]}`);",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a token stays in a path",
+      "file": "src/footprint/rules.ts",
+      "find": "/\\d{6,}/.test(segment) || OPAQUE.test(segment)) return true;",
+      "replace": "/\\d{6,}/.test(segment)) return true;",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a JWT stays in a path",
+      "file": "src/footprint/rules.ts",
+      "find": "if (JWT.test(segment) && (segment.startsWith(\"eyJ\") || segment.length >= 32)) return true;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a phone number stays in a path",
+      "file": "src/footprint/rules.ts",
+      "find": "if (/^[+\\d().\\s_-]+$/.test(segment) && segment.replace(/\\D/g, \"\").length >= 7) return true;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a short token stays in a path",
+      "file": "src/footprint/rules.ts",
+      "find": "if (mixed && /^[\\w-]{8,}$/.test(segment) && /\\d/.test(segment)) return true;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a date folds",
+      "file": "src/footprint/rules.ts",
+      "find": "if (DATE.test(segment)) return false;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "the trace budget isn't shared",
+      "file": "src/footprint/trace-file.ts",
+      "find": "if (budget.left < 0) throw new Error(\"A trace too large to read\");",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "an absolute URL isn't bridged",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "literal.replace(/^(?:https?:)?\\/\\/[^/]*/, \"\").replace",
+      "replace": "literal.replace",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a helper under rootDir is the tests' alone",
+      "file": "src/reach/scan.ts",
+      "find": "const appFile = (file: string) => !UNIT_TEST.test(file) && !specs.has(file) && !isOnlyTests(file);",
+      "replace": "const appFile = (file: string) => !UNIT_TEST.test(file) && !specs.has(file) && !specClosure.has(file);",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a document something reads stays a document",
+      "file": "src/reach/scan.ts",
+      "find": "!looksLikeDoc(change.path) || graph.reverse.has(change.path)",
+      "replace": "!looksLikeDoc(change.path)",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a sparse checkout passes",
+      "file": "src/reach/scan.ts",
+      "find": "if (graph.unread.length > 0) throw new Global(\"unread_file\", graph.unread[0]);",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a global reach goes over the cap",
+      "file": "src/reach/scan.ts",
+      "find": "return capReach({ ...out, global: true, why: error.why, surfaces: [], reasons: file ? [{ surface: null, file }] : [] });",
+      "replace": "return { ...out, global: true, why: error.why, surfaces: [], reasons: file ? [{ surface: null, file }] : [] };",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a refused reach fails the job",
+      "file": "src/report.ts",
+      "find": "if (!reach || !(error instanceof PeepsHttpError) || error.status >= 500 || error.status === 401 || error.status === 403) throw error;",
+      "replace": "throw error;",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "git isn't under the budget",
+      "file": "src/reach/git.ts",
+      "find": "if (left <= 0) throw new Error(\"Out of time\");",
+      "replace": "",
+      "tests": [
+        "test/reach-checkout.test.ts"
+      ]
+    },
+    {
+      "name": "an encoded path doesn't meet its route",
+      "file": "src/reach/match.ts",
+      "find": "return decodeURIComponent(segment).toLowerCase();",
+      "replace": "return segment.toLowerCase();",
+      "tests": [
+        "test/reach-match.test.ts"
+      ]
+    },
+    {
+      "name": "a path parameter stays in the match",
+      "file": "src/reach/match.ts",
+      "find": ".map((segment) => segment.split(\";\")[0]!)\n",
+      "replace": "",
+      "tests": [
+        "test/reach-match.test.ts"
+      ]
+    },
+    {
+      "name": "a malformed escape misses",
+      "file": "src/reach/match.ts",
+      "find": "if (wanted !== null && had !== null && wanted !== had) return false;",
+      "replace": "if (wanted !== had) return false;",
+      "tests": [
+        "test/reach-match.test.ts"
+      ]
+    },
+    {
+      "name": "a session id leaves in a path",
+      "file": "src/footprint/rules.ts",
+      "find": "const segment = whole.split(\";\")[0]!;",
+      "replace": "const segment = whole;",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "base64 stays in a path",
+      "file": "src/footprint/rules.ts",
+      "find": "if (/^[A-Za-z0-9+/_-]+={1,2}$/.test(segment)) return true;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a global setup reads as the app",
+      "file": "src/reach/scan.ts",
+      "find": "[...specs, ...files.filter((file) => PLAYWRIGHT_CONFIG.test(path.basename(file)))]",
+      "replace": "specs",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a spec's own trace is recorded over and deleted",
+      "file": "src/report.ts",
+      "find": "record: sources.reasons.length === 0 };",
+      "replace": "record: true };",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a global setup isn't scanned",
+      "file": "src/report.ts",
+      "find": "const sources = await workspaceTestSources(env.workspace, specFiles, globalSetups);",
+      "replace": "const sources = await workspaceTestSources(env.workspace, specFiles, []);",
+      "tests": [
+        "test/targeted-action.test.ts"
+      ],
+      "build": true
+    },
+    {
+      "name": "a test's own tracing isn't seen in a chain",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (chain.includes(\"tracing\")) addReason(file, \"starts its own tracing\");",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a test's own tracing isn't seen off a call",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (ts.isPropertyAccessExpression(node) && node.name.text === \"tracing\") marksOf(sym).tracing = true;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a package's test passes",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (!found.sawTest && !found.unread) addReason(spec, \"takes its test from somewhere this can't read\");",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a package's test beside Playwright's isn't said",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (fact && fact.spec !== PLAYWRIGHT && !resolver.resolve(file, fact.spec)) addReason(file, `takes its test from ${fact.spec}`);",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a .use of a non-test counts",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (doubt && isTest(file, on, new Set())) addReason(file, doubt);",
+      "replace": "if (doubt) addReason(file, doubt);",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a test's unreadable options pass",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (doubt && isTest(file, on, new Set())) addReason(file, doubt);",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a trace key isn't seen",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (name === \"trace\") return \"sets its own trace\";",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a computed key isn't seen",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (name === null) return \"computes an option's name\";",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "any spread is a doubt",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (chain?.[0] !== \"devices\") return \"spreads options this can't read\";",
+      "replace": "return \"spreads options this can't read\";",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "no spread is a doubt",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (chain?.[0] !== \"devices\") return \"spreads options this can't read\";",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a re-export isn't followed for test",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (reexport.spec === PLAYWRIGHT) return reexport.imported === \"test\";",
+      "replace": "if (reexport.spec === PLAYWRIGHT) return false;",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a worker fixture isn't hidden",
+      "file": "src/footprint/test-trace.ts",
+      "find": "node.initializer.text === \"worker\") marksOf(sym).hidden = true;",
+      "replace": "node.initializer.text === \"worker\") marksOf(sym).tracing = false;",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a beforeAll isn't hidden",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (OUTSIDE_THE_TRACE.has(callee.name.text)) marksOf(sym).hidden = true;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a request module isn't hidden",
+      "file": "src/footprint/test-trace.ts",
+      "find": "else if (REQUEST_MODULES.has(moduleName(spec))) out.hidden = true;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "fetch isn't hidden",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (REQUEST_GLOBALS.has(name)) out.hidden = true;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "globalThis.fetch isn't hidden",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (GLOBAL_ROOTS.has(chain[0]!) && REQUEST_GLOBALS.has(chain[1] ?? \"\")) out.hidden = true;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a browser's fetch is hidden",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (BROWSER_ARGS.has(callee.name.text)) {",
+      "replace": "if (false) {",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a shared file's fetch hides every spec",
+      "file": "src/footprint/test-trace.ts",
+      "find": "for (const sym of factsOf(root)?.symbols ?? []) push(root, sym);",
+      "replace": "for (const sym of factsOf(root)?.symbols ?? []) push(root, sym);\n      for (const fact of factsOf(root)?.imports ?? []) follow(root, fact.spec, \"*\", null);",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "what's on globalThis runs on load",
+      "file": "src/footprint/test-trace.ts",
+      "find": "staticChain(callee)?.join(\".\") === \"Object.assign\" &&",
+      "replace": "false &&",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a global's caller isn't followed",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (global) for (const other of factsOf(global.file)?.symbols ?? []) if (other.names.includes(global.local)) push(global.file, other);",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a setup's requests are ignored",
+      "file": "src/footprint/test-trace.ts",
+      "find": "if (setupHides || found.hidden || found.browsers || found.unread) hiddenRequests.push(spec);",
+      "replace": "if (found.hidden || found.browsers || found.unread) hiddenRequests.push(spec);",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a WebSocket's route is dropped",
+      "file": "src/footprint/rules.ts",
+      "find": "new Set([\"http:\", \"https:\", \"ws:\", \"wss:\"])",
+      "replace": "new Set([\"http:\", \"https:\"])",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a framework asset stays",
+      "file": "src/footprint/rules.ts",
+      "find": "if (path.startsWith(STATIC_PREFIX)) continue;",
+      "replace": "",
+      "tests": [
+        "test/footprint.test.ts"
+      ]
+    },
+    {
+      "name": "a changed route path keeps only the new one",
+      "file": "src/reach/adapters/express.ts",
+      "find": "return match !== null && !kept.includes(`${match[1]}${match[2]}${match[1]}`);",
+      "replace": "return false;",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a changed procedure name keeps only the new one",
+      "file": "src/reach/adapters/trpc.ts",
+      "find": "return name !== undefined && !kept.has(name);",
+      "replace": "return false;",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "the removed route check isn't made",
+      "file": "src/reach/scan.ts",
+      "find": "if (conventions.some((convention) => convention.removesRoute?.(removed, added))) throw new Global(\"removed_route\", change.path);",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a file only tests reach isn't walked",
+      "file": "src/reach/scan.ts",
+      "find": "if (stillThere.length > 0) walkChanges(input, stillThere, graph, conventions, notSuiteSetup, addSurface, tick, true);",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a test helper's effect is a doubt",
+      "file": "src/reach/scan.ts",
+      "find": "if (walked.doubt && !(mayBeTests && walked.surfaces.size === 0)) throw",
+      "replace": "if (walked.doubt) throw",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a test helper with no surface is global",
+      "file": "src/reach/scan.ts",
+      "find": "if (walked.surfaces.size === 0 && starts.length > 0 && !mayBeTests) {",
+      "replace": "if (walked.surfaces.size === 0 && starts.length > 0) {",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "an unresolved request is ignored",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "doubt: (node) => (unresolved.has(node.sym) ? \"unresolved_request\" : null),",
+      "replace": "doubt: () => null,",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a browser's request is unresolved",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "if ((facts.data.fetchBrowser ??= BROWSER_FILE.test(text)) === true && !request.root) {",
+      "replace": "if (false) {",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a client instance isn't a client",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "if (root && CLIENT.has(root)) clientsOf(facts).add(name);",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a client's file isn't read",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "if (source) view.read(source);",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a sum isn't an address",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {",
+      "replace": "if (false) {",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "globalThis.fetch isn't a request",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "if (chain.length === 2 && GLOBALS.has(root) && member === \"fetch\") return { direct: true };",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "placeholders alone bridge a fetch",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "if (ownPath) return have.some((segment) => !segment.startsWith(\":\"));",
+      "replace": "if (ownPath) return true;",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a wildcard fetch isn't indexed",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "for (const key of new Set([normal(segment), \":id\"])) {",
+      "replace": "for (const key of new Set([normal(segment)])) {",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a param surface finds nothing",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "for (const child of node.children.values()) visit(child, at + 1);",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "an Express segment isn't checked",
+      "file": "src/reach/adapters/express.ts",
+      "find": "if (!(catchAll ? segments.slice(0, -1) : segments).every((segment) => PLAIN_SEGMENT.test(segment))) return null;",
+      "replace": "",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "pageExtensions are read as routes",
+      "file": "src/reach/adapters/next.ts",
+      "find": "basePath|rewrites|i18n|pageExtensions",
+      "replace": "basePath|rewrites|i18n",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a source file under docs is a document",
+      "file": "src/reach/scan.ts",
+      "find": "const looksLikeDoc = (file: string) => !SOURCE.test(file) && (DOC_NAME",
+      "replace": "const looksLikeDoc = (file: string) => (DOC_NAME",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "any markdown is a document",
+      "file": "src/reach/scan.ts",
+      "find": "(DOC_NAME.test(file) || DOC_PLACE.test(file))",
+      "replace": "(/\\.md$/i.test(file) || DOC_NAME.test(file) || DOC_PLACE.test(file))",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a type-only import becomes an edge",
+      "file": "src/reach/text-graph.ts",
+      "find": "if (ts.isTypeNode(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return;\n    if (ts.isImportDeclaration(node)) {\n      const clause = node.importClause;\n      const bindings = clause?.namedBindings;\n      const onlyTypes = clause?.isTypeOnly ||",
+      "replace": "if (ts.isTypeNode(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return;\n    if (ts.isImportDeclaration(node)) {\n      const clause = node.importClause;\n      const bindings = clause?.namedBindings;\n      const onlyTypes = false ||",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a dynamic import isn't an edge",
+      "file": "src/reach/text-graph.ts",
+      "find": "if (callee.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(callee) && callee.text === \"require\")) {",
+      "replace": "if (false) {",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "the framework's file reads as a document",
+      "file": "src/reach/scan.ts",
+      "find": " && !conventions.some((convention) => convention.ownsFile?.(file));",
+      "replace": ";",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a fetch doesn't bridge",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "surfaces.flatMap((surface) => fetchers.meeting(surface).filter((other) => other.sym !== node.sym))",
+      "replace": "[]",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a URL after a base needn't share a word",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "  const want = surface.split(\"/\").filter(Boolean);\n  return want.some((segment, i) =>",
+      "replace": "  const want = surface.split(\"/\").filter(Boolean);\n  return true || want.some((segment, i) =>",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    },
+    {
+      "name": "a path from / must share a word",
+      "file": "src/reach/adapters/fetch.ts",
+      "find": "own: literal.startsWith(\"/\") && !literal.startsWith(\"//\") };",
+      "replace": "own: false };",
+      "tests": [
+        "test/reach-scan.test.ts"
+      ]
+    }
+  ]
+}

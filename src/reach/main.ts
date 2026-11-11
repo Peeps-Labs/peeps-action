@@ -1,0 +1,40 @@
+/**
+ * The scanner's process: `node dist/reach.js <input.json>`, answering on stdout: a reach,
+ * or what a suite's specs may do. See `process.ts`.
+ */
+import { readFileSync, readdirSync } from "node:fs";
+import path from "node:path";
+import { readTestSources } from "../footprint/test-trace";
+import { scan } from "./scan";
+import type { FileChange } from "./types";
+
+type Input =
+  | { kind?: "reach"; root: string; files: string[]; changes: FileChange[]; specFiles: string[]; base: string; deadlineMs: number }
+  | { kind: "testSources"; root: string; specs: string[]; globalSetups: string[]; deadlineMs: number };
+
+const SKIPPED = new Set(["node_modules", ".git", ".next", ".nuxt", ".turbo", ".cache", "dist", "build", "out", "coverage"]);
+
+function listFiles(root: string, tick: () => void, dir = ""): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(path.join(root, dir), { withFileTypes: true })) {
+    tick();
+    const relative = dir ? `${dir}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      if (!SKIPPED.has(entry.name)) out.push(...listFiles(root, tick, relative));
+    } else if (entry.isFile()) out.push(relative);
+  }
+  return out;
+}
+
+const input = JSON.parse(readFileSync(process.argv[2]!, "utf8")) as Input;
+const read = (file: string) => readFileSync(path.join(input.root, file), "utf8");
+
+if (input.kind === "testSources") {
+  const started = Date.now();
+  const tick = () => {
+    if (Date.now() - started > input.deadlineMs) throw new Error("Out of time");
+  };
+  process.stdout.write(JSON.stringify(readTestSources(input.specs, input.globalSetups, listFiles(input.root, tick), read, tick)));
+} else {
+  process.stdout.write(JSON.stringify(scan({ files: input.files, read, changes: input.changes, specFiles: input.specFiles, base: input.base, deadlineMs: input.deadlineMs })));
+}
