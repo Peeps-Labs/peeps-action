@@ -34,6 +34,7 @@ test("ambient, then each spec file once; a test holds the footprint of the invoc
     return { exitCode, coverage: coverageFor[options.kind === "ambient" ? "ambient" : seen.at(-1)!]! };
   };
   const result = await recordServer({
+    perRun: 1,
     app,
     specs: ["/work/app/tests/a.spec.ts", "/work/app/tests/b.spec.ts"],
     preload: "/dist/evidence-preload.js",
@@ -63,6 +64,7 @@ test("a test recorded in another file's invocation is unknown: that invocation's
   // A filter that selected too much: a's invocation also ran b's test, whose own invocation then wrote nothing new.
   const ids: Array<{ testId: string; file: string | null }> = [];
   const result = await recordServer({
+    perRun: 1,
     app,
     specs: ["/s/a.spec.ts", "/s/b.spec.ts"],
     preload: "/p",
@@ -96,6 +98,7 @@ test("once a run changed the build directory, every later run's footprint is unk
   const settled = [{ created: [], changed: [] }, { created: ["server/app/x.html"], changed: [] }, { created: [], changed: ["server/app/old.html"] }, { created: [], changed: [] }];
   let call = 0;
   const result = await recordServer({
+    perRun: 1,
     app,
     specs: ["/s/a.spec.ts", "/s/b.spec.ts", "/s/c.spec.ts"],
     preload: "/p",
@@ -121,6 +124,7 @@ test("the preload is the action's, never the app's: its own code doesn't make a 
   const withPreload: InvocationCoverage = { ...ran("Badge"), files: [...ran("Badge").files, { result: [{ url: pathToFileURL(preload).href, functions: [{ functionName: "take", ranges: [{ startOffset: 3, endOffset: 40, count: 1 }] }] }] }] };
   const ids: Array<{ testId: string; file: string | null }> = [];
   const result = await recordServer({
+    perRun: 1,
     app,
     specs: ["/s/a.spec.ts"],
     preload,
@@ -174,6 +178,7 @@ test("a run's coverage is mapped while the next run's tests run, never while its
   const order: string[] = [];
   const ids: Array<{ testId: string; file: string | null }> = [];
   await recordServer({
+    perRun: 1,
     app,
     specs: ["/s/a.spec.ts", "/s/b.spec.ts"],
     preload: "/p",

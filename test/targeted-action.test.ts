@@ -1000,17 +1000,16 @@ test("server evidence: one invocation per spec file with the app the action owns
     });
   });
   const app = `http://127.0.0.1:${port}`;
+  // Two test files per run, in file order: [api, badge] reach /login, [cart, shared] reach /badge.
   const root = await suite(t, COMMON("", "webServer: { command: \"exit 1\", url: \"http://127.0.0.1:9\" },"), `import { test, expect } from "@playwright/test";
+test("shows a badge", async ({ page }) => { await page.goto("/badge"); await expect(page.getByRole("heading")).toHaveText("ok"); });
+`);
+  await writeFile(path.join(root, "suite/specs/badge.spec.ts"), `import { test, expect } from "@playwright/test";
 test("logs in", async ({ page }) => {
-  require("node:fs").appendFileSync(${JSON.stringify("INVOCATIONS_LOG")}, process.env.PEEPS_INVOCATION + "\\n");
+  require("node:fs").appendFileSync(${JSON.stringify(path.join(root, "test-invocations.log"))}, process.env.PEEPS_INVOCATION + "\\n");
   await page.goto("/login");
   await expect(page.getByRole("heading")).toHaveText("ok");
 });
-`);
-  const specFile = path.join(root, "suite/specs/cart.spec.ts");
-  await writeFile(specFile, (await readFile(specFile, "utf8")).replace("INVOCATIONS_LOG", path.join(root, "test-invocations.log")));
-  await writeFile(path.join(root, "suite/specs/badge.spec.ts"), `import { test, expect } from "@playwright/test";
-test("shows a badge", async ({ page }) => { await page.goto("/badge"); await expect(page.getByRole("heading")).toHaveText("ok"); });
 `);
   // A test registered by a shared helper: it runs in the importing file's run, and is that file's.
   await mkdir(path.join(root, "suite/helpers"), { recursive: true });
@@ -1042,9 +1041,9 @@ test("calls the api", async ({ request }) => { expect((await request.get("/login
   });
   assert.equal(result.code, 0, result.output);
   // Ambient first, then each of the three spec files, each reset and started on its own; the config's webServer never ran.
-  // One run per test file (four), never one for the helper that registers a test.
-  assert.deepEqual((await readFile(path.join(root, "resets.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec", "spec", "spec"]);
-  assert.deepEqual((await readFile(path.join(root, "starts.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec", "spec", "spec"]);
+  // Four test files in runs of two, never a file of its own for the helper that registers a test.
+  assert.deepEqual((await readFile(path.join(root, "resets.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec"]);
+  assert.deepEqual((await readFile(path.join(root, "starts.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec"]);
   assert.deepEqual((await readFile(path.join(root, "test-invocations.log"), "utf8")).trim().split("\n"), ["spec"], "the tests see which run they're in");
   // The invocations' reports, merged into the one HTML report the batch gets.
   assert.ok([...peeps.artifacts.keys()].includes("index.html"), [...peeps.artifacts.keys()].join(", "));

@@ -1873,7 +1873,7 @@ function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ n
 
 // src/evidence/server/record.ts
 var say4 = (line) => console.log(`[peeps] ${line}`);
-var FILES_PER_RUN = 1;
+var FILES_PER_RUN = 2;
 var MAP_AFTER_MS = 300;
 function groupsOf(specs, perRun = FILES_PER_RUN) {
   const groups = [];

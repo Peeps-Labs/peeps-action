@@ -20,7 +20,7 @@ const say = (line: string) => console.log(`[peeps] ${line}`);
  * global setup; a test holds its whole run's footprint, so more files per run narrows less,
  * never unsoundly.
  */
-export const FILES_PER_RUN = 1;
+export const FILES_PER_RUN = 2;
 
 /** How long after a run's tests start to map the previous run's coverage. */
 const MAP_AFTER_MS = 300;
