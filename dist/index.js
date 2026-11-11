@@ -487,7 +487,13 @@ withEvidence.use = recordTrace(withEvidence.use);
 if (Array.isArray(config.projects))
   withEvidence.projects = config.projects.map((project) => project?.use?.trace === undefined ? project : { ...project, use: recordTrace(project.use) });
 `;
-var OWN_APP = `delete withEvidence.webServer;
+var OWN_APP = `{
+  // Playwright's own default: one webServer with a port, and no baseURL, is http://localhost:<port>.
+  const servers = [withEvidence.webServer].flat().filter(Boolean);
+  if (servers.length === 1 && servers[0].port !== undefined && withEvidence.use?.baseURL === undefined)
+    withEvidence.use = { ...withEvidence.use, baseURL: "http://localhost:" + servers[0].port };
+  delete withEvidence.webServer;
+}
 `;
 var recordCoverage = (worker, dir) => `if (process.env.TEST_WORKER_INDEX !== undefined) {
   try {
@@ -1504,6 +1510,10 @@ function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ n
           keys.add(index.whole);
           continue;
         }
+        if (!index) {
+          unmapped++;
+          continue;
+        }
         if (range.startOffset === 0 && fn.functionName === "") continue;
         const span = index && spanAt(index, { name: fn.functionName, start: range.startOffset, end: range.endOffset });
         if (!span) {
@@ -2021,7 +2031,7 @@ async function recordEvidence(env, peeps, impact, scratch, collected, server) {
         { coverage: collected.coverage && project.collect.coverage, har: collected.har },
         contexts,
         taints,
-        server
+        project.collect.coverage ? server : void 0
       );
     } catch (error) {
       console.log(`[peeps] not recording what this job's tests ran: its evidence couldn't be read (${String(error).slice(0, 300)})`);

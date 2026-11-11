@@ -17,9 +17,11 @@ if (dir && process.env.NODE_V8_COVERAGE === dir) {
     if (taken) return;
     taken = true;
     try {
+      const files = () => fs.readdirSync(dir).filter((name) => name.startsWith(`coverage-${process.pid}-`)).length;
+      const before = files();
       v8.takeCoverage();
       v8.stopCoverage();
-      mark("taken");
+      if (files() > before) mark("taken");
     } catch {
     }
   };
