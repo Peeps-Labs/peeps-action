@@ -502,7 +502,7 @@ https://docs.peepsai.com/repository/vercel-previews.
 | `preview-project` | with several Vercel projects | The Vercel project whose preview to test: the `<name>` of the deployment environment `Preview – <name>` |
 | `preview-timeout` | no, defaults to `600` | Seconds to wait for the preview |
 | `github-token` | no, defaults to the job's `GITHUB_TOKEN` | Reads the pull request's deployments for `preview`. Removed from the action's environment before anything runs, so test processes don't inherit it |
-| `app-start` | no | With `app-ready-url`: the command that starts your app (from `working-directory`) for server evidence on recorded pushes. The suite then runs once per spec file, each against a fresh start of the app the action owns, after one run with no tests; your config's `webServer` isn't used for those runs. Setup (dependency) projects run once per file, and `test-results/` keeps only the last file's run (the HTML report has all) |
+| `app-start` | no | With `app-ready-url`: the command that starts your app (from `working-directory`) for server evidence on recorded pushes. The suite then runs in runs of two test files, each against a fresh start of the app the action owns, after one run with no tests (started beside the fingerprint); your config's `webServer` isn't used for those runs. Setup (dependency) projects run once per run, and `test-results/` keeps only the last run (the HTML report has all) |
 | `app-ready-url` | no | With `app-start`: a URL that answers 2xx once the app serves |
 | `app-reset` | no | With `app-start`: run before each of those runs to put the app's state back, for example by cloning a seeded template database. `PEEPS_INVOCATION` is `ambient` for the first run and `spec` after, here and in the tests' environment |
 
