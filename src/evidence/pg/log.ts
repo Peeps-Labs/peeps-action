@@ -9,7 +9,8 @@ export interface PgEntry {
   session: string;
   /** `application_name` at the time, or "" when the entry has none. */
   app: string;
-  kind: "statement" | "plan" | "other";
+  /** `error`: an ERROR the server logged, as for a statement it aborted. */
+  kind: "statement" | "plan" | "error" | "other";
   /** A statement's SQL, a plan's JSON, or another entry's message. */
   text: string;
 }
@@ -46,5 +47,6 @@ function entryOf(line: string): PgEntry | null {
   if (statement) return { session: session_id, app, kind: "statement", text: message.slice(statement[0].length) };
   const plan = PLAN.exec(message);
   if (plan) return { session: session_id, app, kind: "plan", text: message.slice(plan[0].length) };
+  if (error_severity === "ERROR") return { session: session_id, app, kind: "error", text: message };
   return { session: session_id, app, kind: "other", text: message };
 }

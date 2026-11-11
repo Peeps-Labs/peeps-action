@@ -1227,6 +1227,24 @@
       "tests": [
         "test/evidence-pg.test.ts"
       ]
+    },
+    {
+      "name": "a statement that errored still owes its plan",
+      "file": "src/evidence/pg/collector.ts",
+      "find": "          count(entry.session, previous.text).owed -= previous.owed;\n",
+      "replace": "",
+      "tests": [
+        "test/evidence-pg.test.ts"
+      ]
+    },
+    {
+      "name": "any ERROR excuses the session's last statement, whatever came between",
+      "file": "src/evidence/pg/collector.ts",
+      "find": "      justLogged.set(entry.session, null);\n",
+      "replace": "",
+      "tests": [
+        "test/evidence-pg.test.ts"
+      ]
     }
   ]
 }

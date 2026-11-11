@@ -131,6 +131,41 @@ test("a statement whose plan is missing reads partial, though its session has mo
   rmSync(dir, { recursive: true });
 });
 
+/** An ERROR entry the server logs right after a statement it aborted, in that statement's session. */
+const uniqueViolationAfter = (line: string) =>
+  JSON.stringify({ ...(JSON.parse(line) as object), error_severity: "ERROR", state_code: "23505", message: 'duplicate key value violates unique constraint "users_email_key"' });
+const isUsersUpdate = (line: string) => /^execute [^:\n]*: update "users"/.test(message(line));
+
+test("a statement that errored owes no plan: a unique violation no longer makes the job partial, and it is counted (PQA-3435)", async () => {
+  // T5's update hits a unique violation: logged, aborted, so auto_explain logs no plan.
+  const dir = brokenCopy((lines) =>
+    lines
+      .filter((line) => !(message(line).includes("plan:\n") && message(line).includes('update \\"users\\"')))
+      .flatMap((line) => (isUsersUpdate(line) ? [line, uniqueViolationAfter(line)] : [line])),
+  );
+  const out = await collectTables(dir);
+  assert.deepEqual([out.partial, out.reasons, out.errored], [[], [], 1]);
+  assert.ok(out.keys.includes("table:w:public.orders"), "the job's other tables are still read");
+  rmSync(dir, { recursive: true });
+});
+
+test("a job made only of errored statements still reads partial: no plan proves anything", async () => {
+  const dir = brokenCopy((lines) => lines.filter(isUsersUpdate).flatMap((line) => [line, uniqueViolationAfter(line)]));
+  assert.deepEqual(await collectTables(dir), { keys: [], partial: ["table"], reasons: ["pg_no_statements"], errored: 1 });
+  rmSync(dir, { recursive: true });
+});
+
+test("an ERROR that doesn't follow a statement in its session excuses nothing", async () => {
+  // A plan sits between T5's update and the error: the error isn't the update's, so the update still owes its plan.
+  const dir = brokenCopy((lines) =>
+    lines
+      .filter((line) => !(message(line).includes("plan:\n") && message(line).includes('update \\"users\\"')))
+      .flatMap((line) => (isUsersUpdate(line) ? [line, withMessage(line, 'duration: 0.010 ms  plan:\n{"Query Text": "select 1", "Plan": {"Node Type": "Result"}}'), uniqueViolationAfter(line)] : [line])),
+  );
+  assert.deepEqual((await collectTables(dir)).reasons, ["pg_statements_unexplained"]);
+  rmSync(dir, { recursive: true });
+});
+
 test("a statement that moves rows with no plan (TRUNCATE, COPY, DO, CALL) reads partial, however many plans its session has", async () => {
   const dir = brokenCopy((lines) => {
     const at = lines.findIndex((line) => message(line).startsWith("execute") && message(line).includes("INSERT INTO orders"));

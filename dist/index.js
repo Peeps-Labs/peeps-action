@@ -1238,6 +1238,7 @@ function entryOf(line) {
   if (statement) return { session: session_id, app, kind: "statement", text: message.slice(statement[0].length) };
   const plan = PLAN.exec(message);
   if (plan) return { session: session_id, app, kind: "plan", text: message.slice(plan[0].length) };
+  if (error_severity === "ERROR") return { session: session_id, app, kind: "error", text: message };
   return { session: session_id, app, kind: "other", text: message };
 }
 
@@ -1386,7 +1387,12 @@ function statementsOf(sql) {
 }
 
 // src/evidence/pg/collector.ts
-var partial = (reasons) => ({ keys: [], partial: ["table"], reasons: [...new Set(reasons)].sort() });
+var partial = (reasons, errored = 0) => ({
+  keys: [],
+  partial: ["table"],
+  reasons: [...new Set(reasons)].sort(),
+  ...errored > 0 ? { errored } : {}
+});
 var SETTLE = { quietMs: 500, limitMs: 1e4, pollMs: 100 };
 var jsonFiles = async (dir) => (await (0, import_promises6.readdir)(dir)).filter((n) => n.endsWith(".json")).sort();
 async function signature(dir) {
@@ -1434,16 +1440,30 @@ function tablesOfLog(texts) {
   const reasons = [];
   let plans = 0;
   let statements = 0;
+  let errored = 0;
+  const justLogged = /* @__PURE__ */ new Map();
   for (const text2 of texts) {
     const entries = readJsonlog(text2);
     if (entries === null) return partial(["pg_log_unreadable"]);
     for (const entry of entries) {
+      const previous = justLogged.get(entry.session) ?? null;
+      justLogged.set(entry.session, null);
       if (entry.kind === "other") continue;
+      if (entry.kind === "error") {
+        if (previous !== null) {
+          count(entry.session, previous.text).owed -= previous.owed;
+          errored += 1;
+        }
+        continue;
+      }
       if (entry.kind === "statement") {
         statements += 1;
         const owed = plansOwed(entry.text);
         if (owed === null) reasons.push("pg_statements_unexplained");
-        else count(entry.session, entry.text).owed += owed;
+        else {
+          count(entry.session, entry.text).owed += owed;
+          justLogged.set(entry.session, { text: entry.text, owed });
+        }
         continue;
       }
       plans += 1;
@@ -1457,11 +1477,11 @@ function tablesOfLog(texts) {
       for (const name of tables.writes) keys.add(`table:w:${name}`);
     }
   }
-  if (plans === 0) return partial(["pg_no_statements"]);
-  if (statements === 0) return partial(["pg_statements_not_logged"]);
+  if (plans === 0) return partial(["pg_no_statements"], errored);
+  if (statements === 0) return partial(["pg_statements_not_logged"], errored);
   for (const tally of owing.values()) if (tally.plans < tally.owed) reasons.push("pg_statements_unexplained");
-  if (reasons.length > 0) return partial(reasons);
-  return { keys: [...keys].sort(), partial: [], reasons: [] };
+  if (reasons.length > 0) return partial(reasons, errored);
+  return { keys: [...keys].sort(), partial: [], reasons: [], ...errored > 0 ? { errored } : {} };
 }
 
 // src/evidence/scratch.ts
@@ -1901,7 +1921,7 @@ async function recordEvidence(env, peeps, impact, scratch, collected) {
   const transport = peepsTransport(env.peepsUrl, () => peeps.token());
   const pgLog = process.env.PEEPS_PG_LOG;
   const tables = pgLog && impact.projects.some((p) => p.collect.tables) ? await collectTables(import_node_path12.default.resolve(env.workspace, pgLog)) : void 0;
-  if (tables) console.log(tables.partial.length === 0 ? `[peeps] read ${tables.keys.length} table key(s) from the Postgres log` : `[peeps] not recording tables: the Postgres log doesn't prove them (${tables.reasons.join(", ")})`);
+  if (tables) console.log(tables.partial.length === 0 ? `[peeps] read ${tables.keys.length} table key(s) from the Postgres log${tables.errored ? ` (${tables.errored} statement(s) that errored left out)` : ""}` : `[peeps] not recording tables: the Postgres log doesn't prove them (${tables.reasons.join(", ")})`);
   for (const project of impact.projects) {
     const runs = new Set(project.runIds);
     const own = records.filter((record) => runs.has(record.runId));

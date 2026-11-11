@@ -16,9 +16,16 @@ export interface TableEvidence {
   keys: string[];
   partial: EvidenceKind[];
   reasons: string[];
+  /** Statements the server aborted with an ERROR, excused from owing a plan; absent when none. */
+  errored?: number;
 }
 
-const partial = (reasons: string[]): TableEvidence => ({ keys: [], partial: ["table"], reasons: [...new Set(reasons)].sort() });
+const partial = (reasons: string[], errored = 0): TableEvidence => ({
+  keys: [],
+  partial: ["table"],
+  reasons: [...new Set(reasons)].sort(),
+  ...(errored > 0 ? { errored } : {}),
+});
 
 /** How long the log must stay unchanged before it's read, the most to wait for that, and how often to look. */
 export interface Settle {
@@ -88,16 +95,36 @@ export function tablesOfLog(texts: string[]): TableEvidence {
   const reasons: string[] = [];
   let plans = 0;
   let statements = 0;
+  let errored = 0;
+  /** Per session, the statement its previous entry logged, if that entry was one. */
+  const justLogged = new Map<string, { text: string; owed: number } | null>();
   for (const text of texts) {
     const entries = readJsonlog(text);
     if (entries === null) return partial(["pg_log_unreadable"]);
     for (const entry of entries) {
+      const previous = justLogged.get(entry.session) ?? null;
+      justLogged.set(entry.session, null);
       if (entry.kind === "other") continue;
+      // An ERROR right after a statement in its session: the executor aborted it, so
+      // auto_explain logged no plan, and it wrote nothing that stayed. Its reads go unseen:
+      // sound only while the table set just says whether a job touched the database at
+      // all. Per-invocation windows (PQA-3419) must close this before tables narrow
+      // anything (PQA-3435).
+      if (entry.kind === "error") {
+        if (previous !== null) {
+          count(entry.session, previous.text).owed -= previous.owed;
+          errored += 1;
+        }
+        continue;
+      }
       if (entry.kind === "statement") {
         statements += 1;
         const owed = plansOwed(entry.text);
         if (owed === null) reasons.push("pg_statements_unexplained");
-        else count(entry.session, entry.text).owed += owed;
+        else {
+          count(entry.session, entry.text).owed += owed;
+          justLogged.set(entry.session, { text: entry.text, owed });
+        }
         continue;
       }
       plans += 1;
@@ -112,11 +139,11 @@ export function tablesOfLog(texts: string[]): TableEvidence {
     }
   }
   // Silence is indistinguishable from auto_explain not loaded.
-  if (plans === 0) return partial(["pg_no_statements"]);
+  if (plans === 0) return partial(["pg_no_statements"], errored);
   // Plans with no statement logged: log_statement is off, so no plan's absence could show.
-  if (statements === 0) return partial(["pg_statements_not_logged"]);
+  if (statements === 0) return partial(["pg_statements_not_logged"], errored);
   // One-sided: a nested plan carries its own text and only adds, so fewer means a statement went unplanned.
   for (const tally of owing.values()) if (tally.plans < tally.owed) reasons.push("pg_statements_unexplained");
-  if (reasons.length > 0) return partial(reasons);
-  return { keys: [...keys].sort(), partial: [], reasons: [] };
+  if (reasons.length > 0) return partial(reasons, errored);
+  return { keys: [...keys].sort(), partial: [], reasons: [], ...(errored > 0 ? { errored } : {}) };
 }

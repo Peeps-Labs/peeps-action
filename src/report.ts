@@ -365,7 +365,7 @@ async function recordEvidence(
   // The job's Postgres log, read once and only when a project asked: no line of it is printed.
   const pgLog = process.env.PEEPS_PG_LOG;
   const tables = pgLog && impact.projects.some((p) => p.collect.tables) ? await collectTables(path.resolve(env.workspace, pgLog)) : undefined;
-  if (tables) console.log(tables.partial.length === 0 ? `[peeps] read ${tables.keys.length} table key(s) from the Postgres log` : `[peeps] not recording tables: the Postgres log doesn't prove them (${tables.reasons.join(", ")})`);
+  if (tables) console.log(tables.partial.length === 0 ? `[peeps] read ${tables.keys.length} table key(s) from the Postgres log${tables.errored ? ` (${tables.errored} statement(s) that errored left out)` : ""}` : `[peeps] not recording tables: the Postgres log doesn't prove them (${tables.reasons.join(", ")})`);
   for (const project of impact.projects) {
     const runs = new Set(project.runIds);
     const own = records.filter((record) => runs.has(record.runId));
