@@ -104,7 +104,7 @@ const answer = (projects: unknown[]) => ({ scan: true, protocolVersion: 2, proje
 
 test("collect: per project, only with protocol 2, a 64-hex key and a key version (contract §1)", () => {
   const negotiated = readPreflight(answer([{ projectId: "p1", executionMode: "shadow", collect }, { projectId: "p2", executionMode: "shadow" }]));
-  assert.deepEqual(negotiated.collect, [{ projectId: "p1", coverage: true, fingerprint: true, key: Buffer.from(KEY_HEX, "hex"), keyVersion: "V1" }]);
+  assert.deepEqual(negotiated.collect, [{ projectId: "p1", coverage: true, fingerprint: true, tables: false, key: Buffer.from(KEY_HEX, "hex"), keyVersion: "V1" }]);
   for (const bad of [
     { ...collect, key: "short" },
     { ...collect, key: Buffer.from(KEY_HEX, "hex").toString("base64url") },
@@ -121,6 +121,14 @@ test("collect: per project, only with protocol 2, a 64-hex key and a key version
   assert.deepEqual(readPreflight({ scan: true, protocolVersion: 1, projects: [{ projectId: "p1", collect }] }), NONE);
   // A top-level collect is no project's.
   assert.equal("collect" in readPreflight({ scan: true, protocolVersion: 2, collect }), false);
+});
+
+test("collect.tables: read the job's Postgres log only when Peeps says exactly true", () => {
+  const tablesOf = (value: unknown) => readPreflight(answer([{ projectId: "p1", collect: { ...collect, tables: value } }])).collect?.[0]?.tables;
+  assert.equal(tablesOf(true), true);
+  for (const value of [undefined, false, "true", 1, null]) assert.equal(tablesOf(value), false, JSON.stringify(value));
+  // Tables alone ask for nothing: they ride on a fingerprint's recording.
+  assert.equal("collect" in readPreflight(answer([{ projectId: "p1", collect: { ...collect, coverage: false, fingerprint: false, tables: true } }])), false);
 });
 
 test("two projects, two keys", () => {

@@ -30,7 +30,7 @@ const coverageFile = (testId: string, retry: number, ran = true, contextId = `${
   },
 });
 /** Each coverage file's own context, announced as the worker announces it. */
-const membersOf = (records: AttemptRecord[], files: AttemptFile[], fp: typeof fingerprint, collected: { coverage: boolean; har: boolean }, contexts?: ContextMarker[]) =>
+const membersOf = (records: AttemptRecord[], files: AttemptFile[], fp: typeof fingerprint, collected: Parameters<typeof membersOfAll>[3], contexts?: ContextMarker[]) =>
   membersOfAll(records, files, fp, collected, contexts ?? files.map(({ testId, retry, contextId }) => ({ testId, retry, contextId })));
 const record = (testId: string, runId: string, retry: number, passed: boolean, paths: string[] | null = ["/cart"]): AttemptRecord => ({
   testId,
@@ -104,4 +104,32 @@ test("loaded files are only ever file: keys, and ambient stays empty (contract Â
   assert.ok(result.loadedFiles.length > 0);
   assert.ok(result.loadedFiles.every((key) => key.startsWith("file:")), result.loadedFiles.join(", "));
   assert.deepEqual(result.ambient, []);
+});
+
+const whole = { keys: ["table:r:public.users", "table:w:public.orders"], partial: [], reasons: [] };
+
+test("the job's tables: ambient to every test, table measured, the database layer recorded", () => {
+  const result = membersOf([record("t1", "run-1", 0, true), record("t2", "run-2", 0, true)], [coverageFile("t1", 0), coverageFile("t2", 0)], fingerprint, { coverage: true, har: true, tables: whole });
+  assert.deepEqual(result.ambient, whole.keys);
+  assert.deepEqual(result.measured, ["code", "css", "route", "table"]);
+  assert.deepEqual(result.layers, ["browser", "database"]);
+  assert.ok(result.members.every((m) => m.evidence.every((e) => !e.partial.includes("table"))));
+  // Tables alone measure only the database.
+  const alone = membersOf([record("t1", "run-1", 0, true)], [], fingerprint, { coverage: false, har: false, tables: whole });
+  assert.deepEqual([alone.measured, alone.layers, alone.ambient], [["table"], ["database"], whole.keys]);
+});
+
+test("a table log that can't prove itself: every test partial for tables, and table not measured", () => {
+  const doubt = { keys: [], partial: ["table" as const], reasons: ["pg_statements_unexplained"] };
+  const result = membersOf([record("t1", "run-1", 0, true), record("t2", "run-2", 0, true)], [coverageFile("t1", 0), coverageFile("t2", 0)], fingerprint, { coverage: true, har: true, tables: doubt });
+  assert.deepEqual(result.measured, ["code", "css", "route"]);
+  assert.deepEqual(result.layers, ["browser"]);
+  assert.deepEqual(result.ambient, []);
+  for (const member of result.members) assert.ok(member.evidence.some((e) => e.partial.includes("table") && e.reasons.includes("pg_statements_unexplained")), member.run);
+});
+
+test("no table log asked for or given: nothing changes", () => {
+  const result = membersOf([record("t1", "run-1", 0, true)], [coverageFile("t1", 0)], fingerprint, { coverage: true, har: true });
+  assert.deepEqual([result.measured, result.layers, result.ambient], [["code", "css", "route"], ["browser"], []]);
+  assert.ok(result.members[0]!.evidence.every((e) => !e.partial.includes("table")));
 });

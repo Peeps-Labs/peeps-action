@@ -45,6 +45,8 @@ export interface FootprintsInput {
   members: MemberEvidence[];
   /** Plaintext `file:` keys of what a measured process loaded, run or not. */
   loadedFiles?: string[];
+  /** Plaintext keys every test shares: the job's `table:r:` / `table:w:` keys. */
+  ambient?: string[];
   /** The browser build that recorded: recording metadata, never the binding. */
   browser?: { name: string; version: string } | null;
 }
@@ -56,5 +58,5 @@ export function footprintsRecording(key: Buffer, input: FootprintsInput): Record
     const union = unionEvidence(evidence);
     return { run, attempts, partial: union.partial, tokens: evidenceTokens(key, union) };
   });
-  return { kind: "footprints", browser: input.browser ?? null, universe: { layers: input.layers, measured: input.measured, loadedFiles: (input.loadedFiles ?? []).map((f) => tokenOf(key, f)), ambient: [] }, members };
+  return { kind: "footprints", browser: input.browser ?? null, universe: { layers: input.layers, measured: input.measured, loadedFiles: (input.loadedFiles ?? []).map((f) => tokenOf(key, f)), ambient: (input.ambient ?? []).map((k) => tokenOf(key, k)) }, members };
 }

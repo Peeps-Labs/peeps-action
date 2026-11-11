@@ -1163,6 +1163,70 @@
       "tests": [
         "test/evidence-cdp-unit.test.ts"
       ]
+    },
+    {
+      "name": "a ModifyTable's target is no write",
+      "file": "src/evidence/pg/plan.ts",
+      "find": "      if (name) writes.add(name);\n",
+      "replace": "",
+      "tests": [
+        "test/evidence-pg.test.ts"
+      ]
+    },
+    {
+      "name": "a plan's nested plans are ignored",
+      "file": "src/evidence/pg/plan.ts",
+      "find": "    for (const child of nodesOf(node.Plans)) walk(child);\n",
+      "replace": "",
+      "tests": [
+        "test/evidence-pg.test.ts"
+      ]
+    },
+    {
+      "name": "a statement whose plan is missing passes the count check",
+      "file": "src/evidence/pg/collector.ts",
+      "find": "  for (const tally of owing.values()) if (tally.plans < tally.owed) reasons.push(\"pg_statements_unexplained\");\n",
+      "replace": "",
+      "tests": [
+        "test/evidence-pg.test.ts"
+      ]
+    },
+    {
+      "name": "a truncated jsonlog line is skipped, not partial",
+      "file": "src/evidence/pg/log.ts",
+      "find": "    if (entry === null) return null;",
+      "replace": "    if (entry === null) continue;",
+      "tests": [
+        "test/evidence-pg.test.ts"
+      ]
+    },
+    {
+      "name": "the job's tables never reach ambient",
+      "file": "src/evidence/recording.ts",
+      "find": "ambient: (input.ambient ?? []).map((k) => tokenOf(key, k))",
+      "replace": "ambient: []",
+      "tests": [
+        "test/evidence-pg.test.ts",
+        "test/evidence-upload.test.ts"
+      ]
+    },
+    {
+      "name": "the collector reads before the log settles",
+      "file": "src/evidence/pg/collector.ts",
+      "find": "    if (!(await settled(dir, settle))) return partial([\"pg_log_unsettled\"]);\n",
+      "replace": "",
+      "tests": [
+        "test/evidence-pg.test.ts"
+      ]
+    },
+    {
+      "name": "plans with no statement logged pass the count check",
+      "file": "src/evidence/pg/collector.ts",
+      "find": "  if (statements === 0) return partial([\"pg_statements_not_logged\"]);\n",
+      "replace": "",
+      "tests": [
+        "test/evidence-pg.test.ts"
+      ]
     }
   ]
 }
