@@ -114,10 +114,12 @@ test("code the server ran outside the build: a fingerprinted source holds its fi
   const sources = new Set(["app/src/lib/csp.ts"]);
   const named = serverFootprint(invocation([ran("/work/app/src/lib/csp.ts")]), fingerprint.scripts, NEXT, sources);
   assert.deepEqual([named.keys, named.reasons], [["file:app/src/lib/csp.ts"], []]);
-  // Tracked or not: a spec may import it, so a change to it isn't sure to run everything.
-  for (const file of ["/work/app/config/redirects.js", "/work/app/dist/src/lib/auth.js"]) {
-    assert.deepEqual(serverFootprint(invocation([ran(file)]), fingerprint.scripts, NEXT, sources).reasons, ["outside_build"], file);
-  }
+  // Untracked and unnamed (a compiled custom server's output): unknown.
+  assert.deepEqual(serverFootprint(invocation([ran("/work/app/dist/src/lib/auth.js")]), fingerprint.scripts, NEXT, sources).reasons, ["outside_build"]);
+  // Tracked, unnamed: a change to it is a file no entity accounts for, or a test helper, and
+  // beside server evidence Peeps runs everything for either.
+  const tracked = (file: string) => file === "/work/app/config/redirects.js";
+  assert.deepEqual(serverFootprint(invocation([ran("/work/app/config/redirects.js")]), fingerprint.scripts, NEXT, sources, () => false, tracked).reasons, []);
   const runtime = [
     "/work/app/next.config.compiled.js",
     "/work/app/next.config.mjs",

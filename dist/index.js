@@ -1799,7 +1799,7 @@ function byFileName(sources) {
   }
   return out;
 }
-function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ new Set(), own = () => false) {
+function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ new Set(), own = () => false, tracked = () => false) {
   const keys = /* @__PURE__ */ new Set();
   const loaded = /* @__PURE__ */ new Set();
   let unmapped = 0;
@@ -1819,7 +1819,7 @@ function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ n
           loaded.add(`file:${source}`);
           if (ran) keys.add(`file:${source}`);
         }
-        if (ran && matches.length === 0 && !RUNTIME.test(rel) && !own(rel) && !NEXT_CONFIG.test(import_node_path13.default.posix.basename(rel))) outside++;
+        if (ran && matches.length === 0 && !RUNTIME.test(rel) && !own(rel) && !tracked(rel) && !NEXT_CONFIG.test(import_node_path13.default.posix.basename(rel))) outside++;
         continue;
       }
       const index = scripts.get(file);
@@ -1873,7 +1873,7 @@ async function recordServer(input2) {
   const invoke = input2.invoke ?? runInvocation;
   const preload = input2.preload.split(import_node_path14.default.sep).join("/");
   const ownCode = (file) => file === preload;
-  const footprint = (coverage) => serverFootprint(coverage, input2.scripts, input2.nextDir, input2.sources, ownCode);
+  const footprint = (coverage) => serverFootprint(coverage, input2.scripts, input2.nextDir, input2.sources, ownCode, input2.tracked);
   const build = input2.buildDir ?? (() => {
     let snapshot = snapshotBuildDir(input2.nextDir);
     return { snapshot: () => snapshot = snapshotBuildDir(input2.nextDir), settle: () => settleBuildDir(input2.nextDir, snapshot) };
@@ -2295,6 +2295,7 @@ async function executeAndReport(env, peeps, input2) {
         coverageDir: import_node_path16.default.join(scratch, "server-coverage"),
         scripts: input2.impact.fingerprint.scripts,
         sources: new Set(input2.impact.fingerprint.files.values()),
+        tracked: plan2.tracked,
         nextDir: plan2.nextDir,
         runTests: (spec, index) => runPlaywright(env, planFile, reportDir, void 0, { ...input2.extraEnv, PEEPS_INVOCATION: spec === null ? "ambient" : "spec" }, input2.narrowed, input2.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : import_node_path16.default.join(blobDir, `report-${index}.zip`) }),
         attempts: () => evidence.read("att-").map((record) => ({ testId: record.testId, file: typeof record.file === "string" ? realOr(record.file) : null }))
@@ -2439,6 +2440,15 @@ function realOr(file) {
     return file;
   }
 }
+function trackedFiles(dir) {
+  try {
+    const root = (0, import_node_fs6.realpathSync)((0, import_node_child_process5.execFileSync)("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
+    const listed = (0, import_node_child_process5.execFileSync)("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+    return new Set(listed.split("\0").filter(Boolean).map((file) => import_node_path16.default.join(root, file).split(import_node_path16.default.sep).join("/")));
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
 function serverPlanOf(env, recorded, rootDirAbs, specFiles, shard) {
   if (!env.app || !recorded.some((project) => project.collect.coverage)) return null;
   if (shard) {
@@ -2458,7 +2468,8 @@ function serverPlanOf(env, recorded, rootDirAbs, specFiles, shard) {
   }
   const specs = [...new Set(specFiles.map((file) => realOr(import_node_path16.default.resolve(rootDirAbs, file))))].sort();
   console.log(`[peeps] recording server evidence: ${specs.length} spec file(s), each with the app to itself, after one ambient run`);
-  return { app: env.app, specs, nextDir };
+  const tracked = trackedFiles(env.workingDirectory);
+  return { app: env.app, specs, nextDir, tracked: (file) => tracked.has(file) };
 }
 async function mergeReports(env, blobDir, reportDir) {
   if (!(0, import_node_fs6.existsSync)(blobDir)) return;

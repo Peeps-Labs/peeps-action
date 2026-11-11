@@ -9,9 +9,10 @@
  * or trouble around the app (its reset, readiness, an early exit). A partial footprint is
  * unknown for code: those tests always run. Code that ran outside `.next` is keyed by the
  * fingerprinted source it is, wherever it sits. Otherwise the runtime (`node_modules`,
- * corepack's cache, Node itself), Next's own `next.config` and the action's preload are no
- * one's; anything else, such as a compiled custom server's output or source a spec may
- * import too, is unknown (`outside_build`). A process that wrote coverage without
+ * corepack's cache, Node itself), Next's own `next.config`, the action's preload and source
+ * git tracks are no one's (a change to tracked source is unaccounted, or a test helper, and
+ * Peeps runs everything for either beside server evidence); anything else, such as a
+ * compiled custom server's output, is unknown (`outside_build`). A process that wrote coverage without
  * registering is `unregistered`, and registered processes that never loaded the build
  * mean the server ran without the preload (`no_build_ran`).
  */
@@ -113,6 +114,8 @@ export function serverFootprint(
   sources: ReadonlySet<string> = new Set(),
   /** The action's own code that runs in the app (the preload): no one's. */
   own: (file: string) => boolean = () => false,
+  /** Whether git tracks an absolute path; by default nothing is, so unmatched code reads unknown. */
+  tracked: (file: string) => boolean = () => false,
 ): ServerFootprint {
   const keys = new Set<string>();
   const loaded = new Set<string>();
@@ -138,7 +141,9 @@ export function serverFootprint(
         // (a custom server's dist/), or source a spec may import too, so that a change to it
         // picks only that spec.
         // A fingerprinted source is keyed wherever it sits; otherwise the runtime is no one's.
-        if (ran && matches.length === 0 && !RUNTIME.test(rel) && !own(rel) && !NEXT_CONFIG.test(path.posix.basename(rel))) outside++;
+        // Tracked source no fingerprint names needs nothing: a change to it is a file no entity
+        // accounts for, or a test helper, and beside server evidence Peeps runs everything for either.
+        if (ran && matches.length === 0 && !RUNTIME.test(rel) && !own(rel) && !tracked(rel) && !NEXT_CONFIG.test(path.posix.basename(rel))) outside++;
         continue;
       }
       const index = scripts.get(file);
