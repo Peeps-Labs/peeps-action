@@ -1383,6 +1383,61 @@ test("on a full run, a test with no plan entry is logged and sends nothing, and 
   }
 });
 
+/** A report whose batch has "Record video" on: the plan wdio was handed, and how often ffmpeg was ensured. */
+async function reportRecordingVideo(answer: (tests: PlannedTest[]) => Record<string, unknown>) {
+  const { root } = workspace();
+  const { peeps } = announceAnswering((tests) => ({ recordVideo: true, ...answer(tests) }));
+  let ffmpegChecks = 0;
+  let plan: AppiumPlanFile | undefined;
+  await logged(() =>
+    runAppiumReport(
+      envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile" }),
+      peeps,
+      async (_wrapper, extra) => {
+        plan = JSON.parse(readFileSync(extra.PEEPS_PLAN_FILE!, "utf8")) as AppiumPlanFile;
+        return 0;
+      },
+      async () => {
+        ffmpegChecks += 1;
+        return true;
+      },
+    ),
+  );
+  return { plan, ffmpegChecks };
+}
+
+for (const [path_, answer, runIds] of [
+  ["Peeps did not narrow", (tests: PlannedTest[]) => ({ runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun) }), ["r-0"]],
+  ["the narrowing fell back to the full suite", () => ({ narrowed: true, runs: [asRun(GONE, 7)] }), ["r-7"]],
+  ["the run was narrowed", (tests: PlannedTest[]) => ({ narrowed: true, runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun) }), ["r-0"]],
+] as Array<[string, (tests: PlannedTest[]) => Record<string, unknown>, string[]]>) {
+  test(`Record video records a report's runs when ${path_}, and ensures ffmpeg once`, async () => {
+    const { plan, ffmpegChecks } = await reportRecordingVideo(answer);
+    assert.ok(plan, "wdio ran");
+    assert.deepEqual(plan.recordVideoRunIds, runIds);
+    assert.equal(plan.ffmpeg, true);
+    assert.equal(ffmpegChecks, 1);
+  });
+}
+
+test("a report with Record video off never looks for ffmpeg", async () => {
+  const { root } = workspace();
+  const { peeps } = announceAnswering((tests) => ({ narrowed: true, runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun) }));
+  let plan: AppiumPlanFile | undefined;
+  await runAppiumReport(
+    envFor(root, { "INPUT_WORKING-DIRECTORY": "mobile" }),
+    peeps,
+    async (_wrapper, extra) => {
+      plan = JSON.parse(readFileSync(extra.PEEPS_PLAN_FILE!, "utf8")) as AppiumPlanFile;
+      return 0;
+    },
+    async () => assert.fail("not checked when nothing records"),
+  );
+  assert.ok(plan, "wdio ran");
+  assert.equal("recordVideoRunIds" in plan, false);
+  assert.equal("ffmpeg" in plan, false);
+});
+
 test("a report Peeps did not narrow selects nothing, as before", async () => {
   const { seen, posts } = await reportWith((tests) => ({ runs: tests.filter((t) => t.titlePath === LOGIN).map(asRun) }));
   assert.ok(seen, "wdio ran");

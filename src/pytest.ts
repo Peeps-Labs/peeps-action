@@ -32,6 +32,7 @@ import type { RunnerEnv } from "./env";
 import { gitBlobSha } from "./inventory";
 import type { PeepsClient } from "./peeps";
 import { type PlanEnvironment, planEnvironmentVariables } from "./environment";
+import { MAX_VIDEO_BYTES } from "./appium-reporter";
 import { requestPlan } from "./plan";
 import type { PlanEntry } from "./reporter";
 import type { PlannedTest } from "./report";
@@ -753,8 +754,10 @@ export async function uploadEvidence(
   for (const file of files) {
     try {
       const info = await lstat(file.abs);
-      if (!info.isFile() || info.size > MAX_EVIDENCE_BYTES) {
-        console.log(`[peeps] skipping attachment ${file.name}: not a file within ${MAX_EVIDENCE_BYTES} bytes`);
+      // A recording (`-evidence-video.mp4`, the Appium path's "Record video") has its own, larger cap.
+      const cap = /-evidence-video\.mp4$/.test(file.name) ? MAX_VIDEO_BYTES : MAX_EVIDENCE_BYTES;
+      if (!info.isFile() || info.size > cap) {
+        console.log(`[peeps] skipping attachment ${file.name}: not a file within ${cap} bytes`);
         continue;
       }
       await peeps.postBytes(

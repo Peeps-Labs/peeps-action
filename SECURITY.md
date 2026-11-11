@@ -57,6 +57,7 @@ This is more than "test results". Concretely:
 | The commit sha, ref, repository and Actions job URL | all modes |
 | The sha actually checked out (`git rev-parse HEAD`), and this action's version | `agent` |
 | Tool results in an agent session: file contents, diffs, test output (for a failed Playwright test, its `error-context.md`, which holds the page's accessibility snapshot at the failure: up to 16 KB each and 128 KB per run, masked like every result. It is read only when it is a regular file, not a symlink, named `error-context.md`, inside the workspace or a Playwright project's output directory. Those checks stop a mistaken attachment, not a hostile spec: the output directory comes from the Playwright config, which an agent can edit, and a hard link passes them; for a failed Appium test, its page source), and the sha256 of each changed file's contents (files up to 5 MB; symlinks are never followed) | `agent` |
+| Appium, only when the project's **Record video** setting is on in Peeps: a **screen recording of every planned test, pass or fail**, from its first `beforeEach` to its end, and for a failed test up to 8 still frames from the end of it | `report`, `run` |
 | Appium, only with `device-tools: true`: what the device tools read from the app under test, when Peeps' agent calls them: **page source** of the screen (native hierarchy XML, or a WebView's HTML), element texts and positions, context names, **device logs** (logcat or syslog), and **screenshots** | `agent` |
 
 Two of those deserve emphasis.
@@ -89,6 +90,15 @@ nothing), and for a WebView its HTML as the page serialises it, including
 hidden inputs and any token or state embedded in the markup. Nothing redacts either before upload.
 Passing tests send neither. If that is not acceptable for a suite, use test
 accounts and data in it, or do not run `report`/`run` modes for it.
+
+**Record video sends the whole test, pass or fail.** With the project's
+Record video setting on (off by default), every planned test's screen is
+recorded for as long as it runs: every screen it reaches, everything typed
+where the platform shows it, any code or token the app displays. Nothing is
+masked or blurred. Turn it on only for suites that use test accounts and
+data. A job that records and finds no ffmpeg installs it on the runner
+(`sudo -n apt-get install ffmpeg` on Linux, `brew install ffmpeg` on macOS);
+with the setting off, the action installs nothing.
 
 **Device tools read the app under test, live.** With `device-tools: true`,
 an agent session can read whatever the app shows: the page source of any
