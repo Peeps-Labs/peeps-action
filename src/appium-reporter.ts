@@ -13,6 +13,12 @@
  *                        attachments the reporter lists on that test's final
  *                        `test_end`, in the pytest evidence shape
  *                        (`PytestTestEndEvidence`).
+ *   peepsBeforeTest      when Peeps asked for video (the project's "Record
+ *   peepsBeforeHook      video" setting), start the device's screen recording
+ *                        for a planned test at its first `beforeEach` or at
+ *                        the test, and stop it in the after hooks: the MP4 is
+ *                        attached to the test's final `test_end`, pass or fail,
+ *                        and a failure also gets JPEG frames from its end.
  *   mochaHooks           run mode's mocha root hook: skips every test whose
  *                        (spec file, title path) the plan does not name.
  *   withPeeps            what the wrapper config exports: the customer's
@@ -31,6 +37,7 @@
  * saved is there when the reporter builds that test's `test_end`.
  */
 
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -63,6 +70,14 @@ export interface AppiumPlanFile {
    * request run's `unmatched` tests.
    */
   alsoRun?: Array<{ path: string; titlePath: string }>;
+  /**
+   * The runs whose project has "Record video" on: each is recorded from its
+   * first `beforeEach` to its end. Absent (an older Peeps, agent mode) means
+   * none.
+   */
+  recordVideoRunIds?: string[];
+  /** Whether `ffmpeg` and `ffprobe` run on this runner (the action checks once). */
+  ffmpeg?: boolean;
 }
 
 /** One line of a `resultsDir` events file: a test and the events it produced. */
@@ -168,6 +183,11 @@ class Plan {
     return { state: existsSync(path.join(this.claimsDir, `${fileSafe(runId)}.ended`)) ? "ended" : "continue" };
   }
 
+  /** Whether Peeps asked for this run to be recorded. */
+  recordsVideo(runId: string): boolean {
+    return this.file.recordVideoRunIds?.includes(runId) ?? false;
+  }
+
   /** The run's `run_end` was sent: a later attempt of its worker must not reopen it. */
   markEnded(runId: string): void {
     if (!this.claimsDir) return;
@@ -240,6 +260,9 @@ export function resetForTests(): void {
   cachedPlan = undefined;
   captured.clear();
   specFileRetries = 0;
+  recording = null;
+  recorderBroken = null;
+  videoTools = defaultVideoTools;
 }
 
 // ---------------------------------------------------------------------------
@@ -310,12 +333,12 @@ function discardCaptured(runId: string): void {
   captured.delete(runId);
 }
 
-function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, label: string, ms = CAPTURE_TIMEOUT_MS): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   return Promise.race([
     promise,
     new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out after ${CAPTURE_TIMEOUT_MS} ms`)), CAPTURE_TIMEOUT_MS);
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
     }),
   ]).finally(() => clearTimeout(timer));
 }
@@ -327,9 +350,14 @@ function reasonOf(error: unknown): string {
 /** The subset of a WebdriverIO browser this module calls. */
 export interface CaptureBrowser {
   isMobile?: boolean;
+  isAndroid?: boolean;
+  isIOS?: boolean;
   saveScreenshot(file: string): Promise<unknown>;
   getPageSource(): Promise<string>;
   getContext?(): Promise<unknown>;
+  startRecordingScreen?(options?: Record<string, unknown>): Promise<unknown>;
+  /** The recording since the start, base64. */
+  stopRecordingScreen?(): Promise<unknown>;
 }
 
 /**
@@ -337,9 +365,15 @@ export interface CaptureBrowser {
  * `PEEPS_ARTIFACTS_DIR/upload`, replacing what an earlier attempt saved.
  * Never throws: evidence is a bonus on top of the result.
  */
-export async function captureEvidence(runId: string, browser: CaptureBrowser): Promise<void> {
+export async function captureEvidence(
+  runId: string,
+  browser: CaptureBrowser,
+  options: { keepVideo?: boolean } = {},
+): Promise<void> {
   const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
   if (!artifacts) return;
+  // What this attempt's recording start noted stays (`startVideo` cleared any earlier attempt's).
+  const noted = options.keepVideo ? [...(captured.get(runId)?.omitted ?? [])] : [];
   discardCaptured(runId);
   const dir = path.join(artifacts, "upload");
   const out: Captured = { attachments: [], omitted: [], context: null, files: [] };
@@ -385,6 +419,7 @@ export async function captureEvidence(runId: string, browser: CaptureBrowser): P
   } catch (error) {
     console.log(`[peeps] evidence for ${runId} not captured: ${String(error)}`);
   }
+  out.omitted.push(...noted);
   captured.set(runId, out);
 }
 
@@ -396,7 +431,242 @@ function workerBrowser(): CaptureBrowser | null {
     : null;
 }
 
-interface MochaRunnableLike {
+// ---------------------------------------------------------------------------
+// Video: the project's "Record video" setting
+// ---------------------------------------------------------------------------
+
+/**
+ * A video's own cap, above the 25 MB of every other file: a long test at the
+ * Android bit rate below runs about 7.5 MB a minute. Peeps' artifact route
+ * takes 128 MB.
+ */
+export const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+
+/** The longest recording either driver makes, in seconds. */
+const VIDEO_TIME_LIMIT_S = 1800;
+/** UiAutomator2 records in 180 s chunks and joins them with ffmpeg: without it, 180 s is the limit. */
+const ANDROID_LIMIT_WITHOUT_FFMPEG_S = 180;
+/** Starting answers quickly; stopping hands back the whole video as base64. */
+const START_TIMEOUT_MS = 15_000;
+const STOP_TIMEOUT_MS = 120_000;
+/** Cutting the frames: each one is one ffmpeg call. */
+const FRAME_TIMEOUT_MS = 10_000;
+/**
+ * The after hooks run inside the test's own mocha timeout: before stopping,
+ * the test is given this long from now, so a slow stop never turns a pass
+ * into a timeout.
+ */
+const VIDEO_HOOK_BUDGET_MS = STOP_TIMEOUT_MS + 8 * FRAME_TIMEOUT_MS + 30_000;
+/** Before the end of the video: the failure is where the recording stops. */
+const FRAME_OFFSETS_MS = [20_000, 12_000, 8_000, 5_000, 3_000, 2_000, 1_000, 200];
+/** Wide enough for the model to read text, as web keyframes are. */
+const FRAME_WIDTH = 720;
+
+/**
+ * The driver's `startRecordingScreen` options, or null when this runner
+ * cannot record (iOS encodes with ffmpeg on the Appium host, the runner).
+ * Android keeps the device's own resolution (a size its encoder refuses
+ * fails the start) at 1 Mbps, a quarter of the driver's default. iOS is
+ * H.264 in yuv420p, the one pixel format every browser plays.
+ */
+export function recordingOptions(browser: CaptureBrowser, ffmpeg: boolean): Record<string, unknown> | null {
+  if (browser.isIOS) {
+    if (!ffmpeg) return null;
+    return {
+      videoType: "libx264",
+      videoQuality: "medium",
+      videoFps: 10,
+      videoScale: `${FRAME_WIDTH}:-2`,
+      pixelFormat: "yuv420p",
+      timeLimit: VIDEO_TIME_LIMIT_S,
+      forceRestart: true,
+    };
+  }
+  return { bitRate: 1_000_000, timeLimit: ffmpeg ? VIDEO_TIME_LIMIT_S : ANDROID_LIMIT_WITHOUT_FFMPEG_S, forceRestart: true };
+}
+
+/**
+ * Where the frames are cut, in ms from the start of a video `durationMs`
+ * long: the last 20 seconds, densest at the end, within the video,
+ * ascending, each position once.
+ */
+export function videoFrameOffsets(durationMs: number): number[] {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return [];
+  const positions = new Set<number>();
+  for (const before of FRAME_OFFSETS_MS) positions.add(Math.max(0, Math.round(durationMs - before)));
+  return [...positions].sort((a, b) => a - b);
+}
+
+/** The ffmpeg calls frame cutting makes; replaced in tests. */
+export interface VideoTools {
+  durationMs(video: string): Promise<number>;
+  frame(video: string, positionMs: number, out: string): Promise<void>;
+}
+
+function run(file: string, args: string[], timeout: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { timeout, maxBuffer: 1024 * 1024 }, (error, stdout) => (error ? reject(error) : resolve(stdout)));
+  });
+}
+
+const defaultVideoTools: VideoTools = {
+  async durationMs(video) {
+    const out = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video], FRAME_TIMEOUT_MS);
+    return Math.round(Number.parseFloat(out.trim()) * 1000);
+  },
+  async frame(video, positionMs, out) {
+    await run(
+      "ffmpeg",
+      ["-v", "error", "-y", "-ss", (positionMs / 1000).toFixed(3), "-i", video, "-frames:v", "1",
+        "-vf", `scale='min(${FRAME_WIDTH},iw)':-2`, "-q:v", "4", out],
+      FRAME_TIMEOUT_MS,
+    );
+  },
+};
+
+let videoTools: VideoTools = defaultVideoTools;
+
+/** For tests: replace the ffmpeg calls (null restores them). */
+export function setVideoToolsForTests(tools: VideoTools | null): void {
+  videoTools = tools ?? defaultVideoTools;
+}
+
+/** The run this worker's device is recording now, if any (one session, one recording). */
+let recording: { runId: string } | null = null;
+/** Why this worker's recorder cannot record: set at its first failure, so it is not tried per test. */
+let recorderBroken: string | null = null;
+
+function capturedFor(runId: string): Captured {
+  let out = captured.get(runId);
+  if (!out) {
+    out = { attachments: [], omitted: [], context: null, files: [] };
+    captured.set(runId, out);
+  }
+  return out;
+}
+
+function canRecord(browser: CaptureBrowser): boolean {
+  return Boolean(browser.isMobile) && typeof browser.startRecordingScreen === "function" && typeof browser.stopRecordingScreen === "function";
+}
+
+/**
+ * Start recording `runId` when Peeps asked for it. Idempotent for the run it
+ * is already recording. A start that fails is noted for the run, and the
+ * worker stops trying. Never throws.
+ */
+async function startVideo(plan: Plan, runId: string, browser: CaptureBrowser): Promise<void> {
+  if (!plan.recordsVideo(runId) || !canRecord(browser) || recording?.runId === runId) return;
+  recording = null;
+  // A new attempt starts with nothing staged.
+  discardCaptured(runId);
+  if (recorderBroken) {
+    capturedFor(runId).omitted.push({ name: "video.mp4", reason: recorderBroken });
+    return;
+  }
+  const options = recordingOptions(browser, plan.file.ffmpeg === true);
+  if (!options) {
+    capturedFor(runId).omitted.push({ name: "video.mp4", reason: "not recorded: ffmpeg was not found on the runner" });
+    return;
+  }
+  try {
+    await withTimeout(Promise.resolve(browser.startRecordingScreen!(options)), "startRecordingScreen", START_TIMEOUT_MS);
+    recording = { runId };
+  } catch (error) {
+    recorderBroken = reasonOf(error);
+    console.log(`[peeps] screen recording is not available in this worker: ${recorderBroken}`);
+    capturedFor(runId).omitted.push({ name: "video.mp4", reason: recorderBroken });
+  }
+}
+
+/** Mocha's Test as the hooks' context carries it, as far as the timeout goes. */
+interface TimedRunnable {
+  timeout?: (ms?: number) => unknown;
+}
+
+/** Give the running test room for the stop, from now (mocha restarts its timer). */
+function extendTimeout(test: TimedRunnable | undefined): void {
+  try {
+    if (typeof test?.timeout !== "function") return;
+    const current = Number(test.timeout());
+    if (!Number.isFinite(current) || current <= 0) return;
+    test.timeout(Math.max(current, VIDEO_HOOK_BUDGET_MS));
+  } catch {
+    // Not mocha's Test: nothing to extend.
+  }
+}
+
+/**
+ * Stop recording `runId` and stage the MP4 (and, for a failure, frames cut
+ * from its end) beside what `captureEvidence` saved. Never throws.
+ */
+async function stopVideo(plan: Plan, runId: string, browser: CaptureBrowser, failed: boolean): Promise<void> {
+  if (recording?.runId !== runId) return;
+  recording = null;
+  const artifacts = process.env.PEEPS_ARTIFACTS_DIR;
+  const out = capturedFor(runId);
+  let base64: string;
+  try {
+    base64 = String(await withTimeout(Promise.resolve(browser.stopRecordingScreen!()), "stopRecordingScreen", STOP_TIMEOUT_MS));
+  } catch (error) {
+    out.omitted.push({ name: "video.mp4", reason: reasonOf(error) });
+    return;
+  }
+  if (!artifacts) return;
+  try {
+    const dir = path.join(artifacts, "upload");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, evidenceFileName(runId, "video.mp4"));
+    writeFileSync(file, Buffer.from(base64, "base64"));
+    const size = statSync(file).size;
+    if (size === 0) {
+      unlinkSync(file);
+      out.omitted.push({ name: "video.mp4", reason: "the recording was empty" });
+      return;
+    }
+    const tooBig = size > MAX_VIDEO_BYTES;
+    if (!tooBig) {
+      out.files.push(file);
+      out.attachments.push({ name: "video.mp4", path: `data/${path.basename(file)}`, size });
+    }
+    if (failed) await cutFrames(plan, runId, file, dir, out);
+    if (tooBig) {
+      unlinkSync(file);
+      out.omitted.push({ name: "video.mp4", reason: `larger than ${MAX_VIDEO_BYTES} bytes` });
+    }
+  } catch (error) {
+    out.omitted.push({ name: "video.mp4", reason: reasonOf(error) });
+  }
+}
+
+/** JPEG frames from the end of the video, `video-frame-<ms from start>.jpg`. */
+async function cutFrames(plan: Plan, runId: string, video: string, dir: string, out: Captured): Promise<void> {
+  if (plan.file.ffmpeg !== true) {
+    out.omitted.push({ name: "video frames", reason: "not extracted: ffmpeg was not found on the runner" });
+    return;
+  }
+  try {
+    for (const positionMs of videoFrameOffsets(await videoTools.durationMs(video))) {
+      const name = `video-frame-${String(positionMs).padStart(7, "0")}.jpg`;
+      const file = path.join(dir, evidenceFileName(runId, name));
+      try {
+        await videoTools.frame(video, positionMs, file);
+        const size = statSync(file).size;
+        if (size === 0 || size > MAX_ATTACHMENT_BYTES) {
+          unlinkSync(file);
+          continue;
+        }
+        out.files.push(file);
+        out.attachments.push({ name, path: `data/${path.basename(file)}`, size });
+      } catch {
+        // A position past the last decodable frame: the others still tell the story.
+      }
+    }
+  } catch (error) {
+    out.omitted.push({ name: "video frames", reason: reasonOf(error) });
+  }
+}
+
+interface MochaRunnableLike extends TimedRunnable {
   title?: string;
   file?: string;
   titlePath?: () => string[];
@@ -417,15 +687,66 @@ export async function peepsAfterTest(
   result: { passed?: boolean; error?: unknown } | undefined,
 ): Promise<void> {
   try {
-    if (!result || result.passed || !result.error) return;
+    if (!result) return;
+    const failed = !result.passed && Boolean(result.error);
     const plan = loadPlan();
     const titles = titlesOf(context?.test);
     const browser = workerBrowser();
     if (!plan || !titles || !browser) return;
     const entry = plan.entryFor(context?.test?.file, titles);
-    if (entry) await captureEvidence(entry.runId, browser);
+    if (!entry) return;
+    const recorded = recording?.runId === entry.runId;
+    if (recorded) extendTimeout(context?.test);
+    // The failure's own screen first, then the recording that led to it.
+    if (failed) await captureEvidence(entry.runId, browser, { keepVideo: true });
+    if (recorded) await stopVideo(plan, entry.runId, browser, failed);
   } catch (error) {
     console.log(`[peeps] afterTest evidence not captured: ${String(error)}`);
+  }
+}
+
+/** The planned entry for a `beforeEach` hook's test, or a test's own. */
+function beforeEntry(context: { test?: MochaRunnableLike; currentTest?: MochaRunnableLike } | undefined, hook: boolean) {
+  const plan = loadPlan();
+  const test = hook ? context?.currentTest : (context?.test ?? context?.currentTest);
+  const titles = titlesOf(test);
+  const browser = workerBrowser();
+  if (!plan || !titles || !browser) return null;
+  const entry = plan.entryFor(test?.file, titles);
+  return entry ? { plan, entry, browser } : null;
+}
+
+/**
+ * WebdriverIO's `beforeTest(test, context)`: runs inside the test, after its
+ * `beforeEach` hooks. Starts the recording for a test that has none (no
+ * `beforeEach`), when Peeps asked for video.
+ */
+export async function peepsBeforeTest(
+  _test: unknown,
+  context: { test?: MochaRunnableLike; currentTest?: MochaRunnableLike } | undefined,
+): Promise<void> {
+  try {
+    const found = beforeEntry(context, false);
+    if (found) await startVideo(found.plan, found.entry.runId, found.browser);
+  } catch (error) {
+    console.log(`[peeps] beforeTest recording not started: ${String(error)}`);
+  }
+}
+
+/**
+ * WebdriverIO's `beforeHook(hook, context)`: at a test's first `beforeEach`,
+ * start its recording, so a setup that fails is on video too.
+ */
+export async function peepsBeforeHook(
+  _hook: unknown,
+  context: { test?: MochaRunnableLike; currentTest?: MochaRunnableLike } | undefined,
+): Promise<void> {
+  try {
+    if (!/^"before each" hook/.test(context?.test?.title ?? "")) return;
+    const found = beforeEntry(context, true);
+    if (found) await startVideo(found.plan, found.entry.runId, found.browser);
+  } catch (error) {
+    console.log(`[peeps] beforeHook recording not started: ${String(error)}`);
   }
 }
 
@@ -446,7 +767,9 @@ export async function peepsAfterHook(
     const browser = workerBrowser();
     if (!plan || !titles || !browser) return;
     const entry = plan.entryFor(context?.currentTest?.file, titles);
-    if (entry) await captureEvidence(entry.runId, browser);
+    if (!entry) return;
+    await captureEvidence(entry.runId, browser, { keepVideo: true });
+    if (recording?.runId === entry.runId) await stopVideo(plan, entry.runId, browser, true);
   } catch (error) {
     console.log(`[peeps] afterHook evidence not captured: ${String(error)}`);
   }
@@ -696,6 +1019,11 @@ export class PeepsAppiumReporter {
       if (error?.message) event.error = error.message.slice(0, 4000);
       if (error?.stack) event.errorStack = error.stack.slice(0, 8000);
       Object.assign(event, failureEvidence(error, "call", captured.get(entry.runId)));
+    } else if (status === "passed") {
+      // A passing test's only evidence is its video, when Peeps asked for one.
+      const evidence = captured.get(entry.runId);
+      if (evidence?.attachments.length) event.attachments = evidence.attachments;
+      if (evidence?.omitted.length) event.attachmentsOmitted = evidence.omitted;
     }
     this.close(entry, event);
   }
@@ -895,6 +1223,8 @@ export function withPeeps(base: Record<string, unknown>, options: PeepsWdioOptio
   const config: Record<string, unknown> = {
     ...base,
     reporters,
+    beforeHook: [...hooksOf(base.beforeHook), peepsBeforeHook],
+    beforeTest: [...hooksOf(base.beforeTest), peepsBeforeTest],
     afterTest: [...hooksOf(base.afterTest), peepsAfterTest],
     afterHook: [...hooksOf(base.afterHook), peepsAfterHook],
     // Room for the last test's events to reach Peeps before the worker exits.

@@ -296,6 +296,37 @@ A capture that fails or exceeds 25 MB is listed in `attachmentsOmitted` with
 its reason. Under mocha retries each retried attempt sends a failed
 `test_end` and only the final attempt's evidence is kept.
 
+#### Video ("Record video")
+
+When the project's **Record video** setting is on in Peeps (Repository
+settings, off by default), Peeps' plan names the runs to record and the
+action records each planned test on the device, from its first `beforeEach`
+(or the test itself) to its end, with Appium's `startRecordingScreen` and
+`stopRecordingScreen`. The final attempt's `test_end` carries
+`video.mp4` (uploaded as `data/<runId>-evidence-video.mp4`), **pass or fail**.
+A failed test also gets up to 8 JPEG frames from the last 20 seconds of its
+video, `video-frame-<ms from start>.jpg`, for Peeps' failure analysis and
+healer.
+
+- Android (UiAutomator2): the device's own recorder at its own resolution,
+  1 Mbps, up to 30 minutes.
+- iOS (XCUITest): H.264 (`yuv420p`), 10 fps, 720 px wide, up to 30 minutes.
+- **ffmpeg on the runner** (the machine Appium runs on): iOS needs it to
+  record at all, Android needs it to record past 3 minutes, and the frames
+  need `ffmpeg` and `ffprobe`. When the project records video and the
+  runner has none, the action installs it first (`sudo -n apt-get` on
+  Linux, `brew` on macOS, at most 10 minutes); a job that records nothing
+  never installs it. If the install fails, the run goes on and each test
+  lists what was not captured in `attachmentsOmitted`.
+- A video is capped at 100 MB (other files at 25 MB); a larger one is listed
+  as omitted, and its frames are still sent.
+- Recording never fails a test or the job: a driver that cannot record is
+  noted once per worker and each test lists the reason. Before stopping, the
+  action gives the running test enough of its mocha timeout for the stop.
+- Remove your own `startRecordingScreen` hooks from `wdio.conf` when you turn
+  this on: two recorders on one session stop each other.
+- Agent mode (`run_tests`) does not record.
+
 One capability per config (one platform per config, named in `config`) is
 the supported shape. With several, each test is reported once, from the
 first capability that runs it; another capability's result for it is
@@ -692,6 +723,15 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## 1.13.0
+
+- Appium: **Record video**. When the project's setting is on in Peeps, each
+  planned test is recorded on the device and its MP4 is sent with its result,
+  pass or fail; a failure also sends frames from the end of its video for
+  failure analysis. Off unless Peeps asks, so a project that has not turned
+  it on, and an older Peeps, record nothing. A video may be up to 100 MB.
+  A job that records installs ffmpeg when the runner lacks it.
 
 ## 1.12.1
 

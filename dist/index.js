@@ -1218,6 +1218,10 @@ function pageSourceExtension(source, context) {
   if (/^<!doctype html|<html[\s>]/i.test(head)) return "html";
   return context && /^NATIVE/i.test(context) ? "xml" : "html";
 }
+var MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+var STOP_TIMEOUT_MS = 12e4;
+var FRAME_TIMEOUT_MS = 1e4;
+var VIDEO_HOOK_BUDGET_MS = STOP_TIMEOUT_MS + 8 * FRAME_TIMEOUT_MS + 3e4;
 
 // src/pytest.ts
 var import_node_child_process5 = require("node:child_process");
@@ -1628,8 +1632,9 @@ async function uploadEvidence(peeps, batchId, files) {
   for (const file of files) {
     try {
       const info = await (0, import_promises7.lstat)(file.abs);
-      if (!info.isFile() || info.size > MAX_EVIDENCE_BYTES) {
-        console.log(`[peeps] skipping attachment ${file.name}: not a file within ${MAX_EVIDENCE_BYTES} bytes`);
+      const cap = /-evidence-video\.mp4$/.test(file.name) ? MAX_VIDEO_BYTES : MAX_EVIDENCE_BYTES;
+      if (!info.isFile() || info.size > cap) {
+        console.log(`[peeps] skipping attachment ${file.name}: not a file within ${cap} bytes`);
         continue;
       }
       await peeps.postBytes(
@@ -1845,6 +1850,49 @@ async function runAppiumInventory(env, peeps) {
   const result = await peeps.post("/api/v1/ci/inventory", request);
   console.log(`[peeps] inventory accepted: ${JSON.stringify(result.results)}`);
 }
+function recordVideoRunIdsOf(batches) {
+  return batches.filter((b) => b.recordVideo === true).flatMap((b) => b.runs.map((r) => r.runId));
+}
+async function ffmpegAvailable(pathEnv = process.env.PATH ?? "") {
+  const runs = (bin) => new Promise((resolve) => {
+    (0, import_node_child_process6.execFile)(bin, ["-version"], { timeout: 1e4, env: { ...process.env, PATH: pathEnv } }, (error) => resolve(!error));
+  });
+  return await runs("ffmpeg") && await runs("ffprobe");
+}
+function ffmpegInstallCommand(platform = process.platform) {
+  if (platform === "linux") {
+    return "sudo -n apt-get update -qq && sudo -n apt-get install -y -qq --no-install-recommends ffmpeg";
+  }
+  if (platform === "darwin") return "HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ffmpeg";
+  return null;
+}
+var FFMPEG_INSTALL_TIMEOUT_MS = 10 * 60 * 1e3;
+function installFfmpeg() {
+  const command = ffmpegInstallCommand();
+  if (!command) return Promise.reject(new Error(`no installer for ${process.platform}`));
+  return new Promise((resolve, reject) => {
+    (0, import_node_child_process6.execFile)(
+      "bash",
+      ["-c", command],
+      { timeout: FFMPEG_INSTALL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
+      (error, _out, err) => error ? reject(new Error(err.trim().split("\n").pop() || error.message)) : resolve()
+    );
+  });
+}
+async function ensureFfmpeg(deps = {
+  available: () => ffmpegAvailable(),
+  install: installFfmpeg
+}) {
+  if (await deps.available()) return true;
+  console.log("[peeps] Record video: ffmpeg is not on this runner; installing it");
+  try {
+    await deps.install();
+  } catch (error) {
+    console.log(`[peeps] Record video: could not install ffmpeg (${error instanceof Error ? error.message : String(error)})`);
+    return false;
+  }
+  return deps.available();
+}
 async function runAppiumReport(env, peeps, runner) {
   if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const configPath = wdioConfigPath(env);
@@ -1871,13 +1919,14 @@ async function runAppiumReport(env, peeps, runner) {
     batchNumber: b.batchNumber,
     runIds: b.runs.map((r) => r.runId)
   }));
+  const recordVideoRunIds = recordVideoRunIdsOf(response.batches);
   if (!answeredNarrowed(response)) {
-    await executeAppiumAndReport(env, peeps, { configPath, runs, batches, runner });
+    await executeAppiumAndReport(env, peeps, { configPath, runs, batches, recordVideoRunIds, runner });
     return;
   }
   const fallBack = (why) => {
     console.log(`[peeps] not narrowing, running the full suite: ${why}`);
-    return executeAppiumAndReport(env, peeps, { configPath, runs, batches, runner, ranFullSuite: true });
+    return executeAppiumAndReport(env, peeps, { configPath, runs, batches, recordVideoRunIds, runner, ranFullSuite: true });
   };
   if (!isNarrowed(response)) return fallBack("Peeps did not narrow every project's batch");
   if (collection.errors.length > 0) return fallBack(`${collection.errors.length} spec file(s) did not load`);
@@ -1894,9 +1943,11 @@ async function runAppiumReport(env, peeps, runner) {
   }
   if (found.matched.length === 0) return fallBack(`none of the ${selected.length} selected test(s) can run at this commit`);
   console.log(`[peeps] narrowed to ${selected.length} test(s) for this pull request`);
+  const narrowedRuns = runs.filter((r) => found.matched.includes(r));
   await executeAppiumAndReport(env, peeps, {
     configPath,
-    runs: runs.filter((r) => found.matched.includes(r)),
+    runs: narrowedRuns,
+    recordVideoRunIds: recordVideoRunIds.filter((id) => narrowedRuns.some((r) => r.runId === id)),
     batches,
     selection: {
       specs: found.specs,
@@ -1980,6 +2031,7 @@ async function runAppiumDispatched(env, peeps) {
   await executeAppiumAndReport(env, peeps, {
     configPath,
     runs: matched,
+    recordVideoRunIds: plan.recordVideo === true ? matched.map((r) => r.runId) : [],
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
     selection: { specs, capabilitySpecs, grep: mochaGrepFor(matched.map((r) => r.titlePath)) },
     extraEnv: environment.vars
@@ -2093,6 +2145,13 @@ async function executeAppiumAndReport(env, peeps, input2) {
   const plan = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: input2.runs };
   if (input2.selection) plan.onlyPlanned = true;
   if (input2.selection?.alsoRun?.length) plan.alsoRun = input2.selection.alsoRun;
+  if (input2.recordVideoRunIds?.length) {
+    plan.recordVideoRunIds = input2.recordVideoRunIds;
+    plan.ffmpeg = await (input2.ffmpegCheck ?? (() => ensureFfmpeg()))();
+    console.log(
+      `[peeps] Record video is on: recording ${input2.recordVideoRunIds.length} run(s)` + (plan.ffmpeg ? "" : "; ffmpeg is not on this runner, so iOS does not record, Android stops at 3 minutes and no frames are cut")
+    );
+  }
   await (0, import_promises8.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
   const junitDir = hasPackage("@wdio/junit-reporter", import_node_path12.default.dirname(input2.configPath)) ? import_node_path12.default.join(scratch, "junit") : null;
   const options = { junitDir };
@@ -4059,7 +4118,7 @@ function runCapture(cmd, args, cwd, timeoutMs, extraEnv = {}) {
 }
 
 // src/version.ts
-var ACTION_VERSION = "1.12.1";
+var ACTION_VERSION = "1.13.0";
 
 // src/agent.ts
 var execFileAsync4 = (0, import_node_util4.promisify)(import_node_child_process9.execFile);
