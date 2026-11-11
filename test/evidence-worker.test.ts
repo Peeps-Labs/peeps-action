@@ -347,7 +347,7 @@ test("a begin that times out leaves the context out of the open set, so the work
   await timedOut.close();
 });
 
-test("a page that navigates at once with our start delayed is still whole: Chrome holds it for our resume (no settled())", async (t) => {
+test("a page that navigates at once with our start delayed is still whole: Chrome holds it for our resume (no settled() before goto)", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "peeps-worker-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const url = await app(t);
@@ -359,6 +359,8 @@ test("a page that navigates at once with our start delayed is still whole: Chrom
   const context = await browser.newContext();
   const page = await context.newPage();
   await page.goto(url);
+  // goto resolves on Playwright's connection; our starts' replies come on ours, and can trail it.
+  await (listener as unknown as Settles).settled();
   await context.close();
   const [file] = await files(dir);
   assert.ok(file, "a record was written");
