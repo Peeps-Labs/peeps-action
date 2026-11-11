@@ -40,6 +40,7 @@ __export(reporter_exports, {
   narrowedOutcome: () => narrowedOutcome
 });
 module.exports = __toCommonJS(reporter_exports);
+var import_node_crypto2 = require("node:crypto");
 var import_node_fs3 = require("node:fs");
 var import_promises = require("node:fs/promises");
 var import_node_path3 = __toESM(require("node:path"));
@@ -757,6 +758,21 @@ var PeepsCiReporter = class {
       console.log(`[peeps] not planned, not reported: ${test.titlePath().join(" \u203A ")} (${result.status})`);
       return;
     }
+    const sent = footprint ? sentFootprint(footprint, this.plan.footprints?.origins ?? [], {
+      retry: result.retry,
+      repeatEachIndex: test.repeatEachIndex,
+      repeatEach: test.parent.project()?.repeatEach ?? 1,
+      hiddenRequests: this.plan.footprints?.hiddenRequests.includes(entry.path) ?? false
+    }) : void 0;
+    if (this.plan.evidence) {
+      const record = { testId: test.id, runId: entry.runId, retry: result.retry, passed: result.status === "passed", har: sent ? { paths: sent.paths, complete: sent.complete } : null };
+      const name = `att-${(0, import_node_crypto2.createHash)("sha256").update(test.id).digest("hex").slice(0, 16)}-${result.retry}.json`;
+      try {
+        (0, import_node_fs3.writeFileSync)(import_node_path3.default.join(this.plan.evidence.dir, name), JSON.stringify(record), { mode: 384, flag: "wx" });
+      } catch (error2) {
+        console.log(`[peeps] could not record what this attempt ran: ${String(error2)}`);
+      }
+    }
     const narrowed = this.plan.narrowed === true;
     const outcome = narrowed ? narrowedOutcome(test, result) : null;
     const error = outcome ? outcome.error : result.errors[0];
@@ -769,14 +785,7 @@ var PeepsCiReporter = class {
       error: error?.message?.slice(0, 4e3),
       errorStack: error?.stack?.slice(0, 8e3),
       retry: result.retry,
-      ...footprint ? {
-        footprint: sentFootprint(footprint, this.plan.footprints?.origins ?? [], {
-          retry: result.retry,
-          repeatEachIndex: test.repeatEachIndex,
-          repeatEach: test.parent.project()?.repeatEach ?? 1,
-          hiddenRequests: this.plan.footprints?.hiddenRequests.includes(entry.path) ?? false
-        })
-      } : {}
+      ...sent ? { footprint: sent } : {}
     });
     if (narrowed ? isLastAttempt(test, result) : result.retry >= test.retries || result.status === "passed") {
       this.enqueue(entry, { type: "run_end", timestamp: now });
