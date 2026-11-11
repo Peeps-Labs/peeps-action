@@ -20,7 +20,7 @@ const prepareImpact = (input: Omit<PrepareInput, "fingerprint" | "collect"> & { 
   prepare({ ...input, collect: [{ projectId: "p1", ...input.collect }], fingerprint: async (nextDir, prefix) => fingerprintNextDir(nextDir, prefix) }, log).then((r) => r && { ...r, ...r.projects[0]! });
 
 const key = parseProjectKey(Buffer.alloc(32, 5).toString("hex"))!;
-const collect = { coverage: true, fingerprint: true, key, keyVersion: "V1", codecVersion: 2 };
+const collect = { coverage: true, fingerprint: true, tables: false, key, keyVersion: "V1", codecVersion: 2 };
 
 /** A repository whose app sits in `apps/web`, built, with a merge commit at HEAD as GitHub makes for a pull request. */
 async function repository(t: TestContext): Promise<{ root: string; app: string; sha: string; base: string }> {

@@ -32,6 +32,8 @@ export interface Collect {
   projectId: string;
   coverage: boolean;
   fingerprint: boolean;
+  /** Read the job's Postgres log (`PEEPS_PG_LOG`) for the tables its tests touched (PR 5). */
+  tables: boolean;
   key: Buffer;
   keyVersion: string;
   /** The recording codec version to write: the newest Peeps reads that this action writes (PQA-3430). */
@@ -55,11 +57,11 @@ function readCollect(project: unknown): Collect | null {
   if (typeof project !== "object" || project === null) return null;
   const { projectId, collect } = project as { projectId?: unknown; collect?: unknown };
   if (typeof projectId !== "string" || projectId === "" || typeof collect !== "object" || collect === null) return null;
-  const { coverage, fingerprint, key, keyVersion, codecVersions } = collect as Record<string, unknown>;
+  const { coverage, fingerprint, tables, key, keyVersion, codecVersions } = collect as Record<string, unknown>;
   const parsed = typeof key === "string" && /^[0-9a-f]{64}$/.test(key) ? parseProjectKey(key) : null;
   if (!parsed || typeof keyVersion !== "string" || !/^V[1-9][0-9]*$/.test(keyVersion)) return null;
   if (coverage !== true && fingerprint !== true) return null;
-  return { projectId, coverage: coverage === true, fingerprint: fingerprint === true, key: parsed, keyVersion, codecVersion: codecVersionOf(codecVersions) };
+  return { projectId, coverage: coverage === true, fingerprint: fingerprint === true, tables: tables === true, key: parsed, keyVersion, codecVersion: codecVersionOf(codecVersions) };
 }
 
 /** A server from before version 2 says nothing, and reads version 1 only. */

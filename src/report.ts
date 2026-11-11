@@ -32,6 +32,7 @@ import type { AttemptFile } from "./evidence/browser/worker";
 import { prepareImpact, type PreparedImpact, type PreparedProject } from "./evidence/job";
 import { coverageConflictIn } from "./evidence/browser/conflict";
 import { membersOf, type AttemptRecord, type ContextMarker, type ServerEvidence } from "./evidence/members";
+import { collectTables } from "./evidence/pg/collector";
 import { openScratch } from "./evidence/scratch";
 import { recordServer, specFilter } from "./evidence/server/record";
 import { peepsTransport, uploadEvidence } from "./evidence/upload";
@@ -388,6 +389,10 @@ async function recordEvidence(
   const contexts = scratch.read("ctx-") as ContextMarker[];
   const taints = scratch.read("taint-") as Array<{ testId: string; retry: number }>;
   const transport = peepsTransport(env.peepsUrl, () => peeps.token());
+  // The job's Postgres log, read once and only when a project asked: no line of it is printed.
+  const pgLog = process.env.PEEPS_PG_LOG;
+  const tables = pgLog && impact.projects.some((p) => p.collect.tables) ? await collectTables(path.resolve(env.workspace, pgLog)) : undefined;
+  if (tables) console.log(tables.partial.length === 0 ? `[peeps] read ${tables.keys.length} table key(s) from the Postgres log${tables.errored ? ` (${tables.errored} statement(s) that errored left out)` : ""}` : `[peeps] not recording tables: the Postgres log doesn't prove them (${tables.reasons.join(", ")})`);
   for (const project of impact.projects) {
     const runs = new Set(project.runIds);
     const own = records.filter((record) => runs.has(record.runId));
@@ -398,7 +403,7 @@ async function recordEvidence(
         own,
         coverage.filter((file) => tests.has(file.testId)),
         impact.fingerprint,
-        { coverage: collected.coverage && project.collect.coverage, har: collected.har },
+        { coverage: collected.coverage && project.collect.coverage, har: collected.har, tables: project.collect.tables ? tables : undefined },
         contexts,
         taints,
         project.collect.coverage ? server : undefined,

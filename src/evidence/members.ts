@@ -9,6 +9,7 @@ import { builtFileOf } from "./browser/rules";
 import type { AttemptFile } from "./browser/worker";
 import type { Layer } from "./codec";
 import type { Fingerprint } from "./fingerprint/rules";
+import type { TableEvidence } from "./pg/collector";
 import type { AttemptEvidence, EvidenceKind } from "./port";
 import type { MemberEvidence } from "./recording";
 import type { ServerFootprint } from "./server/rules";
@@ -45,7 +46,7 @@ export interface JobEvidence {
   measured: EvidenceKind[];
   /** Plaintext `file:` keys of every source in a script any attempt loaded. */
   loadedFiles: string[];
-  /** What the app ran with no test running (`fn:` and `file:` keys): every test shares it. The browser has none. */
+  /** What every test shares: the app's code with no test running (`fn:` and `file:` keys), and the job's database tables when its log proved them. The browser has none. */
   ambient: string[];
   members: MemberEvidence[];
   /** The one browser build every attempt ran in, or null when there were several or none. */
@@ -56,7 +57,8 @@ export function membersOf(
   records: AttemptRecord[],
   coverage: AttemptFile[],
   fingerprint: Fingerprint,
-  collected: { coverage: boolean; har: boolean },
+  /** `tables`: the job's Postgres log, read only when Peeps asked and `PEEPS_PG_LOG` is set. */
+  collected: { coverage: boolean; har: boolean; tables?: TableEvidence },
   contexts: ContextMarker[],
   /** Attempts with a context whose marker never landed: none is whole, whatever records did. */
   taints: Array<{ testId: string; retry: number }> = [],
@@ -109,6 +111,10 @@ export function membersOf(
     }
   }
   for (const member of byRun.values()) member.attempts.sort((a, b) => a.retry - b.retry);
+  // Nothing says which test ran a statement: the log proves every test's tables, or none.
+  const tables = collected.tables;
+  const tablesWhole = tables !== undefined && tables.partial.length === 0;
+  if (tables && !tablesWhole) for (const member of byRun.values()) member.evidence.push({ keys: [], paths: [], partial: ["table"], layers: ["database"], reasons: tables.reasons });
 
   const loaded = new Set<string>();
   const browsers = new Set<string>();
@@ -124,14 +130,19 @@ export function membersOf(
   }
   if (server) for (const footprint of [server.ambient, ...server.byTest.values()]) for (const file of footprint.loaded) if (file.startsWith("file:")) loaded.add(file);
   const [only] = browsers;
-  const measured: EvidenceKind[] = [...(collected.coverage || server ? (["code"] as const) : []), ...(collected.coverage ? (["css"] as const) : []), ...(collected.har ? (["route"] as const) : [])];
+  const measured: EvidenceKind[] = [
+    ...(collected.coverage || server ? (["code"] as const) : []),
+    ...(collected.coverage ? (["css"] as const) : []),
+    ...(collected.har ? (["route"] as const) : []),
+    ...(tablesWhole ? (["table"] as const) : []),
+  ];
   const browserLayer = collected.coverage || collected.har;
   return {
-    layers: [...(browserLayer ? (["browser"] as const) : []), ...(server ? (["server"] as const) : [])],
+    layers: [...(browserLayer ? (["browser"] as const) : []), ...(server ? (["server"] as const) : []), ...(tablesWhole ? (["database"] as const) : [])],
     measured,
     loadedFiles: [...loaded].sort(),
-    // Peeps takes only code ids here; a whole script's `out:` key stays in each member, whose invocation started the same app.
-    ambient: server ? server.ambient.keys.filter((key) => key.startsWith("fn:") || key.startsWith("file:")) : [],
+    // Peeps takes code ids and tables here; a whole script's `out:` key stays in each member, whose invocation started the same app.
+    ambient: [...(server ? server.ambient.keys.filter((key) => key.startsWith("fn:") || key.startsWith("file:")) : []), ...(tablesWhole ? tables.keys : [])],
     members: [...byRun.values()],
     browser: browsers.size === 1 && only ? (([name, version]) => ({ name, version }))(JSON.parse(only) as [string, string]) : null,
   };

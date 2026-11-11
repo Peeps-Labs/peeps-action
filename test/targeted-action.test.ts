@@ -76,7 +76,7 @@ async function suite(t: TestContext, config: string, spec = SPEC) {
  * `on` and `off`: a server that speaks protocol 2, with or without the switch. `legacy`:
  * one from before it, which answers `scan` alone. `v3`: a later protocol, with the switch.
  */
-type Preflight = "on" | "off" | "legacy" | "v3" | "missing" | "error" | "hang" | "garbage" | "collect";
+type Preflight = "on" | "off" | "legacy" | "v3" | "missing" | "error" | "hang" | "garbage" | "collect" | "collect-tables";
 /** The project key a `collect` preflight hands over: masked, and never printed otherwise. */
 const COLLECT_KEY = "c03dd504d33c33f55a570a1a758d442e1cda0793b1a480482f0d67f9437320a6";
 
@@ -110,8 +110,8 @@ async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, le
         res.end("<html>");
         return;
       }
-      response = preflight === "legacy" ? { scan: true } : preflight === "v3" ? { scan: true, protocolVersion: 3 } : { scan: preflight === "on" || preflight === "collect", protocolVersion: 2, projects: [{ projectId: "project", executionMode: "shadow" }] };
-      if (preflight === "collect") response = { ...(response as object), projects: [{ projectId: "project", executionMode: "shadow", collect: { coverage: true, fingerprint: true, key: COLLECT_KEY, keyVersion: "V1", codecVersions: [1, 2] } }] };
+      response = preflight === "legacy" ? { scan: true } : preflight === "v3" ? { scan: true, protocolVersion: 3 } : { scan: preflight === "on" || preflight.startsWith("collect"), protocolVersion: 2, projects: [{ projectId: "project", executionMode: "shadow" }] };
+      if (preflight.startsWith("collect")) response = { ...(response as object), projects: [{ projectId: "project", executionMode: "shadow", collect: { coverage: true, fingerprint: true, ...(preflight === "collect-tables" ? { tables: true } : {}), key: COLLECT_KEY, keyVersion: "V1", codecVersions: [1, 2] } }] };
     } else if (url.pathname === "/api/v1/ci/impact/fingerprint") {
       fingerprints.push(url.search);
       response = { uploadId: "upload-1" };
@@ -613,6 +613,46 @@ test("logs in", async ({ page }) => {
   }
   // The scratch directory is gone.
   assert.deepEqual((await readdir(root)).filter((name) => name.startsWith("peeps-evidence-")), []);
+});
+
+test("Peeps asks for tables and PEEPS_PG_LOG is set: the job's tables are every test's, as tokens; without the log, nothing changes", async (t) => {
+  const app = await nextApp(t);
+  const root = await suite(t, COMMON(""), `import { test, expect } from "@playwright/test";
+test("logs in", async ({ page }) => {
+  await page.goto("/login");
+  await expect(page.locator(".Badge-module__badge")).toHaveText("b");
+});
+`);
+  await writeFile(path.join(root, ".gitignore"), "node_modules\n.next\nsuite/results\nsuite/playwright-report\nreport*\n");
+  for (const [file, text] of nextBuild(NEXT_BUILD)) {
+    await mkdir(path.dirname(path.join(root, ".next", file)), { recursive: true });
+    await writeFile(path.join(root, ".next", file), text);
+  }
+  git(root, "init", "-q", "-b", "main");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "first");
+  const sha = git(root, "rev-parse", "HEAD");
+  const key = parseProjectKey(COLLECT_KEY)!;
+  const pgLog = path.join(__dirname, "fixtures/evidence/pg-jsonlog");
+
+  const peeps = await fakePeeps(t, { collectFootprints: true }, undefined, "collect-tables");
+  const result = await runAction(root, peeps.url, { GITHUB_SHA: sha, GITHUB_EVENT_NAME: "push", BASE_URL: app, PEEPS_PG_LOG: pgLog });
+  assert.equal(result.code, 0, result.output);
+  const blob = decodePayload(gunzipSync(peeps.evidence[0]!.bytes));
+  assert.ok(blob.kind === "footprints");
+  assert.deepEqual([blob.universe.layers, blob.universe.measured], [["browser", "database"], ["code", "css", "route", "table"]], result.output);
+  assert.ok(blob.universe.ambient.includes(tokenOf(key, "table:w:public.users")) && blob.universe.ambient.includes(tokenOf(key, "table:r:public.orders")));
+  assert.ok(blob.universe.ambient.every((token) => token.startsWith("table:")));
+  assert.deepEqual(blob.members[0]!.partial, []);
+  // Nothing of the log in the job's output: no table name, statement or value.
+  for (const plain of ["audit_log", "public.users", "a@x.io", "INSERT INTO"]) assert.ok(!result.output.includes(plain), plain);
+
+  const without = await fakePeeps(t, { collectFootprints: true }, undefined, "collect-tables");
+  const plain = await runAction(root, without.url, { GITHUB_SHA: sha, GITHUB_EVENT_NAME: "push", BASE_URL: app });
+  assert.equal(plain.code, 0, plain.output);
+  const today = decodePayload(gunzipSync(without.evidence[0]!.bytes));
+  assert.ok(today.kind === "footprints");
+  assert.deepEqual([today.universe.layers, today.universe.measured, today.universe.ambient], [["browser"], ["code", "css", "route"], []]);
 });
 
 test("a suite that runs precise coverage itself is not collected: routes only, and it says why", async (t) => {

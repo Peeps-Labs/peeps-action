@@ -45,10 +45,10 @@ export interface FootprintsInput {
   members: MemberEvidence[];
   /** Plaintext `file:` keys of what a measured process loaded, run or not. */
   loadedFiles?: string[];
+  /** Plaintext keys every test shares: the app's code with no test running (`fn:`, `file:`), and the job's `table:r:` / `table:w:` keys. */
+  ambient?: string[];
   /** The browser build that recorded: recording metadata, never the binding. */
   browser?: { name: string; version: string } | null;
-  /** Plaintext `fn:` and `file:` keys every test shares (PQA-3201 PR 3). */
-  ambient?: string[];
   /** The codec version Peeps reads (`Collect.codecVersion`): 2 says each member's partial layers. */
   codecVersion?: number;
 }
