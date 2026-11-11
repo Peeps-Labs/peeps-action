@@ -155,6 +155,7 @@ function readRunnerEnv(env = process.env) {
 // src/inventory.ts
 var import_node_child_process = require("node:child_process");
 var import_node_crypto = require("node:crypto");
+var import_node_fs2 = require("node:fs");
 var import_promises2 = require("node:fs/promises");
 var import_node_path3 = __toESM(require("node:path"));
 var import_node_util = require("node:util");
@@ -219,22 +220,45 @@ function testFilesOf(list) {
     )
   ].sort();
 }
+function projectsReporter() {
+  for (const name of ["list-projects.js", "list-projects.ts"]) {
+    const file = import_node_path3.default.join(__dirname, name);
+    if ((0, import_node_fs2.existsSync)(file)) return file;
+  }
+  return null;
+}
 async function listTests(env, extraArgs = []) {
-  const args = ["playwright", "test", "--list", "--reporter=json", ...extraArgs];
+  const projects = projectsReporter();
+  const args = ["playwright", "test", "--list", `--reporter=json${projects ? `,${projects}` : ""}`, ...extraArgs];
   if (env.configPath) args.push("--config", env.configPath);
   const target = await jsonReportTarget();
+  const projectsFile = import_node_path3.default.join(import_node_path3.default.dirname(target.env.PLAYWRIGHT_JSON_OUTPUT_FILE), "projects.json");
   try {
     const { stdout } = await execFileAsync("npx", args, {
       cwd: env.workingDirectory,
       maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env, CI: "1", ...target.env }
+      env: { ...process.env, CI: "1", ...target.env, PEEPS_PROJECTS_FILE: projectsFile }
     });
     const list = await target.read(stdout);
     if (!list) throw new Error("playwright test --list wrote no JSON report");
-    return list;
+    return withProjectLinks(list, projectsFile);
   } finally {
     await target.cleanup();
   }
+}
+function withProjectLinks(list, file) {
+  let links;
+  try {
+    links = JSON.parse((0, import_node_fs2.readFileSync)(file, "utf8"));
+  } catch {
+    return list;
+  }
+  const byName = new Map(links.map((link) => [link.name, link]));
+  const projects = (list.config.projects ?? []).map((project) => {
+    const link = byName.get(project.name);
+    return link ? { ...project, dependencies: link.dependencies ?? [], ...link.teardown ? { teardown: link.teardown } : {} } : project;
+  });
+  return { ...list, config: { ...list.config, projects } };
 }
 async function specFilePayload(env, list) {
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
@@ -439,7 +463,7 @@ var PeepsClient = class {
 
 // src/report.ts
 var import_node_child_process5 = require("node:child_process");
-var import_node_fs6 = require("node:fs");
+var import_node_fs7 = require("node:fs");
 
 // src/capture-config.ts
 var import_node_crypto2 = require("node:crypto");
@@ -700,7 +724,7 @@ async function workspaceTestSources(workspace, specs, globalSetups, options = {}
 }
 
 // src/evidence/job.ts
-var import_node_fs2 = require("node:fs");
+var import_node_fs3 = require("node:fs");
 var import_node_path7 = __toESM(require("node:path"));
 
 // src/version.ts
@@ -1000,7 +1024,7 @@ async function prepareImpact(input2, log = say2) {
   const asked = input2.collect.filter((c) => c.fingerprint);
   if (asked.length === 0) return null;
   const nextDir = import_node_path7.default.join(input2.appDir, ".next");
-  if (!(0, import_node_fs2.existsSync)(import_node_path7.default.join(nextDir, "BUILD_ID"))) {
+  if (!(0, import_node_fs3.existsSync)(import_node_path7.default.join(nextDir, "BUILD_ID"))) {
     log("not recording what this job's tests ran: no Next build in the working directory to fingerprint");
     return null;
   }
@@ -1009,8 +1033,8 @@ async function prepareImpact(input2, log = say2) {
   try {
     const { git } = input2.repository;
     if ((await git("rev-parse", "HEAD")).trim() !== input2.sha) throw new Error("not the job's commit");
-    const root = (0, import_node_fs2.realpathSync)((await git("rev-parse", "--show-toplevel")).trim());
-    sourcePrefix = import_node_path7.default.relative(root, (0, import_node_fs2.realpathSync)(input2.appDir)).split(import_node_path7.default.sep).join("/");
+    const root = (0, import_node_fs3.realpathSync)((await git("rev-parse", "--show-toplevel")).trim());
+    sourcePrefix = import_node_path7.default.relative(root, (0, import_node_fs3.realpathSync)(input2.appDir)).split(import_node_path7.default.sep).join("/");
     if (input2.eventName === "pull_request") {
       await git("rev-parse", "--verify", "--quiet", "HEAD^2");
       base = (await git("rev-parse", "--verify", "--quiet", "HEAD^1")).trim();
@@ -1547,14 +1571,14 @@ function tablesOfLog(texts) {
 }
 
 // src/evidence/scratch.ts
-var import_node_fs3 = require("node:fs");
+var import_node_fs4 = require("node:fs");
 var import_promises7 = require("node:fs/promises");
 var import_node_path10 = __toESM(require("node:path"));
 async function openScratch(parent) {
   const dir = await (0, import_promises7.mkdtemp)(import_node_path10.default.join(parent, "peeps-evidence-"));
   const signals = ["SIGTERM", "SIGINT"];
   const onSignal = (signal) => {
-    (0, import_node_fs3.rmSync)(dir, { recursive: true, force: true });
+    (0, import_node_fs4.rmSync)(dir, { recursive: true, force: true });
     for (const s2 of signals) process.off(s2, onSignal);
     process.kill(process.pid, signal);
   };
@@ -1563,14 +1587,14 @@ async function openScratch(parent) {
     dir,
     write(name, value) {
       const file = import_node_path10.default.join(dir, import_node_path10.default.basename(name));
-      (0, import_node_fs3.writeFileSync)(file, JSON.stringify(value), { mode: 384, flag: "wx" });
+      (0, import_node_fs4.writeFileSync)(file, JSON.stringify(value), { mode: 384, flag: "wx" });
       return file;
     },
     read(prefix) {
       const out = [];
-      for (const name of (0, import_node_fs3.readdirSync)(dir).filter((n) => n.startsWith(prefix)).sort()) {
+      for (const name of (0, import_node_fs4.readdirSync)(dir).filter((n) => n.startsWith(prefix)).sort()) {
         try {
-          out.push(JSON.parse((0, import_node_fs3.readFileSync)(import_node_path10.default.join(dir, name), "utf8")));
+          out.push(JSON.parse((0, import_node_fs4.readFileSync)(import_node_path10.default.join(dir, name), "utf8")));
         } catch {
         }
       }
@@ -1587,12 +1611,12 @@ async function openScratch(parent) {
 var import_node_path14 = __toESM(require("node:path"));
 
 // src/evidence/server/build-dir.ts
-var import_node_fs4 = require("node:fs");
+var import_node_fs5 = require("node:fs");
 var import_node_path11 = __toESM(require("node:path"));
 function walk(dir, rel, out) {
   let entries;
   try {
-    entries = (0, import_node_fs4.readdirSync)(import_node_path11.default.join(dir, rel), { withFileTypes: true });
+    entries = (0, import_node_fs5.readdirSync)(import_node_path11.default.join(dir, rel), { withFileTypes: true });
   } catch {
     return;
   }
@@ -1600,7 +1624,7 @@ function walk(dir, rel, out) {
     const child = rel === "" ? entry.name : `${rel}/${entry.name}`;
     if (entry.isDirectory()) walk(dir, child, out);
     else {
-      const stat7 = (0, import_node_fs4.lstatSync)(import_node_path11.default.join(dir, child));
+      const stat7 = (0, import_node_fs5.lstatSync)(import_node_path11.default.join(dir, child));
       out.set(child, `${stat7.size}:${stat7.mtimeMs}`);
     }
   }
@@ -1619,13 +1643,13 @@ function settleBuildDir(dir, snapshot) {
     if (before === void 0) created.push(file);
     else if (before !== stamp) changed.push(file);
   }
-  for (const file of created) (0, import_node_fs4.rmSync)(import_node_path11.default.join(dir, file), { force: true });
+  for (const file of created) (0, import_node_fs5.rmSync)(import_node_path11.default.join(dir, file), { force: true });
   return { created: created.sort(), changed: changed.sort() };
 }
 
 // src/evidence/server/lifecycle.ts
 var import_node_child_process3 = require("node:child_process");
-var import_node_fs5 = require("node:fs");
+var import_node_fs6 = require("node:fs");
 var import_node_path12 = __toESM(require("node:path"));
 var READY_TIMEOUT_MS = 18e4;
 var STOP_TIMEOUT_MS = 3e4;
@@ -1657,7 +1681,7 @@ async function waitUntil(done, timeoutMs, everyMs) {
 function readInvocationCoverage(dir, problems) {
   const names = (() => {
     try {
-      return (0, import_node_fs5.readdirSync)(dir);
+      return (0, import_node_fs6.readdirSync)(dir);
     } catch {
       return [];
     }
@@ -1667,22 +1691,22 @@ function readInvocationCoverage(dir, problems) {
   let unreadable = 0;
   for (const name of names.filter((n) => n.startsWith("coverage-"))) {
     try {
-      const parsed = JSON.parse((0, import_node_fs5.readFileSync)(import_node_path12.default.join(dir, name), "utf8"));
+      const parsed = JSON.parse((0, import_node_fs6.readFileSync)(import_node_path12.default.join(dir, name), "utf8"));
       if (!Array.isArray(parsed.result)) throw new Error("no result");
       files.push({ result: parsed.result });
     } catch {
       unreadable++;
     }
   }
-  (0, import_node_fs5.rmSync)(dir, { recursive: true, force: true });
+  (0, import_node_fs6.rmSync)(dir, { recursive: true, force: true });
   const covered = [...new Set(names.filter((n) => n.startsWith("coverage-")).map((n) => Number(n.split("-")[1])).filter(Number.isInteger))];
   return { started: pids("pid-"), taken: pids("taken-"), covered, files, unreadable, problems };
 }
 async function runInvocation(app, options, tests) {
   const problems = [];
   const at = [Date.now()];
-  (0, import_node_fs5.rmSync)(options.dir, { recursive: true, force: true });
-  (0, import_node_fs5.mkdirSync)(options.dir, { recursive: true, mode: 448 });
+  (0, import_node_fs6.rmSync)(options.dir, { recursive: true, force: true });
+  (0, import_node_fs6.mkdirSync)(options.dir, { recursive: true, mode: 448 });
   const env = { ...app.env, PEEPS_INVOCATION: options.kind };
   if (app.reset !== null && await shell(app.reset, app.cwd, env) !== 0) {
     say3(`app-reset failed before this ${options.kind} invocation: its server evidence reads partial`);
@@ -1762,8 +1786,8 @@ async function runInvocation(app, options, tests) {
   let read;
   if (options.defer) {
     const aside = `${options.dir}.done`;
-    (0, import_node_fs5.rmSync)(aside, { recursive: true, force: true });
-    (0, import_node_fs5.renameSync)(options.dir, aside);
+    (0, import_node_fs6.rmSync)(aside, { recursive: true, force: true });
+    (0, import_node_fs6.renameSync)(options.dir, aside);
     read = () => readInvocationCoverage(aside, problems);
   } else coverage = readInvocationCoverage(options.dir, problems);
   at.push(Date.now());
@@ -2482,7 +2506,7 @@ async function runPlaywright(env, planFile, reportDir, selection, extraEnv = {},
 }
 function realOr(file) {
   try {
-    return (0, import_node_fs6.realpathSync)(file);
+    return (0, import_node_fs7.realpathSync)(file);
   } catch {
     return file;
   }
@@ -2491,7 +2515,7 @@ function startEarlyAmbient(env, collect, list) {
   if (!env.app || !collect.some((c) => c.coverage) || process.env.NODE_V8_COVERAGE || list.config.shard) return void 0;
   let nextDir;
   try {
-    nextDir = (0, import_node_fs6.realpathSync)(import_node_path16.default.join(env.workingDirectory, ".next"));
+    nextDir = (0, import_node_fs7.realpathSync)(import_node_path16.default.join(env.workingDirectory, ".next"));
   } catch {
     return void 0;
   }
@@ -2512,7 +2536,7 @@ function startEarlyAmbient(env, collect, list) {
 }
 function trackedFiles(dir) {
   try {
-    const root = (0, import_node_fs6.realpathSync)((0, import_node_child_process5.execFileSync)("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
+    const root = (0, import_node_fs7.realpathSync)((0, import_node_child_process5.execFileSync)("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
     const listed = (0, import_node_child_process5.execFileSync)("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
     return new Set(listed.split("\0").filter(Boolean).map((file) => import_node_path16.default.join(root, file).split(import_node_path16.default.sep).join("/")));
   } catch {
@@ -2531,7 +2555,7 @@ function serverPlanOf(env, recorded, rootDirAbs, specFiles, shard) {
   }
   let nextDir;
   try {
-    nextDir = (0, import_node_fs6.realpathSync)(import_node_path16.default.join(env.workingDirectory, ".next"));
+    nextDir = (0, import_node_fs7.realpathSync)(import_node_path16.default.join(env.workingDirectory, ".next"));
   } catch {
     console.log("[peeps] not recording server evidence: no Next build in the working directory");
     return null;
@@ -2542,7 +2566,7 @@ function serverPlanOf(env, recorded, rootDirAbs, specFiles, shard) {
   return { app: env.app, specs, nextDir, tracked: (file) => tracked.has(file) };
 }
 async function mergeReports(env, blobDir, reportDir) {
-  if (!(0, import_node_fs6.existsSync)(blobDir)) return;
+  if (!(0, import_node_fs7.existsSync)(blobDir)) return;
   const code = await new Promise((resolve) => {
     const child = (0, import_node_child_process5.spawn)("npx", ["playwright", "merge-reports", "--reporter=html", blobDir], {
       cwd: env.workingDirectory,
@@ -2698,14 +2722,14 @@ var import_node_util4 = require("node:util");
 // src/appium.ts
 var import_node_child_process7 = require("node:child_process");
 var import_node_crypto6 = require("node:crypto");
-var import_node_fs9 = require("node:fs");
+var import_node_fs10 = require("node:fs");
 var import_promises11 = require("node:fs/promises");
 var import_node_os5 = require("node:os");
 var import_node_path20 = __toESM(require("node:path"));
 var import_node_url3 = require("node:url");
 
 // src/appium-reporter.ts
-var import_node_fs7 = require("node:fs");
+var import_node_fs8 = require("node:fs");
 var import_node_path18 = __toESM(require("node:path"));
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function repoRelative(workspace, abs) {
@@ -2716,7 +2740,7 @@ function repoRelative(workspace, abs) {
   const direct = attempt(workspace, abs);
   if (direct !== null) return direct;
   try {
-    return attempt((0, import_node_fs7.realpathSync)(workspace), (0, import_node_fs7.realpathSync)(abs));
+    return attempt((0, import_node_fs8.realpathSync)(workspace), (0, import_node_fs8.realpathSync)(abs));
   } catch {
     return null;
   }
@@ -2741,7 +2765,7 @@ var VIDEO_HOOK_BUDGET_MS = STOP_TIMEOUT_MS2 + 8 * FRAME_TIMEOUT_MS + 3e4;
 // src/pytest.ts
 var import_node_child_process6 = require("node:child_process");
 var import_node_crypto5 = require("node:crypto");
-var import_node_fs8 = require("node:fs");
+var import_node_fs9 = require("node:fs");
 var import_promises10 = require("node:fs/promises");
 var import_node_os4 = require("node:os");
 var import_node_path19 = __toESM(require("node:path"));
@@ -2758,7 +2782,7 @@ function resolveFramework(env) {
   if (env.configPath) return WDIO_CONFIG.test(import_node_path19.default.basename(env.configPath)) ? "appium" : "playwright";
   let names;
   try {
-    names = (0, import_node_fs8.readdirSync)(env.workingDirectory);
+    names = (0, import_node_fs9.readdirSync)(env.workingDirectory);
   } catch {
     return "playwright";
   }
@@ -2766,7 +2790,7 @@ function resolveFramework(env) {
   if (names.some((name) => WDIO_CONFIG.test(name))) return "appium";
   if (names.includes("pytest.ini") || names.includes("conftest.py")) return "pytest";
   const pyproject = import_node_path19.default.join(env.workingDirectory, "pyproject.toml");
-  if ((0, import_node_fs8.existsSync)(pyproject) && /^\s*\[tool\.pytest(\.ini_options)?\]/m.test((0, import_node_fs8.readFileSync)(pyproject, "utf8"))) {
+  if ((0, import_node_fs9.existsSync)(pyproject) && /^\s*\[tool\.pytest(\.ini_options)?\]/m.test((0, import_node_fs9.readFileSync)(pyproject, "utf8"))) {
     return "pytest";
   }
   return "playwright";
@@ -2876,7 +2900,7 @@ async function collectPytest(env) {
     ["--collect-only", "-q", "-p", PLUGIN, ...configArgs(env)],
     { cwd: env.workingDirectory, env: pytestEnv({ PEEPS_COLLECT_OUT: out }), capture: true }
   );
-  if (![0, 2, 5].includes(code) || !(0, import_node_fs8.existsSync)(out)) {
+  if (![0, 2, 5].includes(code) || !(0, import_node_fs9.existsSync)(out)) {
     throw new Error(`pytest --collect-only exited with ${code}:
 ${output.slice(-4e3)}`);
   }
@@ -2890,7 +2914,7 @@ ${error.message}`);
 function repoRelative2(env, abs) {
   let workspace = env.workspace;
   try {
-    workspace = (0, import_node_fs8.realpathSync)(workspace);
+    workspace = (0, import_node_fs9.realpathSync)(workspace);
   } catch {
   }
   const rel = import_node_path19.default.relative(workspace, abs).split(import_node_path19.default.sep).join("/");
@@ -3012,7 +3036,7 @@ function nodeIdArgument(nodeId, rootDirAbs, cwd) {
   const rest = separator === -1 ? "" : nodeId.slice(separator);
   let from = cwd;
   try {
-    from = (0, import_node_fs8.realpathSync)(cwd);
+    from = (0, import_node_fs9.realpathSync)(cwd);
   } catch {
   }
   const relative = import_node_path19.default.relative(from, import_node_path19.default.join(rootDirAbs, file)).split(import_node_path19.default.sep).join("/");
@@ -3200,11 +3224,11 @@ function wdioConfigPath(env) {
   if (env.configPath) return import_node_path20.default.resolve(env.workingDirectory, env.configPath);
   for (const name of DEFAULT_CONFIGS) {
     const candidate = import_node_path20.default.join(env.workingDirectory, name);
-    if ((0, import_node_fs9.existsSync)(candidate)) return candidate;
+    if ((0, import_node_fs10.existsSync)(candidate)) return candidate;
   }
   let names = [];
   try {
-    names = (0, import_node_fs9.readdirSync)(env.workingDirectory).filter((name) => WDIO_CONFIG.test(name)).sort();
+    names = (0, import_node_fs10.readdirSync)(env.workingDirectory).filter((name) => WDIO_CONFIG.test(name)).sort();
   } catch {
   }
   if (names.length === 1) return import_node_path20.default.join(env.workingDirectory, names[0]);
@@ -3241,7 +3265,7 @@ async function runCollector(env, args, what, extraEnv = {}) {
       resolve({ code: code2 ?? 1, output: output2 });
     });
   });
-  if (code !== 0 || !(0, import_node_fs9.existsSync)(out)) {
+  if (code !== 0 || !(0, import_node_fs10.existsSync)(out)) {
     throw new Error(`${what} failed (${code}):
 ${output.slice(-4e3)}`);
   }
@@ -3555,7 +3579,7 @@ async function runAppiumDispatched(env, peeps) {
 }
 function hasPackage(name, from) {
   for (let dir = from; ; dir = import_node_path20.default.dirname(dir)) {
-    if ((0, import_node_fs9.existsSync)(import_node_path20.default.join(dir, "node_modules", name, "package.json"))) return true;
+    if ((0, import_node_fs10.existsSync)(import_node_path20.default.join(dir, "node_modules", name, "package.json"))) return true;
     if (import_node_path20.default.dirname(dir) === dir) return false;
   }
 }
@@ -3583,7 +3607,7 @@ function killGroup(pid, signal) {
 async function stopAppiumRuns(graceMs = 3e3) {
   for (const file of [...liveWrappers]) {
     try {
-      (0, import_node_fs9.unlinkSync)(file);
+      (0, import_node_fs10.unlinkSync)(file);
     } catch {
     }
     liveWrappers.delete(file);
@@ -3886,7 +3910,7 @@ async function runAppiumTests(env, input2, options = {}) {
 
 // src/device-tools.ts
 var import_node_child_process8 = require("node:child_process");
-var import_node_fs10 = require("node:fs");
+var import_node_fs11 = require("node:fs");
 var import_promises12 = require("node:fs/promises");
 var import_node_net = require("node:net");
 var import_node_os6 = require("node:os");
@@ -4428,13 +4452,13 @@ async function defaultReadCapabilities(env, extraEnv) {
 function resolveAppiumBinary(from, pathEnv = process.env.PATH ?? "") {
   for (let dir = import_node_path21.default.resolve(from); ; dir = import_node_path21.default.dirname(dir)) {
     const candidate = import_node_path21.default.join(dir, "node_modules", ".bin", "appium");
-    if ((0, import_node_fs10.existsSync)(candidate)) return candidate;
+    if ((0, import_node_fs11.existsSync)(candidate)) return candidate;
     if (import_node_path21.default.dirname(dir) === dir) break;
   }
   for (const dir of pathEnv.split(import_node_path21.default.delimiter)) {
     if (!dir) continue;
     const candidate = import_node_path21.default.join(dir, "appium");
-    if ((0, import_node_fs10.existsSync)(candidate)) return candidate;
+    if ((0, import_node_fs11.existsSync)(candidate)) return candidate;
   }
   return null;
 }
@@ -4548,7 +4572,7 @@ ${output.slice(-2e3)}`);
 // src/tools.ts
 var import_node_child_process9 = require("node:child_process");
 var import_node_crypto7 = require("node:crypto");
-var import_node_fs11 = require("node:fs");
+var import_node_fs12 = require("node:fs");
 var import_promises14 = require("node:fs/promises");
 var import_node_os8 = require("node:os");
 var import_node_path23 = __toESM(require("node:path"));
@@ -4956,7 +4980,7 @@ async function digestOf(workspace, realWorkspace, relative, hashing) {
   if (hashing.outOfTime()) return { kind: "file", sha256: null, reason: "time budget for digests spent" };
   try {
     const hash = (0, import_node_crypto7.createHash)("sha256");
-    for await (const chunk of (0, import_node_fs11.createReadStream)(abs)) hash.update(chunk);
+    for await (const chunk of (0, import_node_fs12.createReadStream)(abs)) hash.update(chunk);
     return { kind: "file", sha256: hash.digest("hex") };
   } catch (error) {
     return { kind: "file", sha256: null, reason: `unreadable: ${errorCode(error)}` };
@@ -5431,7 +5455,7 @@ async function readErrorContext(file, redact, allowedRoots) {
       return rel !== "" && !rel.startsWith("..") && !import_node_path23.default.isAbsolute(rel);
     });
     if (!inside) return null;
-    handle = await (0, import_promises14.open)(file, import_node_fs11.constants.O_RDONLY | import_node_fs11.constants.O_NOFOLLOW);
+    handle = await (0, import_promises14.open)(file, import_node_fs12.constants.O_RDONLY | import_node_fs12.constants.O_NOFOLLOW);
     const info = await handle.stat();
     if (!info.isFile()) return null;
     if (info.size > ERROR_CONTEXT_MAX_READ_BYTES) return "too_large";
@@ -5925,7 +5949,7 @@ async function runAttachStep(step, deadlineMs) {
 
 // src/browser-check.ts
 var import_node_child_process11 = require("node:child_process");
-var import_node_fs12 = require("node:fs");
+var import_node_fs13 = require("node:fs");
 var import_node_util5 = require("node:util");
 var execFileAsync5 = (0, import_node_util5.promisify)(import_node_child_process11.execFile);
 var PROBE = `
@@ -5970,7 +5994,7 @@ function installOf(executablePath) {
 }
 function listDir(dir) {
   try {
-    return (0, import_node_fs12.readdirSync)(dir);
+    return (0, import_node_fs13.readdirSync)(dir);
   } catch {
     return [];
   }
@@ -5995,14 +6019,14 @@ function missingBrowsersMessage(probe, fs) {
 async function warnIfBrowsersMissing(workingDirectory, platform) {
   const probe = await probePlaywright(workingDirectory);
   if (!probe) return;
-  const message = missingBrowsersMessage(probe, { exists: import_node_fs12.existsSync });
+  const message = missingBrowsersMessage(probe, { exists: import_node_fs13.existsSync });
   if (!message) return;
   console.log(platform === "github" ? `::warning title=Playwright browsers missing::${message}` : `[peeps] warning: ${message}`);
 }
 
 // src/preview.ts
 var import_node_child_process12 = require("node:child_process");
-var import_node_fs13 = require("node:fs");
+var import_node_fs14 = require("node:fs");
 var GITHUB_TOKEN_INPUT = "INPUT_GITHUB-TOKEN";
 function takeGithubToken(env) {
   const token = env[GITHUB_TOKEN_INPUT]?.trim() || null;
@@ -6043,7 +6067,7 @@ function readPreviewRequest(env, githubToken) {
 function pullRequestHead(eventPath) {
   if (!eventPath) return null;
   try {
-    const payload = JSON.parse((0, import_node_fs13.readFileSync)(eventPath, "utf8"));
+    const payload = JSON.parse((0, import_node_fs14.readFileSync)(eventPath, "utf8"));
     const head = payload.pull_request?.head;
     const sha = head?.sha;
     if (typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha)) return null;

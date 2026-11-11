@@ -9,6 +9,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -70,22 +71,49 @@ export function testFilesOf(list: PlaywrightList): string[] {
   ].sort();
 }
 
+/** The projects reporter (`list-projects.ts`): bundled beside this file, or its source in tests. */
+function projectsReporter(): string | null {
+  for (const name of ["list-projects.js", "list-projects.ts"]) {
+    const file = path.join(__dirname, name);
+    if (existsSync(file)) return file;
+  }
+  return null;
+}
+
 export async function listTests(env: RunnerEnv, extraArgs: string[] = []): Promise<PlaywrightList> {
-  const args = ["playwright", "test", "--list", "--reporter=json", ...extraArgs];
+  const projects = projectsReporter();
+  const args = ["playwright", "test", "--list", `--reporter=json${projects ? `,${projects}` : ""}`, ...extraArgs];
   if (env.configPath) args.push("--config", env.configPath);
   const target = await jsonReportTarget();
+  const projectsFile = path.join(path.dirname(target.env.PLAYWRIGHT_JSON_OUTPUT_FILE!), "projects.json");
   try {
     const { stdout } = await execFileAsync("npx", args, {
       cwd: env.workingDirectory,
       maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env, CI: "1", ...target.env },
+      env: { ...process.env, CI: "1", ...target.env, PEEPS_PROJECTS_FILE: projectsFile },
     });
-    const list = await target.read(stdout);
+    const list = (await target.read(stdout)) as PlaywrightList | null;
     if (!list) throw new Error("playwright test --list wrote no JSON report");
-    return list as PlaywrightList;
+    return withProjectLinks(list, projectsFile);
   } finally {
     await target.cleanup();
   }
+}
+
+/** The JSON report's projects, with the dependencies and teardown it leaves out. */
+function withProjectLinks(list: PlaywrightList, file: string): PlaywrightList {
+  let links: Array<{ name: string; dependencies?: string[]; teardown?: string }>;
+  try {
+    links = JSON.parse(readFileSync(file, "utf8")) as typeof links;
+  } catch {
+    return list;
+  }
+  const byName = new Map(links.map((link) => [link.name, link]));
+  const projects = (list.config.projects ?? []).map((project) => {
+    const link = byName.get(project.name);
+    return link ? { ...project, dependencies: link.dependencies ?? [], ...(link.teardown ? { teardown: link.teardown } : {}) } : project;
+  });
+  return { ...list, config: { ...list.config, projects } };
 }
 
 /**
