@@ -58,14 +58,38 @@ function builtFileOf(url: string, nextDir: string): string | null {
   return rel.split(path.sep).join("/");
 }
 
+/**
+ * App code outside the build: a file under the app's directory, not in `.next` or
+ * `node_modules`, other than Next's own config. A custom server can run source the
+ * build also bundles, and the fingerprint keys only the bundle, so it reads unknown.
+ */
+function outsideBuild(url: string, nextDir: string): boolean {
+  if (!url.startsWith("file:")) return false;
+  let file: string;
+  try {
+    file = fileURLToPath(url);
+  } catch {
+    return false;
+  }
+  const rel = path.relative(path.dirname(nextDir), file);
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+  const parts = rel.split(path.sep);
+  if (parts[0] === path.basename(nextDir) || parts.includes("node_modules")) return false;
+  return !/^next\.config\.(?:js|mjs|cjs|ts|mts)$/.test(rel);
+}
+
 export function serverFootprint(coverage: InvocationCoverage, scripts: ReadonlyMap<string, ScriptIndex>, nextDir: string): ServerFootprint {
   const keys = new Set<string>();
   const loaded = new Set<string>();
   let unmapped = 0;
+  let outside = 0;
   for (const { result } of coverage.files) {
     for (const script of result) {
       const file = builtFileOf(script.url, nextDir);
-      if (file === null) continue;
+      if (file === null) {
+        if (outsideBuild(script.url, nextDir) && script.functions.some((fn) => (fn.ranges[0]?.count ?? 0) > 0)) outside++;
+        continue;
+      }
       const index = scripts.get(file);
       if (index?.whole) loaded.add(index.whole);
       for (const span of index?.spans ?? []) if (span.source !== null) loaded.add(`file:${span.source}`);
@@ -97,5 +121,6 @@ export function serverFootprint(coverage: InvocationCoverage, scripts: ReadonlyM
   if (coverage.started.some((pid) => !taken.has(pid))) reasons.push("not_taken");
   if (coverage.unreadable > 0) reasons.push("unreadable");
   if (unmapped > 0) reasons.push("unmapped");
+  if (outside > 0) reasons.push("outside_build");
   return { keys: [...keys].sort(), loaded: [...loaded].sort(), partial: reasons.length > 0 ? ["code"] : [], reasons };
 }

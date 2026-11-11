@@ -87,3 +87,27 @@ test("the spec filter selects exactly that file: its path, anchored, every regex
   assert.ok(!filter.test("/work/app/tests/i/aab.spec.ts"));
   assert.ok(!/^(.*?):(\d+):?(\d+)?$/.test(specFilter("/w/a.spec.ts")), "never read as a file:line location");
 });
+
+test("once a run changed the build directory, every later run's footprint is unknown: it may have served what that one wrote", async () => {
+  const ids: Array<{ testId: string; file: string | null }> = [];
+  const settled = [{ created: [], changed: [] }, { created: ["server/app/x.html"], changed: [] }, { created: [], changed: ["server/app/old.html"] }, { created: [], changed: [] }];
+  let call = 0;
+  const result = await recordServer({
+    app,
+    specs: ["/s/a.spec.ts", "/s/b.spec.ts", "/s/c.spec.ts"],
+    preload: "/p",
+    coverageDir: "/c",
+    scripts: fingerprint.scripts,
+    nextDir: NEXT,
+    runTests: async (spec) => {
+      if (spec) ids.push({ testId: spec.slice(3, 4), file: spec });
+      return 0;
+    },
+    attempts: () => [...ids],
+    invoke: async (_a, _o, tests) => ({ exitCode: await tests(), coverage: ran("Badge") }),
+    buildDir: { snapshot: () => undefined, settle: () => settled[call++]! },
+  });
+  // ambient clean; a's run only created (removed): b clean; b's run rewrote a built file: c unknown.
+  assert.deepEqual(["a", "b", "c"].map((id) => result.server.byTest.get(id)!.reasons), [[], [], ["build_dir_changed"]]);
+  assert.deepEqual(result.server.ambient.reasons, []);
+});

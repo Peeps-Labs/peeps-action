@@ -49,6 +49,11 @@ export function specFilesOf(list: PlaywrightList): string[] {
   return [...files].sort();
 }
 
+/** The test files themselves, relative to rootDir: Playwright's file suites, which its file filters select. */
+export function testFilesOf(list: PlaywrightList): string[] {
+  return [...new Set(list.suites.flatMap((suite) => (suite.file ? [suite.file] : [])))].sort();
+}
+
 export async function listTests(env: RunnerEnv, extraArgs: string[] = []): Promise<PlaywrightList> {
   const args = ["playwright", "test", "--list", "--reporter=json", ...extraArgs];
   if (env.configPath) args.push("--config", env.configPath);

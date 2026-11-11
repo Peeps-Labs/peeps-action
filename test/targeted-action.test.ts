@@ -972,6 +972,14 @@ test("logs in", async ({ page }) => {
   await writeFile(path.join(root, "suite/specs/badge.spec.ts"), `import { test, expect } from "@playwright/test";
 test("shows a badge", async ({ page }) => { await page.goto("/badge"); await expect(page.getByRole("heading")).toHaveText("ok"); });
 `);
+  // A test registered by a shared helper: it runs in the importing file's run, and is that file's.
+  await mkdir(path.join(root, "suite/helpers"), { recursive: true });
+  await writeFile(path.join(root, "suite/helpers/shared.ts"), `import { test, expect } from "@playwright/test";
+export function sharedBadgeTest() { test("shared badge", async ({ page }) => { await page.goto("/badge"); await expect(page.getByRole("heading")).toHaveText("ok"); }); }
+`);
+  await writeFile(path.join(root, "suite/specs/shared.spec.ts"), `import { sharedBadgeTest } from "../helpers/shared";
+sharedBadgeTest();
+`);
   await writeFile(path.join(root, "suite/specs/api.spec.ts"), `import { test, expect } from "@playwright/test";
 test("calls the api", async ({ request }) => { expect((await request.get("/login")).ok()).toBe(true); });
 `);
@@ -980,19 +988,23 @@ test("calls the api", async ({ request }) => { expect((await request.get("/login
     await mkdir(path.dirname(path.join(root, ".next", file)), { recursive: true });
     await writeFile(path.join(root, ".next", file), text);
   }
-  await writeFile(path.join(root, "app.cjs"), OWNED_APP(path.join(root, ".next", `server/chunks/ssr/${NEXT_BUILD.hash}s1.js`)));
+  // Outside the app's directory: app code beside `.next` is a custom server, which reads partial (`outside_build`).
+  const appHome = await realpath(await mkdtemp(path.join(tmpdir(), "peeps-owned-app-")));
+  t.after(() => rm(appHome, { recursive: true, force: true }));
+  await writeFile(path.join(appHome, "app.cjs"), OWNED_APP(path.join(root, ".next", `server/chunks/ssr/${NEXT_BUILD.hash}s1.js`)));
   git(root, "init", "-q", "-b", "main");
   git(root, "add", ".");
   git(root, "commit", "-qm", "first");
   const peeps = await fakePeeps(t, {}, undefined, "collect");
   const result = await runAction(root, peeps.url, {
     GITHUB_SHA: git(root, "rev-parse", "HEAD"), GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "push", BASE_URL: app, APP_PORT: String(port),
-    "INPUT_APP-START": "node app.cjs", "INPUT_APP-READY-URL": `${app}/ready`, "INPUT_APP-RESET": "echo \"$PEEPS_INVOCATION\" >> resets.log",
+    "INPUT_APP-START": `node ${appHome}/app.cjs`, "INPUT_APP-READY-URL": `${app}/ready`, "INPUT_APP-RESET": "echo \"$PEEPS_INVOCATION\" >> resets.log",
   });
   assert.equal(result.code, 0, result.output);
   // Ambient first, then each of the three spec files, each reset and started on its own; the config's webServer never ran.
-  assert.deepEqual((await readFile(path.join(root, "resets.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec", "spec"]);
-  assert.deepEqual((await readFile(path.join(root, "starts.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec", "spec"]);
+  // One run per test file (four), never one for the helper that registers a test.
+  assert.deepEqual((await readFile(path.join(root, "resets.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec", "spec", "spec"]);
+  assert.deepEqual((await readFile(path.join(root, "starts.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec", "spec", "spec"]);
   assert.deepEqual((await readFile(path.join(root, "test-invocations.log"), "utf8")).trim().split("\n"), ["spec"], "the tests see which run they're in");
   // The invocations' reports, merged into the one HTML report the batch gets.
   assert.ok([...peeps.artifacts.keys()].includes("index.html"), [...peeps.artifacts.keys()].join(", "));
@@ -1008,7 +1020,7 @@ test("calls the api", async ({ request }) => { expect((await request.get("/login
   assert.ok(blob.universe.ambient.includes(tokenOf(key, css)), "what the app ran at boot is ambient");
   assert.ok(!blob.universe.ambient.includes(tokenOf(key, login)));
   const member = (title: string) => {
-    const run = [...Array(3).keys()].map((i) => `run-${i}`).find((r) => blob.members.some((m) => m.run === r) && peeps.announces[0] && (peeps.announces[0].tests as Planned[])[Number(r.slice(4))]!.titlePath === title)!;
+    const run = [...Array(4).keys()].map((i) => `run-${i}`).find((r) => blob.members.some((m) => m.run === r) && peeps.announces[0] && (peeps.announces[0].tests as Planned[])[Number(r.slice(4))]!.titlePath === title)!;
     return blob.members.find((m) => m.run === run)!;
   };
   const logsIn = member("logs in");
@@ -1023,4 +1035,7 @@ test("calls the api", async ({ request }) => { expect((await request.get("/login
   assert.deepEqual([api.partial, api.partialLayers], [["code", "css"], ["browser"]]);
   assert.ok(api.tokens.includes(tokenOf(key, login)));
   assert.deepEqual([logsIn.partialLayers, showsBadge.partialLayers], [[], []]);
+  const shared = member("shared badge");
+  assert.deepEqual(shared.partial, [], "its file's run, not another's");
+  assert.ok(shared.tokens.includes(tokenOf(key, badge)));
 });

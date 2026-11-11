@@ -46,8 +46,11 @@ test("what isn't the job's own build is the runtime: neither keyed nor partial",
   const elsewhere = { url: "file:///work/app/node_modules/next/dist/server/next.js", functions: [fn("start", 10, 20)] };
   const internal = { url: "node:internal/main", functions: [fn("run", 1, 2)] };
   const sibling = { url: pathToFileURL(`/work/app/.next-other/${SSR}`).href, functions: [fn("onSuccess", onSuccess.start, onSuccess.end)] };
-  const result = serverFootprint(invocation([elsewhere, internal, sibling]), fingerprint.scripts, NEXT);
+  const result = serverFootprint(invocation([elsewhere, internal]), fingerprint.scripts, NEXT);
   assert.deepEqual([result.keys, result.loaded, result.partial], [[], [], []]);
+  // Another directory of the app is the app's code, not the build: unknown, never keyed.
+  const beside = serverFootprint(invocation([sibling]), fingerprint.scripts, NEXT);
+  assert.deepEqual([beside.keys, beside.reasons], [[], ["outside_build"]]);
 });
 
 test("a script whose whole is its key: the key, run or loaded", () => {
@@ -87,4 +90,11 @@ test("a ran function in the build that no key names is partial, as is a built sc
 
 test("what went wrong around the app (a reset, readiness, an early exit) is partial and named", () => {
   assert.deepEqual(partialOf({ problems: ["not_ready", "reset_failed"] }), [["code"], ["not_ready", "reset_failed"]]);
+});
+
+test("workspace code outside the build ran (a custom server, a script it loads) is unknown; next.config and node_modules aren't", () => {
+  const ran = (rel: string) => ({ url: pathToFileURL(`/work/app/${rel}`).href, functions: [fn("handle", 3, 40)] });
+  assert.deepEqual(partialOf({}, [ran("server/socket.js")]), [["code"], ["outside_build"]]);
+  assert.deepEqual(partialOf({}, [ran("next.config.mjs"), ran("node_modules/pg/lib/client.js")]), [[], []]);
+  assert.deepEqual(partialOf({}, [{ url: pathToFileURL("/work/app/server/idle.js").href, functions: [fn("idle", 3, 40, 0)] }]), [[], []], "loaded, nothing ran");
 });

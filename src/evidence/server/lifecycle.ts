@@ -102,6 +102,15 @@ export async function runInvocation(
     say(`app-reset failed before this ${options.kind} invocation: its server evidence reads partial`);
     problems.push("reset_failed");
   }
+  // Whatever answers before the app starts (a server left running, another job's) isn't it.
+  try {
+    if ((await fetch(app.readyUrl, { signal: AbortSignal.timeout(2_000) })).ok) {
+      say(`something already answers ${app.readyUrl} before the app starts: this ${options.kind} invocation's server evidence reads partial`);
+      problems.push("ready_before_start");
+    }
+  } catch {
+    // Nothing listening: as it should be.
+  }
   const child = spawn("sh", ["-c", app.start], {
     cwd: app.cwd,
     detached: true,

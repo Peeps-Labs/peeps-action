@@ -37,7 +37,8 @@ __export(reporter_exports, {
   htmlReportDir: () => htmlReportDir,
   identityOf: () => identityOf,
   isLastAttempt: () => isLastAttempt,
-  narrowedOutcome: () => narrowedOutcome
+  narrowedOutcome: () => narrowedOutcome,
+  testFileOf: () => testFileOf
 });
 module.exports = __toCommonJS(reporter_exports);
 var import_node_crypto2 = require("node:crypto");
@@ -592,6 +593,10 @@ var PeepsClient = class {
 };
 
 // src/reporter.ts
+function testFileOf(test) {
+  for (let suite = test.parent; suite; suite = suite.parent) if (suite.type === "file" && suite.location) return suite.location.file;
+  return test.location.file;
+}
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function identityOf(test, rootDirAbs, rootDirRepo) {
   const rel = import_node_path3.default.relative(rootDirAbs, test.location.file).split(import_node_path3.default.sep).join("/");
@@ -774,7 +779,7 @@ var PeepsCiReporter = class {
       hiddenRequests: this.plan.footprints?.hiddenRequests.includes(entry.path) ?? false
     }) : void 0;
     if (this.plan.evidence) {
-      const record = { testId: test.id, runId: entry.runId, retry: result.retry, passed: result.status === "passed", har: sent ? { paths: sent.paths, complete: sent.complete } : null, file: test.location.file };
+      const record = { testId: test.id, runId: entry.runId, retry: result.retry, passed: result.status === "passed", har: sent ? { paths: sent.paths, complete: sent.complete } : null, file: testFileOf(test) };
       const name = `att-${(0, import_node_crypto2.createHash)("sha256").update(test.id).digest("hex").slice(0, 16)}-${result.retry}.json`;
       try {
         (0, import_node_fs3.writeFileSync)(import_node_path3.default.join(this.plan.evidence.dir, name), JSON.stringify(record), { mode: 384, flag: "wx" });
@@ -902,5 +907,6 @@ function htmlReportDir(config) {
   htmlReportDir,
   identityOf,
   isLastAttempt,
-  narrowedOutcome
+  narrowedOutcome,
+  testFileOf
 });

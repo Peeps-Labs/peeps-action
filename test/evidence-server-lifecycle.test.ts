@@ -97,3 +97,15 @@ test("an app that dies while its tests run says so: it may have served only some
   });
   assert.ok(coverage.problems.includes("app_exited"), JSON.stringify(coverage.problems));
 });
+
+test("something already answering the ready URL before the app starts can't vouch for it: partial", async () => {
+  const command = await app();
+  const squatter = require("node:http").createServer((_req: unknown, res: { end: (body: string) => void }) => res.end("ok")).listen(Number(command.env.PORT), "127.0.0.1");
+  await new Promise((resolve) => squatter.once("listening", resolve));
+  try {
+    const { coverage } = await runInvocation(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec", readyTimeoutMs: 3_000 }, async () => 0);
+    assert.ok(coverage.problems.includes("ready_before_start"), JSON.stringify(coverage.problems));
+  } finally {
+    squatter.close();
+  }
+});

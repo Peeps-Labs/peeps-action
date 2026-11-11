@@ -7,10 +7,13 @@
 import path from "node:path";
 import type { ScriptIndex } from "../fingerprint/rules";
 import type { ServerEvidence } from "../members";
+import { settleBuildDir, snapshotBuildDir } from "./build-dir";
 import { runInvocation, type AppCommand } from "./lifecycle";
 import { serverFootprint, type ServerFootprint } from "./rules";
 
 export type Invoke = typeof runInvocation;
+
+const say = (line: string) => console.log(`[peeps] ${line}`);
 
 export interface RecordServerInput {
   app: AppCommand;
@@ -27,6 +30,8 @@ export interface RecordServerInput {
   /** Every attempt the reporter has recorded so far: its test id, and the real path of the test's file. */
   attempts: () => Array<{ testId: string; file: string | null }>;
   invoke?: Invoke;
+  /** The build directory between runs (`build-dir.ts`); by default the real `nextDir`. */
+  buildDir?: { snapshot(): unknown; settle(): { created: string[]; changed: string[] } };
 }
 
 /** The filter that selects exactly this file: Playwright reads each file argument as a case-insensitive regex. */
@@ -40,10 +45,29 @@ const elsewhere: ServerFootprint = { keys: [], loaded: [], partial: ["code"], re
 export async function recordServer(input: RecordServerInput): Promise<{ exitCode: number; server: ServerEvidence }> {
   const invoke = input.invoke ?? runInvocation;
   const footprint = (coverage: Parameters<typeof serverFootprint>[0]) => serverFootprint(coverage, input.scripts, input.nextDir);
+  const build =
+    input.buildDir ??
+    (() => {
+      let snapshot = snapshotBuildDir(input.nextDir);
+      return { snapshot: () => (snapshot = snapshotBuildDir(input.nextDir)), settle: () => settleBuildDir(input.nextDir, snapshot) };
+    })();
+  build.snapshot();
+  // Once a run rewrote a built file, every later run may serve what it wrote.
+  let tainted = false;
+  const settle = () => {
+    const { created, changed } = build.settle();
+    if (created.length > 0) say(`removed ${created.length} file(s) the app wrote into its build directory, before the next run`);
+    if (changed.length > 0 && !tainted) {
+      say(`the app rewrote ${changed.length} built file(s) (${changed.slice(0, 3).join(", ")}): later runs' server evidence reads partial`);
+      tainted = true;
+    }
+  };
+  const taint = (fp: ServerFootprint): ServerFootprint => (tainted ? { ...fp, partial: ["code"], reasons: [...fp.reasons, "build_dir_changed"] } : fp);
   let exitCode = 0;
   const ambientRun = await invoke(input.app, { dir: path.join(input.coverageDir, "ambient"), preload: input.preload, kind: "ambient" }, () => input.runTests(null, 0));
   if (ambientRun.exitCode !== 0) exitCode = ambientRun.exitCode;
   const ambient = footprint(ambientRun.coverage);
+  settle();
   const byTest = new Map<string, ServerFootprint>();
   const counts = () => {
     const out = new Map<string, { count: number; file: string | null }>();
@@ -54,7 +78,8 @@ export async function recordServer(input: RecordServerInput): Promise<{ exitCode
     const before = counts();
     const run = await invoke(input.app, { dir: path.join(input.coverageDir, `spec-${i}`), preload: input.preload, kind: "spec" }, () => input.runTests(spec, i + 1));
     if (run.exitCode !== 0) exitCode = run.exitCode;
-    const own = footprint(run.coverage);
+    const own = taint(footprint(run.coverage));
+    settle();
     for (const [id, { count, file }] of counts()) {
       if (count === (before.get(id)?.count ?? 0)) continue;
       // Each attempt is recorded once (the reporter never overwrites one), so a test that ran in the

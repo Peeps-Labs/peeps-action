@@ -16,7 +16,7 @@ import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AppInput, RunnerEnv } from "./env";
-import { listTests, specFilePayload, specFilesOf, type PlaywrightList, type PlaywrightSuite } from "./inventory";
+import { listTests, specFilePayload, specFilesOf, testFilesOf, type PlaywrightList, type PlaywrightSuite } from "./inventory";
 import {
   answeredNarrowed,
   exactGrepFor,
@@ -167,7 +167,7 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   // Fail safe: a suite that may run precise coverage itself resets ours (see `conflict.ts`).
   const conflict = recorded?.some((p) => p.collect.coverage) ? await coverageConflictIn([rootDirAbs, env.workingDirectory]) : null;
   if (conflict) console.log(`[peeps] not recording browser coverage: ${conflict}`);
-  const server = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, specFilesOf(list)) : null;
+  const server = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list)) : null;
   const recording = impact && recorded && recorded.length > 0 ? { impact: { fingerprint: impact.fingerprint, projects: recorded, coverage: conflict === null, ...(server ? { server } : {}) } } : {};
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);

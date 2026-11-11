@@ -37,7 +37,7 @@ inputs:
     required: false
     default: "600"
   app-start:
-    description: "Server evidence (recorded pushes, with app-ready-url): the command that starts your app from working-directory, e.g. `npx next start -p 3000`. The action then runs your suite once per spec file, each with a fresh start of the app it owns (your config's webServer is not used), after one run with no tests, and records what the app ran for each file's tests. Costs one app start, reset and global setup per spec file on those pushes"
+    description: "Server evidence (recorded pushes, with app-ready-url): the command that starts your app from working-directory, e.g. `npx next start -p 3000`. The action then runs your suite once per spec file, each with a fresh start of the app it owns (your config's webServer is not used), after one run with no tests, and records what the app ran for each file's tests. Costs one app start, reset, global setup and setup-project run per spec file on those pushes; test-results/ keeps only the last file's run"
     required: false
   app-ready-url:
     description: "With app-start: the URL that answers 2xx once the app serves, e.g. http://localhost:3000/api/health"
