@@ -77,7 +77,13 @@ if (Array.isArray(config.projects))
  * Playwright's own webServer would start a second one, and its teardown kills the app
  * before its coverage is taken.
  */
-const OWN_APP = `delete withEvidence.webServer;
+const OWN_APP = `{
+  // Playwright's own default: one webServer with a port, and no baseURL, is http://localhost:<port>.
+  const servers = [withEvidence.webServer].flat().filter(Boolean);
+  if (servers.length === 1 && servers[0].port !== undefined && withEvidence.use?.baseURL === undefined)
+    withEvidence.use = { ...withEvidence.use, baseURL: "http://localhost:" + servers[0].port };
+  delete withEvidence.webServer;
+}
 `;
 
 /**

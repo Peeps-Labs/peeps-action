@@ -130,3 +130,7 @@ test("code the server ran that git doesn't track and the fingerprint doesn't nam
   const config = serverFootprint(invocation([ran("/work/app/next.config.compiled.js"), ran("/work/app/next.config.mjs")]), fingerprint.scripts, NEXT, sources, tracked);
   assert.deepEqual(config.reasons, []);
 });
+
+test("a built script the fingerprint doesn't index ran, even only its top level: unmapped", () => {
+  assert.deepEqual(partialOf({}, [script("server/chunks/late.js", [fn("", 0, 50)])]), [["code"], ["unmapped"]]);
+});

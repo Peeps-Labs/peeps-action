@@ -133,6 +133,11 @@ export function serverFootprint(
           keys.add(index.whole);
           continue;
         }
+        // A built script the fingerprint doesn't know ran: whatever it ran is unknown.
+        if (!index) {
+          unmapped++;
+          continue;
+        }
         // The script's own top level, which V8 reports as a function.
         if (range.startOffset === 0 && fn.functionName === "") continue;
         const span = index && spanAt(index, { name: fn.functionName, start: range.startOffset, end: range.endOffset });

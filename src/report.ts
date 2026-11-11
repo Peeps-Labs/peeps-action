@@ -402,7 +402,7 @@ async function recordEvidence(
         { coverage: collected.coverage && project.collect.coverage, har: collected.har },
         contexts,
         taints,
-        server,
+        project.collect.coverage ? server : undefined,
       );
     } catch (error) {
       // Evidence never fails a job: this project records nothing, and its batch still completes.

@@ -114,3 +114,13 @@ test("something already answering the ready URL before the app starts can't vouc
     squatter.close();
   }
 });
+
+test("an app that stopped coverage itself has no final take: not taken, so partial", async () => {
+  const command = await app({ start: `node -e 'require("node:v8").takeCoverage(); require("node:v8").stopCoverage(); require("./server.js")'` });
+  const { coverage } = await runInvocation(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => {
+    await fetch(command.readyUrl.replace("/ready", "/work"));
+    return 0;
+  });
+  assert.equal(coverage.started.length, 1);
+  assert.deepEqual(coverage.taken, [], "the final take wrote nothing, so no marker");
+});
