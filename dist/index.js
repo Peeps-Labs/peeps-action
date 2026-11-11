@@ -1893,7 +1893,7 @@ async function ensureFfmpeg(deps = {
   }
   return deps.available();
 }
-async function runAppiumReport(env, peeps, runner) {
+async function runAppiumReport(env, peeps, runner, ffmpegCheck) {
   if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const configPath = wdioConfigPath(env);
   const collection = await collectAppium(env, configPath);
@@ -1921,12 +1921,12 @@ async function runAppiumReport(env, peeps, runner) {
   }));
   const recordVideoRunIds = recordVideoRunIdsOf(response.batches);
   if (!answeredNarrowed(response)) {
-    await executeAppiumAndReport(env, peeps, { configPath, runs, batches, recordVideoRunIds, runner });
+    await executeAppiumAndReport(env, peeps, { configPath, runs, batches, recordVideoRunIds, ffmpegCheck, runner });
     return;
   }
   const fallBack = (why) => {
     console.log(`[peeps] not narrowing, running the full suite: ${why}`);
-    return executeAppiumAndReport(env, peeps, { configPath, runs, batches, recordVideoRunIds, runner, ranFullSuite: true });
+    return executeAppiumAndReport(env, peeps, { configPath, runs, batches, recordVideoRunIds, ffmpegCheck, runner, ranFullSuite: true });
   };
   if (!isNarrowed(response)) return fallBack("Peeps did not narrow every project's batch");
   if (collection.errors.length > 0) return fallBack(`${collection.errors.length} spec file(s) did not load`);
@@ -1948,6 +1948,7 @@ async function runAppiumReport(env, peeps, runner) {
     configPath,
     runs: narrowedRuns,
     recordVideoRunIds: recordVideoRunIds.filter((id) => narrowedRuns.some((r) => r.runId === id)),
+    ffmpegCheck,
     batches,
     selection: {
       specs: found.specs,

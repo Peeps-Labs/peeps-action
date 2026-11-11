@@ -375,6 +375,8 @@ export async function runAppiumReport(
   peeps: PeepsClient,
   /** For tests: run this instead of `npx wdio run <config>`. */
   runner?: (configPath: string, extraEnv: Record<string, string>) => Promise<number>,
+  /** For tests: instead of looking for (and installing) ffmpeg on the runner. */
+  ffmpegCheck?: () => Promise<boolean>,
 ): Promise<void> {
   if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const configPath = wdioConfigPath(env);
@@ -403,12 +405,12 @@ export async function runAppiumReport(
   }));
   const recordVideoRunIds = recordVideoRunIdsOf(response.batches);
   if (!answeredNarrowed(response)) {
-    await executeAppiumAndReport(env, peeps, { configPath, runs, batches, recordVideoRunIds, runner });
+    await executeAppiumAndReport(env, peeps, { configPath, runs, batches, recordVideoRunIds, ffmpegCheck, runner });
     return;
   }
   const fallBack = (why: string) => {
     console.log(`[peeps] not narrowing, running the full suite: ${why}`);
-    return executeAppiumAndReport(env, peeps, { configPath, runs, batches, recordVideoRunIds, runner, ranFullSuite: true });
+    return executeAppiumAndReport(env, peeps, { configPath, runs, batches, recordVideoRunIds, ffmpegCheck, runner, ranFullSuite: true });
   };
   if (!isNarrowed(response)) return fallBack("Peeps did not narrow every project's batch");
   // A spec that did not load holds tests nobody could select, so only a full run answers for them.
@@ -434,6 +436,7 @@ export async function runAppiumReport(
     configPath,
     runs: narrowedRuns,
     recordVideoRunIds: recordVideoRunIds.filter((id) => narrowedRuns.some((r) => r.runId === id)),
+    ffmpegCheck,
     batches,
     selection: {
       specs: found.specs,
