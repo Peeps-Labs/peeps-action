@@ -105,3 +105,63 @@ test("loaded files are only ever file: keys, and ambient stays empty (contract Â
   assert.ok(result.loadedFiles.every((key) => key.startsWith("file:")), result.loadedFiles.join(", "));
   assert.deepEqual(result.ambient, []);
 });
+
+// PQA-3201 PR 3: each spec file's invocation owned the app, so its server footprint is each of its tests'.
+const serverFp = (keys: string[], loaded: string[] = [], reasons: string[] = []) => ({ keys, loaded, partial: reasons.length > 0 ? (["code"] as const).slice() : [], reasons });
+const AMBIENT = serverFp(["file:src/app/api/heartbeat/route.ts", "fn:server:src/app/api/heartbeat/route.ts:GET"], ["file:src/app/api/heartbeat/route.ts", "file:src/lib/db.ts"]);
+
+test("server evidence: each test holds its invocation's footprint; ambient and loaded files fill the universe", () => {
+  const result = membersOfAll(
+    [record("t1", "run-1", 0, true), record("t2", "run-2", 0, true)],
+    [],
+    fingerprint,
+    { coverage: false, har: false },
+    [],
+    [],
+    {
+      ambient: AMBIENT,
+      byTest: new Map([
+        ["t1", serverFp(["file:src/app/api/me/route.ts", "fn:server:src/app/api/me/route.ts:GET"], ["file:src/app/api/me/route.ts"])],
+        ["t2", serverFp([], ["file:src/app/api/segments/route.ts"])],
+      ]),
+    },
+  );
+  assert.deepEqual(result.layers, ["server"]);
+  assert.deepEqual(result.measured, ["code"]);
+  assert.deepEqual(result.ambient, ["file:src/app/api/heartbeat/route.ts", "fn:server:src/app/api/heartbeat/route.ts:GET"]);
+  assert.deepEqual(result.loadedFiles, ["file:src/app/api/heartbeat/route.ts", "file:src/app/api/me/route.ts", "file:src/app/api/segments/route.ts", "file:src/lib/db.ts"]);
+  const one = result.members.find((m) => m.run === "run-1")!;
+  assert.deepEqual(one.evidence.flatMap((e) => e.keys).sort(), ["file:src/app/api/me/route.ts", "fn:server:src/app/api/me/route.ts:GET"]);
+  assert.ok(result.members.every((m) => m.evidence.every((e) => e.partial.length === 0)));
+});
+
+test("server evidence beside browser coverage: both layers, code measured once", () => {
+  const result = membersOfAll([record("t1", "run-1", 0, true)], [coverageFile("t1", 0)], fingerprint, { coverage: true, har: false }, [{ testId: "t1", retry: 0, contextId: "t1-0" }], [], { ambient: AMBIENT, byTest: new Map([["t1", serverFp([])]]) });
+  assert.deepEqual([result.layers, result.measured], [["browser", "server"], ["code", "css"]]);
+});
+
+test("a test whose invocation left no server footprint, or whose own is partial, reads partial for code", () => {
+  const result = membersOfAll([record("t1", "run-1", 0, true), record("t2", "run-2", 0, true)], [], fingerprint, { coverage: false, har: false }, [], [], {
+    ambient: AMBIENT,
+    byTest: new Map([["t2", serverFp(["file:a.ts"], [], ["not_taken"])]]),
+  });
+  const of = (run: string) => result.members.find((m) => m.run === run)!.evidence;
+  assert.deepEqual([of("run-1").flatMap((e) => e.partial), of("run-1").flatMap((e) => e.reasons)], [["code"], ["server_missing"]]);
+  assert.deepEqual([of("run-2").flatMap((e) => e.partial), of("run-2").flatMap((e) => e.reasons)], [["code"], ["server_not_taken"]]);
+});
+
+test("a partial ambient invocation leaves every test partial for code: what every test shares is unknown", () => {
+  const result = membersOfAll([record("t1", "run-1", 0, true)], [], fingerprint, { coverage: false, har: false }, [], [], {
+    ambient: serverFp([], [], ["not_ready"]),
+    byTest: new Map([["t1", serverFp(["file:a.ts"])]]),
+  });
+  const evidence = result.members[0]!.evidence;
+  assert.ok(evidence.some((e) => e.partial.includes("code") && e.reasons.includes("ambient_not_ready")), JSON.stringify(evidence));
+});
+
+test("no server evidence without browser coverage: code is never claimed measured for a layer nobody measured", () => {
+  // HAR on, browser coverage refused (a suite running precise coverage itself): routes only, as before.
+  const result = membersOfAll([record("t1", "run-1", 0, true)], [], fingerprint, { coverage: false, har: true }, [], [], { ambient: AMBIENT, byTest: new Map([["t1", serverFp(["file:a.ts"])]]) });
+  assert.deepEqual([result.layers, result.measured, result.ambient], [["browser"], ["route"], []]);
+  assert.ok(result.members[0]!.evidence.every((e) => e.keys.length === 0));
+});

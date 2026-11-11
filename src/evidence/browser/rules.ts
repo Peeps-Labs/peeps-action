@@ -91,7 +91,7 @@ export function partialReasons(coverage: AttemptCoverage): string[] {
 /** V8's own functions for a class's fields and static members: no source function starts where they do. */
 const SYNTHETIC = /^<(?:static_initializer|instance_members_initializer)>$/;
 
-function spanAt(index: ScriptIndex, fn: RanFunction) {
+export function spanAt(index: ScriptIndex, fn: RanFunction) {
   const exact = index.spans.find((span) => span.start === fn.start) ?? index.spans.find((span) => span.end === fn.end);
   if (exact || !SYNTHETIC.test(fn.name)) return exact;
   // The innermost function holding it: the class's code is that function's.

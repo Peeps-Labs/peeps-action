@@ -105,3 +105,12 @@ test("device-tools is off unless the job turns it on, on GitHub and on GitLab", 
   assert.equal(readRunnerEnv({ GITLAB_CI: "true", CI_PROJECT_DIR: "/builds/x", PEEPS_DEVICE_TOOLS: "TRUE" }).deviceTools, true);
   assert.equal(readRunnerEnv({ GITLAB_CI: "true", CI_PROJECT_DIR: "/builds/x" }).deviceTools, false);
 });
+
+test("the app the action owns for server evidence: start and ready together, reset optional (PQA-3201 PR 3)", () => {
+  const owned = readRunnerEnv({ GITHUB_WORKSPACE: "/workspace", "INPUT_APP-START": "npm start", "INPUT_APP-READY-URL": "http://localhost:3000/api/health", "INPUT_APP-RESET": "./reset-db.sh" });
+  assert.deepEqual(owned.app, { start: "npm start", readyUrl: "http://localhost:3000/api/health", reset: "./reset-db.sh" });
+  assert.equal(readRunnerEnv({ GITHUB_WORKSPACE: "/workspace" }).app, null);
+  assert.equal(readRunnerEnv({ GITHUB_WORKSPACE: "/workspace", "INPUT_APP-START": "npm start" }).app, null, "no ready URL: the action can't tell when it serves");
+  const gitlab = readRunnerEnv({ GITLAB_CI: "true", PEEPS_APP_START: "npm start", PEEPS_APP_READY_URL: "http://localhost:3000" });
+  assert.deepEqual(gitlab.app, { start: "npm start", readyUrl: "http://localhost:3000", reset: null });
+});

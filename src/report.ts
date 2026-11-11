@@ -10,11 +10,12 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { prepareCaptureConfig } from "./capture-config";
 import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { RunnerEnv } from "./env";
+import type { AppInput, RunnerEnv } from "./env";
 import { listTests, specFilePayload, specFilesOf, type PlaywrightList, type PlaywrightSuite } from "./inventory";
 import {
   answeredNarrowed,
@@ -30,8 +31,9 @@ import { workspaceTestSources } from "./footprint/test-sources";
 import type { AttemptFile } from "./evidence/browser/worker";
 import { prepareImpact, type PreparedImpact, type PreparedProject } from "./evidence/job";
 import { coverageConflictIn } from "./evidence/browser/conflict";
-import { membersOf, type AttemptRecord, type ContextMarker } from "./evidence/members";
+import { membersOf, type AttemptRecord, type ContextMarker, type ServerEvidence } from "./evidence/members";
 import { openScratch } from "./evidence/scratch";
+import { recordServer, specFilter } from "./evidence/server/record";
 import { peepsTransport, uploadEvidence } from "./evidence/upload";
 import { computeReach } from "./reach";
 import { localRepository } from "./reach/git";
@@ -165,7 +167,8 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   // Fail safe: a suite that may run precise coverage itself resets ours (see `conflict.ts`).
   const conflict = recorded?.some((p) => p.collect.coverage) ? await coverageConflictIn([rootDirAbs, env.workingDirectory]) : null;
   if (conflict) console.log(`[peeps] not recording browser coverage: ${conflict}`);
-  const recording = impact && recorded && recorded.length > 0 ? { impact: { fingerprint: impact.fingerprint, projects: recorded, coverage: conflict === null } } : {};
+  const server = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, specFilesOf(list)) : null;
+  const recording = impact && recorded && recorded.length > 0 ? { impact: { fingerprint: impact.fingerprint, projects: recorded, coverage: conflict === null, ...(server ? { server } : {}) } } : {};
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
   console.log(
@@ -286,7 +289,7 @@ export async function executeAndReport(
     /** This job sent a reach: each batch's `complete` says what it ran. */
     executed?: Executed;
     /** Peeps took this job's fingerprint: record what its tests ran (`evidence/`), per project. */
-    impact?: { fingerprint: PreparedImpact["fingerprint"]; projects: RecordedProject[]; coverage: boolean };
+    impact?: { fingerprint: PreparedImpact["fingerprint"]; projects: RecordedProject[]; coverage: boolean; server?: ServerPlan };
   },
 ): Promise<void> {
   const scratch = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-"));
@@ -302,11 +305,33 @@ export async function executeAndReport(
   let exitCode: number;
   try {
     const coverage = evidence && input.impact?.coverage && input.impact.projects.some((p) => p.collect.coverage) ? { worker: path.join(__dirname, "evidence-worker.js"), dir: evidence.dir } : undefined;
-    exitCode = await runPlaywright(env, planFile, reportDir, input.selection, input.extraEnv, input.narrowed, input.footprints?.record === true, coverage);
+    const plan = input.impact?.server;
+    let server: ServerEvidence | undefined;
+    // Only beside browser coverage, which a suite running precise coverage itself refuses (`conflict.ts`).
+    if (evidence && plan && !input.selection && coverage !== undefined) {
+      // One invocation per spec file, each with the app to itself (PQA-3201 PR 3).
+      const blobDir = path.join(scratch, "blobs");
+      const recorded = await recordServer({
+        app: { ...plan.app, cwd: env.workingDirectory, env: { ...process.env, ...input.extraEnv, CI: "1" } },
+        specs: plan.specs,
+        preload: path.join(__dirname, "evidence-preload.js"),
+        coverageDir: path.join(scratch, "server-coverage"),
+        scripts: input.impact!.fingerprint.scripts,
+        nextDir: plan.nextDir,
+        runTests: (spec, index) =>
+          runPlaywright(env, planFile, reportDir, undefined, input.extraEnv, input.narrowed, input.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : path.join(blobDir, `report-${index}.zip`) }),
+        attempts: () => (evidence.read("att-") as AttemptRecord[]).map((record) => ({ testId: record.testId, file: typeof record.file === "string" ? realOr(record.file) : null })),
+      });
+      exitCode = recorded.exitCode;
+      server = recorded.server;
+      await mergeReports(env, blobDir, reportDir);
+    } else {
+      exitCode = await runPlaywright(env, planFile, reportDir, input.selection, input.extraEnv, input.narrowed, input.footprints?.record === true, coverage);
+    }
     if (evidence && input.impact) {
       // Evidence never fails a run: whatever goes wrong reading or sending it, Playwright's
       // own exit status stands, and the report and the batches still go up.
-      await recordEvidence(env, peeps, input.impact, evidence, { coverage: coverage !== undefined, har: input.footprints?.record === true }).catch((error: unknown) => {
+      await recordEvidence(env, peeps, input.impact, evidence, { coverage: coverage !== undefined, har: input.footprints?.record === true }, server).catch((error: unknown) => {
         console.log(`[peeps] not recording what this job's tests ran: ${String(error).slice(0, 300)}`);
       });
     }
@@ -355,6 +380,7 @@ async function recordEvidence(
   impact: { fingerprint: PreparedImpact["fingerprint"]; projects: RecordedProject[] },
   scratch: { read(prefix: string): unknown[] },
   collected: { coverage: boolean; har: boolean },
+  server?: ServerEvidence,
 ): Promise<void> {
   const records = scratch.read("att-") as AttemptRecord[];
   const coverage = scratch.read("cov-") as AttemptFile[];
@@ -374,6 +400,7 @@ async function recordEvidence(
         { coverage: collected.coverage && project.collect.coverage, har: collected.har },
         contexts,
         taints,
+        server,
       );
     } catch (error) {
       // Evidence never fails a job: this project records nothing, and its batch still completes.
@@ -387,6 +414,7 @@ async function recordEvidence(
       layers: job.layers,
       measured: job.measured,
       loadedFiles: job.loadedFiles,
+      ambient: job.ambient,
       browser: job.browser,
       members: job.members,
     });
@@ -403,15 +431,19 @@ async function runPlaywright(
   narrowed = false,
   collectFootprints = false,
   coverage?: { worker: string; dir: string },
+  /** One invocation of a server recording: one spec file, or none for ambient; its report as a blob to merge. */
+  invocation?: { spec: string | null; blobFile: string | null },
 ): Promise<number> {
   const reporterPath = path.join(__dirname, "reporter.js");
-  const args = ["playwright", "test", `--reporter=${reporterPath},list,html`];
+  const reporters = invocation ? `${reporterPath},list${invocation.blobFile ? ",blob" : ""}` : `${reporterPath},list,html`;
+  const args = ["playwright", "test", `--reporter=${reporters}`];
   let capture: Awaited<ReturnType<typeof prepareCaptureConfig>> | undefined;
   try {
     capture = await prepareCaptureConfig(env, {
       ...(narrowed ? { defaultRetries: NARROWED_DEFAULT_RETRIES } : {}),
       ...(collectFootprints ? { collectFootprints } : {}),
       ...(coverage ? { coverage } : {}),
+      ...(invocation ? { ownsApp: true } : {}),
     });
   } catch (error) {
     console.warn(`[peeps] screenshot/video defaults could not be applied; using the original config: ${String(error)}`);
@@ -425,6 +457,9 @@ async function runPlaywright(
     // rather than a file. Everything after `--` is a positional argument.
     args.push("--grep", selection.grep, "--", ...selection.files);
   }
+  // Ambient runs no test, though its global setup and teardown run; a spec runs that one file.
+  // No `--` before the filter: Playwright (1.63) ignores file filters after it. It starts with `^`, so it's never read as an option.
+  if (invocation) args.push(...(invocation.spec === null ? ["--grep", "(?!)", "--pass-with-no-tests"] : [specFilter(invocation.spec)]));
   try {
     return await new Promise((resolve) => {
       const couldNotStart = (error: unknown) => {
@@ -442,6 +477,7 @@ async function runPlaywright(
             PEEPS_PLAN_FILE: planFile,
             PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,
             PLAYWRIGHT_HTML_OPEN: "never",
+            ...(invocation?.blobFile ? { PLAYWRIGHT_BLOB_OUTPUT_FILE: invocation.blobFile } : {}),
           },
         });
         child.on("error", couldNotStart);
@@ -456,6 +492,62 @@ async function runPlaywright(
       console.warn(`[peeps] could not remove temporary capture config: ${String(error)}`);
     });
   }
+}
+
+/** The file's real path, or the path itself when it can't be resolved. */
+function realOr(file: string): string {
+  try {
+    return realpathSync(file);
+  } catch {
+    return file;
+  }
+}
+
+/** A recording's server plan (PQA-3201 PR 3): the app the action owns, and the spec files it runs one at a time. */
+export interface ServerPlan {
+  app: AppInput;
+  /** Absolute real paths, sorted, each once. */
+  specs: string[];
+  /** The job's `.next`, real path: coverage outside it is the runtime. */
+  nextDir: string;
+}
+
+/**
+ * Server evidence is recorded only when the workflow gave the app to the action
+ * (`app-start` and `app-ready-url`), Peeps asked for coverage, and nothing else in the job
+ * collects V8 coverage. Anything else: browser evidence only, as before, said once.
+ */
+export function serverPlanOf(env: RunnerEnv, recorded: Array<{ collect: { coverage: boolean } }>, rootDirAbs: string, specFiles: string[]): ServerPlan | null {
+  if (!env.app || !recorded.some((project) => project.collect.coverage)) return null;
+  if (process.env.NODE_V8_COVERAGE) {
+    console.log("[peeps] not recording server evidence: NODE_V8_COVERAGE is already set in this job");
+    return null;
+  }
+  let nextDir: string;
+  try {
+    nextDir = realpathSync(path.join(env.workingDirectory, ".next"));
+  } catch {
+    console.log("[peeps] not recording server evidence: no Next build in the working directory");
+    return null;
+  }
+  const specs = [...new Set(specFiles.map((file) => realOr(path.resolve(rootDirAbs, file))))].sort();
+  console.log(`[peeps] recording server evidence: ${specs.length} spec file(s), each with the app to itself, after one ambient run`);
+  return { app: env.app, specs, nextDir };
+}
+
+/** The invocations' blob reports as the one HTML report the job uploads. */
+async function mergeReports(env: RunnerEnv, blobDir: string, reportDir: string): Promise<void> {
+  if (!existsSync(blobDir)) return;
+  const code = await new Promise<number>((resolve) => {
+    const child = spawn("npx", ["playwright", "merge-reports", "--reporter=html", blobDir], {
+      cwd: env.workingDirectory,
+      stdio: "inherit",
+      env: { ...process.env, PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir, PLAYWRIGHT_HTML_OPEN: "never" },
+    });
+    child.on("error", () => resolve(1));
+    child.on("close", (c) => resolve(c ?? 1));
+  });
+  if (code !== 0) console.log(`[peeps] could not merge the invocations' reports (${code}): the HTML report may be missing`);
 }
 
 async function* walk(dir: string, rel = ""): AsyncGenerator<{ abs: string; rel: string }> {

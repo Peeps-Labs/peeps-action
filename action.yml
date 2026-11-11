@@ -36,6 +36,15 @@ inputs:
     description: "Seconds to wait for the preview (default 600)"
     required: false
     default: "600"
+  app-start:
+    description: "Server evidence (recorded pushes, with app-ready-url): the command that starts your app from working-directory, e.g. `npx next start -p 3000`. The action then runs your suite once per spec file, each with a fresh start of the app it owns (your config's webServer is not used), after one run with no tests, and records what the app ran for each file's tests. Costs one app start, reset and global setup per spec file on those pushes"
+    required: false
+  app-ready-url:
+    description: "With app-start: the URL that answers 2xx once the app serves, e.g. http://localhost:3000/api/health"
+    required: false
+  app-reset:
+    description: "With app-start: a command run before every one of those runs to put your app's state back (e.g. clone a seeded template database). PEEPS_INVOCATION is `ambient` for the first run, `spec` after, in its environment and in the tests'"
+    required: false
   github-token:
     description: "Token for reading the pull request's deployments with preview (default: the job's GITHUB_TOKEN). The action removes it from its environment before anything runs, so test processes don't inherit it"
     required: false

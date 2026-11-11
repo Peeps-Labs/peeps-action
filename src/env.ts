@@ -46,6 +46,22 @@ export interface RunnerEnv {
   oidc: { requestUrl: string; requestToken: string } | null;
   /** GitLab: the ID token the job was issued for Peeps' audience. */
   idToken: string | null;
+  /**
+   * The app the action starts for each recorded invocation (PQA-3201 PR 3): its start
+   * command, the URL that answers once it serves, and an optional reset run before each.
+   * Null when either of the first two is missing.
+   */
+  app?: AppInput | null;
+}
+
+export interface AppInput {
+  start: string;
+  readyUrl: string;
+  reset: string | null;
+}
+
+function appOf(start: string | null, readyUrl: string | null, reset: string | null): AppInput | null {
+  return start && readyUrl ? { start, readyUrl, reset } : null;
 }
 
 /**
@@ -178,6 +194,7 @@ export function readGitLabRunnerEnv(env: NodeJS.ProcessEnv): RunnerEnv {
     workspace,
     oidc: null,
     idToken: variable(env, "PEEPS_ID_TOKEN"),
+    app: appOf(variable(env, "PEEPS_APP_START"), variable(env, "PEEPS_APP_READY_URL"), variable(env, "PEEPS_APP_RESET")),
   };
 }
 
@@ -218,5 +235,10 @@ export function readRunnerEnv(env: NodeJS.ProcessEnv = process.env): RunnerEnv {
     workspace,
     oidc: requestUrl && requestToken ? { requestUrl, requestToken } : null,
     idToken: null,
+    app: appOf(
+      input(env, "app-start") ?? variable(env, "PEEPS_APP_START"),
+      input(env, "app-ready-url") ?? variable(env, "PEEPS_APP_READY_URL"),
+      input(env, "app-reset") ?? variable(env, "PEEPS_APP_RESET"),
+    ),
   };
 }

@@ -11,6 +11,7 @@ import type { Layer } from "./codec";
 import type { Fingerprint } from "./fingerprint/rules";
 import type { AttemptEvidence, EvidenceKind } from "./port";
 import type { MemberEvidence } from "./recording";
+import type { ServerFootprint } from "./server/rules";
 
 /** What the reporter writes for each attempt of a planned test. */
 export interface AttemptRecord {
@@ -21,6 +22,8 @@ export interface AttemptRecord {
   passed: boolean;
   /** The HAR footprint, when the reporter recorded one. */
   har: { paths: string[]; complete: boolean } | null;
+  /** The test's file, absolute: which invocation of a server recording should have run it. */
+  file?: string;
 }
 
 /** What the worker writes when a test opens a browser context: that context owes a final record. */
@@ -30,12 +33,19 @@ export interface ContextMarker {
   contextId: string;
 }
 
+/** Server evidence (PQA-3201 PR 3): the ambient invocation's footprint, and each test's spec invocation's. */
+export interface ServerEvidence {
+  ambient: ServerFootprint;
+  /** By Playwright's `TestCase.id`: every test of a spec file holds that file's invocation's footprint. */
+  byTest: ReadonlyMap<string, ServerFootprint>;
+}
+
 export interface JobEvidence {
   layers: Layer[];
   measured: EvidenceKind[];
   /** Plaintext `file:` keys of every source in a script any attempt loaded. */
   loadedFiles: string[];
-  /** The browser has no startup window shared by every test. */
+  /** What the app ran with no test running (`fn:` and `file:` keys): every test shares it. The browser has none. */
   ambient: string[];
   members: MemberEvidence[];
   /** The one browser build every attempt ran in, or null when there were several or none. */
@@ -50,7 +60,11 @@ export function membersOf(
   contexts: ContextMarker[],
   /** Attempts with a context whose marker never landed: none is whole, whatever records did. */
   taints: Array<{ testId: string; retry: number }> = [],
+  serverEvidence?: ServerEvidence,
 ): JobEvidence {
+  // `code` measured covers every listed layer: with the browser listed (HAR) but its coverage
+  // refused, server code would claim the browser's measured too. Then no server evidence.
+  const server = serverEvidence && (collected.coverage || !collected.har) ? serverEvidence : undefined;
   const taintedAttempts = new Set(taints.map((t) => `${t.testId}\u0000${t.retry}`));
   const collector = browserCollector(fingerprint);
   const covered = new Map<string, AttemptFile[]>();
@@ -82,6 +96,16 @@ export function membersOf(
         member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], reasons: ["context_unfinished"] });
       for (const file of files) member.evidence.push(collector.collect(file.coverage));
     }
+    if (server) {
+      const own = server.byTest.get(record.testId);
+      member.evidence.push(
+        own
+          ? { keys: own.keys, paths: [], partial: own.partial, reasons: own.reasons.map((r) => `server_${r}`) }
+          : { keys: [], paths: [], partial: ["code"], reasons: ["server_missing"] },
+      );
+      // Unknown shared work is unknown for every test.
+      if (server.ambient.partial.length > 0) member.evidence.push({ keys: [], paths: [], partial: ["code"], reasons: server.ambient.reasons.map((r) => `ambient_${r}`) });
+    }
   }
   for (const member of byRun.values()) member.attempts.sort((a, b) => a.retry - b.retry);
 
@@ -97,13 +121,16 @@ export function membersOf(
       }
     }
   }
+  if (server) for (const footprint of [server.ambient, ...server.byTest.values()]) for (const file of footprint.loaded) if (file.startsWith("file:")) loaded.add(file);
   const [only] = browsers;
-  const measured: EvidenceKind[] = [...(collected.coverage ? (["code", "css"] as const) : []), ...(collected.har ? (["route"] as const) : [])];
+  const measured: EvidenceKind[] = [...(collected.coverage || server ? (["code"] as const) : []), ...(collected.coverage ? (["css"] as const) : []), ...(collected.har ? (["route"] as const) : [])];
+  const browserLayer = collected.coverage || collected.har;
   return {
-    layers: measured.length > 0 ? ["browser"] : [],
+    layers: [...(browserLayer ? (["browser"] as const) : []), ...(server ? (["server"] as const) : [])],
     measured,
     loadedFiles: [...loaded].sort(),
-    ambient: [],
+    // Peeps takes only code ids here; a whole script's `out:` key stays in each member, whose invocation started the same app.
+    ambient: server ? server.ambient.keys.filter((key) => key.startsWith("fn:") || key.startsWith("file:")) : [],
     members: [...byRun.values()],
     browser: browsers.size === 1 && only ? (([name, version]) => ({ name, version }))(JSON.parse(only) as [string, string]) : null,
   };

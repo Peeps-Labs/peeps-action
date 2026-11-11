@@ -347,3 +347,20 @@ test("missing FFmpeg preserves system-browser outcomes and screenshot evidence w
   assert.equal(uploads(peeps.requests, ".webm").length, 0);
   assert.match(result.output, /default video disabled.*playwright install ffmpeg/);
 });
+
+test("when the action owns the app, the config's own webServer is dropped; otherwise it stays (PQA-3201 PR 3)", async (t) => {
+  const dir = await realpath(await mkdtemp(path.join(tmpdir(), "peeps-owns-app-")));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, "playwright.config.cjs"), `module.exports = { webServer: { command: "npm start", url: "http://localhost:3000" }, use: { video: "off" } };\n`);
+  const env = readRunnerEnv({ GITHUB_WORKSPACE: dir, INPUT_CONFIG: "playwright.config.cjs" });
+  const load = async (options: Parameters<typeof prepareCaptureConfig>[1]) => {
+    const capture = await prepareCaptureConfig(env, options);
+    try {
+      return ((await require(capture.configPath)) as { default: { webServer?: unknown } }).default;
+    } finally {
+      await capture.cleanup();
+    }
+  };
+  assert.equal((await load({ ownsApp: true })).webServer, undefined);
+  assert.deepEqual((await load({})).webServer, { command: "npm start", url: "http://localhost:3000" });
+});

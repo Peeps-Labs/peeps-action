@@ -150,3 +150,11 @@ test("the footprints carry the browser build that recorded, or none", () => {
   const unknown = footprintsRecording(key, { layers: ["browser"], measured: ["code"], members: [] });
   assert.equal(unknown.kind === "footprints" && unknown.browser, null);
 });
+
+test("ambient code leaves keyed, like every other token (PQA-3201 PR 3)", () => {
+  const blob = footprintsRecording(key, { layers: ["server"], measured: ["code"], members: [], ambient: ["fn:server:src/app/api/heartbeat/route.ts:GET", "file:src/app/api/heartbeat/route.ts"] });
+  assert.equal(blob.kind, "footprints");
+  assert.deepEqual(blob.universe.ambient, [tokenOf(key, "fn:server:src/app/api/heartbeat/route.ts:GET"), tokenOf(key, "file:src/app/api/heartbeat/route.ts")]);
+  const none = footprintsRecording(key, { layers: ["browser"], measured: ["code"], members: [] });
+  assert.deepEqual(none.kind === "footprints" && none.universe.ambient, []);
+});

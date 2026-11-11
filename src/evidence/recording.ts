@@ -47,6 +47,8 @@ export interface FootprintsInput {
   loadedFiles?: string[];
   /** The browser build that recorded: recording metadata, never the binding. */
   browser?: { name: string; version: string } | null;
+  /** Plaintext `fn:` and `file:` keys every test shares (PQA-3201 PR 3). */
+  ambient?: string[];
 }
 
 export function footprintsRecording(key: Buffer, input: FootprintsInput): RecordingBlob {
@@ -56,5 +58,5 @@ export function footprintsRecording(key: Buffer, input: FootprintsInput): Record
     const union = unionEvidence(evidence);
     return { run, attempts, partial: union.partial, tokens: evidenceTokens(key, union) };
   });
-  return { kind: "footprints", browser: input.browser ?? null, universe: { layers: input.layers, measured: input.measured, loadedFiles: (input.loadedFiles ?? []).map((f) => tokenOf(key, f)), ambient: [] }, members };
+  return { kind: "footprints", browser: input.browser ?? null, universe: { layers: input.layers, measured: input.measured, loadedFiles: (input.loadedFiles ?? []).map((f) => tokenOf(key, f)), ambient: (input.ambient ?? []).map((k) => tokenOf(key, k)) }, members };
 }
