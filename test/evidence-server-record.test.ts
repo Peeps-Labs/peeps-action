@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 import { fingerprintBuild } from "../src/evidence/fingerprint/rules";
 import type { InvocationCoverage } from "../src/evidence/server/rules";
-import { recordServer, specFilter, type Invoke } from "../src/evidence/server/record";
+import { groupsOf, recordServer, specFilter, type Invoke } from "../src/evidence/server/record";
 import { BASE, nextBuild } from "./support/next-build";
 
 const build = nextBuild(BASE);
@@ -40,7 +40,8 @@ test("ambient, then each spec file once; a test holds the footprint of the invoc
     coverageDir: "/tmp/cov",
     scripts: fingerprint.scripts,
     nextDir: NEXT,
-    runTests: async (spec) => {
+    runTests: async (files) => {
+      const spec = files?.[0] ?? null;
       seen.push(spec === null ? "ambient" : spec.split("/").at(-1)!);
       if (spec?.endsWith("a.spec.ts")) ids.push({ testId: "a1", file: spec }, { testId: "a2", file: spec }, { testId: "a2", file: spec });
       if (spec?.endsWith("b.spec.ts")) ids.push({ testId: "b1", file: spec });
@@ -68,7 +69,8 @@ test("a test recorded in another file's invocation is unknown: that invocation's
     coverageDir: "/c",
     scripts: fingerprint.scripts,
     nextDir: NEXT,
-    runTests: async (spec) => {
+    runTests: async (files) => {
+      const spec = files?.[0] ?? null;
       if (spec === "/s/a.spec.ts") ids.push({ testId: "a1", file: "/s/a.spec.ts" }, { testId: "b1", file: "/s/b.spec.ts" }, { testId: "x1", file: null });
       return 0;
     },
@@ -100,7 +102,8 @@ test("once a run changed the build directory, every later run's footprint is unk
     coverageDir: "/c",
     scripts: fingerprint.scripts,
     nextDir: NEXT,
-    runTests: async (spec) => {
+    runTests: async (files) => {
+      const spec = files?.[0] ?? null;
       if (spec) ids.push({ testId: spec.slice(3, 4), file: spec });
       return 0;
     },
@@ -124,10 +127,45 @@ test("the preload is the action's, never the app's: its own code doesn't make a 
     coverageDir: "/c",
     scripts: fingerprint.scripts,
     nextDir: NEXT,
-    runTests: async (spec) => (spec && ids.push({ testId: "a", file: spec }), 0),
+    runTests: async (files) => (files && ids.push({ testId: "a", file: files[0]! }), 0),
     attempts: () => [...ids],
     invoke: async (_a, _o, tests) => ({ exitCode: await tests(), coverage: withPreload }),
     buildDir: { snapshot: () => undefined, settle: () => ({ created: [], changed: [] }) },
   });
   assert.deepEqual([result.server.ambient.reasons, result.server.byTest.get("a")!.reasons], [[], []]);
+});
+
+test("files go into runs of a fixed size, in order", () => {
+  assert.deepEqual(groupsOf(["a", "b", "c", "d", "e"], 2), [["a", "b"], ["c", "d"], ["e"]]);
+  assert.deepEqual(groupsOf(["a", "b"], 1), [["a"], ["b"]]);
+});
+
+test("two files per run: both files' tests hold that run's footprint, and only theirs", async () => {
+  const ids: Array<{ testId: string; file: string | null }> = [];
+  const seen: string[][] = [];
+  const coverageFor = [ran("onSuccess"), ran("Badge")];
+  let call = 0;
+  const result = await recordServer({
+    app,
+    specs: ["/s/a.spec.ts", "/s/b.spec.ts", "/s/c.spec.ts"],
+    perRun: 2,
+    preload: "/p",
+    coverageDir: "/c",
+    scripts: fingerprint.scripts,
+    nextDir: NEXT,
+    runTests: async (files) => {
+      if (files) {
+        seen.push(files);
+        for (const file of files) ids.push({ testId: file.slice(3, 4), file });
+      }
+      return 0;
+    },
+    attempts: () => [...ids],
+    invoke: async (_a, options, tests) => ({ exitCode: await tests(), coverage: options.kind === "ambient" ? ran() : coverageFor[call++]! }),
+    buildDir: { snapshot: () => undefined, settle: () => ({ created: [], changed: [] }) },
+  });
+  assert.deepEqual(seen, [["/s/a.spec.ts", "/s/b.spec.ts"], ["/s/c.spec.ts"]]);
+  const has = (id: string, suffix: string) => result.server.byTest.get(id)!.keys.some((k) => k.endsWith(suffix));
+  assert.ok(has("a", ":onSuccess") && has("b", ":onSuccess") && !has("a", ":Badge"));
+  assert.ok(has("c", ":Badge") && !has("c", ":onSuccess"));
 });

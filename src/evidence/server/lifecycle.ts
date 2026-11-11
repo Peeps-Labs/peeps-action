@@ -6,7 +6,7 @@
  * invocation's footprint partial, and the tests still run.
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
 import type { InvocationCoverage, V8Script } from "./rules";
 
@@ -38,6 +38,10 @@ export interface InvocationOptions {
   kind: "ambient" | "spec";
   readyTimeoutMs?: number;
   stopTimeoutMs?: number;
+  /** Set the coverage aside at the stop and return a reader, instead of parsing it then. */
+  defer?: boolean;
+  /** Runs right after the app is spawned, while it starts: work that can overlap it. */
+  whileStarting?: () => void;
 }
 
 const READY_TIMEOUT_MS = 180_000;
@@ -103,7 +107,7 @@ export async function runInvocation(
   app: AppCommand,
   options: InvocationOptions,
   tests: () => Promise<number>,
-): Promise<{ exitCode: number; coverage: InvocationCoverage; timings?: InvocationTimings }> {
+): Promise<{ exitCode: number; coverage?: InvocationCoverage; read?: () => InvocationCoverage; timings?: InvocationTimings }> {
   const problems: string[] = [];
   const at = [Date.now()];
   rmSync(options.dir, { recursive: true, force: true });
@@ -151,6 +155,7 @@ export async function runInvocation(
   for (const s of signals) process.on(s, onSignal);
   let exited = false;
   child.on("exit", () => (exited = true));
+  options.whileStarting?.();
   child.on("error", () => (exited = true));
   const ready = await waitUntil(
     async () => {
@@ -188,8 +193,16 @@ export async function runInvocation(
       }
     }
   }
-  const coverage = readInvocationCoverage(options.dir, problems);
+  let coverage: InvocationCoverage | undefined;
+  let read: (() => InvocationCoverage) | undefined;
+  if (options.defer) {
+    // Out of the way of the next run's directory, read when the caller is ready to.
+    const aside = `${options.dir}.done`;
+    rmSync(aside, { recursive: true, force: true });
+    renameSync(options.dir, aside);
+    read = () => readInvocationCoverage(aside, problems);
+  } else coverage = readInvocationCoverage(options.dir, problems);
   at.push(Date.now());
   const [t0, t1, t2, t3, t4] = at as [number, number, number, number, number];
-  return { exitCode, coverage, timings: { resetMs: t1 - t0, readyMs: t2 - t1, testsMs: t3 - t2, stopMs: t4 - t3 } };
+  return { exitCode, coverage, read, timings: { resetMs: t1 - t0, readyMs: t2 - t1, testsMs: t3 - t2, stopMs: t4 - t3 } };
 }

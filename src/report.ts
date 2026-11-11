@@ -34,7 +34,7 @@ import { coverageConflictIn } from "./evidence/browser/conflict";
 import { membersOf, type AttemptRecord, type ContextMarker, type ServerEvidence } from "./evidence/members";
 import { collectTables } from "./evidence/pg/collector";
 import { openScratch } from "./evidence/scratch";
-import { recordServer, specFilter } from "./evidence/server/record";
+import { recordServer, runAmbient, specFilter, type AmbientRun } from "./evidence/server/record";
 import { peepsTransport, uploadEvidence } from "./evidence/upload";
 import { computeReach } from "./reach";
 import { localRepository } from "./reach/git";
@@ -136,6 +136,8 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
     ...announceFieldsOf(negotiated),
   };
   // Only when Peeps asked: the head build's fingerprint, whose receipt the announce cites.
+  // The ambient run (its reset, start, global setup and stop) runs beside the fingerprint and the announce.
+  const earlyAmbient = negotiated.collect ? startEarlyAmbient(env, negotiated.collect, list) : undefined;
   let impact = negotiated.collect
     ? await prepareImpact({
         appDir: env.workingDirectory,
@@ -168,7 +170,10 @@ export async function runReport(env: RunnerEnv, peeps: PeepsClient): Promise<voi
   // Fail safe: a suite that may run precise coverage itself resets ours (see `conflict.ts`).
   const conflict = recorded?.some((p) => p.collect.coverage) ? await coverageConflictIn([rootDirAbs, env.workingDirectory]) : null;
   if (conflict) console.log(`[peeps] not recording browser coverage: ${conflict}`);
-  const server = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list), list.config.shard) : null;
+  const planned = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list), list.config.shard) : null;
+  // The ambient run already started beside the fingerprint: this recording's, or one to finish first.
+  const server = planned && earlyAmbient ? { ...planned, ambient: earlyAmbient } : planned;
+  if (earlyAmbient && !server) await earlyAmbient;
   const recording = impact && recorded && recorded.length > 0 ? { impact: { fingerprint: impact.fingerprint, projects: recorded, coverage: conflict === null, ...(server ? { server } : {}) } } : {};
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -308,6 +313,8 @@ export async function executeAndReport(
     const coverage = evidence && input.impact?.coverage && input.impact.projects.some((p) => p.collect.coverage) ? { worker: path.join(__dirname, "evidence-worker.js"), dir: evidence.dir } : undefined;
     const plan = input.impact?.server;
     let server: ServerEvidence | undefined;
+    // An ambient run started early owns the app until it ends: nothing else runs before.
+    const ambient = plan?.ambient ? await plan.ambient : null;
     // Only beside browser coverage, which a suite running precise coverage itself refuses (`conflict.ts`).
     if (evidence && plan && !input.selection && coverage !== undefined) {
       // One invocation per spec file, each with the app to itself (PQA-3201 PR 3).
@@ -321,8 +328,9 @@ export async function executeAndReport(
         sources: new Set(input.impact!.fingerprint.files.values()),
         tracked: plan.tracked,
         nextDir: plan.nextDir,
-        runTests: (spec, index) =>
-          runPlaywright(env, planFile, reportDir, undefined, { ...input.extraEnv, PEEPS_INVOCATION: spec === null ? "ambient" : "spec" }, input.narrowed, input.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : path.join(blobDir, `report-${index}.zip`) }),
+        ...(ambient ? { ambient: Promise.resolve(ambient) } : {}),
+        runTests: (files, index) =>
+          runPlaywright(env, planFile, reportDir, undefined, { ...input.extraEnv, PEEPS_INVOCATION: files === null ? "ambient" : "spec" }, input.narrowed, input.footprints?.record === true, coverage, { files, blobFile: files === null ? null : path.join(blobDir, `report-${index}.zip`) }),
         attempts: () => (evidence.read("att-") as AttemptRecord[]).map((record) => ({ testId: record.testId, file: typeof record.file === "string" ? realOr(record.file) : null })),
       });
       exitCode = recorded.exitCode;
@@ -439,11 +447,12 @@ async function runPlaywright(
   narrowed = false,
   collectFootprints = false,
   coverage?: { worker: string; dir: string },
-  /** One invocation of a server recording: one spec file, or none for ambient; its report as a blob to merge. */
-  invocation?: { spec: string | null; blobFile: string | null },
+  /** One invocation of a server recording: its test files, or none for ambient; its report as a blob to merge. */
+  invocation?: { files: string[] | null; blobFile: string | null },
 ): Promise<number> {
   const reporterPath = path.join(__dirname, "reporter.js");
-  const reporters = invocation ? `${reporterPath},list${invocation.blobFile ? ",blob" : ""}` : `${reporterPath},list,html`;
+  // The ambient run reports no test, so it needs no plan: the list reporter alone.
+  const reporters = invocation ? (invocation.files === null ? "list" : `${reporterPath},list${invocation.blobFile ? ",blob" : ""}`) : `${reporterPath},list,html`;
   const args = ["playwright", "test", `--reporter=${reporters}`];
   let capture: Awaited<ReturnType<typeof prepareCaptureConfig>> | undefined;
   try {
@@ -467,7 +476,7 @@ async function runPlaywright(
   }
   // Ambient runs no test, though its global setup and teardown run; a spec runs that one file.
   // No `--` before the filter: Playwright (1.63) ignores file filters after it. It starts with `^`, so it's never read as an option.
-  if (invocation) args.push(...(invocation.spec === null ? ["--grep", "(?!)", "--pass-with-no-tests"] : [specFilter(invocation.spec)]));
+  if (invocation) args.push(...(invocation.files === null ? ["--grep", "(?!)", "--pass-with-no-tests"] : invocation.files.map(specFilter)));
   try {
     return await new Promise((resolve) => {
       const couldNotStart = (error: unknown) => {
@@ -520,6 +529,37 @@ export interface ServerPlan {
   nextDir: string;
   /** Whether git tracks a real absolute path; none outside a repository, so unmatched code reads unknown. */
   tracked: (file: string) => boolean;
+  /** The ambient run, started beside the fingerprint and the announce; null when it couldn't run. */
+  ambient?: Promise<AmbientRun | null>;
+}
+
+/**
+ * The ambient run needs nothing the announce gives, so when this job will record server
+ * evidence it starts right after the preflight, beside the fingerprint and the announce.
+ * A failure is no early run: the recording then runs its own.
+ */
+function startEarlyAmbient(env: RunnerEnv, collect: Array<{ coverage: boolean }>, list: PlaywrightList): Promise<AmbientRun | null> | undefined {
+  if (!env.app || !collect.some((c) => c.coverage) || process.env.NODE_V8_COVERAGE || list.config.shard) return undefined;
+  let nextDir: string;
+  try {
+    nextDir = realpathSync(path.join(env.workingDirectory, ".next"));
+  } catch {
+    return undefined;
+  }
+  const app = env.app;
+  return (async () => {
+    const dir = await mkdtemp(path.join(process.env.RUNNER_TEMP ?? tmpdir(), "peeps-ambient-"));
+    return runAmbient({
+      app: { ...app, cwd: env.workingDirectory, env: { ...process.env, CI: "1" } },
+      preload: realOr(path.join(__dirname, "evidence-preload.js")),
+      coverageDir: dir,
+      nextDir,
+      runTests: () => runPlaywright(env, "", "", undefined, { PEEPS_INVOCATION: "ambient" }, false, false, undefined, { files: null, blobFile: null }),
+    });
+  })().catch((error: unknown) => {
+    console.log(`[peeps] the early ambient run failed (${String(error).slice(0, 200)}): the recording runs its own`);
+    return null;
+  });
 }
 
 /** Every file git tracks in the checkout holding `dir`, as real absolute paths; none when that can't be read. */

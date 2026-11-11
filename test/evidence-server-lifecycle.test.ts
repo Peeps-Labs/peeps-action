@@ -8,6 +8,12 @@ import { createServer } from "node:net";
 
 import { runInvocation, type AppCommand } from "../src/evidence/server/lifecycle";
 
+/** One invocation, its coverage read whichever way it was taken. */
+async function runOnce(...args: Parameters<typeof runInvocation>) {
+  const run = await runInvocation(...args);
+  return { ...run, coverage: run.coverage ?? run.read!() };
+}
+
 const PRELOAD = path.join(__dirname, "..", "src", "evidence", "server", "preload.cjs");
 
 async function freePort(): Promise<number> {
@@ -40,13 +46,13 @@ async function app(over: Partial<AppCommand> = {}, env: Record<string, string> =
   return { start: "node server.js", readyUrl: `http://127.0.0.1:${port}/ready`, reset: null, cwd, env: { ...process.env, PORT: String(port), ...env }, ...over };
 }
 
-const ranIn = (coverage: Awaited<ReturnType<typeof runInvocation>>["coverage"], name: string) =>
+const ranIn = (coverage: { files: Array<{ result: Array<{ url: string; functions: Array<{ functionName: string; ranges: Array<{ count: number }> }> }> }> }, name: string) =>
   coverage.files.some(({ result }) => result.some((s) => s.url.endsWith("/server.js") && s.functions.some((f) => f.functionName === name && f.ranges[0]!.count > 0)));
 
 test("the app runs for the invocation's tests: what they reached ran, its coverage taken on SIGTERM", async () => {
   const command = await app();
   const dir = path.join(command.cwd, "cov");
-  const { exitCode, coverage } = await runInvocation(command, { dir, preload: PRELOAD, kind: "spec" }, async () => {
+  const { exitCode, coverage } = await runOnce(command, { dir, preload: PRELOAD, kind: "spec" }, async () => {
     assert.equal(await (await fetch(command.readyUrl.replace("/ready", "/work"))).text(), "worked");
     return 3;
   });
@@ -63,7 +69,7 @@ test("the app runs for the invocation's tests: what they reached ran, its covera
 test("every Node process the app starts registers, and the whole group is stopped and taken", async () => {
   const command = await app({}, { CHILD: "1" });
   const dir = path.join(command.cwd, "cov");
-  const { coverage } = await runInvocation(command, { dir, preload: PRELOAD, kind: "spec" }, async () => {
+  const { coverage } = await runOnce(command, { dir, preload: PRELOAD, kind: "spec" }, async () => {
     // The child starts after the app answers: wait until it has registered too.
     for (let i = 0; i < 100 && require("node:fs").readdirSync(dir).filter((n: string) => n.startsWith("pid-")).length < 2; i++) await new Promise((r) => setTimeout(r, 50));
     return 0;
@@ -74,27 +80,27 @@ test("every Node process the app starts registers, and the whole group is stoppe
 
 test("the reset runs first, told which invocation it is; its failure is a named problem, and the tests still run", async () => {
   const command = await app({ reset: 'echo "$PEEPS_INVOCATION" > reset.txt' });
-  await runInvocation(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "ambient" }, async () => 0);
+  await runOnce(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "ambient" }, async () => 0);
   assert.equal(require("node:fs").readFileSync(path.join(command.cwd, "reset.txt"), "utf8").trim(), "ambient");
   const failing = await app({ reset: "exit 4" });
   let ran = false;
-  const { coverage } = await runInvocation(failing, { dir: path.join(failing.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => ((ran = true), 0));
+  const { coverage } = await runOnce(failing, { dir: path.join(failing.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => ((ran = true), 0));
   assert.ok(ran);
   assert.deepEqual(coverage.problems, ["reset_failed"]);
 });
 
 test("an app that never answers is not ready; one that exits early says so; the tests still run", async () => {
   const deaf = await app({ readyUrl: "http://127.0.0.1:9/never" });
-  const slow = await runInvocation(deaf, { dir: path.join(deaf.cwd, "cov"), preload: PRELOAD, kind: "spec", readyTimeoutMs: 1_500 }, async () => 0);
+  const slow = await runOnce(deaf, { dir: path.join(deaf.cwd, "cov"), preload: PRELOAD, kind: "spec", readyTimeoutMs: 1_500 }, async () => 0);
   assert.ok(slow.coverage.problems.includes("not_ready"));
   const quitter = await app({ start: "node -e 'process.exit(0)'" });
-  const gone = await runInvocation(quitter, { dir: path.join(quitter.cwd, "cov"), preload: PRELOAD, kind: "spec", readyTimeoutMs: 5_000 }, async () => 0);
+  const gone = await runOnce(quitter, { dir: path.join(quitter.cwd, "cov"), preload: PRELOAD, kind: "spec", readyTimeoutMs: 5_000 }, async () => 0);
   assert.ok(gone.coverage.problems.includes("app_exited"), JSON.stringify(gone.coverage.problems));
 });
 
 test("an app that dies while its tests run says so: it may have served only some of them", async () => {
   const command = await app({ start: "node server.js & pid=$!; sleep 0.5; while kill -0 $pid 2>/dev/null; do sleep 0.1; done" });
-  const { coverage } = await runInvocation(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => {
+  const { coverage } = await runOnce(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => {
     // Ready, then the app goes away mid-run.
     for (const pid of require("node:fs").readdirSync(path.join(command.cwd, "cov")).filter((n: string) => n.startsWith("pid-"))) process.kill(Number(pid.slice(4, -5)), "SIGKILL");
     await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -108,7 +114,7 @@ test("something already answering the ready URL before the app starts can't vouc
   const squatter = require("node:http").createServer((_req: unknown, res: { end: (body: string) => void }) => res.end("ok")).listen(Number(command.env.PORT), "127.0.0.1");
   await new Promise((resolve) => squatter.once("listening", resolve));
   try {
-    const { coverage } = await runInvocation(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec", readyTimeoutMs: 3_000 }, async () => 0);
+    const { coverage } = await runOnce(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec", readyTimeoutMs: 3_000 }, async () => 0);
     assert.ok(coverage.problems.includes("ready_before_start"), JSON.stringify(coverage.problems));
   } finally {
     squatter.close();
@@ -117,7 +123,7 @@ test("something already answering the ready URL before the app starts can't vouc
 
 test("an app that stopped coverage itself has no final take: not taken, so partial", async () => {
   const command = await app({ start: `node -e 'require("node:v8").takeCoverage(); require("node:v8").stopCoverage(); require("./server.js")'` });
-  const { coverage } = await runInvocation(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => {
+  const { coverage } = await runOnce(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => {
     await fetch(command.readyUrl.replace("/ready", "/work"));
     return 0;
   });
@@ -161,9 +167,26 @@ runInvocation({ ...${JSON.stringify({ ...command, env: undefined })}, env: proce
 test("a worker thread's own take can't vouch for a main thread that stopped coverage", async () => {
   const start = `node -e 'require("node:v8").takeCoverage(); require("node:v8").stopCoverage(); new (require("node:worker_threads").Worker)("1", { eval: true }); require("./server.js")'`;
   const command = await app({ start });
-  const { coverage } = await runInvocation(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => {
+  const { coverage } = await runOnce(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => {
     await new Promise((r) => setTimeout(r, 500));
     return 0;
   });
   assert.deepEqual(coverage.taken, []);
+});
+
+test("a deferred read sets the coverage aside at the stop, and reads it later; the hook runs while the app starts", async () => {
+  const command = await app();
+  const dir = path.join(command.cwd, "cov");
+  const order: string[] = [];
+  const run = await runInvocation(command, { dir, preload: PRELOAD, kind: "spec", defer: true, whileStarting: () => order.push("starting") }, async () => {
+    order.push("tests");
+    await fetch(command.readyUrl.replace("/ready", "/work"));
+    return 0;
+  });
+  assert.deepEqual(order, ["starting", "tests"]);
+  assert.equal(run.coverage, undefined, "nothing parsed at the stop");
+  assert.ok(!existsSync(dir), "the directory is free for the next run");
+  const coverage = run.read!();
+  assert.equal(coverage.started.length, 1);
+  assert.ok(ranIn(coverage, "work"));
 });

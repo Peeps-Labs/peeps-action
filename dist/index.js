@@ -1721,6 +1721,7 @@ async function runInvocation(app, options, tests) {
   for (const s2 of signals) process.on(s2, onSignal);
   let exited = false;
   child.on("exit", () => exited = true);
+  options.whileStarting?.();
   child.on("error", () => exited = true);
   const ready = await waitUntil(
     async () => {
@@ -1757,10 +1758,17 @@ async function runInvocation(app, options, tests) {
       }
     }
   }
-  const coverage = readInvocationCoverage(options.dir, problems);
+  let coverage;
+  let read;
+  if (options.defer) {
+    const aside = `${options.dir}.done`;
+    (0, import_node_fs5.rmSync)(aside, { recursive: true, force: true });
+    (0, import_node_fs5.renameSync)(options.dir, aside);
+    read = () => readInvocationCoverage(aside, problems);
+  } else coverage = readInvocationCoverage(options.dir, problems);
   at.push(Date.now());
   const [t0, t1, t2, t3, t4] = at;
-  return { exitCode, coverage, timings: { resetMs: t1 - t0, readyMs: t2 - t1, testsMs: t3 - t2, stopMs: t4 - t3 } };
+  return { exitCode, coverage, read, timings: { resetMs: t1 - t0, readyMs: t2 - t1, testsMs: t3 - t2, stopMs: t4 - t3 } };
 }
 
 // src/evidence/server/rules.ts
@@ -1865,6 +1873,32 @@ function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ n
 
 // src/evidence/server/record.ts
 var say4 = (line) => console.log(`[peeps] ${line}`);
+var FILES_PER_RUN = 1;
+function groupsOf(specs, perRun = FILES_PER_RUN) {
+  const groups = [];
+  for (let i = 0; i < specs.length; i += perRun) groups.push(specs.slice(i, i + perRun));
+  return groups;
+}
+function realBuildDir(nextDir) {
+  let snapshot = snapshotBuildDir(nextDir);
+  return { snapshot: () => snapshot = snapshotBuildDir(nextDir), settle: () => settleBuildDir(nextDir, snapshot) };
+}
+function settleBuild(build) {
+  const { created, changed } = build.settle();
+  if (created.length > 0) say4(`removed ${created.length} file(s) the app wrote into its build directory, before the next run`);
+  if (changed.length > 0) say4(`the app rewrote ${changed.length} built file(s) (${changed.slice(0, 3).join(", ")}): later runs' server evidence reads partial`);
+  return changed.length > 0;
+}
+var timing = (name, t) => t && say4(`${name}: reset ${(t.resetMs / 1e3).toFixed(1)} s, ready ${(t.readyMs / 1e3).toFixed(1)} s, tests ${(t.testsMs / 1e3).toFixed(1)} s, stop ${(t.stopMs / 1e3).toFixed(1)} s`);
+async function runAmbient(input2) {
+  const invoke = input2.invoke ?? runInvocation;
+  const build = input2.buildDir ?? realBuildDir(input2.nextDir);
+  build.snapshot();
+  const run = await invoke(input2.app, { dir: import_node_path14.default.join(input2.coverageDir, "ambient"), preload: input2.preload, kind: "ambient", defer: true }, input2.runTests);
+  timing("ambient", run.timings);
+  const rewrote = settleBuild(build);
+  return { exitCode: run.exitCode, read: run.read ?? (() => run.coverage), timings: run.timings, build, rewrote };
+}
 function specFilter(file) {
   return `^${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
 }
@@ -1874,48 +1908,48 @@ async function recordServer(input2) {
   const preload = input2.preload.split(import_node_path14.default.sep).join("/");
   const ownCode = (file) => file === preload;
   const footprint = (coverage) => serverFootprint(coverage, input2.scripts, input2.nextDir, input2.sources, ownCode, input2.tracked);
-  const build = input2.buildDir ?? (() => {
-    let snapshot = snapshotBuildDir(input2.nextDir);
-    return { snapshot: () => snapshot = snapshotBuildDir(input2.nextDir), settle: () => settleBuildDir(input2.nextDir, snapshot) };
-  })();
-  build.snapshot();
-  let tainted = false;
-  const settle = () => {
-    const { created, changed } = build.settle();
-    if (created.length > 0) say4(`removed ${created.length} file(s) the app wrote into its build directory, before the next run`);
-    if (changed.length > 0 && !tainted) {
-      say4(`the app rewrote ${changed.length} built file(s) (${changed.slice(0, 3).join(", ")}): later runs' server evidence reads partial`);
-      tainted = true;
-    }
+  const ambientRun = await (input2.ambient ?? runAmbient({ app: input2.app, preload: input2.preload, coverageDir: input2.coverageDir, nextDir: input2.nextDir, runTests: () => input2.runTests(null, 0), invoke, buildDir: input2.buildDir }));
+  let exitCode = ambientRun.exitCode;
+  let tainted = ambientRun.rewrote;
+  const taint = (fp) => ({ ...fp, partial: ["code"], reasons: [...fp.reasons, "build_dir_changed"] });
+  let ambient;
+  let deferred = () => {
+    ambient = footprint(ambientRun.read());
+    if (ambient.reasons.length > 0) say4(`the ambient run's server evidence is partial (${ambient.reasons.join(", ")}): every test's is`);
   };
-  const taint = (fp) => tainted ? { ...fp, partial: ["code"], reasons: [...fp.reasons, "build_dir_changed"] } : fp;
-  let exitCode = 0;
-  const ambientRun = await invoke(input2.app, { dir: import_node_path14.default.join(input2.coverageDir, "ambient"), preload: input2.preload, kind: "ambient" }, () => input2.runTests(null, 0));
-  if (ambientRun.exitCode !== 0) exitCode = ambientRun.exitCode;
-  const ambient = footprint(ambientRun.coverage);
-  const timing = (name, t) => t && say4(`${name}: reset ${(t.resetMs / 1e3).toFixed(1)} s, ready ${(t.readyMs / 1e3).toFixed(1)} s, tests ${(t.testsMs / 1e3).toFixed(1)} s, stop ${(t.stopMs / 1e3).toFixed(1)} s`);
-  timing("ambient", ambientRun.timings);
-  if (ambient.reasons.length > 0) say4(`the ambient run's server evidence is partial (${ambient.reasons.join(", ")}): every test's is`);
-  settle();
+  const flush = () => {
+    const work = deferred;
+    deferred = null;
+    work?.();
+  };
   const byTest = /* @__PURE__ */ new Map();
   const counts = () => {
     const out = /* @__PURE__ */ new Map();
     for (const { testId, file } of input2.attempts()) out.set(testId, { count: (out.get(testId)?.count ?? 0) + 1, file });
     return out;
   };
-  for (const [i, spec] of input2.specs.entries()) {
+  for (const [i, files] of groupsOf(input2.specs, input2.perRun).entries()) {
     const before = counts();
-    const run = await invoke(input2.app, { dir: import_node_path14.default.join(input2.coverageDir, `spec-${i}`), preload: input2.preload, kind: "spec" }, () => input2.runTests(spec, i + 1));
+    const run = await invoke(input2.app, { dir: import_node_path14.default.join(input2.coverageDir, `spec-${i}`), preload: input2.preload, kind: "spec", defer: true, whileStarting: flush }, () => input2.runTests(files, i + 1));
     if (run.exitCode !== 0) exitCode = run.exitCode;
-    timing(import_node_path14.default.basename(spec), run.timings);
-    const own = taint(footprint(run.coverage));
-    if (own.reasons.length > 0) say4(`${import_node_path14.default.basename(spec)}: server evidence partial (${own.reasons.join(", ")})`);
-    settle();
-    for (const [id, { count, file }] of counts()) {
-      if (count === (before.get(id)?.count ?? 0)) continue;
-      byTest.set(id, file === spec && !byTest.has(id) ? own : elsewhere);
-    }
+    const label = files.map((file) => import_node_path14.default.basename(file)).join(", ");
+    timing(label, run.timings);
+    const after = counts();
+    const servedTainted = tainted;
+    if (settleBuild(input2.buildDir ?? ambientRun.build)) tainted = true;
+    const read = run.read ?? (() => run.coverage);
+    flush();
+    deferred = () => {
+      const mapped = footprint(read());
+      const own = servedTainted ? taint(mapped) : mapped;
+      if (own.reasons.length > 0) say4(`${label}: server evidence partial (${own.reasons.join(", ")})`);
+      for (const [id, { count, file }] of after) {
+        if (count === (before.get(id)?.count ?? 0)) continue;
+        byTest.set(id, file !== null && files.includes(file) && !byTest.has(id) ? own : elsewhere);
+      }
+    };
   }
+  flush();
   return { exitCode, server: { ambient, byTest } };
 }
 
@@ -2172,6 +2206,7 @@ async function runReport(env, peeps) {
     files,
     ...announceFieldsOf(negotiated)
   };
+  const earlyAmbient = negotiated.collect ? startEarlyAmbient(env, negotiated.collect, list) : void 0;
   let impact = negotiated.collect ? await prepareImpact({
     appDir: env.workingDirectory,
     sha: env.sha,
@@ -2195,7 +2230,9 @@ async function runReport(env, peeps) {
   const recorded = impact?.projects.slice(0, MAX_RECEIPTS).map((project) => ({ project, batch: response.batches.find((b) => b.projectId === project.projectId) })).filter((p) => p.batch !== void 0).map(({ project, batch }) => ({ ...project, batchId: batch.batchId, runIds: batch.runs.map((run) => run.runId) }));
   const conflict = recorded?.some((p) => p.collect.coverage) ? await coverageConflictIn([rootDirAbs, env.workingDirectory]) : null;
   if (conflict) console.log(`[peeps] not recording browser coverage: ${conflict}`);
-  const server = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list), list.config.shard) : null;
+  const planned = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list), list.config.shard) : null;
+  const server = planned && earlyAmbient ? { ...planned, ambient: earlyAmbient } : planned;
+  if (earlyAmbient && !server) await earlyAmbient;
   const recording = impact && recorded && recorded.length > 0 ? { impact: { fingerprint: impact.fingerprint, projects: recorded, coverage: conflict === null, ...server ? { server } : {} } } : {};
   const runs = response.batches.flatMap((b) => b.runs);
   const unmatched = response.batches.flatMap((b) => b.unmatched);
@@ -2286,6 +2323,7 @@ async function executeAndReport(env, peeps, input2) {
     const coverage = evidence && input2.impact?.coverage && input2.impact.projects.some((p) => p.collect.coverage) ? { worker: import_node_path16.default.join(__dirname, "evidence-worker.js"), dir: evidence.dir } : void 0;
     const plan2 = input2.impact?.server;
     let server;
+    const ambient = plan2?.ambient ? await plan2.ambient : null;
     if (evidence && plan2 && !input2.selection && coverage !== void 0) {
       const blobDir = import_node_path16.default.join(scratch, "blobs");
       const recorded = await recordServer({
@@ -2297,7 +2335,8 @@ async function executeAndReport(env, peeps, input2) {
         sources: new Set(input2.impact.fingerprint.files.values()),
         tracked: plan2.tracked,
         nextDir: plan2.nextDir,
-        runTests: (spec, index) => runPlaywright(env, planFile, reportDir, void 0, { ...input2.extraEnv, PEEPS_INVOCATION: spec === null ? "ambient" : "spec" }, input2.narrowed, input2.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : import_node_path16.default.join(blobDir, `report-${index}.zip`) }),
+        ...ambient ? { ambient: Promise.resolve(ambient) } : {},
+        runTests: (files, index) => runPlaywright(env, planFile, reportDir, void 0, { ...input2.extraEnv, PEEPS_INVOCATION: files === null ? "ambient" : "spec" }, input2.narrowed, input2.footprints?.record === true, coverage, { files, blobFile: files === null ? null : import_node_path16.default.join(blobDir, `report-${index}.zip`) }),
         attempts: () => evidence.read("att-").map((record) => ({ testId: record.testId, file: typeof record.file === "string" ? realOr(record.file) : null }))
       });
       exitCode = recorded.exitCode;
@@ -2382,7 +2421,7 @@ async function recordEvidence(env, peeps, impact, scratch, collected, server) {
 }
 async function runPlaywright(env, planFile, reportDir, selection, extraEnv = {}, narrowed = false, collectFootprints = false, coverage, invocation) {
   const reporterPath = import_node_path16.default.join(__dirname, "reporter.js");
-  const reporters = invocation ? `${reporterPath},list${invocation.blobFile ? ",blob" : ""}` : `${reporterPath},list,html`;
+  const reporters = invocation ? invocation.files === null ? "list" : `${reporterPath},list${invocation.blobFile ? ",blob" : ""}` : `${reporterPath},list,html`;
   const args = ["playwright", "test", `--reporter=${reporters}`];
   let capture;
   try {
@@ -2400,7 +2439,7 @@ async function runPlaywright(env, planFile, reportDir, selection, extraEnv = {},
   if (selection) {
     args.push("--grep", selection.grep, "--", ...selection.files);
   }
-  if (invocation) args.push(...invocation.spec === null ? ["--grep", "(?!)", "--pass-with-no-tests"] : [specFilter(invocation.spec)]);
+  if (invocation) args.push(...invocation.files === null ? ["--grep", "(?!)", "--pass-with-no-tests"] : invocation.files.map(specFilter));
   try {
     return await new Promise((resolve) => {
       const couldNotStart = (error) => {
@@ -2439,6 +2478,29 @@ function realOr(file) {
   } catch {
     return file;
   }
+}
+function startEarlyAmbient(env, collect, list) {
+  if (!env.app || !collect.some((c) => c.coverage) || process.env.NODE_V8_COVERAGE || list.config.shard) return void 0;
+  let nextDir;
+  try {
+    nextDir = (0, import_node_fs6.realpathSync)(import_node_path16.default.join(env.workingDirectory, ".next"));
+  } catch {
+    return void 0;
+  }
+  const app = env.app;
+  return (async () => {
+    const dir = await (0, import_promises9.mkdtemp)(import_node_path16.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-ambient-"));
+    return runAmbient({
+      app: { ...app, cwd: env.workingDirectory, env: { ...process.env, CI: "1" } },
+      preload: realOr(import_node_path16.default.join(__dirname, "evidence-preload.js")),
+      coverageDir: dir,
+      nextDir,
+      runTests: () => runPlaywright(env, "", "", void 0, { PEEPS_INVOCATION: "ambient" }, false, false, void 0, { files: null, blobFile: null })
+    });
+  })().catch((error) => {
+    console.log(`[peeps] the early ambient run failed (${String(error).slice(0, 200)}): the recording runs its own`);
+    return null;
+  });
 }
 function trackedFiles(dir) {
   try {
