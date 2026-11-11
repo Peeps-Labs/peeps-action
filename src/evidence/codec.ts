@@ -15,11 +15,15 @@
  * or 1 then its name and full version as strings), layers and measured as u8 bitmasks,
  * loadedFiles and ambient index lists, then members ascending by run, each its
  * run, attempts ascending by retry (retry, passed u8), partial u8 bitmask and tokens.
+ * Version 2 (PQA-3430) is footprints whose members carry `partialLayers`, a u8 bitmask
+ * over the layers after `partial`, 0 exactly when `partial` is; a fingerprint, and
+ * footprints without them, stay version 1, so each value has one encoding.
  * `decodePayload` refuses every other encoding, as Peeps' reader does.
  */
 import type { EvidenceKind } from "./port";
 
-export const RECORDING_CODEC_VERSION = 1;
+/** The newest version this writes; Peeps' preflight says which it reads (`collect.codecVersions`). */
+export const RECORDING_CODEC_VERSION = 2;
 /** In Peeps' order: a bitmask's bit is the index. */
 export const LAYERS = ["browser", "server", "worker_thread", "worker_process", "build", "database"] as const;
 export const EVIDENCE_KINDS: readonly EvidenceKind[] = ["code", "out", "css", "route", "table"];
@@ -38,6 +42,8 @@ export interface RecordedMember {
   run: string;
   attempts: Array<{ retry: number; passed: boolean }>;
   partial: EvidenceKind[];
+  /** Version 2: the layers its partial kinds hold for. Absent: every layer. */
+  partialLayers?: Layer[];
   tokens: string[];
 }
 
@@ -109,7 +115,9 @@ export function encodePayload(value: RecordingBlob): Uint8Array {
   };
 
   bytes.push(...MAGIC);
-  u8(RECORDING_CODEC_VERSION);
+  const layered = value.kind === "footprints" ? value.members.filter((m) => m.partialLayers !== undefined).length : 0;
+  if (value.kind === "footprints" && layered > 0 && layered < value.members.length) fail("partial layers on some members only");
+  u8(layered > 0 ? 2 : 1);
   u8(value.kind === "fingerprint" ? 1 : 2);
   varint(dictionary.length);
   for (const entry of dictionary) string(entry);
@@ -151,6 +159,10 @@ export function encodePayload(value: RecordingBlob): Uint8Array {
       u8(attempt.passed ? 1 : 0);
     }
     u8(bitmask(EVIDENCE_KINDS, member.partial, "partial"));
+    if (member.partialLayers !== undefined) {
+      if ((member.partialLayers.length === 0) !== (member.partial.length === 0)) fail("partial layers without partial kinds, or the reverse");
+      u8(bitmask(LAYERS, member.partialLayers, "partialLayers"));
+    }
     indexList(member.tokens);
   }
   return new Uint8Array(bytes);
@@ -201,8 +213,9 @@ export function decodePayload(bytes: Uint8Array): RecordingBlob {
 
   if (Buffer.compare(Buffer.from(raw(MAGIC.length)), Buffer.from(MAGIC)) !== 0) fail("bad magic");
   const version = u8();
-  if (version !== RECORDING_CODEC_VERSION) fail(`unknown version ${version}`);
+  if (version < 1 || version > RECORDING_CODEC_VERSION) fail(`unknown version ${version}`);
   const kind = u8();
+  if (version === 2 && kind !== 2) fail("a version 2 fingerprint");
   const dictionary: string[] = [];
   const count = varint();
   for (let i = 0; i < count; i++) {
@@ -262,8 +275,16 @@ export function decodePayload(bytes: Uint8Array): RecordingBlob {
         attempts.push({ retry, passed: passed === 1 });
       }
       const partial = fromBitmask(EVIDENCE_KINDS, u8(), "partial");
-      members.push({ run, attempts, partial, tokens: indexList() });
+      if (version === 1) {
+        members.push({ run, attempts, partial, tokens: indexList() });
+        continue;
+      }
+      const partialLayers = [...fromBitmask(LAYERS, u8(), "partialLayers")];
+      if ((partialLayers.length === 0) !== (partial.length === 0)) fail("partial layers without partial kinds, or the reverse");
+      members.push({ run, attempts, partial, partialLayers, tokens: indexList() });
     }
+    // With no member to carry partial layers, version 1 is this value's one encoding.
+    if (version === 2 && members.length === 0) fail("version 2 footprints with no members");
     value = { kind: "footprints", browser, universe: { layers: [...layers], measured, loadedFiles, ambient }, members };
   } else {
     fail(`unknown kind ${kind}`);

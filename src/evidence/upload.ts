@@ -83,12 +83,12 @@ export async function uploadFingerprint(
 
 export async function uploadEvidence(
   transport: EvidenceTransport,
-  input: { batchId: string; key: Buffer; layers: Layer[]; measured: EvidenceKind[]; members: MemberEvidence[]; loadedFiles?: string[]; ambient?: string[]; browser?: { name: string; version: string } | null },
+  input: { batchId: string; key: Buffer; layers: Layer[]; measured: EvidenceKind[]; members: MemberEvidence[]; loadedFiles?: string[]; ambient?: string[]; browser?: { name: string; version: string } | null; codecVersion?: number },
   log: (message: string) => void = say,
 ): Promise<boolean> {
   try {
     if (input.members.length > MAX_MEMBERS) throw new Error(`${input.members.length} tests, over ${MAX_MEMBERS}`);
-    const blob = footprintsRecording(input.key, { layers: input.layers, measured: input.measured, loadedFiles: input.loadedFiles, ambient: input.ambient, browser: input.browser, members: input.members });
+    const blob = footprintsRecording(input.key, { layers: input.layers, measured: input.measured, loadedFiles: input.loadedFiles, ambient: input.ambient, browser: input.browser, members: input.members, codecVersion: input.codecVersion });
     const bytes = gzipRecording(blob);
     if (bytes.length > MAX_BLOB_BYTES) throw new Error(`the footprints are ${bytes.length} bytes, over ${MAX_BLOB_BYTES}`);
     await transport.postBytes(`${evidencePath(input.batchId)}?protocolVersion=${PROTOCOL_VERSION}`, bytes, UPLOAD_TIMEOUT_MS);

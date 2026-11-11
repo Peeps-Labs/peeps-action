@@ -73,6 +73,21 @@ if (Array.isArray(config.projects))
 `;
 
 /**
+ * The action starts and stops the app itself for each recorded invocation (PQA-3201 PR 3):
+ * Playwright's own webServer would start a second one, and its teardown kills the app
+ * before its coverage is taken.
+ */
+const OWN_APP = `{
+  // Playwright's own default (1.63): a single webServer object with a port and no url, and no baseURL,
+  // is http://localhost:<port>. An array, of any length, gives none.
+  const server = withEvidence.webServer;
+  if (server && !Array.isArray(server) && server.port && !server.url && withEvidence.use?.baseURL === undefined)
+    withEvidence.use = { ...withEvidence.use, baseURL: "http://localhost:" + server.port };
+  delete withEvidence.webServer;
+}
+`;
+
+/**
  * Playwright loads this wrapper in place of the original. Keeping it beside
  * that file preserves every config-relative directory and module resolution.
  * Load in the original's module format, then unwrap default exactly once as
@@ -110,7 +125,7 @@ const recordCoverage = (worker: string, dir: string) => `if (process.env.TEST_WO
 }
 `;
 
-export async function prepareCaptureConfig(env: RunnerEnv, options: { defaultRetries?: number; collectFootprints?: boolean; coverage?: { worker: string; dir: string } } = {}): Promise<{
+export async function prepareCaptureConfig(env: RunnerEnv, options: { defaultRetries?: number; collectFootprints?: boolean; coverage?: { worker: string; dir: string }; ownsApp?: boolean } = {}): Promise<{
   configPath: string;
   cleanup: () => Promise<void>;
 }> {
@@ -159,7 +174,7 @@ const withEvidence = {
     video: config.use?.video === undefined ? defaultVideo : config.use.video,
   },
 };
-${options.collectFootprints ? RECORD_TRACES : ""}${options.coverage ? recordCoverage(options.coverage.worker, options.coverage.dir) : ""}`;
+${options.ownsApp ? OWN_APP : ""}${options.collectFootprints ? RECORD_TRACES : ""}${options.coverage ? recordCoverage(options.coverage.worker, options.coverage.dir) : ""}`;
   // Await both raw CJS exports and the unwrapped value, matching Playwright's
   // async loader. Export a default envelope so its own unwrap cannot discard
   // an original config's unrelated `default` property.

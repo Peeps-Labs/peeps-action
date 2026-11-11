@@ -347,3 +347,48 @@ test("missing FFmpeg preserves system-browser outcomes and screenshot evidence w
   assert.equal(uploads(peeps.requests, ".webm").length, 0);
   assert.match(result.output, /default video disabled.*playwright install ffmpeg/);
 });
+
+test("when the action owns the app, the config's own webServer is dropped; otherwise it stays (PQA-3201 PR 3)", async (t) => {
+  const dir = await realpath(await mkdtemp(path.join(tmpdir(), "peeps-owns-app-")));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, "playwright.config.cjs"), `module.exports = { webServer: { command: "npm start", url: "http://localhost:3000" }, use: { video: "off" } };\n`);
+  const env = readRunnerEnv({ GITHUB_WORKSPACE: dir, INPUT_CONFIG: "playwright.config.cjs" });
+  const load = async (options: Parameters<typeof prepareCaptureConfig>[1]) => {
+    const capture = await prepareCaptureConfig(env, options);
+    try {
+      return ((await require(capture.configPath)) as { default: { webServer?: unknown } }).default;
+    } finally {
+      await capture.cleanup();
+    }
+  };
+  assert.equal((await load({ ownsApp: true })).webServer, undefined);
+  assert.deepEqual((await load({})).webServer, { command: "npm start", url: "http://localhost:3000" });
+});
+
+test("when the action owns the app, a webServer's port still gives the base URL Playwright would have (PQA-3201 PR 3)", async (t) => {
+  const dir = await realpath(await mkdtemp(path.join(tmpdir(), "peeps-owns-port-")));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let n = 0;
+  const load = async (config: string) => {
+    // A file per case: Node caches the config the wrapper requires.
+    const name = `playwright.${++n}.config.cjs`;
+    await writeFile(path.join(dir, name), config);
+    const capture = await prepareCaptureConfig(readRunnerEnv({ GITHUB_WORKSPACE: dir, INPUT_CONFIG: name }), { ownsApp: true });
+    try {
+      delete require.cache[capture.configPath];
+      return ((await require(capture.configPath)) as { default: { webServer?: unknown; use?: { baseURL?: string } } }).default;
+    } finally {
+      await capture.cleanup();
+    }
+  };
+  const byPort = await load(`module.exports = { webServer: { command: "npm start", port: 3000 }, use: { video: "off" } };\n`);
+  assert.deepEqual([byPort.webServer, byPort.use?.baseURL], [undefined, "http://localhost:3000"]);
+  const own = await load(`module.exports = { webServer: { command: "npm start", port: 3000 }, use: { video: "off", baseURL: "http://127.0.0.1:4000" } };\n`);
+  assert.equal(own.use?.baseURL, "http://127.0.0.1:4000", "an explicit baseURL wins");
+  const two = await load(`module.exports = { webServer: [{ command: "a", port: 3000 }, { command: "b", port: 4000 }], use: { video: "off" } };\n`);
+  assert.equal(two.use?.baseURL, undefined, "two servers: Playwright derives none");
+  const one = await load(`module.exports = { webServer: [{ command: "a", port: 3000 }], use: { video: "off" } };\n`);
+  assert.equal(one.use?.baseURL, undefined, "an array, even of one: Playwright derives none");
+  const url = await load(`module.exports = { webServer: { command: "a", port: 3000, url: "http://localhost:3000/health" }, use: { video: "off" } };\n`);
+  assert.equal(url.use?.baseURL, undefined, "a url instead: Playwright derives none");
+});

@@ -77,16 +77,25 @@ const MAX_VOTES = 200;
 
 export const sha16 = (text: string | Buffer) => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
+function decoded(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
 /** A map's source as a repo-relative path: Turbopack's `[project]`, webpack's `_N_E`, or relative to the map. */
 export function sourceName(source: string, mapFile: string, sourcePrefix: string): string {
   let appRelative: string;
   const turbopack = /^turbopack:\/\/\/(?:\[project\]\/)?(.*)$/.exec(source);
   const webpack = /^webpack:\/\/[^/]*\/(.*)$/.exec(source);
-  if (turbopack) appRelative = turbopack[1]!;
-  else if (webpack) appRelative = webpack[1]!;
+  // A map's sources are URLs: `[id]` and `(group)` segments arrive percent-encoded.
+  if (turbopack) appRelative = decoded(turbopack[1]!);
+  else if (webpack) appRelative = decoded(webpack[1]!);
   else if (/^[a-z]+:/.test(source) || source.startsWith("[")) return source;
   // Relative to the map, which sits in `.next`, inside the app.
-  else appRelative = path.join(".next", path.dirname(mapFile), source);
+  else appRelative = path.join(".next", path.dirname(mapFile), decoded(source));
   return path.normalize(path.join(sourcePrefix || ".", appRelative)).replace(/^\.\//, "");
 }
 

@@ -104,7 +104,7 @@ const answer = (projects: unknown[]) => ({ scan: true, protocolVersion: 2, proje
 
 test("collect: per project, only with protocol 2, a 64-hex key and a key version (contract §1)", () => {
   const negotiated = readPreflight(answer([{ projectId: "p1", executionMode: "shadow", collect }, { projectId: "p2", executionMode: "shadow" }]));
-  assert.deepEqual(negotiated.collect, [{ projectId: "p1", coverage: true, fingerprint: true, tables: false, key: Buffer.from(KEY_HEX, "hex"), keyVersion: "V1" }]);
+  assert.deepEqual(negotiated.collect, [{ projectId: "p1", coverage: true, fingerprint: true, tables: false, key: Buffer.from(KEY_HEX, "hex"), keyVersion: "V1", codecVersion: 1 }]);
   for (const bad of [
     { ...collect, key: "short" },
     { ...collect, key: Buffer.from(KEY_HEX, "hex").toString("base64url") },
@@ -155,4 +155,14 @@ test("every key is masked in the job's log the moment it arrives, and never prin
 test("the key never reaches the announce", () => {
   const negotiated = readPreflight(answer([{ projectId: "p1", collect }]));
   assert.doesNotMatch(JSON.stringify(announceFieldsOf(negotiated)), new RegExp(KEY_HEX.slice(0, 16)));
+});
+
+test("the codec versions Peeps reads: the newest one both know is written; none said is version 1 only (PQA-3430)", () => {
+  const read = (codecVersions: unknown) => readPreflight(answer([{ projectId: "p1", collect: { ...collect, codecVersions } }])).collect?.[0]?.codecVersion;
+  assert.equal(read([1, 2]), 2);
+  assert.equal(read([1, 2, 7]), 2, "a later version this action can't write");
+  assert.equal(read([1]), 1);
+  assert.equal(read(undefined), 1, "a server from before version 2");
+  assert.equal(read("2"), 1);
+  assert.equal(read([2, "x"]), 2);
 });

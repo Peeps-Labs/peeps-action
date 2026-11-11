@@ -161,3 +161,22 @@ test("the footprints carry the browser build that recorded, or none", () => {
   const unknown = footprintsRecording(key, { layers: ["browser"], measured: ["code"], members: [] });
   assert.equal(unknown.kind === "footprints" && unknown.browser, null);
 });
+
+test("ambient code leaves keyed, like every other token (PQA-3201 PR 3)", () => {
+  const blob = footprintsRecording(key, { layers: ["server"], measured: ["code"], members: [], ambient: ["fn:server:src/app/api/heartbeat/route.ts:GET", "file:src/app/api/heartbeat/route.ts"] });
+  assert.equal(blob.kind, "footprints");
+  assert.deepEqual(blob.universe.ambient, [tokenOf(key, "fn:server:src/app/api/heartbeat/route.ts:GET"), tokenOf(key, "file:src/app/api/heartbeat/route.ts")]);
+  const none = footprintsRecording(key, { layers: ["browser"], measured: ["code"], members: [] });
+  assert.deepEqual(none.kind === "footprints" && none.universe.ambient, []);
+});
+
+test("codec 2: each member says which layers its partial holds for; codec 1 doesn't (PQA-3430)", () => {
+  const members = [
+    { run: "r1", attempts: [{ retry: 0, passed: true }], evidence: [{ keys: ["file:a.ts"], paths: [], partial: ["code" as const], layers: ["browser" as const], reasons: ["coverage_missing"] }] },
+    { run: "r2", attempts: [{ retry: 0, passed: true }], evidence: [{ keys: ["file:a.ts"], paths: [], partial: [], reasons: [] }] },
+  ];
+  const v2 = footprintsRecording(key, { layers: ["browser", "server"], measured: ["code"], members, codecVersion: 2 });
+  assert.deepEqual(v2.kind === "footprints" && v2.members.map((m) => m.partialLayers), [["browser"], []]);
+  const v1 = footprintsRecording(key, { layers: ["browser", "server"], measured: ["code"], members });
+  assert.deepEqual(v1.kind === "footprints" && v1.members.map((m) => "partialLayers" in m), [false, false]);
+});

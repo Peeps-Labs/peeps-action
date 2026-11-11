@@ -111,7 +111,7 @@ async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, le
         return;
       }
       response = preflight === "legacy" ? { scan: true } : preflight === "v3" ? { scan: true, protocolVersion: 3 } : { scan: preflight === "on" || preflight.startsWith("collect"), protocolVersion: 2, projects: [{ projectId: "project", executionMode: "shadow" }] };
-      if (preflight.startsWith("collect")) response = { ...(response as object), projects: [{ projectId: "project", executionMode: "shadow", collect: { coverage: true, fingerprint: true, ...(preflight === "collect-tables" ? { tables: true } : {}), key: COLLECT_KEY, keyVersion: "V1" } }] };
+      if (preflight.startsWith("collect")) response = { ...(response as object), projects: [{ projectId: "project", executionMode: "shadow", collect: { coverage: true, fingerprint: true, ...(preflight === "collect-tables" ? { tables: true } : {}), key: COLLECT_KEY, keyVersion: "V1", codecVersions: [1, 2] } }] };
     } else if (url.pathname === "/api/v1/ci/impact/fingerprint") {
       fingerprints.push(url.search);
       response = { uploadId: "upload-1" };
@@ -967,4 +967,114 @@ test("a push and a non-GitHub platform compute nothing", async () => {
   assert.equal(await computeReach(readRunnerEnv({ ...base, GITHUB_EVENT_NAME: "push" }), { specFiles: [] }), undefined);
   assert.equal(await computeReach(readRunnerEnv({ ...base, GITHUB_EVENT_NAME: "pull_request_target" }), { specFiles: [] }), undefined);
   assert.equal(await computeReach(readRunnerEnv({ GITLAB_CI: "true", CI_COMMIT_SHA: "a".repeat(40), CI_PIPELINE_SOURCE: "merge_request_event" }), { specFiles: [] }), undefined);
+});
+
+/**
+ * PQA-3201 PR 3. The app the action owns: built server code from the fake `.next`, a factory
+ * run at boot (ambient), and per page the server code that page needs.
+ */
+const OWNED_APP = (ssr: string) => `globalThis.document = { currentScript: null };
+globalThis.sessionStorage = { setItem() {} };
+require(${JSON.stringify(ssr)});
+require("node:fs").appendFileSync("starts.log", process.env.PEEPS_INVOCATION + "\\n");
+const factories = Object.assign({}, ...globalThis.TURBOPACK.map((entry) => entry[1]));
+const run = (name) => {
+  const exported = {};
+  factories[name]({ i: () => ({ badge: "b" }), s: (names) => Object.assign(exported, names), v: () => {} });
+  return exported;
+};
+run("[project]/src/components/common/Badge.module.css [ssr] (css module)");
+require("node:http").createServer((req, res) => {
+  if (req.url === "/login") run("turbopack:///[project]/src/app/login/LoginForm.tsx").LoginForm()({ token: "t" });
+  if (req.url === "/badge") run("turbopack:///[project]/src/components/common/Badge.tsx").default()({ variant: "ok" });
+  res.writeHead(200, { "Content-Type": "text/html" });
+  res.end("<h1>ok</h1>");
+}).listen(Number(process.env.APP_PORT), "127.0.0.1");
+`;
+
+test("server evidence: one invocation per spec file with the app the action owns; each test holds its own file's server code (PQA-3201 PR 3)", async (t) => {
+  const port = await new Promise<number>((resolve) => {
+    const probe = createServer().listen(0, "127.0.0.1", () => {
+      const { port } = probe.address() as AddressInfo;
+      probe.close(() => resolve(port));
+    });
+  });
+  const app = `http://127.0.0.1:${port}`;
+  // Two test files per run, in file order: [api, badge] reach /login, [cart, shared] reach /badge.
+  const root = await suite(t, COMMON("", "webServer: { command: \"exit 1\", url: \"http://127.0.0.1:9\" },"), `import { test, expect } from "@playwright/test";
+test("shows a badge", async ({ page }) => { await page.goto("/badge"); await expect(page.getByRole("heading")).toHaveText("ok"); });
+`);
+  await writeFile(path.join(root, "suite/specs/badge.spec.ts"), `import { test, expect } from "@playwright/test";
+test("logs in", async ({ page }) => {
+  require("node:fs").appendFileSync(${JSON.stringify(path.join(root, "test-invocations.log"))}, process.env.PEEPS_INVOCATION + "\\n");
+  await page.goto("/login");
+  await expect(page.getByRole("heading")).toHaveText("ok");
+});
+`);
+  // A test registered by a shared helper: it runs in the importing file's run, and is that file's.
+  await mkdir(path.join(root, "suite/helpers"), { recursive: true });
+  await writeFile(path.join(root, "suite/helpers/shared.ts"), `import { test, expect } from "@playwright/test";
+export function sharedBadgeTest() { test("shared badge", async ({ page }) => { await page.goto("/badge"); await expect(page.getByRole("heading")).toHaveText("ok"); }); }
+`);
+  await writeFile(path.join(root, "suite/specs/shared.spec.ts"), `import { sharedBadgeTest } from "../helpers/shared";
+sharedBadgeTest();
+`);
+  await writeFile(path.join(root, "suite/specs/api.spec.ts"), `import { test, expect } from "@playwright/test";
+test("calls the api", async ({ request }) => { expect((await request.get("/login")).ok()).toBe(true); });
+`);
+  await writeFile(path.join(root, ".gitignore"), "node_modules\n.next\nsuite/results\nsuite/playwright-report\nreport*\n*.log\n");
+  for (const [file, text] of nextBuild(NEXT_BUILD)) {
+    await mkdir(path.dirname(path.join(root, ".next", file)), { recursive: true });
+    await writeFile(path.join(root, ".next", file), text);
+  }
+  // Stands in for `next start`, which runs from node_modules: the runtime, no one's code. (A custom
+  // server in the app's own source would read partial, outside_build.)
+  await mkdir(path.join(root, "vendor/node_modules/fake-next"), { recursive: true });
+  await writeFile(path.join(root, "vendor/node_modules/fake-next/start.cjs"), OWNED_APP(path.join(root, ".next", `server/chunks/ssr/${NEXT_BUILD.hash}s1.js`)));
+  git(root, "init", "-q", "-b", "main");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "first");
+  const peeps = await fakePeeps(t, {}, undefined, "collect");
+  const result = await runAction(root, peeps.url, {
+    GITHUB_SHA: git(root, "rev-parse", "HEAD"), GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "push", BASE_URL: app, APP_PORT: String(port),
+    "INPUT_APP-START": "node vendor/node_modules/fake-next/start.cjs", "INPUT_APP-READY-URL": `${app}/ready`, "INPUT_APP-RESET": "echo \"$PEEPS_INVOCATION\" >> resets.log",
+  });
+  assert.equal(result.code, 0, result.output);
+  // Ambient first, then each of the three spec files, each reset and started on its own; the config's webServer never ran.
+  // Four test files in runs of two, never a file of its own for the helper that registers a test.
+  assert.deepEqual((await readFile(path.join(root, "resets.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec"]);
+  assert.deepEqual((await readFile(path.join(root, "starts.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec"]);
+  assert.deepEqual((await readFile(path.join(root, "test-invocations.log"), "utf8")).trim().split("\n"), ["spec"], "the tests see which run they're in");
+  // The invocations' reports, merged into the one HTML report the batch gets.
+  assert.ok([...peeps.artifacts.keys()].includes("index.html"), [...peeps.artifacts.keys()].join(", "));
+
+  const key = parseProjectKey(COLLECT_KEY)!;
+  const blob = decodePayload(gunzipSync(peeps.evidence[0]!.bytes));
+  assert.ok(blob.kind === "footprints");
+  if (blob.kind !== "footprints") return;
+  assert.deepEqual([blob.universe.layers, blob.universe.measured], [["browser", "server"], ["code", "css"]]);
+  const css = "fn:server:src/components/common/Badge.module.css:[project]/src/components/common/Badge.module.css [ssr] (css module)";
+  const login = "fn:server:src/app/login/LoginForm.tsx:onSuccess";
+  const badge = "fn:server:src/components/common/Badge.tsx:Badge";
+  assert.ok(blob.universe.ambient.includes(tokenOf(key, css)), "what the app ran at boot is ambient");
+  assert.ok(!blob.universe.ambient.includes(tokenOf(key, login)));
+  const member = (title: string) => {
+    const run = [...Array(4).keys()].map((i) => `run-${i}`).find((r) => blob.members.some((m) => m.run === r) && peeps.announces[0] && (peeps.announces[0].tests as Planned[])[Number(r.slice(4))]!.titlePath === title)!;
+    return blob.members.find((m) => m.run === run)!;
+  };
+  const logsIn = member("logs in");
+  const showsBadge = member("shows a badge");
+  assert.deepEqual([logsIn.partial, showsBadge.partial], [[], []], result.output);
+  assert.ok(logsIn.tokens.includes(tokenOf(key, login)) && logsIn.tokens.includes(tokenOf(key, "file:src/app/login/LoginForm.tsx")));
+  assert.ok(!logsIn.tokens.includes(tokenOf(key, badge)), "another file's invocation ran Badge, not this one's");
+  assert.ok(showsBadge.tokens.includes(tokenOf(key, badge)) && !showsBadge.tokens.includes(tokenOf(key, login)));
+  // A test that opens no browser context has no browser coverage: partial in the browser only (PQA-3430),
+  // so a server-only change still judges it by its server footprint, which holds what /login ran.
+  const api = member("calls the api");
+  assert.deepEqual([api.partial, api.partialLayers], [["code", "css"], ["browser"]]);
+  assert.ok(api.tokens.includes(tokenOf(key, login)));
+  assert.deepEqual([logsIn.partialLayers, showsBadge.partialLayers], [[], []]);
+  const shared = member("shared badge");
+  assert.deepEqual(shared.partial, [], "its file's run, not another's");
+  assert.ok(shared.tokens.includes(tokenOf(key, badge)));
 });

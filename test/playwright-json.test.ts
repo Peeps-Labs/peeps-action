@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { readRunnerEnv } from "../src/env";
-import { listTests, specFilesOf } from "../src/inventory";
+import { listTests, specFilesOf, testFilesOf } from "../src/inventory";
 import { parseJsonReport } from "../src/playwright-json";
 
 const modules = process.env.PEEPS_CAPTURE_TEST_MODULES ?? path.resolve(__dirname, "../node_modules");
@@ -47,4 +47,25 @@ export default defineConfig({ testDir: "./tests" });
 
   const list = await listTests(readRunnerEnv({ GITHUB_WORKSPACE: root, "INPUT_WORKING-DIRECTORY": "e2e" }));
   assert.deepEqual(specFilesOf(list), ["shop.spec.ts"]);
+});
+
+test("the list carries each project's dependencies and teardown, which Playwright's JSON report leaves out (PQA-3201 PR 3)", async (t) => {
+  const { mkdtemp, writeFile, mkdir, rm, symlink, realpath } = await import("node:fs/promises");
+  const os = await import("node:os");
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "peeps-projects-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await symlink(path.resolve(__dirname, "../node_modules"), path.join(root, "node_modules"), "dir");
+  await mkdir(path.join(root, "specs"));
+  await writeFile(path.join(root, "playwright.config.ts"), `import { defineConfig } from "@playwright/test";
+export default defineConfig({ testDir: "./specs", projects: [
+  { name: "setup", testMatch: /.*\\.setup\\.ts/, teardown: "cleanup" },
+  { name: "cleanup", testMatch: /.*\\.teardown\\.ts/ },
+  { name: "chromium", testMatch: /.*\\.spec\\.ts/, dependencies: ["setup"] },
+] });
+`);
+  for (const [file, title] of [["auth.setup.ts", "logs in"], ["db.teardown.ts", "cleans"], ["a.spec.ts", "a"]] as Array<[string, string]>) await writeFile(path.join(root, "specs", file), `import { test } from "@playwright/test";\ntest(${JSON.stringify(title)}, () => {});\n`);
+  const list = await listTests(readRunnerEnv({ GITHUB_WORKSPACE: root }));
+  const projects = Object.fromEntries((list.config.projects ?? []).map((p) => [p.name, p]));
+  assert.deepEqual([projects.chromium?.dependencies, projects.setup?.teardown], [["setup"], "cleanup"]);
+  assert.deepEqual(testFilesOf(list), ["a.spec.ts"]);
 });

@@ -37,7 +37,8 @@ __export(reporter_exports, {
   htmlReportDir: () => htmlReportDir,
   identityOf: () => identityOf,
   isLastAttempt: () => isLastAttempt,
-  narrowedOutcome: () => narrowedOutcome
+  narrowedOutcome: () => narrowedOutcome,
+  testFileOf: () => testFileOf
 });
 module.exports = __toCommonJS(reporter_exports);
 var import_node_crypto2 = require("node:crypto");
@@ -48,6 +49,9 @@ var import_node_path3 = __toESM(require("node:path"));
 // src/env.ts
 var import_node_fs = require("node:fs");
 var import_node_path = __toESM(require("node:path"));
+function appOf(start, readyUrl, reset) {
+  return start && readyUrl ? { start, readyUrl, reset } : null;
+}
 function readDefaultBranch(env) {
   const file = env.GITHUB_EVENT_PATH;
   if (!file) return null;
@@ -131,7 +135,8 @@ function readGitLabRunnerEnv(env) {
     serverUrl: (env.CI_SERVER_URL ?? "https://gitlab.com").replace(/\/+$/, ""),
     workspace,
     oidc: null,
-    idToken: variable(env, "PEEPS_ID_TOKEN")
+    idToken: variable(env, "PEEPS_ID_TOKEN"),
+    app: appOf(variable(env, "PEEPS_APP_START"), variable(env, "PEEPS_APP_READY_URL"), variable(env, "PEEPS_APP_RESET"))
   };
 }
 function readRunnerEnv(env = process.env) {
@@ -162,7 +167,12 @@ function readRunnerEnv(env = process.env) {
     serverUrl,
     workspace,
     oidc: requestUrl && requestToken ? { requestUrl, requestToken } : null,
-    idToken: null
+    idToken: null,
+    app: appOf(
+      input(env, "app-start") ?? variable(env, "PEEPS_APP_START"),
+      input(env, "app-ready-url") ?? variable(env, "PEEPS_APP_READY_URL"),
+      input(env, "app-reset") ?? variable(env, "PEEPS_APP_RESET")
+    )
   };
 }
 
@@ -583,6 +593,10 @@ var PeepsClient = class {
 };
 
 // src/reporter.ts
+function testFileOf(test) {
+  for (let suite = test.parent; suite; suite = suite.parent) if (suite.type === "file" && suite.location) return suite.location.file;
+  return test.location.file;
+}
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function identityOf(test, rootDirAbs, rootDirRepo) {
   const rel = import_node_path3.default.relative(rootDirAbs, test.location.file).split(import_node_path3.default.sep).join("/");
@@ -765,7 +779,7 @@ var PeepsCiReporter = class {
       hiddenRequests: this.plan.footprints?.hiddenRequests.includes(entry.path) ?? false
     }) : void 0;
     if (this.plan.evidence) {
-      const record = { testId: test.id, runId: entry.runId, retry: result.retry, passed: result.status === "passed", har: sent ? { paths: sent.paths, complete: sent.complete } : null };
+      const record = { testId: test.id, runId: entry.runId, retry: result.retry, passed: result.status === "passed", har: sent ? { paths: sent.paths, complete: sent.complete } : null, file: testFileOf(test) };
       const name = `att-${(0, import_node_crypto2.createHash)("sha256").update(test.id).digest("hex").slice(0, 16)}-${result.retry}.json`;
       try {
         (0, import_node_fs3.writeFileSync)(import_node_path3.default.join(this.plan.evidence.dir, name), JSON.stringify(record), { mode: 384, flag: "wx" });
@@ -893,5 +907,6 @@ function htmlReportDir(config) {
   htmlReportDir,
   identityOf,
   isLastAttempt,
-  narrowedOutcome
+  narrowedOutcome,
+  testFileOf
 });

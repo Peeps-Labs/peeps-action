@@ -95,6 +95,13 @@ test("source names, from Turbopack, webpack and a map-relative path", () => {
   assert.equal(sourceName("webpack://_N_E/./src/a.tsx", "static/chunks/x.js.map", ""), "src/a.tsx");
   assert.equal(sourceName("webpack://_N_E/./src/a.tsx", "static/chunks/x.js.map", "apps/web"), "apps/web/src/a.tsx");
   assert.equal(sourceName("../../../src/a.tsx", "server/app/page.js.map", "apps/web"), "apps/web/src/a.tsx");
+  // A map's sources are URLs: a dynamic route's brackets and a route group's parentheses arrive encoded,
+  // and git names the file as it is (PQA-3201 PR 3, Umami's [websiteId] and (compat) handlers).
+  assert.equal(sourceName("turbopack:///[project]/src/app/api/websites/%5BwebsiteId%5D/route.ts", "server/chunks/x.js.map", ""), "src/app/api/websites/[websiteId]/route.ts");
+  assert.equal(sourceName("webpack://_N_E/./src/app/%28compat%29/page.tsx", "static/chunks/x.js.map", ""), "src/app/(compat)/page.tsx");
+  assert.equal(sourceName("turbopack:///[project]/src/a%ZZ.ts", "server/chunks/x.js.map", ""), "src/a%ZZ.ts", "an invalid escape stays as it is");
+  // Server chunks' maps name sources relative to themselves, encoded the same way.
+  assert.equal(sourceName("../../../../src/app/api/websites/%5BwebsiteId%5D/route.ts", "server/chunks/ssr/x.js.map", ""), "src/app/api/websites/[websiteId]/route.ts");
   assert.equal(sourceName("turbopack:///[project]/./src/a.tsx", "static/chunks/x.js.map", ""), "src/a.tsx");
 });
 

@@ -10,7 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 
-import { decodePayload, encodePayload, type RecordingBlob } from "../src/evidence/codec";
+import { decodePayload, encodePayload, RECORDING_CODEC_VERSION, type RecordingBlob } from "../src/evidence/codec";
 import { gzipRecording } from "../src/evidence/upload";
 
 const GOLDEN = path.join(__dirname, "fixtures/evidence/recording-codec.golden.json");
@@ -83,7 +83,7 @@ const PEEPS_FIXTURES = process.env.PEEPS_FIXTURES ?? path.resolve(__dirname, "..
 const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 
 const PINNED = {
-  "recording-codec.golden.json": "91893e36686027fa28be8f4f54f8473436b09ec2051e060497cde0a9a57473e5",
+  "recording-codec.golden.json": "cdd6831ef3834bfe891cd1b6ca6ce3d28aca2d9f09bd0fd7725d29692f619078",
   "impact-ids.vectors.json": "1cc7f0eb1f947eb669d9fb099e6d1f248882c303a6f7b8ef25dec913a18c0577",
 };
 
@@ -103,7 +103,7 @@ interface Golden {
 const golden = JSON.parse(readFileSync(GOLDEN, "utf8")) as Golden;
 
 test("Peeps' golden payloads, byte for byte, both ways", () => {
-  assert.equal(golden.version, 1);
+  assert.equal(golden.version, RECORDING_CODEC_VERSION);
   assert.ok(golden.cases.length > 0);
   for (const row of golden.cases) {
     assert.equal(Buffer.from(encodePayload(row.value)).toString("hex"), row.payloadHex, row.name);
