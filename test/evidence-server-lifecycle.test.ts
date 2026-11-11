@@ -62,7 +62,12 @@ test("the app runs for the invocation's tests: what they reached ran, its covera
 
 test("every Node process the app starts registers, and the whole group is stopped and taken", async () => {
   const command = await app({}, { CHILD: "1" });
-  const { coverage } = await runInvocation(command, { dir: path.join(command.cwd, "cov"), preload: PRELOAD, kind: "spec" }, async () => 0);
+  const dir = path.join(command.cwd, "cov");
+  const { coverage } = await runInvocation(command, { dir, preload: PRELOAD, kind: "spec" }, async () => {
+    // The child starts after the app answers: wait until it has registered too.
+    for (let i = 0; i < 100 && require("node:fs").readdirSync(dir).filter((n: string) => n.startsWith("pid-")).length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+    return 0;
+  });
   assert.equal(coverage.started.length, 2);
   assert.deepEqual([...coverage.taken].sort(), [...coverage.started].sort());
 });

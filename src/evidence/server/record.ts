@@ -25,6 +25,8 @@ export interface RecordServerInput {
   scripts: ReadonlyMap<string, ScriptIndex>;
   /** Every source the fingerprint names: workspace code the server ran is keyed by its file. */
   sources?: ReadonlySet<string>;
+  /** Whether git tracks an absolute path: unmatched untracked code reads unknown. */
+  tracked?: (file: string) => boolean;
   /** The job's `.next`, real path. */
   nextDir: string;
   /** Run Playwright on one spec file, or on none (null) for the ambient invocation. */
@@ -46,7 +48,10 @@ const elsewhere: ServerFootprint = { keys: [], loaded: [], partial: ["code"], re
 
 export async function recordServer(input: RecordServerInput): Promise<{ exitCode: number; server: ServerEvidence }> {
   const invoke = input.invoke ?? runInvocation;
-  const footprint = (coverage: Parameters<typeof serverFootprint>[0]) => serverFootprint(coverage, input.scripts, input.nextDir, input.sources);
+  // The preload runs in every app process, from wherever the action is installed: it's no one's code.
+  const preload = input.preload.split(path.sep).join("/");
+  const ownCode = (file: string) => file === preload || (input.tracked?.(file) ?? false);
+  const footprint = (coverage: Parameters<typeof serverFootprint>[0]) => serverFootprint(coverage, input.scripts, input.nextDir, input.sources, ownCode);
   const build =
     input.buildDir ??
     (() => {
@@ -69,6 +74,10 @@ export async function recordServer(input: RecordServerInput): Promise<{ exitCode
   const ambientRun = await invoke(input.app, { dir: path.join(input.coverageDir, "ambient"), preload: input.preload, kind: "ambient" }, () => input.runTests(null, 0));
   if (ambientRun.exitCode !== 0) exitCode = ambientRun.exitCode;
   const ambient = footprint(ambientRun.coverage);
+  const timing = (name: string, t: { resetMs: number; readyMs: number; testsMs: number; stopMs: number } | undefined) =>
+    t && say(`${name}: reset ${(t.resetMs / 1000).toFixed(1)} s, ready ${(t.readyMs / 1000).toFixed(1)} s, tests ${(t.testsMs / 1000).toFixed(1)} s, stop ${(t.stopMs / 1000).toFixed(1)} s`);
+  timing("ambient", ambientRun.timings);
+  if (ambient.reasons.length > 0) say(`the ambient run's server evidence is partial (${ambient.reasons.join(", ")}): every test's is`);
   settle();
   const byTest = new Map<string, ServerFootprint>();
   const counts = () => {
@@ -80,7 +89,9 @@ export async function recordServer(input: RecordServerInput): Promise<{ exitCode
     const before = counts();
     const run = await invoke(input.app, { dir: path.join(input.coverageDir, `spec-${i}`), preload: input.preload, kind: "spec" }, () => input.runTests(spec, i + 1));
     if (run.exitCode !== 0) exitCode = run.exitCode;
+    timing(path.basename(spec), run.timings);
     const own = taint(footprint(run.coverage));
+    if (own.reasons.length > 0) say(`${path.basename(spec)}: server evidence partial (${own.reasons.join(", ")})`);
     settle();
     for (const [id, { count, file }] of counts()) {
       if (count === (before.get(id)?.count ?? 0)) continue;

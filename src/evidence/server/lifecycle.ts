@@ -21,6 +21,14 @@ export interface AppCommand {
   env: NodeJS.ProcessEnv;
 }
 
+/** Where one invocation's time went: the reset, the app's start to ready, the tests, the stop and coverage read. */
+export interface InvocationTimings {
+  resetMs: number;
+  readyMs: number;
+  testsMs: number;
+  stopMs: number;
+}
+
 export interface InvocationOptions {
   /** Where the app's processes write coverage: created, read, then removed. */
   dir: string;
@@ -86,15 +94,18 @@ export function readInvocationCoverage(dir: string, problems: string[]): Invocat
     }
   }
   rmSync(dir, { recursive: true, force: true });
-  return { started: pids("pid-"), taken: pids("taken-"), files, unreadable, problems };
+  // V8 names each file coverage-<pid>-<time>-<n>.json.
+  const covered = [...new Set(names.filter((n) => n.startsWith("coverage-")).map((n) => Number(n.split("-")[1])).filter(Number.isInteger))];
+  return { started: pids("pid-"), taken: pids("taken-"), covered, files, unreadable, problems };
 }
 
 export async function runInvocation(
   app: AppCommand,
   options: InvocationOptions,
   tests: () => Promise<number>,
-): Promise<{ exitCode: number; coverage: InvocationCoverage }> {
+): Promise<{ exitCode: number; coverage: InvocationCoverage; timings?: InvocationTimings }> {
   const problems: string[] = [];
+  const at = [Date.now()];
   rmSync(options.dir, { recursive: true, force: true });
   mkdirSync(options.dir, { recursive: true, mode: 0o700 });
   const env = { ...app.env, PEEPS_INVOCATION: options.kind };
@@ -111,6 +122,7 @@ export async function runInvocation(
   } catch {
     // Nothing listening: as it should be.
   }
+  at.push(Date.now());
   const child = spawn("sh", ["-c", app.start], {
     cwd: app.cwd,
     detached: true,
@@ -142,9 +154,11 @@ export async function runInvocation(
     say(`the app didn't answer ${app.readyUrl} in time: this invocation's server evidence reads partial`);
     problems.push("not_ready");
   }
+  at.push(Date.now());
   let exitCode: number;
   try {
     exitCode = await tests();
+    at.push(Date.now());
   } finally {
     // An app that ended before its tests did may have served only some of them.
     if (exited && !problems.includes("app_exited")) problems.push("app_exited");
@@ -158,5 +172,8 @@ export async function runInvocation(
       }
     }
   }
-  return { exitCode, coverage: readInvocationCoverage(options.dir, problems) };
+  const coverage = readInvocationCoverage(options.dir, problems);
+  at.push(Date.now());
+  const [t0, t1, t2, t3, t4] = at as [number, number, number, number, number];
+  return { exitCode, coverage, timings: { resetMs: t1 - t0, readyMs: t2 - t1, testsMs: t3 - t2, stopMs: t4 - t3 } };
 }

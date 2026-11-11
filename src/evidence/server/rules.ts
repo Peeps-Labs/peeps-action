@@ -7,9 +7,11 @@
  * Partial on anything unknown: no process registered, one whose coverage was never taken,
  * a coverage file that didn't parse, a function that ran in the job's build with no key,
  * or trouble around the app (its reset, readiness, an early exit). A partial footprint is
- * unknown for code: those tests always run. Code outside the job's `.next` (the Next
- * runtime, `node_modules`, Node itself) is the runtime, which the fingerprint treats as
- * global, so it is neither keyed nor partial.
+ * unknown for code: those tests always run. `node_modules` and Node itself are the runtime,
+ * which the fingerprint treats as global: neither keyed nor partial. Other code that ran
+ * outside `.next` is keyed by the fingerprinted source it is; tracked source the fingerprint
+ * doesn't name needs nothing (a change to it is unaccounted); anything else, such as a
+ * compiled custom server's output, is unknown (`outside_build`).
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +31,8 @@ export interface InvocationCoverage {
   taken: number[];
   /** Every coverage file the processes wrote: each take, and each exit. */
   files: Array<{ result: V8Script[] }>;
+  /** Every process that wrote at least one coverage file. */
+  covered: number[];
   /** Coverage files that didn't parse. */
   unreadable: number;
   /** What went wrong around the app, named: `reset_failed`, `not_ready`, `app_exited`, … */
@@ -59,11 +63,11 @@ function builtFileOf(url: string, nextDir: string): string | null {
 }
 
 /**
- * App code the server ran from the workspace, outside `.next` and `node_modules`: what
- * `next.config` imports, or a custom server running source the build also bundles. Its
- * path under the app's directory, or null for anything else.
+ * Code the server ran from source outside `.next` and `node_modules`: what `next.config`
+ * imports, a custom server running source the build also bundles, or a monorepo sibling
+ * package. Its absolute path, or null for anything else.
  */
-function workspaceFileOf(url: string, nextDir: string): string | null {
+function sourceFileOf(url: string): string | null {
   if (!url.startsWith("file:")) return null;
   let file: string;
   try {
@@ -71,20 +75,21 @@ function workspaceFileOf(url: string, nextDir: string): string | null {
   } catch {
     return null;
   }
-  const rel = path.relative(path.dirname(nextDir), file);
-  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null;
-  const parts = rel.split(path.sep);
-  if (parts[0] === path.basename(nextDir) || parts.includes("node_modules")) return null;
-  return parts.join("/");
+  const posix = file.split(path.sep).join("/");
+  return posix.includes("/node_modules/") ? null : posix;
 }
 
 /**
- * The fingerprinted sources a workspace file is: a source is repo-relative, the file app-relative.
- * One the fingerprint doesn't name needs nothing: a change to it is a file no entity accounts
- * for, which runs everything.
+ * The fingerprinted sources a file is. A source is repo-relative, so it's a suffix of the
+ * file's absolute path wherever the app sits; matching more than one only over-attributes.
+ * A file the fingerprint doesn't name needs nothing: a change to it is a file no entity
+ * accounts for, which runs everything.
  */
-function sourcesOf(rel: string, sources: ReadonlySet<string>): string[] {
-  return [...sources].filter((source) => source === rel || source.endsWith(`/${rel}`));
+/** Next's own config, and the copy it compiles beside it: a change to it runs everything anyway. */
+const NEXT_CONFIG = /^next\.config(?:\.compiled)?\.(?:js|mjs|cjs|ts|mts)$/;
+
+function sourcesOf(file: string, sources: ReadonlySet<string>): string[] {
+  return [...sources].filter((source) => file === source || file.endsWith(`/${source}`));
 }
 
 export function serverFootprint(
@@ -93,22 +98,28 @@ export function serverFootprint(
   nextDir: string,
   /** Every source the fingerprint names (`Fingerprint.files`' values). */
   sources: ReadonlySet<string> = new Set(),
+  /** Whether git tracks this absolute path: by default nothing is, so unmatched code reads unknown. */
+  tracked: (file: string) => boolean = () => false,
 ): ServerFootprint {
   const keys = new Set<string>();
   const loaded = new Set<string>();
   let unmapped = 0;
+  let outside = 0;
   for (const { result } of coverage.files) {
     for (const script of result) {
       const file = builtFileOf(script.url, nextDir);
       if (file === null) {
-        const rel = workspaceFileOf(script.url, nextDir);
+        const rel = sourceFileOf(script.url);
         if (rel === null) continue;
         // The join is by file until PR 4: a test whose run ran it holds its file.
         const ran = script.functions.some((fn) => (fn.ranges[0]?.count ?? 0) > 0);
-        for (const source of sourcesOf(rel, sources)) {
+        const named = sourcesOf(rel, sources);
+        for (const source of named) {
           loaded.add(`file:${source}`);
           if (ran) keys.add(`file:${source}`);
         }
+        // Built output of a fingerprinted source (dist/), which no change names: unknown.
+        if (ran && named.length === 0 && !tracked(rel) && !NEXT_CONFIG.test(path.posix.basename(rel))) outside++;
         continue;
       }
       const index = scripts.get(file);
@@ -140,7 +151,11 @@ export function serverFootprint(
   if (coverage.started.length === 0) reasons.push("no_process");
   const taken = new Set(coverage.taken);
   if (coverage.started.some((pid) => !taken.has(pid))) reasons.push("not_taken");
+  // A take reports an app's own stopCoverage on stderr, and writes nothing: the marker isn't enough.
+  const covered = new Set(coverage.covered);
+  if (coverage.started.some((pid) => !covered.has(pid))) reasons.push("no_coverage");
   if (coverage.unreadable > 0) reasons.push("unreadable");
   if (unmapped > 0) reasons.push("unmapped");
+  if (outside > 0) reasons.push("outside_build");
   return { keys: [...keys].sort(), loaded: [...loaded].sort(), partial: reasons.length > 0 ? ["code"] : [], reasons };
 }

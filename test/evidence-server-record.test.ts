@@ -17,6 +17,7 @@ const at = (suffix: string) => fingerprint.scripts.get(SSR)!.spans.find((s) => s
 const ran = (...names: string[]): InvocationCoverage => ({
   started: [1],
   taken: [1],
+  covered: [1],
   unreadable: 0,
   problems: [],
   files: [{ result: [{ url: pathToFileURL(`${NEXT}/${SSR}`).href, functions: names.map((n) => ({ functionName: n, ranges: [{ startOffset: at(`:${n}`).start, endOffset: at(`:${n}`).end, count: 1 }] })) }] }],
@@ -110,4 +111,23 @@ test("once a run changed the build directory, every later run's footprint is unk
   // ambient clean; a's run only created (removed): b clean; b's run rewrote a built file: c unknown.
   assert.deepEqual(["a", "b", "c"].map((id) => result.server.byTest.get(id)!.reasons), [[], [], ["build_dir_changed"]]);
   assert.deepEqual(result.server.ambient.reasons, []);
+});
+
+test("the preload is the action's, never the app's: its own code doesn't make a run unknown", async () => {
+  const preload = "/runner/_actions/peeps-action/dist/evidence-preload.js";
+  const withPreload: InvocationCoverage = { ...ran("Badge"), files: [...ran("Badge").files, { result: [{ url: pathToFileURL(preload).href, functions: [{ functionName: "take", ranges: [{ startOffset: 3, endOffset: 40, count: 1 }] }] }] }] };
+  const ids: Array<{ testId: string; file: string | null }> = [];
+  const result = await recordServer({
+    app,
+    specs: ["/s/a.spec.ts"],
+    preload,
+    coverageDir: "/c",
+    scripts: fingerprint.scripts,
+    nextDir: NEXT,
+    runTests: async (spec) => (spec && ids.push({ testId: "a", file: spec }), 0),
+    attempts: () => [...ids],
+    invoke: async (_a, _o, tests) => ({ exitCode: await tests(), coverage: withPreload }),
+    buildDir: { snapshot: () => undefined, settle: () => ({ created: [], changed: [] }) },
+  });
+  assert.deepEqual([result.server.ambient.reasons, result.server.byTest.get("a")!.reasons], [[], []]);
 });
