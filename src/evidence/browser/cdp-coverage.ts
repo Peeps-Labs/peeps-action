@@ -86,7 +86,15 @@ export interface CdpCoverageOptions {
   browser: string;
   /** Keep each sheet's text, for reading which rules ran (tests and diagnosis only). */
   sheetText?: boolean;
+  /** How long `finish` waits for setup replies already on their way (tests shorten it). */
+  settleMs?: number;
 }
+
+/**
+ * At most this long, `finish` waits for setup replies already sent. A page's own connection
+ * can report it loaded before ours delivers our starts' replies; past this, it reads lost.
+ */
+const SETTLE_MS = 300;
 
 export class CdpCoverage {
   private readonly targets = new Map<string, Target>();
@@ -125,6 +133,13 @@ export class CdpCoverage {
   /** Once every setup reply so far is in (tests: run a page only after its coverage started). */
   async settled(): Promise<void> {
     while (this.setups.size > 0) await Promise.allSettled([...this.setups]);
+  }
+
+  /** `settled`, for at most `ms`: a reply that hasn't come by then leaves its target unstarted. */
+  private async settledWithin(ms: number): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([this.settled(), new Promise<void>((resolve) => (timer = setTimeout(resolve, ms)))]);
+    clearTimeout(timer);
   }
 
   /** Attach to every target the browser has or opens. */
@@ -168,6 +183,7 @@ export class CdpCoverage {
    *   only at the last close) are taken finally, so a later close still checks the rest.
    */
   async finish(scope?: { context: string | null; last: boolean }): Promise<AttemptCoverage> {
+    await this.settledWithin(this.options.settleMs ?? SETTLE_MS);
     if (this.dead) return { browser: this.options.browser, scripts: [], sheets: [], assets: [], covered: [], lost: 0, errors: [], navigations: 0, refused: "collector_disconnected" };
     const inScope = (t: Target) => !scope || (t.context === undefined ? scope.last : t.context === scope.context);
     const ready = (t: Target) => t.profiler && (!DOCUMENTS.has(t.type) || t.css);

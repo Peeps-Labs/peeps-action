@@ -42,12 +42,14 @@ function explain(written: AttemptFile[]): string {
   );
 }
 
+const STARTS = new Set(["Profiler.startPreciseCoverage", "CSS.startRuleUsageTracking"]);
+
 /**
  * A connection whose profiler start lands late, the way Playwright's own resume can beat it:
  * the start is held for `delayMs`, and every later command on that session queues behind it,
  * so the session's commands still reach the browser in the order they were sent.
  */
-async function lateStart(port: number, delayMs: number, onSend?: (method: string, answer: unknown, sessionId?: string) => void) {
+async function lateStart(port: number, delayMs: number, onSend?: (method: string, answer: unknown, sessionId?: string) => void, replyDelayMs = 0) {
   const { connectCdp } = await import("../src/evidence/browser/cdp-socket");
   const real = await connectCdp(port);
   const queues = new Map<string, Promise<unknown>>();
@@ -58,7 +60,9 @@ async function lateStart(port: number, delayMs: number, onSend?: (method: string
       const before = queues.get(key) ?? Promise.resolve();
       const dispatched = before.then(() => (method === "Profiler.startPreciseCoverage" ? new Promise((resolve) => setTimeout(resolve, delayMs)) : undefined));
       queues.set(key, dispatched.catch(() => {}));
-      return dispatched.then(() => real.send(method, params, sessionId)).then((answer) => {
+      return dispatched.then(() => real.send(method, params, sessionId)).then(async (answer) => {
+        // Our starts' replies trailing the page's own connection, which reports it loaded first.
+        if (replyDelayMs > 0 && STARTS.has(method)) await new Promise((resolve) => setTimeout(resolve, replyDelayMs));
         onSend?.(method, answer, sessionId);
         return answer;
       });
@@ -347,7 +351,7 @@ test("a begin that times out leaves the context out of the open set, so the work
   await timedOut.close();
 });
 
-test("a page that navigates at once with our start delayed is still whole: Chrome holds it for our resume (no settled() before goto)", async (t) => {
+test("a page that navigates at once with our start delayed is still whole: Chrome holds it for our resume (no settled())", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "peeps-worker-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const url = await app(t);
@@ -359,14 +363,42 @@ test("a page that navigates at once with our start delayed is still whole: Chrom
   const context = await browser.newContext();
   const page = await context.newPage();
   await page.goto(url);
-  // goto resolves on Playwright's connection; our starts' replies come on ours, and can trail it.
-  await (listener as unknown as Settles).settled();
   await context.close();
   const [file] = await files(dir);
   assert.ok(file, "a record was written");
   assert.deepEqual([file!.coverage.late, file!.coverage.lost, file!.coverage.errors], [0, 0, []], explain([file!]));
   assert.ok(file!.coverage.scripts.some((s) => s.functions.some((fn) => fn.name === "ranOnLoad")), explain([file!]));
 });
+
+for (const [replyDelayMs, whole] of [
+  [50, true],
+  [1_000, false],
+] as const) {
+  test(`a close right after goto, our starts' replies ${replyDelayMs} ms behind the page: ${whole ? "waited for, whole" : "past the bound, still lost"} (no settled())`, async (t) => {
+    const { partialReasons } = await import("../src/evidence/browser/rules");
+    const dir = await mkdtemp(path.join(tmpdir(), "peeps-worker-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const url = await app(t);
+    const port = pickPort()!;
+    const listener = installCoverage({ dir, core, test: { info: () => ({ testId: "trailing", retry: 0 }) }, port, connect: (p) => lateStart(p, 0, undefined, replyDelayMs) });
+    t.after(() => core._instrumentation.removeListener(listener));
+    const browser = await core.chromium.launch({ args: [`--remote-debugging-port=${port}`] });
+    t.after(() => browser.close());
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(url);
+    await context.close();
+    const [file] = await files(dir);
+    assert.ok(file, "a record was written");
+    if (whole) {
+      assert.deepEqual(partialReasons(file!.coverage), [], explain([file!]));
+      assert.ok(file!.coverage.scripts.some((s) => s.functions.some((fn) => fn.name === "ranOnLoad")), explain([file!]));
+    } else {
+      // Never a false whole: a start not answered within the bound leaves the page lost.
+      assert.ok(partialReasons(file!.coverage).includes("target_lost"), explain([file!]));
+    }
+  });
+}
 
 for (const delayMs of [0, 400]) {
   test(`a page that navigates at once is whole, its startup seen, whatever our start's delay (${delayMs} ms; no settled())`, async (t) => {
@@ -387,7 +419,7 @@ for (const delayMs of [0, 400]) {
     // At once, as a customer's test does: no settled().
     await page.goto(`${url}startup`);
     await page.waitForFunction(() => document.body.dataset.ready === "1");
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    // Closed at once: the close itself waits for our starts' replies still on their way.
     await context.close();
     const [file] = await files(dir);
     assert.ok(file, "a record was written");

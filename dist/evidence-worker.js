@@ -43,6 +43,7 @@ var import_node_path = __toESM(require("node:path"));
 var COVERED = /* @__PURE__ */ new Set(["page", "iframe", "worker", "service_worker", "shared_worker"]);
 var DOCUMENTS = /* @__PURE__ */ new Set(["page", "iframe"]);
 var ASSET_TYPES = /* @__PURE__ */ new Set(["Script", "Stylesheet"]);
+var SETTLE_MS = 300;
 var CdpCoverage = class _CdpCoverage {
   constructor(cdp, options) {
     this.cdp = cdp;
@@ -75,6 +76,12 @@ var CdpCoverage = class _CdpCoverage {
   /** Once every setup reply so far is in (tests: run a page only after its coverage started). */
   async settled() {
     while (this.setups.size > 0) await Promise.allSettled([...this.setups]);
+  }
+  /** `settled`, for at most `ms`: a reply that hasn't come by then leaves its target unstarted. */
+  async settledWithin(ms) {
+    let timer;
+    await Promise.race([this.settled(), new Promise((resolve) => timer = setTimeout(resolve, ms))]);
+    clearTimeout(timer);
   }
   /** Attach to every target the browser has or opens. */
   async attach() {
@@ -113,6 +120,7 @@ var CdpCoverage = class _CdpCoverage {
    *   only at the last close) are taken finally, so a later close still checks the rest.
    */
   async finish(scope) {
+    await this.settledWithin(this.options.settleMs ?? SETTLE_MS);
     if (this.dead) return { browser: this.options.browser, scripts: [], sheets: [], assets: [], covered: [], lost: 0, errors: [], navigations: 0, refused: "collector_disconnected" };
     const inScope = (t) => !scope || (t.context === void 0 ? scope.last : t.context === scope.context);
     const ready = (t) => t.profiler && (!DOCUMENTS.has(t.type) || t.css);

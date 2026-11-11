@@ -57,6 +57,32 @@ test("a live target whose setup never finished has no final take: lost too", asy
   assert.equal((await coverage.finish()).lost, 1);
 });
 
+const after = (ms: number, answer: unknown = {}) => () => new Promise((resolve) => setTimeout(() => resolve(answer), ms));
+
+test("a start whose reply is still on its way when the close comes is waited for: the page is whole", async () => {
+  // The page's own connection can report it loaded before our socket delivers our start's reply.
+  const cdp = new FakeCdp({ "Profiler.startPreciseCoverage": after(50), "Profiler.takePreciseCoverage": () => coverageOf("ranOnLoad") });
+  const coverage = new CdpCoverage(cdp, { browser: "chromium" });
+  await coverage.begin();
+  cdp.attach("s1", "ctx-a");
+  await tick();
+  const result = await coverage.finish({ context: "ctx-a", last: true });
+  assert.equal(result.lost, 0);
+  assert.deepEqual(result.scripts.flatMap((s) => s.functions.map((fn) => fn.name)), ["ranOnLoad"]);
+});
+
+test("a start that hasn't answered within the bound is still lost, and the close doesn't wait for it", async () => {
+  const cdp = new FakeCdp({ "Profiler.startPreciseCoverage": after(2_000), "Profiler.takePreciseCoverage": () => coverageOf("ranOnLoad") });
+  const coverage = new CdpCoverage(cdp, { browser: "chromium", settleMs: 100 });
+  await coverage.begin();
+  cdp.attach("s1", "ctx-a");
+  await tick();
+  const started = Date.now();
+  const result = await coverage.finish({ context: "ctx-a", last: true });
+  assert.ok(Date.now() - started < 1_000, `finish waited ${Date.now() - started} ms`);
+  assert.equal(result.lost, 1);
+});
+
 test("one context's close is no final take for another context's targets", async () => {
   let ran = "first";
   const cdp = new FakeCdp({ "Profiler.takePreciseCoverage": () => coverageOf(ran) });

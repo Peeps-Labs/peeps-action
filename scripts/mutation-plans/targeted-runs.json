@@ -1136,6 +1136,33 @@
       "tests": [
         "test/reach-scan.test.ts"
       ]
+    },
+    {
+      "name": "the close waits for setup replies with no bound",
+      "file": "src/evidence/browser/cdp-coverage.ts",
+      "find": "await Promise.race([this.settled(), new Promise<void>((resolve) => (timer = setTimeout(resolve, ms)))]);",
+      "replace": "await this.settled();",
+      "tests": [
+        "test/evidence-worker.test.ts"
+      ]
+    },
+    {
+      "name": "the close doesn't wait for setup replies on their way",
+      "file": "src/evidence/browser/cdp-coverage.ts",
+      "find": "    await this.settledWithin(this.options.settleMs ?? SETTLE_MS);\n",
+      "replace": "",
+      "tests": [
+        "test/evidence-cdp-unit.test.ts"
+      ]
+    },
+    {
+      "name": "a start is counted as started when sent, before its reply",
+      "file": "src/evidence/browser/cdp-coverage.ts",
+      "find": "      const reply = send(method, params).then(",
+      "replace": "      if (method === \"Profiler.startPreciseCoverage\") target.profiler = true;\n      if (method === \"CSS.startRuleUsageTracking\") target.css = true;\n      const reply = send(method, params).then(",
+      "tests": [
+        "test/evidence-cdp-unit.test.ts"
+      ]
     }
   ]
 }
