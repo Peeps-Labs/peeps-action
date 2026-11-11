@@ -1874,6 +1874,7 @@ function serverFootprint(coverage, scripts, nextDir, sources = /* @__PURE__ */ n
 // src/evidence/server/record.ts
 var say4 = (line) => console.log(`[peeps] ${line}`);
 var FILES_PER_RUN = 1;
+var MAP_AFTER_MS = 300;
 function groupsOf(specs, perRun = FILES_PER_RUN) {
   const groups = [];
   for (let i = 0; i < specs.length; i += perRun) groups.push(specs.slice(i, i + perRun));
@@ -1930,7 +1931,14 @@ async function recordServer(input2) {
   };
   for (const [i, files] of groupsOf(input2.specs, input2.perRun).entries()) {
     const before = counts();
-    const run = await invoke(input2.app, { dir: import_node_path14.default.join(input2.coverageDir, `spec-${i}`), preload: input2.preload, kind: "spec", defer: true, whileStarting: flush }, () => input2.runTests(files, i + 1));
+    const run = await invoke(input2.app, { dir: import_node_path14.default.join(input2.coverageDir, `spec-${i}`), preload: input2.preload, kind: "spec", defer: true }, () => {
+      const tests = input2.runTests(files, i + 1);
+      const work = setTimeout(flush, MAP_AFTER_MS);
+      return tests.finally(() => {
+        clearTimeout(work);
+        flush();
+      });
+    });
     if (run.exitCode !== 0) exitCode = run.exitCode;
     const label = files.map((file) => import_node_path14.default.basename(file)).join(", ");
     timing(label, run.timings);

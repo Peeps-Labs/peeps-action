@@ -22,6 +22,9 @@ const say = (line: string) => console.log(`[peeps] ${line}`);
  */
 export const FILES_PER_RUN = 1;
 
+/** How long after a run's tests start to map the previous run's coverage. */
+const MAP_AFTER_MS = 300;
+
 /** The suite's test files in runs of `perRun`, in order. */
 export function groupsOf(specs: readonly string[], perRun: number = FILES_PER_RUN): string[][] {
   const groups: string[][] = [];
@@ -132,8 +135,9 @@ export async function recordServer(input: RecordServerInput): Promise<{ exitCode
   let tainted = ambientRun.rewrote;
   const taint = (fp: ServerFootprint): ServerFootprint => ({ ...fp, partial: ["code"], reasons: [...fp.reasons, "build_dir_changed"] });
   let ambient: ServerFootprint | undefined;
-  // Mapping a run's coverage (a parse of ~140 MB on a Next app) waits for the next app's
-  // start, which it overlaps: the app starts in its own process.
+  // Mapping a run's coverage (a parse of ~140 MB on a Next app) waits for the next run's
+  // tests, which run in Playwright's own process: done while the app starts, it would hold
+  // up the readiness check instead.
   let deferred: (() => void) | null = () => {
     ambient = footprint(ambientRun.read());
     if (ambient.reasons.length > 0) say(`the ambient run's server evidence is partial (${ambient.reasons.join(", ")}): every test's is`);
@@ -151,7 +155,15 @@ export async function recordServer(input: RecordServerInput): Promise<{ exitCode
   };
   for (const [i, files] of groupsOf(input.specs, input.perRun).entries()) {
     const before = counts();
-    const run = await invoke(input.app, { dir: path.join(input.coverageDir, `spec-${i}`), preload: input.preload, kind: "spec", defer: true, whileStarting: flush }, () => input.runTests(files, i + 1));
+    const run = await invoke(input.app, { dir: path.join(input.coverageDir, `spec-${i}`), preload: input.preload, kind: "spec", defer: true }, () => {
+      const tests = input.runTests(files, i + 1);
+      // Once Playwright has started; it takes longer than that to start its first test.
+      const work = setTimeout(flush, MAP_AFTER_MS);
+      return tests.finally(() => {
+        clearTimeout(work);
+        flush();
+      });
+    });
     if (run.exitCode !== 0) exitCode = run.exitCode;
     const label = files.map((file) => path.basename(file)).join(", ");
     timing(label, run.timings);

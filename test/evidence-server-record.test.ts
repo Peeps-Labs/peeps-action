@@ -169,3 +169,32 @@ test("two files per run: both files' tests hold that run's footprint, and only t
   assert.ok(has("a", ":onSuccess") && has("b", ":onSuccess") && !has("a", ":Badge"));
   assert.ok(has("c", ":Badge") && !has("c", ":onSuccess"));
 });
+
+test("a run's coverage is mapped while the next run's tests run, never while its app starts", async () => {
+  const order: string[] = [];
+  const ids: Array<{ testId: string; file: string | null }> = [];
+  await recordServer({
+    app,
+    specs: ["/s/a.spec.ts", "/s/b.spec.ts"],
+    preload: "/p",
+    coverageDir: "/c",
+    scripts: fingerprint.scripts,
+    nextDir: NEXT,
+    runTests: async (files) => {
+      if (files) ids.push({ testId: files[0]!, file: files[0]! });
+      order.push(`tests ${files?.[0] ?? "ambient"}`);
+      await new Promise((r) => setTimeout(r, 50));
+      return 0;
+    },
+    attempts: () => [...ids],
+    invoke: async (_a, options, tests) => {
+      options.whileStarting?.();
+      order.push(`started ${options.kind}`);
+      const exitCode = await tests();
+      return { exitCode, read: () => (order.push("mapped"), ran("Badge")) };
+    },
+    buildDir: { snapshot: () => undefined, settle: () => ({ created: [], changed: [] }) },
+  });
+  // ambient's map waits for a's tests, a's for b's; b's after the last run.
+  assert.deepEqual(order, ["started ambient", "tests ambient", "started spec", "tests /s/a.spec.ts", "mapped", "started spec", "tests /s/b.spec.ts", "mapped", "mapped"]);
+});
