@@ -121,6 +121,17 @@ test("footprints go up in one request under the batch, which publishes (contract
   assert.equal(blob.kind === "footprints" && blob.members.length, 5);
 });
 
+test("the job's tables go up as ambient tokens, both directions under one table id", async () => {
+  const transport = fakeTransport({ [evidencePath("batch-1")]: { status: "published" } });
+  const members = [{ run: "run-1", attempts: [{ retry: 0, passed: true }], evidence: [] }];
+  const ambient = ["table:r:public.users", "table:w:public.users"];
+  assert.equal(await uploadEvidence(transport, { batchId: "batch-1", key, layers: ["database"], measured: ["table"], members, ambient }), true);
+  const blob = decodePayload(gunzipSync(transport.calls[0]!.body as Buffer));
+  assert.ok(blob.kind === "footprints");
+  assert.deepEqual(blob.universe.ambient, ambient.map((k) => tokenOf(key, k)).sort());
+  assert.equal(new Set(blob.universe.ambient.map((t) => t.split(":")[2])).size, 1);
+});
+
 test("a refused upload, or more members than Peeps takes, records nothing", async () => {
   const members = (n: number) => Array.from({ length: n }, (_, i) => ({ run: `run-${i}`, attempts: [{ retry: 0, passed: true }], evidence: [] }));
   const refused = fakeTransport({ [evidencePath("batch-1")]: new Error("Peeps → 409") });

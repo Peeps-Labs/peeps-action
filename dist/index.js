@@ -265,9 +265,9 @@ function expiryOf(token) {
   }
 }
 var PeepsHttpError = class extends Error {
-  constructor(path20, status, body) {
-    super(`Peeps ${path20} \u2192 ${status}: ${body.slice(0, 500)}`);
-    this.path = path20;
+  constructor(path21, status, body) {
+    super(`Peeps ${path21} \u2192 ${status}: ${body.slice(0, 500)}`);
+    this.path = path21;
     this.status = status;
     this.body = body;
     this.name = "PeepsHttpError";
@@ -334,11 +334,11 @@ var PeepsClient = class {
     );
   }
   /** Raw upload (artifacts). Retries transient failures a couple of times. */
-  async postBytes(path20, bytes) {
+  async postBytes(path21, bytes) {
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await fetch(`${this.env.peepsUrl}${path20}`, {
+        const response = await fetch(`${this.env.peepsUrl}${path21}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${await this.token()}`,
@@ -352,9 +352,9 @@ var PeepsClient = class {
         if (response.ok) return;
         const text2 = await response.text();
         if (response.status < 500 && response.status !== 408 && response.status !== 429) {
-          throw new Error(`Peeps ${path20} \u2192 ${response.status}: ${text2.slice(0, 300)}`);
+          throw new Error(`Peeps ${path21} \u2192 ${response.status}: ${text2.slice(0, 300)}`);
         }
-        lastError = new Error(`Peeps ${path20} \u2192 ${response.status}`);
+        lastError = new Error(`Peeps ${path21} \u2192 ${response.status}`);
       } catch (error) {
         lastError = error;
       }
@@ -363,8 +363,8 @@ var PeepsClient = class {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
   /** GET that treats 204 as "nothing" (long-poll idle) instead of an error. */
-  async getOrNull(path20) {
-    const response = await fetch(`${this.env.peepsUrl}${path20}`, {
+  async getOrNull(path21) {
+    const response = await fetch(`${this.env.peepsUrl}${path21}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -375,12 +375,12 @@ var PeepsClient = class {
     if (response.status === 204) return null;
     const text2 = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path20, response.status, text2);
+      throw new PeepsHttpError(path21, response.status, text2);
     }
     return JSON.parse(text2);
   }
-  async get(path20, signal) {
-    const response = await fetch(`${this.env.peepsUrl}${path20}`, {
+  async get(path21, signal) {
+    const response = await fetch(`${this.env.peepsUrl}${path21}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -390,12 +390,12 @@ var PeepsClient = class {
     });
     const text2 = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path20, response.status, text2);
+      throw new PeepsHttpError(path21, response.status, text2);
     }
     return JSON.parse(text2);
   }
-  async post(path20, body) {
-    const response = await fetch(`${this.env.peepsUrl}${path20}`, {
+  async post(path21, body) {
+    const response = await fetch(`${this.env.peepsUrl}${path21}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${await this.token()}`,
@@ -407,7 +407,7 @@ var PeepsClient = class {
     });
     const text2 = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path20, response.status, text2);
+      throw new PeepsHttpError(path21, response.status, text2);
     }
     return text2 ? JSON.parse(text2) : {};
   }
@@ -565,9 +565,9 @@ return { default: withEvidence };
 }
 
 // src/report.ts
-var import_promises8 = require("node:fs/promises");
+var import_promises9 = require("node:fs/promises");
 var import_node_os3 = require("node:os");
-var import_node_path11 = __toESM(require("node:path"));
+var import_node_path12 = __toESM(require("node:path"));
 
 // src/narrow.ts
 var MAX_GREP_BYTES = 64 * 1024;
@@ -811,8 +811,8 @@ function tokenOf(key, plain) {
   if (colon < 1 || !KINDS.has(kind)) throw new Error(`No token kind for ${kind || "an unnamed key"}`);
   return `${kind}:${keyedId(key, kind, rest)}`;
 }
-function pathToken(key, path20) {
-  return `route:${encodePath(key, path20)}`;
+function pathToken(key, path21) {
+  return `route:${encodePath(key, path21)}`;
 }
 function segmentsOf(route) {
   return route.split("/").map((raw) => raw.split(";", 1)[0]).filter((segment) => segment !== "").map((segment) => {
@@ -833,8 +833,8 @@ function encodeMatcher(key, route) {
   });
   return `/${out.join("/")}`;
 }
-function encodePath(key, path20) {
-  const out = segmentsOf(path20).map((segment) => segment === ":id" ? segment : segmentId(key, segment.toLowerCase()));
+function encodePath(key, path21) {
+  const out = segmentsOf(path21).map((segment) => segment === ":id" ? segment : segmentId(key, segment.toLowerCase()));
   return `/${out.join("/")}`;
 }
 function evidenceTokens(key, evidence) {
@@ -879,7 +879,7 @@ function footprintsRecording(key, input2) {
     const union = unionEvidence(evidence);
     return { run, attempts, partial: union.partial, tokens: evidenceTokens(key, union) };
   });
-  return { kind: "footprints", browser: input2.browser ?? null, universe: { layers: input2.layers, measured: input2.measured, loadedFiles: (input2.loadedFiles ?? []).map((f) => tokenOf(key, f)), ambient: [] }, members };
+  return { kind: "footprints", browser: input2.browser ?? null, universe: { layers: input2.layers, measured: input2.measured, loadedFiles: (input2.loadedFiles ?? []).map((f) => tokenOf(key, f)), ambient: (input2.ambient ?? []).map((k) => tokenOf(key, k)) }, members };
 }
 
 // src/evidence/upload.ts
@@ -892,20 +892,20 @@ var MAX_BLOB_BYTES = 8 * 1024 * 1024;
 var MAX_MEMBERS = 16e3;
 var PROTOCOL_VERSION = 2;
 function peepsTransport(peepsUrl, token) {
-  const send = async (path20, body, contentType, timeoutMs) => {
-    const response = await fetch(`${peepsUrl}${path20}`, {
+  const send = async (path21, body, contentType, timeoutMs) => {
+    const response = await fetch(`${peepsUrl}${path21}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${await token()}`, "Content-Type": contentType, Accept: "application/json", "User-Agent": "peeps-action/0.1" },
       body,
       signal: AbortSignal.timeout(timeoutMs)
     });
     const text2 = await response.text();
-    if (!response.ok) throw new Error(`Peeps ${path20.split("?")[0]} \u2192 ${response.status}`);
+    if (!response.ok) throw new Error(`Peeps ${path21.split("?")[0]} \u2192 ${response.status}`);
     return text2 ? JSON.parse(text2) : {};
   };
   return {
-    postBytes: (path20, bytes, timeoutMs) => send(path20, new Uint8Array(bytes), "application/octet-stream", timeoutMs),
-    postJson: (path20, body, timeoutMs) => send(path20, JSON.stringify(body), "application/json", timeoutMs)
+    postBytes: (path21, bytes, timeoutMs) => send(path21, new Uint8Array(bytes), "application/octet-stream", timeoutMs),
+    postJson: (path21, body, timeoutMs) => send(path21, JSON.stringify(body), "application/json", timeoutMs)
   };
 }
 function gzipRecording(blob) {
@@ -933,7 +933,7 @@ async function uploadFingerprint(transport, input2, log = say) {
 async function uploadEvidence(transport, input2, log = say) {
   try {
     if (input2.members.length > MAX_MEMBERS) throw new Error(`${input2.members.length} tests, over ${MAX_MEMBERS}`);
-    const blob = footprintsRecording(input2.key, { layers: input2.layers, measured: input2.measured, loadedFiles: input2.loadedFiles, browser: input2.browser, members: input2.members });
+    const blob = footprintsRecording(input2.key, { layers: input2.layers, measured: input2.measured, loadedFiles: input2.loadedFiles, ambient: input2.ambient, browser: input2.browser, members: input2.members });
     const bytes = gzipRecording(blob);
     if (bytes.length > MAX_BLOB_BYTES) throw new Error(`the footprints are ${bytes.length} bytes, over ${MAX_BLOB_BYTES}`);
     await transport.postBytes(`${evidencePath(input2.batchId)}?protocolVersion=${PROTOCOL_VERSION}`, bytes, UPLOAD_TIMEOUT_MS);
@@ -1138,8 +1138,8 @@ function browserFootprint(coverage, index) {
 function browserCollector(index) {
   return {
     collect(coverage) {
-      const { keys, partial, reasons } = browserFootprint(coverage, index);
-      return { keys, paths: [], partial, reasons };
+      const { keys, partial: partial2, reasons } = browserFootprint(coverage, index);
+      return { keys, paths: [], partial: partial2, reasons };
     }
   };
 }
@@ -1178,6 +1178,9 @@ function membersOf(records, coverage, fingerprint, collected, contexts, taints =
     }
   }
   for (const member of byRun.values()) member.attempts.sort((a, b) => a.retry - b.retry);
+  const tables = collected.tables;
+  const tablesWhole = tables !== void 0 && tables.partial.length === 0;
+  if (tables && !tablesWhole) for (const member of byRun.values()) member.evidence.push({ keys: [], paths: [], partial: ["table"], reasons: tables.reasons });
   const loaded = /* @__PURE__ */ new Set();
   const browsers = /* @__PURE__ */ new Set();
   if (collected.coverage) {
@@ -1191,23 +1194,302 @@ function membersOf(records, coverage, fingerprint, collected, contexts, taints =
     }
   }
   const [only] = browsers;
-  const measured = [...collected.coverage ? ["code", "css"] : [], ...collected.har ? ["route"] : []];
+  const measured = [...collected.coverage ? ["code", "css"] : [], ...collected.har ? ["route"] : [], ...tablesWhole ? ["table"] : []];
   return {
-    layers: measured.length > 0 ? ["browser"] : [],
+    layers: [...collected.coverage || collected.har ? ["browser"] : [], ...tablesWhole ? ["database"] : []],
     measured,
     loadedFiles: [...loaded].sort(),
-    ambient: [],
+    ambient: tablesWhole ? tables.keys : [],
     members: [...byRun.values()],
     browser: browsers.size === 1 && only ? (([name, version]) => ({ name, version }))(JSON.parse(only)) : null
   };
 }
 
-// src/evidence/scratch.ts
-var import_node_fs3 = require("node:fs");
+// src/evidence/pg/collector.ts
 var import_promises6 = require("node:fs/promises");
 var import_node_path9 = __toESM(require("node:path"));
+
+// src/evidence/pg/log.ts
+var STATEMENT = /^(?:statement|execute (?!fetch from )[^:\n]*): /;
+var PLAN = /^duration: \d+(?:\.\d+)? ms {2}plan:\n/;
+function readJsonlog(text2) {
+  const lines = text2.split("\n");
+  const entries = [];
+  for (const [index, line] of lines.entries()) {
+    if (line === "" && index === lines.length - 1) continue;
+    const entry = entryOf(line);
+    if (entry === null) return null;
+    entries.push(entry);
+  }
+  return entries;
+}
+function entryOf(line) {
+  let parsed;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { timestamp, error_severity, session_id, message, application_name } = parsed;
+  if (typeof timestamp !== "string" || typeof error_severity !== "string" || typeof session_id !== "string" || typeof message !== "string") return null;
+  const app = typeof application_name === "string" ? application_name : "";
+  const statement = STATEMENT.exec(message);
+  if (statement) return { session: session_id, app, kind: "statement", text: message.slice(statement[0].length) };
+  const plan = PLAN.exec(message);
+  if (plan) return { session: session_id, app, kind: "plan", text: message.slice(plan[0].length) };
+  if (error_severity === "ERROR") return { session: session_id, app, kind: "error", text: message };
+  return { session: session_id, app, kind: "other", text: message };
+}
+
+// src/evidence/pg/plan.ts
+var isNode = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function tablesOfPlan(json) {
+  let parsed;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return { reason: "pg_log_unreadable" };
+  }
+  const query = parsed?.["Query Text"];
+  const root = parsed?.Plan;
+  if (typeof query !== "string" || !isNode(root)) return { reason: "pg_log_unreadable" };
+  const reads = /* @__PURE__ */ new Set();
+  const writes = /* @__PURE__ */ new Set();
+  let unqualified = false;
+  let malformed = false;
+  const nameOf = (node) => {
+    if (typeof node["Relation Name"] !== "string") return null;
+    if (typeof node.Schema === "string") return `${node.Schema}.${node["Relation Name"]}`;
+    unqualified = true;
+    return null;
+  };
+  const nodesOf = (value) => {
+    if (value === void 0) return [];
+    if (Array.isArray(value) && value.every(isNode)) return value;
+    malformed = true;
+    return [];
+  };
+  const walk2 = (node) => {
+    const name = nameOf(node);
+    if (node["Node Type"] === "ModifyTable") {
+      if (name) writes.add(name);
+      for (const target of nodesOf(node["Target Tables"])) {
+        const table = nameOf(target);
+        if (table) writes.add(table);
+      }
+    } else if (name) reads.add(name);
+    for (const child of nodesOf(node.Plans)) walk2(child);
+  };
+  walk2(root);
+  if (malformed) return { reason: "pg_log_unreadable" };
+  if (unqualified) return { reason: "pg_plans_unqualified" };
+  return { query, reads: [...reads].sort(), writes: [...writes].sort() };
+}
+
+// src/evidence/pg/statement.ts
+var PLANNED = /* @__PURE__ */ new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "WITH", "VALUES", "TABLE", "EXECUTE"]);
+var UNPLANNED = /* @__PURE__ */ new Set([
+  // Transaction and session control.
+  "BEGIN",
+  "START",
+  "COMMIT",
+  "END",
+  "ROLLBACK",
+  "ABORT",
+  "SAVEPOINT",
+  "RELEASE",
+  "PREPARE",
+  "SET",
+  "RESET",
+  "SHOW",
+  "DISCARD",
+  "DEALLOCATE",
+  "LISTEN",
+  "UNLISTEN",
+  "NOTIFY",
+  "CHECKPOINT",
+  // Schema.
+  "CREATE",
+  "ALTER",
+  "DROP",
+  "GRANT",
+  "REVOKE",
+  "COMMENT"
+]);
+function plansOwed(sql) {
+  const statements = statementsOf(sql);
+  if (statements === null) return null;
+  let owed = 0;
+  for (const statement of statements) {
+    if (statement.trim() === "") continue;
+    const verb = /^[\s(]*([A-Za-z]+)/.exec(statement)?.[1]?.toUpperCase();
+    if (verb !== void 0 && PLANNED.has(verb)) owed += 1;
+    else if (verb === void 0 || !UNPLANNED.has(verb)) return null;
+  }
+  return owed;
+}
+var DOLLAR_TAG = /\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/y;
+var WORD = /[A-Za-z0-9_]/;
+function statementsOf(sql) {
+  const statements = [];
+  let current = "";
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i];
+    let end = i + 1;
+    if (c === ";") {
+      statements.push(current);
+      current = "";
+      i = end;
+      continue;
+    }
+    if (c === "-" && sql[i + 1] === "-") {
+      const newline = sql.indexOf("\n", i);
+      i = newline < 0 ? sql.length : newline;
+      current += " ";
+      continue;
+    }
+    if (c === "/" && sql[i + 1] === "*") {
+      let depth = 0;
+      for (end = i; end < sql.length; end++) {
+        if (sql.startsWith("/*", end)) depth++, end++;
+        else if (sql.startsWith("*/", end) && --depth === 0) break;
+      }
+      if (end >= sql.length) return null;
+      i = end + 2;
+      current += " ";
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      const escapes = c === "'" && /[eE]/.test(sql[i - 1] ?? "") && !WORD.test(sql[i - 2] ?? "");
+      for (end = i + 1; end < sql.length; end++) {
+        if (escapes && sql[end] === "\\") end++;
+        else if (sql[end] === c && sql[end + 1] === c) end++;
+        else if (sql[end] === c) break;
+      }
+      if (end >= sql.length) return null;
+      end += 1;
+    } else if (c === "$" && !WORD.test(sql[i - 1] ?? "")) {
+      DOLLAR_TAG.lastIndex = i;
+      const tag = DOLLAR_TAG.exec(sql)?.[0];
+      if (tag !== void 0) {
+        const close = sql.indexOf(tag, i + tag.length);
+        if (close < 0) return null;
+        end = close + tag.length;
+      }
+    }
+    current += sql.slice(i, end);
+    i = end;
+  }
+  statements.push(current);
+  return statements;
+}
+
+// src/evidence/pg/collector.ts
+var partial = (reasons, errored = 0) => ({
+  keys: [],
+  partial: ["table"],
+  reasons: [...new Set(reasons)].sort(),
+  ...errored > 0 ? { errored } : {}
+});
+var SETTLE = { quietMs: 500, limitMs: 1e4, pollMs: 100 };
+var jsonFiles = async (dir) => (await (0, import_promises6.readdir)(dir)).filter((n) => n.endsWith(".json")).sort();
+async function signature(dir) {
+  const parts = [];
+  for (const name of await jsonFiles(dir)) {
+    const { size, mtimeMs } = await (0, import_promises6.stat)(import_node_path9.default.join(dir, name));
+    parts.push(`${name}\0${size}\0${mtimeMs}`);
+  }
+  return parts.join("\n");
+}
+async function settled(dir, { quietMs, limitMs, pollMs }) {
+  const started = Date.now();
+  let last = await signature(dir);
+  let quietSince = started;
+  while (Date.now() - quietSince < quietMs) {
+    if (Date.now() - started >= limitMs) return false;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    const now = await signature(dir);
+    if (now !== last) {
+      last = now;
+      quietSince = Date.now();
+    }
+  }
+  return true;
+}
+async function collectTables(dir, settle = SETTLE) {
+  const texts = [];
+  try {
+    if (!await settled(dir, settle)) return partial(["pg_log_unsettled"]);
+    for (const name of await jsonFiles(dir)) texts.push(await (0, import_promises6.readFile)(import_node_path9.default.join(dir, name), "utf8"));
+  } catch {
+    return partial(["pg_log_unreadable"]);
+  }
+  return tablesOfLog(texts);
+}
+function tablesOfLog(texts) {
+  const owing = /* @__PURE__ */ new Map();
+  const count = (session, text2) => {
+    const key = JSON.stringify([session, text2]);
+    const tally = owing.get(key) ?? { owed: 0, plans: 0 };
+    owing.set(key, tally);
+    return tally;
+  };
+  const keys = /* @__PURE__ */ new Set();
+  const reasons = [];
+  let plans = 0;
+  let statements = 0;
+  let errored = 0;
+  const justLogged = /* @__PURE__ */ new Map();
+  for (const text2 of texts) {
+    const entries = readJsonlog(text2);
+    if (entries === null) return partial(["pg_log_unreadable"]);
+    for (const entry of entries) {
+      const previous = justLogged.get(entry.session) ?? null;
+      justLogged.set(entry.session, null);
+      if (entry.kind === "other") continue;
+      if (entry.kind === "error") {
+        if (previous !== null) {
+          count(entry.session, previous.text).owed -= previous.owed;
+          errored += 1;
+        }
+        continue;
+      }
+      if (entry.kind === "statement") {
+        statements += 1;
+        const owed = plansOwed(entry.text);
+        if (owed === null) reasons.push("pg_statements_unexplained");
+        else {
+          count(entry.session, entry.text).owed += owed;
+          justLogged.set(entry.session, { text: entry.text, owed });
+        }
+        continue;
+      }
+      plans += 1;
+      const tables = tablesOfPlan(entry.text);
+      if ("reason" in tables) {
+        reasons.push(tables.reason);
+        continue;
+      }
+      count(entry.session, tables.query).plans += 1;
+      for (const name of tables.reads) keys.add(`table:r:${name}`);
+      for (const name of tables.writes) keys.add(`table:w:${name}`);
+    }
+  }
+  if (plans === 0) return partial(["pg_no_statements"], errored);
+  if (statements === 0) return partial(["pg_statements_not_logged"], errored);
+  for (const tally of owing.values()) if (tally.plans < tally.owed) reasons.push("pg_statements_unexplained");
+  if (reasons.length > 0) return partial(reasons, errored);
+  return { keys: [...keys].sort(), partial: [], reasons: [], ...errored > 0 ? { errored } : {} };
+}
+
+// src/evidence/scratch.ts
+var import_node_fs3 = require("node:fs");
+var import_promises7 = require("node:fs/promises");
+var import_node_path10 = __toESM(require("node:path"));
 async function openScratch(parent) {
-  const dir = await (0, import_promises6.mkdtemp)(import_node_path9.default.join(parent, "peeps-evidence-"));
+  const dir = await (0, import_promises7.mkdtemp)(import_node_path10.default.join(parent, "peeps-evidence-"));
   const signals = ["SIGTERM", "SIGINT"];
   const onSignal = (signal) => {
     (0, import_node_fs3.rmSync)(dir, { recursive: true, force: true });
@@ -1218,7 +1500,7 @@ async function openScratch(parent) {
   return {
     dir,
     write(name, value) {
-      const file = import_node_path9.default.join(dir, import_node_path9.default.basename(name));
+      const file = import_node_path10.default.join(dir, import_node_path10.default.basename(name));
       (0, import_node_fs3.writeFileSync)(file, JSON.stringify(value), { mode: 384, flag: "wx" });
       return file;
     },
@@ -1226,7 +1508,7 @@ async function openScratch(parent) {
       const out = [];
       for (const name of (0, import_node_fs3.readdirSync)(dir).filter((n) => n.startsWith(prefix)).sort()) {
         try {
-          out.push(JSON.parse((0, import_node_fs3.readFileSync)(import_node_path9.default.join(dir, name), "utf8")));
+          out.push(JSON.parse((0, import_node_fs3.readFileSync)(import_node_path10.default.join(dir, name), "utf8")));
         } catch {
         }
       }
@@ -1234,13 +1516,13 @@ async function openScratch(parent) {
     },
     async dispose() {
       for (const s2 of signals) process.off(s2, onSignal);
-      await (0, import_promises6.rm)(dir, { recursive: true, force: true });
+      await (0, import_promises7.rm)(dir, { recursive: true, force: true });
     }
   };
 }
 
 // src/reach/index.ts
-var import_node_path10 = __toESM(require("node:path"));
+var import_node_path11 = __toESM(require("node:path"));
 
 // src/reach/checkout.ts
 async function readCheckout(repository, sha) {
@@ -1332,13 +1614,13 @@ function parseDiff(diff) {
 
 // src/reach/git.ts
 var import_node_child_process3 = require("node:child_process");
-var import_promises7 = require("node:fs/promises");
+var import_promises8 = require("node:fs/promises");
 var import_node_util2 = require("node:util");
 var execFileAsync2 = (0, import_node_util2.promisify)(import_node_child_process3.execFile);
 var MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
 async function localRepository(workspace, deadline = Number.POSITIVE_INFINITY) {
   return {
-    workspace: await (0, import_promises7.realpath)(workspace),
+    workspace: await (0, import_promises8.realpath)(workspace),
     async git(...args) {
       const left = deadline - Date.now();
       if (left <= 0) throw new Error("Out of time");
@@ -1376,7 +1658,7 @@ async function computeReach(env, input2, options = {}) {
     const remaining = budgetMs - (Date.now() - started);
     if (remaining <= 0) return widened("timeout", checkout.base, changedFiles);
     const answer = await runBundled(
-      options.scanner ?? import_node_path10.default.join(__dirname, "reach.js"),
+      options.scanner ?? import_node_path11.default.join(__dirname, "reach.js"),
       { root: checkout.root, files, changes: checkout.changes, specFiles: input2.specFiles, base: checkout.base, deadlineMs: remaining },
       remaining
     );
@@ -1406,11 +1688,11 @@ function readCollect(project) {
   if (typeof project !== "object" || project === null) return null;
   const { projectId, collect } = project;
   if (typeof projectId !== "string" || projectId === "" || typeof collect !== "object" || collect === null) return null;
-  const { coverage, fingerprint, key, keyVersion } = collect;
+  const { coverage, fingerprint, tables, key, keyVersion } = collect;
   const parsed = typeof key === "string" && /^[0-9a-f]{64}$/.test(key) ? parseProjectKey(key) : null;
   if (!parsed || typeof keyVersion !== "string" || !/^V[1-9][0-9]*$/.test(keyVersion)) return null;
   if (coverage !== true && fingerprint !== true) return null;
-  return { projectId, coverage: coverage === true, fingerprint: fingerprint === true, key: parsed, keyVersion };
+  return { projectId, coverage: coverage === true, fingerprint: fingerprint === true, tables: tables === true, key: parsed, keyVersion };
 }
 var addMask = (line) => console.log(line);
 function announceFieldsOf(negotiated) {
@@ -1441,7 +1723,7 @@ async function negotiateTargetedRuns(env, peeps, log = addMask) {
 var MAX_UPLOAD_BYTES = 128 * 1024 * 1024;
 var NARROWED_DEFAULT_RETRIES = 1;
 function plannedTestsOf(list, rootDir) {
-  return listedTestsOf(list, rootDir).map(({ path: path20, titlePath, pwProject }) => ({ path: path20, titlePath, pwProject }));
+  return listedTestsOf(list, rootDir).map(({ path: path21, titlePath, pwProject }) => ({ path: path21, titlePath, pwProject }));
 }
 function listedTestsOf(list, rootDir) {
   const out = [];
@@ -1470,12 +1752,12 @@ async function runReport(env, peeps) {
   if (!env.sha) throw new Error("The commit sha is not set (GITHUB_SHA / CI_COMMIT_SHA)");
   const list = await listTests(env);
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
-  const rootDir = import_node_path11.default.relative(env.workspace, rootDirAbs).split(import_node_path11.default.sep).join("/") || ".";
+  const rootDir = import_node_path12.default.relative(env.workspace, rootDirAbs).split(import_node_path12.default.sep).join("/") || ".";
   const tests = plannedTestsOf(list, rootDir);
   console.log(`[peeps] report: ${tests.length} tests at ${env.sha.slice(0, 7)} (${env.ref ?? "?"})`);
   const jobUrl = env.runUrl;
   const files = await specFilePayload(env, list);
-  const specFiles = specFilesOf(list).map((file) => import_node_path11.default.relative(env.workspace, import_node_path11.default.join(rootDirAbs, file)).split(import_node_path11.default.sep).join("/"));
+  const specFiles = specFilesOf(list).map((file) => import_node_path12.default.relative(env.workspace, import_node_path12.default.join(rootDirAbs, file)).split(import_node_path12.default.sep).join("/"));
   const started = Date.now();
   const negotiated = await negotiateTargetedRuns(env, peeps);
   const computed = negotiated.scan ? await computeReach(env, { specFiles }) : void 0;
@@ -1521,7 +1803,7 @@ async function runReport(env, peeps) {
   const batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
   let footprints;
   if (negotiated.protocol && response.batches.some((b) => b.collectFootprints === true)) {
-    const globalSetups = [list.config.globalSetup ?? []].flat().map((file) => import_node_path11.default.relative(env.workspace, import_node_path11.default.resolve(rootDirAbs, file)).split(import_node_path11.default.sep).join("/"));
+    const globalSetups = [list.config.globalSetup ?? []].flat().map((file) => import_node_path12.default.relative(env.workspace, import_node_path12.default.resolve(rootDirAbs, file)).split(import_node_path12.default.sep).join("/"));
     const sources = await workspaceTestSources(env.workspace, specFiles, globalSetups);
     for (const { file, why } of sources.reasons.slice(0, 5)) console.log(`[peeps] not recording footprints: ${file}: ${why}`);
     if (sources.reasons.length > 0) console.log("[peeps] so every test here reads unknown, and always runs");
@@ -1587,18 +1869,18 @@ async function completeBatches(peeps, batches, executed) {
   }
 }
 async function executeAndReport(env, peeps, input2) {
-  const scratch = await (0, import_promises8.mkdtemp)(import_node_path11.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-"));
-  const planFile = import_node_path11.default.join(scratch, "plan.json");
-  const reportDir = import_node_path11.default.join(scratch, "report");
+  const scratch = await (0, import_promises9.mkdtemp)(import_node_path12.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)(), "peeps-"));
+  const planFile = import_node_path12.default.join(scratch, "plan.json");
+  const reportDir = import_node_path12.default.join(scratch, "report");
   const plan = { peepsUrl: env.peepsUrl, rootDir: input2.rootDir, runs: input2.runs };
   if (input2.narrowed) plan.narrowed = true;
   if (input2.footprints) plan.footprints = { origins: input2.footprints.origins, hiddenRequests: input2.footprints.hiddenRequests };
   const evidence = input2.impact ? await openScratch(process.env.RUNNER_TEMP ?? (0, import_node_os3.tmpdir)()).catch(() => null) : null;
   if (evidence) plan.evidence = { dir: evidence.dir };
-  await (0, import_promises8.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
+  await (0, import_promises9.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
   let exitCode;
   try {
-    const coverage = evidence && input2.impact?.coverage && input2.impact.projects.some((p) => p.collect.coverage) ? { worker: import_node_path11.default.join(__dirname, "evidence-worker.js"), dir: evidence.dir } : void 0;
+    const coverage = evidence && input2.impact?.coverage && input2.impact.projects.some((p) => p.collect.coverage) ? { worker: import_node_path12.default.join(__dirname, "evidence-worker.js"), dir: evidence.dir } : void 0;
     exitCode = await runPlaywright(env, planFile, reportDir, input2.selection, input2.extraEnv, input2.narrowed, input2.footprints?.record === true, coverage);
     if (evidence && input2.impact) {
       await recordEvidence(env, peeps, input2.impact, evidence, { coverage: coverage !== void 0, har: input2.footprints?.record === true }).catch((error) => {
@@ -1637,6 +1919,9 @@ async function recordEvidence(env, peeps, impact, scratch, collected) {
   const contexts = scratch.read("ctx-");
   const taints = scratch.read("taint-");
   const transport = peepsTransport(env.peepsUrl, () => peeps.token());
+  const pgLog = process.env.PEEPS_PG_LOG;
+  const tables = pgLog && impact.projects.some((p) => p.collect.tables) ? await collectTables(import_node_path12.default.resolve(env.workspace, pgLog)) : void 0;
+  if (tables) console.log(tables.partial.length === 0 ? `[peeps] read ${tables.keys.length} table key(s) from the Postgres log${tables.errored ? ` (${tables.errored} statement(s) that errored left out)` : ""}` : `[peeps] not recording tables: the Postgres log doesn't prove them (${tables.reasons.join(", ")})`);
   for (const project of impact.projects) {
     const runs = new Set(project.runIds);
     const own = records.filter((record) => runs.has(record.runId));
@@ -1647,7 +1932,7 @@ async function recordEvidence(env, peeps, impact, scratch, collected) {
         own,
         coverage.filter((file) => tests.has(file.testId)),
         impact.fingerprint,
-        { coverage: collected.coverage && project.collect.coverage, har: collected.har },
+        { coverage: collected.coverage && project.collect.coverage, har: collected.har, tables: project.collect.tables ? tables : void 0 },
         contexts,
         taints
       );
@@ -1662,6 +1947,7 @@ async function recordEvidence(env, peeps, impact, scratch, collected) {
       layers: job.layers,
       measured: job.measured,
       loadedFiles: job.loadedFiles,
+      ambient: job.ambient,
       browser: job.browser,
       members: job.members
     });
@@ -1669,7 +1955,7 @@ async function recordEvidence(env, peeps, impact, scratch, collected) {
   }
 }
 async function runPlaywright(env, planFile, reportDir, selection, extraEnv = {}, narrowed = false, collectFootprints = false, coverage) {
-  const reporterPath = import_node_path11.default.join(__dirname, "reporter.js");
+  const reporterPath = import_node_path12.default.join(__dirname, "reporter.js");
   const args = ["playwright", "test", `--reporter=${reporterPath},list,html`];
   let capture;
   try {
@@ -1720,12 +2006,12 @@ async function runPlaywright(env, planFile, reportDir, selection, extraEnv = {},
 async function* walk(dir, rel = "") {
   let entries;
   try {
-    entries = await (0, import_promises8.readdir)(dir, { withFileTypes: true });
+    entries = await (0, import_promises9.readdir)(dir, { withFileTypes: true });
   } catch {
     return;
   }
   for (const entry of entries) {
-    const abs = import_node_path11.default.join(dir, entry.name);
+    const abs = import_node_path12.default.join(dir, entry.name);
     const relPath = rel ? `${rel}/${entry.name}` : entry.name;
     if (entry.isDirectory()) yield* walk(abs, relPath);
     else if (entry.isFile()) yield { abs, rel: relPath };
@@ -1734,12 +2020,12 @@ async function* walk(dir, rel = "") {
 async function uploadReport(peeps, batchId, reportDir) {
   let uploaded = 0;
   for await (const file of walk(reportDir)) {
-    const info = await (0, import_promises8.stat)(file.abs);
+    const info = await (0, import_promises9.stat)(file.abs);
     if (info.size > MAX_UPLOAD_BYTES) {
       console.log(`[peeps] skipping ${file.rel}: ${info.size} bytes exceeds the upload limit`);
       continue;
     }
-    const bytes = await (0, import_promises8.readFile)(file.abs);
+    const bytes = await (0, import_promises9.readFile)(file.abs);
     try {
       await peeps.postBytes(
         `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(file.rel)}`,
@@ -1754,7 +2040,7 @@ async function uploadReport(peeps, batchId, reportDir) {
 }
 
 // src/run.ts
-var import_node_path12 = __toESM(require("node:path"));
+var import_node_path13 = __toESM(require("node:path"));
 
 // src/plan.ts
 async function requestPlan(peeps, sessionId, body) {
@@ -1829,7 +2115,7 @@ async function runDispatched(env, peeps) {
   if (!env.sessionId) throw new Error("`session-id` is required in run mode (Peeps passes it)");
   const list = await listTests(env);
   const rootDirAbs = list.config.rootDir ?? env.workingDirectory;
-  const rootDir = import_node_path12.default.relative(env.workspace, rootDirAbs).split(import_node_path12.default.sep).join("/") || ".";
+  const rootDir = import_node_path13.default.relative(env.workspace, rootDirAbs).split(import_node_path13.default.sep).join("/") || ".";
   const plan = await requestPlan(peeps, env.sessionId, {
     tests: plannedTestsOf(list, rootDir).slice(0, 2e3)
   });
@@ -1840,7 +2126,7 @@ async function runDispatched(env, peeps) {
     return;
   }
   const files = [...new Set(plan.runs.map((r) => r.path))].map(
-    (p) => import_node_path12.default.relative(env.workingDirectory, import_node_path12.default.join(env.workspace, p)).split(import_node_path12.default.sep).join("/")
+    (p) => import_node_path13.default.relative(env.workingDirectory, import_node_path13.default.join(env.workspace, p)).split(import_node_path13.default.sep).join("/")
   );
   const environment = planEnvironmentVariables(plan.environment, process.env);
   if (environment.log) console.log(environment.log);
@@ -1855,26 +2141,26 @@ async function runDispatched(env, peeps) {
 
 // src/agent.ts
 var import_node_child_process9 = require("node:child_process");
-var import_promises14 = require("node:fs/promises");
+var import_promises15 = require("node:fs/promises");
 var import_node_util4 = require("node:util");
 
 // src/appium.ts
 var import_node_child_process6 = require("node:child_process");
 var import_node_crypto6 = require("node:crypto");
 var import_node_fs6 = require("node:fs");
-var import_promises10 = require("node:fs/promises");
+var import_promises11 = require("node:fs/promises");
 var import_node_os5 = require("node:os");
-var import_node_path15 = __toESM(require("node:path"));
+var import_node_path16 = __toESM(require("node:path"));
 var import_node_url2 = require("node:url");
 
 // src/appium-reporter.ts
 var import_node_fs4 = require("node:fs");
-var import_node_path13 = __toESM(require("node:path"));
+var import_node_path14 = __toESM(require("node:path"));
 var TITLE_PATH_SEPARATOR = " \u203A ";
 function repoRelative(workspace, abs) {
   const attempt = (root, file) => {
-    const rel = import_node_path13.default.relative(root, file).split(import_node_path13.default.sep).join("/");
-    return rel === "" || rel === ".." || rel.startsWith("../") || import_node_path13.default.isAbsolute(rel) ? null : rel;
+    const rel = import_node_path14.default.relative(root, file).split(import_node_path14.default.sep).join("/");
+    return rel === "" || rel === ".." || rel.startsWith("../") || import_node_path14.default.isAbsolute(rel) ? null : rel;
   };
   const direct = attempt(workspace, abs);
   if (direct !== null) return direct;
@@ -1905,11 +2191,11 @@ var VIDEO_HOOK_BUDGET_MS = STOP_TIMEOUT_MS + 8 * FRAME_TIMEOUT_MS + 3e4;
 var import_node_child_process5 = require("node:child_process");
 var import_node_crypto5 = require("node:crypto");
 var import_node_fs5 = require("node:fs");
-var import_promises9 = require("node:fs/promises");
+var import_promises10 = require("node:fs/promises");
 var import_node_os4 = require("node:os");
-var import_node_path14 = __toESM(require("node:path"));
+var import_node_path15 = __toESM(require("node:path"));
 var WDIO_CONFIG = /^wdio(\..+)?\.conf\.[cm]?[jt]s$/;
-var PLUGIN_DIR = import_node_path14.default.join(__dirname, "..", "python");
+var PLUGIN_DIR = import_node_path15.default.join(__dirname, "..", "python");
 var PLUGIN = "peeps_pytest_plugin";
 var PLAYWRIGHT_CONFIG = /^playwright(\..+)?\.config\.[cm]?[jt]s$/;
 function resolveFramework(env) {
@@ -1918,7 +2204,7 @@ function resolveFramework(env) {
   if (declared != null && declared !== "auto") {
     throw new Error(`unknown framework "${declared}": use playwright, pytest, appium or auto`);
   }
-  if (env.configPath) return WDIO_CONFIG.test(import_node_path14.default.basename(env.configPath)) ? "appium" : "playwright";
+  if (env.configPath) return WDIO_CONFIG.test(import_node_path15.default.basename(env.configPath)) ? "appium" : "playwright";
   let names;
   try {
     names = (0, import_node_fs5.readdirSync)(env.workingDirectory);
@@ -1928,7 +2214,7 @@ function resolveFramework(env) {
   if (names.some((name) => PLAYWRIGHT_CONFIG.test(name))) return "playwright";
   if (names.some((name) => WDIO_CONFIG.test(name))) return "appium";
   if (names.includes("pytest.ini") || names.includes("conftest.py")) return "pytest";
-  const pyproject = import_node_path14.default.join(env.workingDirectory, "pyproject.toml");
+  const pyproject = import_node_path15.default.join(env.workingDirectory, "pyproject.toml");
   if ((0, import_node_fs5.existsSync)(pyproject) && /^\s*\[tool\.pytest(\.ini_options)?\]/m.test((0, import_node_fs5.readFileSync)(pyproject, "utf8"))) {
     return "pytest";
   }
@@ -1996,7 +2282,7 @@ function nodeIdsForRuns(planned, runs) {
 }
 function pytestEnv(extra) {
   const env = { ...process.env, CI: "1", ...extra };
-  env.PYTHONPATH = process.env.PYTHONPATH ? `${PLUGIN_DIR}${import_node_path14.default.delimiter}${process.env.PYTHONPATH}` : PLUGIN_DIR;
+  env.PYTHONPATH = process.env.PYTHONPATH ? `${PLUGIN_DIR}${import_node_path15.default.delimiter}${process.env.PYTHONPATH}` : PLUGIN_DIR;
   if (!("PEEPS_PLAN_FILE" in extra)) delete env.PEEPS_PLAN_FILE;
   if (!("PEEPS_COLLECT_OUT" in extra)) delete env.PEEPS_COLLECT_OUT;
   if (!("PEEPS_SELECT_ONLY" in extra)) delete env.PEEPS_SELECT_ONLY;
@@ -2033,8 +2319,8 @@ function configArgs(env) {
   return env.configPath ? ["-c", env.configPath] : [];
 }
 async function collectPytest(env) {
-  const scratch = await (0, import_promises9.mkdtemp)(import_node_path14.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os4.tmpdir)(), "peeps-collect-"));
-  const out = import_node_path14.default.join(scratch, "collection.json");
+  const scratch = await (0, import_promises10.mkdtemp)(import_node_path15.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os4.tmpdir)(), "peeps-collect-"));
+  const out = import_node_path15.default.join(scratch, "collection.json");
   const { code, output } = await spawnPytest(
     ["--collect-only", "-q", "-p", PLUGIN, ...configArgs(env)],
     { cwd: env.workingDirectory, env: pytestEnv({ PEEPS_COLLECT_OUT: out }), capture: true }
@@ -2043,7 +2329,7 @@ async function collectPytest(env) {
     throw new Error(`pytest --collect-only exited with ${code}:
 ${output.slice(-4e3)}`);
   }
-  const collection = JSON.parse(await (0, import_promises9.readFile)(out, "utf8"));
+  const collection = JSON.parse(await (0, import_promises10.readFile)(out, "utf8"));
   for (const error of collection.errors) {
     console.log(`[peeps] collection error in ${error.nodeId}:
 ${error.message}`);
@@ -2056,8 +2342,8 @@ function repoRelative2(env, abs) {
     workspace = (0, import_node_fs5.realpathSync)(workspace);
   } catch {
   }
-  const rel = import_node_path14.default.relative(workspace, abs).split(import_node_path14.default.sep).join("/");
-  if (rel === ".." || rel.startsWith("../") || import_node_path14.default.isAbsolute(rel)) {
+  const rel = import_node_path15.default.relative(workspace, abs).split(import_node_path15.default.sep).join("/");
+  if (rel === ".." || rel.startsWith("../") || import_node_path15.default.isAbsolute(rel)) {
     throw new Error(`${abs} is outside the repository (${env.workspace})`);
   }
   return rel;
@@ -2071,8 +2357,8 @@ async function moduleFilePayload(env, collection) {
   );
   const files = [];
   for (const file of [...modules].sort()) {
-    const abs = import_node_path14.default.join(collection.rootDir, file);
-    const bytes = await (0, import_promises9.readFile)(abs);
+    const abs = import_node_path15.default.join(collection.rootDir, file);
+    const bytes = await (0, import_promises10.readFile)(abs);
     files.push({
       path: repoRelative2(env, abs),
       blobSha: gitBlobSha(bytes),
@@ -2178,23 +2464,23 @@ function nodeIdArgument(nodeId, rootDirAbs, cwd) {
     from = (0, import_node_fs5.realpathSync)(cwd);
   } catch {
   }
-  const relative = import_node_path14.default.relative(from, import_node_path14.default.join(rootDirAbs, file)).split(import_node_path14.default.sep).join("/");
+  const relative = import_node_path15.default.relative(from, import_node_path15.default.join(rootDirAbs, file)).split(import_node_path15.default.sep).join("/");
   return relative + rest;
 }
 async function executePytestAndReport(env, peeps, input2) {
-  const scratch = await (0, import_promises9.mkdtemp)(import_node_path14.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os4.tmpdir)(), "peeps-"));
-  const planFile = import_node_path14.default.join(scratch, "plan.json");
-  const resultsFile = import_node_path14.default.join(scratch, "results.json");
-  const outputDir = import_node_path14.default.join(scratch, "output");
-  const artifactsDir = import_node_path14.default.join(scratch, "evidence");
-  await (0, import_promises9.mkdir)(artifactsDir);
+  const scratch = await (0, import_promises10.mkdtemp)(import_node_path15.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os4.tmpdir)(), "peeps-"));
+  const planFile = import_node_path15.default.join(scratch, "plan.json");
+  const resultsFile = import_node_path15.default.join(scratch, "results.json");
+  const outputDir = import_node_path15.default.join(scratch, "output");
+  const artifactsDir = import_node_path15.default.join(scratch, "evidence");
+  await (0, import_promises10.mkdir)(artifactsDir);
   const runs = Object.fromEntries(
     Object.entries(input2.byNodeId).map(([nodeId, run]) => [
       nodeId,
       { runId: run.runId, credential: run.credential }
     ])
   );
-  await (0, import_promises9.writeFile)(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 384 });
+  await (0, import_promises10.writeFile)(planFile, JSON.stringify({ peepsUrl: env.peepsUrl, runs }), { mode: 384 });
   const config = env.configPath ? configArgs(env) : input2.collection.iniPath ? ["-c", input2.collection.iniPath] : [];
   const args = ["-p", PLUGIN, "--rootdir", input2.collection.rootDir, ...config];
   if (input2.collection.playwright) args.push("--output", outputDir);
@@ -2225,7 +2511,7 @@ async function executePytestAndReport(env, peeps, input2) {
     }
   );
   const runIdByOutputDir = await readOutputDirs(resultsFile, input2.byNodeId);
-  const evidence = await stagedEvidence(import_node_path14.default.join(artifactsDir, "upload"), input2.byNodeId);
+  const evidence = await stagedEvidence(import_node_path15.default.join(artifactsDir, "upload"), input2.byNodeId);
   for (const b of input2.batches) {
     try {
       const uploaded = await uploadOutput(peeps, b.batchId, outputDir, runIdByOutputDir);
@@ -2252,10 +2538,10 @@ async function executePytestAndReport(env, peeps, input2) {
 async function readOutputDirs(resultsFile, byNodeId) {
   const map = /* @__PURE__ */ new Map();
   try {
-    const results = JSON.parse(await (0, import_promises9.readFile)(resultsFile, "utf8"));
+    const results = JSON.parse(await (0, import_promises10.readFile)(resultsFile, "utf8"));
     for (const [nodeId, dir] of Object.entries(results.outputDirs ?? {})) {
       const run = byNodeId[nodeId];
-      if (run) map.set(import_node_path14.default.basename(dir), run.runId);
+      if (run) map.set(import_node_path15.default.basename(dir), run.runId);
     }
   } catch {
   }
@@ -2267,18 +2553,18 @@ function artifactName(rel, runIdByOutputDir) {
   const runId = rest.length > 0 ? runIdByOutputDir.get(dir) : void 0;
   const flat = (runId ? [runId, ...rest] : [dir, ...rest]).join("-").replace(/[^A-Za-z0-9._-]/g, "_");
   if (flat.length <= 200) return `data/${flat}`;
-  const ext = import_node_path14.default.extname(flat);
+  const ext = import_node_path15.default.extname(flat);
   return `data/${(0, import_node_crypto5.createHash)("sha1").update(rel).digest("hex")}${ext}`;
 }
 async function* walkOutput(dir, rel = "") {
   let entries;
   try {
-    entries = await (0, import_promises9.readdir)(dir, { withFileTypes: true });
+    entries = await (0, import_promises10.readdir)(dir, { withFileTypes: true });
   } catch {
     return;
   }
   for (const entry of entries) {
-    const abs = import_node_path14.default.join(dir, entry.name);
+    const abs = import_node_path15.default.join(dir, entry.name);
     const relPath = rel ? `${rel}/${entry.name}` : entry.name;
     if (entry.isDirectory()) yield* walkOutput(abs, relPath);
     else if (entry.isFile()) yield { abs, rel: relPath };
@@ -2287,13 +2573,13 @@ async function* walkOutput(dir, rel = "") {
 var MAX_EVIDENCE_BYTES = 25 * 1024 * 1024;
 async function stagedEvidence(uploadDir, byNodeId) {
   try {
-    if (!(await (0, import_promises9.lstat)(uploadDir)).isDirectory()) return [];
+    if (!(await (0, import_promises10.lstat)(uploadDir)).isDirectory()) return [];
   } catch {
     return [];
   }
   const runIds = Object.values(byNodeId).map((run) => run.runId);
   const staged = [];
-  for (const entry of await (0, import_promises9.readdir)(uploadDir, { withFileTypes: true })) {
+  for (const entry of await (0, import_promises10.readdir)(uploadDir, { withFileTypes: true })) {
     const name = entry.name;
     if (!entry.isFile() || !/^[A-Za-z0-9._-]{1,200}$/.test(name)) {
       console.log(`[peeps] not uploading ${JSON.stringify(name)}: not a staged attachment`);
@@ -2301,7 +2587,7 @@ async function stagedEvidence(uploadDir, byNodeId) {
     }
     const runId = runIds.find((id) => name.startsWith(`${id}-evidence-`));
     if (runId === void 0) continue;
-    staged.push({ abs: import_node_path14.default.join(uploadDir, name), name, runId });
+    staged.push({ abs: import_node_path15.default.join(uploadDir, name), name, runId });
   }
   return staged.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -2309,7 +2595,7 @@ async function uploadEvidence2(peeps, batchId, files) {
   let uploaded = 0;
   for (const file of files) {
     try {
-      const info = await (0, import_promises9.lstat)(file.abs);
+      const info = await (0, import_promises10.lstat)(file.abs);
       const cap = /-evidence-video\.mp4$/.test(file.name) ? MAX_VIDEO_BYTES : MAX_EVIDENCE_BYTES;
       if (!info.isFile() || info.size > cap) {
         console.log(`[peeps] skipping attachment ${file.name}: not a file within ${cap} bytes`);
@@ -2317,7 +2603,7 @@ async function uploadEvidence2(peeps, batchId, files) {
       }
       await peeps.postBytes(
         `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(`data/${file.name}`)}`,
-        await (0, import_promises9.readFile)(file.abs)
+        await (0, import_promises10.readFile)(file.abs)
       );
       uploaded += 1;
     } catch (error) {
@@ -2329,7 +2615,7 @@ async function uploadEvidence2(peeps, batchId, files) {
 async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
   let uploaded = 0;
   for await (const file of walkOutput(outputDir)) {
-    const info = await (0, import_promises9.stat)(file.abs);
+    const info = await (0, import_promises10.stat)(file.abs);
     if (info.size > MAX_UPLOAD_BYTES2) {
       console.log(`[peeps] skipping ${file.rel}: ${info.size} bytes exceeds the upload limit`);
       continue;
@@ -2338,7 +2624,7 @@ async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
     try {
       await peeps.postBytes(
         `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(name)}`,
-        await (0, import_promises9.readFile)(file.abs)
+        await (0, import_promises10.readFile)(file.abs)
       );
       uploaded += 1;
     } catch (error) {
@@ -2349,8 +2635,8 @@ async function uploadOutput(peeps, batchId, outputDir, runIdByOutputDir) {
 }
 
 // src/appium.ts
-var COLLECTOR = import_node_path15.default.join(__dirname, "..", "dist", "appium-collect.mjs");
-var APPIUM_REPORTER = import_node_path15.default.join(__dirname, "..", "dist", "appium-reporter.js");
+var COLLECTOR = import_node_path16.default.join(__dirname, "..", "dist", "appium-collect.mjs");
+var APPIUM_REPORTER = import_node_path16.default.join(__dirname, "..", "dist", "appium-reporter.js");
 var DEFAULT_CONFIGS = ["ts", "mts", "js", "mjs", "cjs", "cts"].map((ext) => `wdio.conf.${ext}`);
 var COLLECT_TIMEOUT_MS = 10 * 60 * 1e3;
 async function readAppiumCapabilities(env, configPath = wdioConfigPath(env), extraEnv = {}) {
@@ -2360,9 +2646,9 @@ async function readAppiumCapabilities(env, configPath = wdioConfigPath(env), ext
 }
 var MAX_UPLOAD_BYTES3 = 128 * 1024 * 1024;
 function wdioConfigPath(env) {
-  if (env.configPath) return import_node_path15.default.resolve(env.workingDirectory, env.configPath);
+  if (env.configPath) return import_node_path16.default.resolve(env.workingDirectory, env.configPath);
   for (const name of DEFAULT_CONFIGS) {
-    const candidate = import_node_path15.default.join(env.workingDirectory, name);
+    const candidate = import_node_path16.default.join(env.workingDirectory, name);
     if ((0, import_node_fs6.existsSync)(candidate)) return candidate;
   }
   let names = [];
@@ -2370,14 +2656,14 @@ function wdioConfigPath(env) {
     names = (0, import_node_fs6.readdirSync)(env.workingDirectory).filter((name) => WDIO_CONFIG.test(name)).sort();
   } catch {
   }
-  if (names.length === 1) return import_node_path15.default.join(env.workingDirectory, names[0]);
+  if (names.length === 1) return import_node_path16.default.join(env.workingDirectory, names[0]);
   throw new Error(
     names.length > 1 ? `several WebdriverIO configs in ${env.workingDirectory} (${names.join(", ")}): set \`config\` to the one this job runs` : `no wdio.conf.ts (or .js, .mjs, .cjs) in ${env.workingDirectory}: set \`config\` to your WebdriverIO config`
   );
 }
 async function runCollector(env, args, what, extraEnv = {}) {
-  const scratch = await (0, import_promises10.mkdtemp)(import_node_path15.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os5.tmpdir)(), "peeps-collect-"));
-  const out = import_node_path15.default.join(scratch, "collection.json");
+  const scratch = await (0, import_promises11.mkdtemp)(import_node_path16.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os5.tmpdir)(), "peeps-collect-"));
+  const out = import_node_path16.default.join(scratch, "collection.json");
   const { code, output } = await new Promise((resolve, reject) => {
     const child = (0, import_node_child_process6.spawn)(process.execPath, [COLLECTOR, ...args, out], {
       cwd: env.workingDirectory,
@@ -2408,7 +2694,7 @@ async function runCollector(env, args, what, extraEnv = {}) {
     throw new Error(`${what} failed (${code}):
 ${output.slice(-4e3)}`);
   }
-  return JSON.parse(await (0, import_promises10.readFile)(out, "utf8"));
+  return JSON.parse(await (0, import_promises11.readFile)(out, "utf8"));
 }
 async function collectAppium(env, configPath = wdioConfigPath(env)) {
   const collection = await runCollector(env, [configPath], "collecting the WebdriverIO suite");
@@ -2420,7 +2706,7 @@ ${error.message}`);
   return collection;
 }
 function repoPath(env, abs) {
-  if (import_node_path15.default.resolve(abs) === import_node_path15.default.resolve(env.workspace)) return "";
+  if (import_node_path16.default.resolve(abs) === import_node_path16.default.resolve(env.workspace)) return "";
   const rel = repoRelative(env.workspace, abs);
   if (rel === null) throw new Error(`${abs} is outside the repository (${env.workspace})`);
   return rel;
@@ -2430,7 +2716,7 @@ function appiumRootDir(env, collection) {
   const files = collection.specs.map((file) => repoPath(env, file));
   const holds = (file) => root === "" || file.startsWith(`${root}/`);
   while (!files.every(holds)) {
-    const parent = import_node_path15.default.posix.dirname(root);
+    const parent = import_node_path16.default.posix.dirname(root);
     root = parent === "." ? "" : parent;
   }
   return root || ".";
@@ -2466,7 +2752,7 @@ async function buildAppiumList(env, collection) {
     const file = relativeToRoot(test.file);
     let source = sources.get(test.file);
     if (source === void 0) {
-      const bytes = await (0, import_promises10.readFile)(test.file);
+      const bytes = await (0, import_promises11.readFile)(test.file);
       source = bytes.toString("utf8");
       sources.set(test.file, source);
       files.push({ path: prefix + file, blobSha: gitBlobSha(bytes), content: source });
@@ -2497,7 +2783,7 @@ async function buildAppiumList(env, collection) {
   return {
     rootDir,
     list: {
-      config: { rootDir: import_node_path15.default.join(env.workspace, rootDir === "." ? "" : rootDir), projects: [] },
+      config: { rootDir: import_node_path16.default.join(env.workspace, rootDir === "." ? "" : rootDir), projects: [] },
       suites: sorted.map((file) => fileSuites.get(file))
     },
     files: files.sort((a, b) => a.path.localeCompare(b.path)),
@@ -2717,9 +3003,9 @@ async function runAppiumDispatched(env, peeps) {
   });
 }
 function hasPackage(name, from) {
-  for (let dir = from; ; dir = import_node_path15.default.dirname(dir)) {
-    if ((0, import_node_fs6.existsSync)(import_node_path15.default.join(dir, "node_modules", name, "package.json"))) return true;
-    if (import_node_path15.default.dirname(dir) === dir) return false;
+  for (let dir = from; ; dir = import_node_path16.default.dirname(dir)) {
+    if ((0, import_node_fs6.existsSync)(import_node_path16.default.join(dir, "node_modules", name, "package.json"))) return true;
+    if (import_node_path16.default.dirname(dir) === dir) return false;
   }
 }
 var liveWrappers = /* @__PURE__ */ new Set();
@@ -2776,7 +3062,7 @@ function stopOnSignal() {
 }
 async function writeWrapperConfig(configPath, options) {
   const ts = /\.[cm]?ts$/.test(configPath);
-  const wrapper = import_node_path15.default.join(import_node_path15.default.dirname(configPath), `.peeps-${(0, import_node_crypto6.randomUUID)()}.wdio.conf.${ts ? "mts" : "mjs"}`);
+  const wrapper = import_node_path16.default.join(import_node_path16.default.dirname(configPath), `.peeps-${(0, import_node_crypto6.randomUUID)()}.wdio.conf.${ts ? "mts" : "mjs"}`);
   const source = [
     "// Written by peeps-action for this run and removed after it; never committed.",
     'import { createRequire } from "node:module";',
@@ -2787,13 +3073,13 @@ async function writeWrapperConfig(configPath, options) {
     `export const config = withPeeps(base, ${JSON.stringify(options)});`,
     ""
   ].join("\n");
-  await (0, import_promises10.writeFile)(wrapper, source, { flag: "wx", mode: 384 });
+  await (0, import_promises11.writeFile)(wrapper, source, { flag: "wx", mode: 384 });
   liveWrappers.add(wrapper);
   return {
     configPath: wrapper,
     cleanup: async () => {
       liveWrappers.delete(wrapper);
-      await (0, import_promises10.unlink)(wrapper).catch((error) => {
+      await (0, import_promises11.unlink)(wrapper).catch((error) => {
         if (error.code !== "ENOENT") throw error;
       });
     }
@@ -2817,10 +3103,10 @@ function runWdio(env, configPath, extraEnv) {
   });
 }
 async function executeAppiumAndReport(env, peeps, input2) {
-  const scratch = await (0, import_promises10.mkdtemp)(import_node_path15.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os5.tmpdir)(), "peeps-"));
-  const planFile = import_node_path15.default.join(scratch, "plan.json");
-  const artifactsDir = import_node_path15.default.join(scratch, "evidence");
-  await (0, import_promises10.mkdir)(artifactsDir);
+  const scratch = await (0, import_promises11.mkdtemp)(import_node_path16.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os5.tmpdir)(), "peeps-"));
+  const planFile = import_node_path16.default.join(scratch, "plan.json");
+  const artifactsDir = import_node_path16.default.join(scratch, "evidence");
+  await (0, import_promises11.mkdir)(artifactsDir);
   const plan = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: input2.runs };
   if (input2.selection) plan.onlyPlanned = true;
   if (input2.selection?.alsoRun?.length) plan.alsoRun = input2.selection.alsoRun;
@@ -2831,8 +3117,8 @@ async function executeAppiumAndReport(env, peeps, input2) {
       `[peeps] Record video is on: recording ${input2.recordVideoRunIds.length} run(s)` + (plan.ffmpeg ? "" : "; ffmpeg is not on this runner, so iOS does not record, Android stops at 3 minutes and no frames are cut")
     );
   }
-  await (0, import_promises10.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
-  const junitDir = hasPackage("@wdio/junit-reporter", import_node_path15.default.dirname(input2.configPath)) ? import_node_path15.default.join(scratch, "junit") : null;
+  await (0, import_promises11.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
+  const junitDir = hasPackage("@wdio/junit-reporter", import_node_path16.default.dirname(input2.configPath)) ? import_node_path16.default.join(scratch, "junit") : null;
   const options = { junitDir };
   if (input2.selection) {
     options.specs = input2.selection.specs.map((file) => (0, import_node_url2.pathToFileURL)(file).href);
@@ -2858,7 +3144,7 @@ async function executeAppiumAndReport(env, peeps, input2) {
     });
   }
   const byRunId = Object.fromEntries(input2.runs.map((run) => [run.runId, run]));
-  const evidence = await stagedEvidence(import_node_path15.default.join(artifactsDir, "upload"), byRunId);
+  const evidence = await stagedEvidence(import_node_path16.default.join(artifactsDir, "upload"), byRunId);
   if (junitDir && input2.batches.length > 1) {
     console.log(`[peeps] JUnit XML not uploaded: this run spans ${input2.batches.length} batches, and it holds every batch's tests`);
   }
@@ -2887,18 +3173,18 @@ function junitArtifactName(file) {
 async function uploadJunit(peeps, batchId, junitDir) {
   let names;
   try {
-    names = (await (0, import_promises10.readdir)(junitDir)).filter((name) => name.endsWith(".xml")).sort();
+    names = (await (0, import_promises11.readdir)(junitDir)).filter((name) => name.endsWith(".xml")).sort();
   } catch {
     return;
   }
   let uploaded = 0;
   for (const name of names) {
-    const file = import_node_path15.default.join(junitDir, name);
+    const file = import_node_path16.default.join(junitDir, name);
     try {
-      if ((await (0, import_promises10.stat)(file)).size > MAX_UPLOAD_BYTES3) continue;
+      if ((await (0, import_promises11.stat)(file)).size > MAX_UPLOAD_BYTES3) continue;
       await peeps.postBytes(
         `/api/v1/ci/batches/${batchId}/artifacts?path=${encodeURIComponent(junitArtifactName(name))}`,
-        await (0, import_promises10.readFile)(file)
+        await (0, import_promises11.readFile)(file)
       );
       uploaded += 1;
     } catch (error) {
@@ -2950,13 +3236,13 @@ could not start WebdriverIO: ${error.message}` });
 async function readLocalResults(resultsDir) {
   let names;
   try {
-    names = (await (0, import_promises10.readdir)(resultsDir)).filter((name) => name.endsWith(".jsonl")).sort();
+    names = (await (0, import_promises11.readdir)(resultsDir)).filter((name) => name.endsWith(".jsonl")).sort();
   } catch {
     return [];
   }
   const byRunId = /* @__PURE__ */ new Map();
   for (const name of names) {
-    for (const raw of (await (0, import_promises10.readFile)(import_node_path15.default.join(resultsDir, name), "utf8")).split("\n")) {
+    for (const raw of (await (0, import_promises11.readFile)(import_node_path16.default.join(resultsDir, name), "utf8")).split("\n")) {
       if (!raw.trim()) continue;
       let line;
       try {
@@ -2974,13 +3260,13 @@ async function readLocalResults(resultsDir) {
 async function runAppiumTests(env, input2, options = {}) {
   const redact = options.redact ?? ((text2) => text2);
   const configPath = wdioConfigPath(env);
-  const scratch = await (0, import_promises10.mkdtemp)(import_node_path15.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os5.tmpdir)(), "peeps-agent-run-"));
-  const planFile = import_node_path15.default.join(scratch, "plan.json");
-  const artifactsDir = import_node_path15.default.join(scratch, "evidence");
-  const resultsDir = import_node_path15.default.join(scratch, "results");
-  await (0, import_promises10.mkdir)(artifactsDir);
+  const scratch = await (0, import_promises11.mkdtemp)(import_node_path16.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os5.tmpdir)(), "peeps-agent-run-"));
+  const planFile = import_node_path16.default.join(scratch, "plan.json");
+  const artifactsDir = import_node_path16.default.join(scratch, "evidence");
+  const resultsDir = import_node_path16.default.join(scratch, "results");
+  await (0, import_promises11.mkdir)(artifactsDir);
   const plan = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: [], resultsDir };
-  await (0, import_promises10.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
+  await (0, import_promises11.writeFile)(planFile, JSON.stringify(plan), { mode: 384 });
   const wdioOptions = {
     junitDir: null,
     // As a file URL: WebdriverIO globs a plain path, and `[id].spec.ts` is a glob.
@@ -3001,7 +3287,7 @@ async function runAppiumTests(env, input2, options = {}) {
   }
   const sources = /* @__PURE__ */ new Map();
   const sourceOf = async (rel) => {
-    if (!sources.has(rel)) sources.set(rel, await (0, import_promises10.readFile)(import_node_path15.default.join(env.workspace, rel), "utf8").catch(() => null));
+    if (!sources.has(rel)) sources.set(rel, await (0, import_promises11.readFile)(import_node_path16.default.join(env.workspace, rel), "utf8").catch(() => null));
     return sources.get(rel) ?? null;
   };
   const results = [];
@@ -3022,12 +3308,12 @@ async function runAppiumTests(env, input2, options = {}) {
     if (end.attachments?.length) {
       result.evidence = end.attachments.map((a) => ({
         name: a.name,
-        path: import_node_path15.default.join(artifactsDir, "upload", import_node_path15.default.basename(a.path)),
+        path: import_node_path16.default.join(artifactsDir, "upload", import_node_path16.default.basename(a.path)),
         size: a.size
       }));
       const pageSource = result.evidence.find((e) => e.name.startsWith("page-source"));
       if (pageSource && inlined < AGENT_PAGE_SOURCE_TESTS) {
-        const text2 = await (0, import_promises10.readFile)(pageSource.path, "utf8").catch(() => null);
+        const text2 = await (0, import_promises11.readFile)(pageSource.path, "utf8").catch(() => null);
         if (text2 !== null) {
           inlined += 1;
           result.pageSource = redact(text2.slice(0, AGENT_PAGE_SOURCE_CHARS));
@@ -3050,10 +3336,10 @@ async function runAppiumTests(env, input2, options = {}) {
 // src/device-tools.ts
 var import_node_child_process7 = require("node:child_process");
 var import_node_fs7 = require("node:fs");
-var import_promises11 = require("node:fs/promises");
+var import_promises12 = require("node:fs/promises");
 var import_node_net = require("node:net");
 var import_node_os6 = require("node:os");
-var import_node_path16 = __toESM(require("node:path"));
+var import_node_path17 = __toESM(require("node:path"));
 var DEFAULT_DEVICE_LIMITS = {
   readyWaitMs: 6e4,
   callMs: 5e4,
@@ -3420,11 +3706,11 @@ ${masked.slice(0, maxChars)}`
       const data = String(await wd("GET", "/screenshot") ?? "");
       const bytes = Buffer.from(data, "base64");
       const size = pngSize(bytes);
-      const dir = import_node_path16.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os6.tmpdir)(), "peeps-device");
-      await (0, import_promises11.mkdir)(dir, { recursive: true });
+      const dir = import_node_path17.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os6.tmpdir)(), "peeps-device");
+      await (0, import_promises12.mkdir)(dir, { recursive: true });
       screenshots += 1;
-      const file = import_node_path16.default.join(dir, `screenshot-${screenshots}.png`);
-      await (0, import_promises11.writeFile)(file, bytes);
+      const file = import_node_path17.default.join(dir, `screenshot-${screenshots}.png`);
+      await (0, import_promises12.writeFile)(file, bytes);
       const inline = data.length <= SCREENSHOT_INLINE_BASE64;
       const info = {
         width: size?.width ?? null,
@@ -3589,14 +3875,14 @@ async function defaultReadCapabilities(env, extraEnv) {
   return (await readAppiumCapabilities(env, wdioConfigPath(env), extraEnv)).capabilities;
 }
 function resolveAppiumBinary(from, pathEnv = process.env.PATH ?? "") {
-  for (let dir = import_node_path16.default.resolve(from); ; dir = import_node_path16.default.dirname(dir)) {
-    const candidate = import_node_path16.default.join(dir, "node_modules", ".bin", "appium");
+  for (let dir = import_node_path17.default.resolve(from); ; dir = import_node_path17.default.dirname(dir)) {
+    const candidate = import_node_path17.default.join(dir, "node_modules", ".bin", "appium");
     if ((0, import_node_fs7.existsSync)(candidate)) return candidate;
-    if (import_node_path16.default.dirname(dir) === dir) break;
+    if (import_node_path17.default.dirname(dir) === dir) break;
   }
-  for (const dir of pathEnv.split(import_node_path16.default.delimiter)) {
+  for (const dir of pathEnv.split(import_node_path17.default.delimiter)) {
     if (!dir) continue;
-    const candidate = import_node_path16.default.join(dir, "appium");
+    const candidate = import_node_path17.default.join(dir, "appium");
     if ((0, import_node_fs7.existsSync)(candidate)) return candidate;
   }
   return null;
@@ -3621,7 +3907,7 @@ async function startAppiumServer(env, signal, startMs = APPIUM_START_MS) {
     );
   }
   const port = await freePort();
-  const logFile = import_node_path16.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os6.tmpdir)(), `peeps-appium-${port}.log`);
+  const logFile = import_node_path17.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os6.tmpdir)(), `peeps-appium-${port}.log`);
   const child = (0, import_node_child_process7.spawn)(
     bin,
     // `warn`: at its default (debug) and at info Appium logs every request
@@ -3712,15 +3998,15 @@ ${output.slice(-2e3)}`);
 var import_node_child_process8 = require("node:child_process");
 var import_node_crypto7 = require("node:crypto");
 var import_node_fs8 = require("node:fs");
-var import_promises13 = require("node:fs/promises");
+var import_promises14 = require("node:fs/promises");
 var import_node_os8 = require("node:os");
-var import_node_path18 = __toESM(require("node:path"));
+var import_node_path19 = __toESM(require("node:path"));
 var import_node_util3 = require("node:util");
 
 // src/pytest-run-tool.ts
-var import_promises12 = require("node:fs/promises");
+var import_promises13 = require("node:fs/promises");
 var import_node_os7 = require("node:os");
-var import_node_path17 = __toESM(require("node:path"));
+var import_node_path18 = __toESM(require("node:path"));
 var RUN_TESTS_HOOK = ".peeps/run-tests";
 var RUN_TESTS_TIMEOUT_MS = 90 * 60 * 1e3;
 function redactHttpCalls(calls, redact) {
@@ -3776,7 +4062,7 @@ function junitTitlePath(classname, name, file, requestedFile = null) {
   let scopes;
   const dotted = file?.replace(/\.py$/, "").split(/[\\/]/).join(".");
   const parts = classname.split(".");
-  const stem = requestedFile ? import_node_path17.default.basename(requestedFile).replace(/\.py$/, "") : null;
+  const stem = requestedFile ? import_node_path18.default.basename(requestedFile).replace(/\.py$/, "") : null;
   if (dotted && (classname === dotted || classname.startsWith(`${dotted}.`))) {
     scopes = classname.slice(dotted.length).split(".").filter(Boolean);
   } else if (stem && parts.includes(stem)) {
@@ -3835,7 +4121,7 @@ var defaultDeps = {
 function evidenceEnv(out) {
   const pythonPath = process.env.PYTHONPATH;
   return {
-    PYTHONPATH: pythonPath ? `${PLUGIN_DIR}${import_node_path17.default.delimiter}${pythonPath}` : PLUGIN_DIR,
+    PYTHONPATH: pythonPath ? `${PLUGIN_DIR}${import_node_path18.default.delimiter}${pythonPath}` : PLUGIN_DIR,
     PEEPS_EVIDENCE_OUT: out
   };
 }
@@ -3871,14 +4157,14 @@ function withHttpCalls(results, evidenceJson) {
   });
 }
 async function runPytestTool(env, input2, deps = defaultDeps) {
-  const rel = import_node_path17.default.relative(env.workingDirectory, input2.fileAbs).split(import_node_path17.default.sep).join("/");
-  const repoRel = import_node_path17.default.relative(env.workspace, input2.fileAbs).split(import_node_path17.default.sep).join("/");
+  const rel = import_node_path18.default.relative(env.workingDirectory, input2.fileAbs).split(import_node_path18.default.sep).join("/");
+  const repoRel = import_node_path18.default.relative(env.workspace, input2.fileAbs).split(import_node_path18.default.sep).join("/");
   const browser = input2.browser ?? null;
   const extraEnv = input2.extraEnv ?? {};
   const target = pytestNodeArgument(rel, input2.titlePath, browser);
-  const dir = await (0, import_promises12.mkdtemp)(import_node_path17.default.join((0, import_node_os7.tmpdir)(), "peeps-pytest-"));
-  const junit = import_node_path17.default.join(dir, "junit.xml");
-  const evidence = import_node_path17.default.join(dir, "http-calls.json");
+  const dir = await (0, import_promises13.mkdtemp)(import_node_path18.default.join((0, import_node_os7.tmpdir)(), "peeps-pytest-"));
+  const junit = import_node_path18.default.join(dir, "junit.xml");
+  const evidence = import_node_path18.default.join(dir, "http-calls.json");
   const started = Date.now();
   try {
     const plan = input2.hook ? await input2.hook(dir) : { kind: "none" };
@@ -3912,13 +4198,13 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
     );
     let xml = null;
     try {
-      xml = await (0, import_promises12.readFile)(junit, "utf8");
+      xml = await (0, import_promises13.readFile)(junit, "utf8");
     } catch {
     }
     let calls = null;
     if (!hook) {
       try {
-        calls = await (0, import_promises12.readFile)(evidence, "utf8");
+        calls = await (0, import_promises13.readFile)(evidence, "utf8");
       } catch {
       }
     }
@@ -3935,7 +4221,7 @@ async function runPytestTool(env, input2, deps = defaultDeps) {
       outputTail: ran.output.slice(-8e3)
     };
   } finally {
-    await (0, import_promises12.rm)(dir, { recursive: true, force: true });
+    await (0, import_promises13.rm)(dir, { recursive: true, force: true });
   }
 }
 
@@ -3956,12 +4242,12 @@ function str2(args, key, required = true) {
 }
 function jail(workspace, relative) {
   const cleaned = relative.replace(/\\/g, "/").replace(/^\/+/, "");
-  const abs = import_node_path18.default.resolve(workspace, cleaned);
-  const rel = import_node_path18.default.relative(workspace, abs);
-  if (rel.startsWith("..") || import_node_path18.default.isAbsolute(rel)) {
+  const abs = import_node_path19.default.resolve(workspace, cleaned);
+  const rel = import_node_path19.default.relative(workspace, abs);
+  if (rel.startsWith("..") || import_node_path19.default.isAbsolute(rel)) {
     throw new ToolError(`path escapes the workspace: ${relative}`);
   }
-  for (const seg of rel.split(import_node_path18.default.sep)) {
+  for (const seg of rel.split(import_node_path19.default.sep)) {
     if (DENY_SEGMENTS.has(seg)) throw new ToolError(`path is off limits: ${relative}`);
     if (/^\.env(\..*)?$/.test(seg)) throw new ToolError(`path is off limits: ${relative}`);
   }
@@ -3969,7 +4255,7 @@ function jail(workspace, relative) {
 }
 function jailForWrite(workspace, relative) {
   const abs = jail(workspace, relative);
-  const rel = import_node_path18.default.relative(workspace, abs).split(import_node_path18.default.sep).join("/");
+  const rel = import_node_path19.default.relative(workspace, abs).split(import_node_path19.default.sep).join("/");
   if (isCiConfiguration(rel)) {
     throw new ToolError(`workflow files are not writable by Peeps: ${relative}`);
   }
@@ -3997,24 +4283,24 @@ function maskUrlCredentials(text2) {
   return text2.replace(/https:\/\/[^@\s/]+@/g, "https://***@");
 }
 async function ensureParentDirInside(workspace, abs) {
-  const parent = import_node_path18.default.dirname(abs);
+  const parent = import_node_path19.default.dirname(abs);
   let existing = parent;
   for (; ; ) {
     try {
-      await (0, import_promises13.stat)(existing);
+      await (0, import_promises14.stat)(existing);
       break;
     } catch {
-      const up = import_node_path18.default.dirname(existing);
+      const up = import_node_path19.default.dirname(existing);
       if (up === existing) break;
       existing = up;
     }
   }
-  const [realWorkspace, realExisting] = await Promise.all([(0, import_promises13.realpath)(workspace), (0, import_promises13.realpath)(existing)]);
-  const rel = import_node_path18.default.relative(realWorkspace, realExisting);
-  if (rel.startsWith("..") || import_node_path18.default.isAbsolute(rel)) {
-    throw new ToolError(`path escapes the workspace: ${import_node_path18.default.relative(workspace, abs)}`);
+  const [realWorkspace, realExisting] = await Promise.all([(0, import_promises14.realpath)(workspace), (0, import_promises14.realpath)(existing)]);
+  const rel = import_node_path19.default.relative(realWorkspace, realExisting);
+  if (rel.startsWith("..") || import_node_path19.default.isAbsolute(rel)) {
+    throw new ToolError(`path escapes the workspace: ${import_node_path19.default.relative(workspace, abs)}`);
   }
-  if (existing !== parent) await (0, import_promises13.mkdir)(parent, { recursive: true });
+  if (existing !== parent) await (0, import_promises14.mkdir)(parent, { recursive: true });
 }
 var GREP_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml|py|pyi|toml|ini|cfg)$/;
 async function patchPaths(runGit, patchFile) {
@@ -4060,7 +4346,7 @@ async function changedFilesWithDigests(workspace, runGit, limits = {}) {
   const fields = stdout.split("\0");
   const files = [];
   let truncated = false;
-  const realWorkspace = await (0, import_promises13.realpath)(workspace);
+  const realWorkspace = await (0, import_promises14.realpath)(workspace);
   const hashing = {
     maxBytes: limits.maxHashBytes ?? MAX_HASH_BYTES,
     outOfTime: () => Date.now() - started >= (limits.budgetMs ?? DIGEST_BUDGET_MS)
@@ -4090,22 +4376,22 @@ async function digestOf(workspace, realWorkspace, relative, hashing) {
   } catch {
     return { kind: "off_limits", sha256: null };
   }
-  const parent = import_node_path18.default.dirname(abs);
+  const parent = import_node_path19.default.dirname(abs);
   let realParent;
   try {
-    realParent = await (0, import_promises13.realpath)(parent);
+    realParent = await (0, import_promises14.realpath)(parent);
   } catch (error) {
     const code = errorCode(error);
     if (code === "ENOENT" || code === "ENOTDIR") return { kind: "deleted", sha256: null };
     return { kind: "other", sha256: null, reason: `parent unreadable: ${code}` };
   }
-  const resolved = import_node_path18.default.relative(realWorkspace, realParent);
-  if (resolved !== import_node_path18.default.relative(workspace, parent)) {
-    return resolved.startsWith("..") || import_node_path18.default.isAbsolute(resolved) ? { kind: "off_limits", sha256: null, reason: "under a symlinked directory that leads out of the workspace" } : { kind: "symlink", sha256: null, reason: "under a symlinked directory" };
+  const resolved = import_node_path19.default.relative(realWorkspace, realParent);
+  if (resolved !== import_node_path19.default.relative(workspace, parent)) {
+    return resolved.startsWith("..") || import_node_path19.default.isAbsolute(resolved) ? { kind: "off_limits", sha256: null, reason: "under a symlinked directory that leads out of the workspace" } : { kind: "symlink", sha256: null, reason: "under a symlinked directory" };
   }
   let info;
   try {
-    info = await (0, import_promises13.lstat)(abs);
+    info = await (0, import_promises14.lstat)(abs);
   } catch (error) {
     const code = errorCode(error);
     if (code === "ENOENT") return { kind: "deleted", sha256: null };
@@ -4130,29 +4416,29 @@ async function commitPaths(workspace, value) {
   if (!Array.isArray(value) || value.length < 1 || value.length > MAX_COMMIT_PATHS || !value.every((p) => typeof p === "string" && p.length > 0)) {
     throw new ToolError(`argument "paths" must be an array of 1 to ${MAX_COMMIT_PATHS} non-empty strings`);
   }
-  const realWorkspace = await (0, import_promises13.realpath)(workspace);
+  const realWorkspace = await (0, import_promises14.realpath)(workspace);
   const out = /* @__PURE__ */ new Set();
   for (const relative of value) {
-    if (import_node_path18.default.isAbsolute(relative) || /^[\\/]/.test(relative) || /^[A-Za-z]:/.test(relative)) {
+    if (import_node_path19.default.isAbsolute(relative) || /^[\\/]/.test(relative) || /^[A-Za-z]:/.test(relative)) {
       throw new ToolError(`path must be repo-relative, not absolute: ${relative}`);
     }
     const abs = jailForWrite(workspace, relative);
-    const info = await (0, import_promises13.lstat)(abs).catch(() => null);
+    const info = await (0, import_promises14.lstat)(abs).catch(() => null);
     if (info?.isSymbolicLink()) throw new ToolError(`path is a symlink: ${relative}`);
     if (info?.isDirectory()) throw new ToolError(`path is a directory, not a file: ${relative}`);
-    let existing = info ? abs : import_node_path18.default.dirname(abs);
+    let existing = info ? abs : import_node_path19.default.dirname(abs);
     for (; ; ) {
-      const found = await (0, import_promises13.lstat)(existing).then(() => true, () => false);
-      if (found || import_node_path18.default.dirname(existing) === existing) break;
-      existing = import_node_path18.default.dirname(existing);
+      const found = await (0, import_promises14.lstat)(existing).then(() => true, () => false);
+      if (found || import_node_path19.default.dirname(existing) === existing) break;
+      existing = import_node_path19.default.dirname(existing);
     }
-    const real = await (0, import_promises13.realpath)(existing).catch(() => null);
-    if (real === null || import_node_path18.default.relative(realWorkspace, real) !== import_node_path18.default.relative(workspace, existing)) {
+    const real = await (0, import_promises14.realpath)(existing).catch(() => null);
+    if (real === null || import_node_path19.default.relative(realWorkspace, real) !== import_node_path19.default.relative(workspace, existing)) {
       throw new ToolError(
         `path does not resolve to itself (it is under a symlinked directory, or differs in case): ${relative}`
       );
     }
-    out.add(import_node_path18.default.relative(workspace, abs).split(import_node_path18.default.sep).join("/"));
+    out.add(import_node_path19.default.relative(workspace, abs).split(import_node_path19.default.sep).join("/"));
   }
   return [...out];
 }
@@ -4202,10 +4488,10 @@ function createToolServer(env, deps = {}) {
   const handlers = {
     async read_file(args) {
       const abs = jail(workspace, str2(args, "path"));
-      const info = await (0, import_promises13.stat)(abs);
+      const info = await (0, import_promises14.stat)(abs);
       if (!info.isFile()) throw new ToolError("not a file");
       if (info.size > MAX_FILE_BYTES) throw new ToolError(`file is ${info.size} bytes; limit ${MAX_FILE_BYTES}`);
-      return { path: str2(args, "path"), content: redact(await (0, import_promises13.readFile)(abs, "utf8")) };
+      return { path: str2(args, "path"), content: redact(await (0, import_promises14.readFile)(abs, "utf8")) };
     },
     async list_files(args) {
       const dir = jail(workspace, str2(args, "path", false) || ".");
@@ -4214,14 +4500,14 @@ function createToolServer(env, deps = {}) {
         if (out.length >= MAX_LIST || depth > 12) return;
         let entries;
         try {
-          entries = await (0, import_promises13.readdir)(d, { withFileTypes: true });
+          entries = await (0, import_promises14.readdir)(d, { withFileTypes: true });
         } catch {
           return;
         }
         for (const e of entries) {
           if (DENY_SEGMENTS.has(e.name) || e.name.startsWith(".env")) continue;
           const r = rel ? `${rel}/${e.name}` : e.name;
-          if (e.isDirectory()) await walk2(import_node_path18.default.join(d, e.name), r, depth + 1);
+          if (e.isDirectory()) await walk2(import_node_path19.default.join(d, e.name), r, depth + 1);
           else if (e.isFile()) {
             out.push(r);
             if (out.length >= MAX_LIST) return;
@@ -4249,7 +4535,7 @@ function createToolServer(env, deps = {}) {
         if (!GREP_FILE.test(rel)) continue;
         let text2;
         try {
-          text2 = await (0, import_promises13.readFile)(jail(workspace, rel), "utf8");
+          text2 = await (0, import_promises14.readFile)(jail(workspace, rel), "utf8");
         } catch {
           continue;
         }
@@ -4266,14 +4552,14 @@ function createToolServer(env, deps = {}) {
       const content = str2(args, "content");
       if (content.length > MAX_FILE_BYTES) throw new ToolError("content too large");
       await ensureParentDirInside(workspace, abs);
-      await (0, import_promises13.writeFile)(abs, content, "utf8");
+      await (0, import_promises14.writeFile)(abs, content, "utf8");
       return { path: rel, bytes: Buffer.byteLength(content) };
     },
     async apply_patch(args) {
       const patch = str2(args, "patch");
-      const dir = await (0, import_promises13.mkdtemp)(import_node_path18.default.join((0, import_node_os8.tmpdir)(), "peeps-patch-"));
-      const file = import_node_path18.default.join(dir, "change.patch");
-      await (0, import_promises13.writeFile)(file, patch.endsWith("\n") ? patch : `${patch}
+      const dir = await (0, import_promises14.mkdtemp)(import_node_path19.default.join((0, import_node_os8.tmpdir)(), "peeps-patch-"));
+      const file = import_node_path19.default.join(dir, "change.patch");
+      await (0, import_promises14.writeFile)(file, patch.endsWith("\n") ? patch : `${patch}
 `, "utf8");
       for (const touched of await patchPaths(runGit, file)) {
         jailForWrite(workspace, touched);
@@ -4311,12 +4597,12 @@ function createToolServer(env, deps = {}) {
             } catch {
               return { kind: "changed" };
             }
-            const archive = import_node_path18.default.join(scratchDir, "peeps.tar");
-            const copy = import_node_path18.default.join(scratchDir, "hook");
-            await (0, import_promises13.mkdir)(copy);
+            const archive = import_node_path19.default.join(scratchDir, "peeps.tar");
+            const copy = import_node_path19.default.join(scratchDir, "hook");
+            await (0, import_promises14.mkdir)(copy);
             await runGit(["archive", "--format=tar", "-o", archive, sha, ".peeps"]);
             await execFileAsync3("tar", ["-xf", archive, "-C", copy]);
-            return { kind: "ready", path: import_node_path18.default.join(copy, RUN_TESTS_HOOK) };
+            return { kind: "ready", path: import_node_path19.default.join(copy, RUN_TESTS_HOOK) };
           }
         });
         return {
@@ -4347,7 +4633,7 @@ function createToolServer(env, deps = {}) {
           { redact, runner: deps.appiumRunner }
         );
       }
-      const rel = import_node_path18.default.relative(env.workingDirectory, abs).split(import_node_path18.default.sep).join("/");
+      const rel = import_node_path19.default.relative(env.workingDirectory, abs).split(import_node_path19.default.sep).join("/");
       const project = typeof args.project === "string" && args.project ? args.project : null;
       let owners = [];
       if (project) {
@@ -4430,7 +4716,7 @@ function createToolServer(env, deps = {}) {
             (await lit("ls-files", "-z", "--with-tree=HEAD", "--", ...paths)).stdout.split("\0").filter(Boolean)
           );
           const present = await Promise.all(
-            paths.map((p) => (0, import_promises13.lstat)(import_node_path18.default.join(workspace, p)).then(() => true, () => false))
+            paths.map((p) => (0, import_promises14.lstat)(import_node_path19.default.join(workspace, p)).then(() => true, () => false))
           );
           const indexed = new Set(
             (await lit("ls-files", "-z", "--", ...paths)).stdout.split("\0").filter(Boolean)
@@ -4547,7 +4833,7 @@ function createToolServer(env, deps = {}) {
       since ? ["diff", "--name-only", "--no-renames", "-z", since, "HEAD"] : ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", "HEAD"],
       { maxBuffer: 8 * 1024 * 1024 }
     );
-    return stdout.split("\0").filter(Boolean).map((p) => prefix ? import_node_path18.default.posix.relative(prefix, p) : p);
+    return stdout.split("\0").filter(Boolean).map((p) => prefix ? import_node_path19.default.posix.relative(prefix, p) : p);
   }
   const specs = [
     { name: "read_file", description: "Read a file in the repository (repo-relative path). Up to 512 KB.", inputSchema: obj2({ path: s("Repo-relative path") }, ["path"]) },
@@ -4582,19 +4868,19 @@ function jsonBytes(value) {
   return Buffer.byteLength(JSON.stringify(value));
 }
 async function readErrorContext(file, redact, allowedRoots) {
-  if (import_node_path18.default.basename(file) !== "error-context.md") return null;
+  if (import_node_path19.default.basename(file) !== "error-context.md") return null;
   let handle;
   try {
-    if (!(await (0, import_promises13.lstat)(file)).isFile()) return null;
-    const real = await (0, import_promises13.realpath)(file);
-    const roots = await Promise.all(allowedRoots.map((r) => (0, import_promises13.realpath)(r).catch(() => null)));
+    if (!(await (0, import_promises14.lstat)(file)).isFile()) return null;
+    const real = await (0, import_promises14.realpath)(file);
+    const roots = await Promise.all(allowedRoots.map((r) => (0, import_promises14.realpath)(r).catch(() => null)));
     const inside = roots.some((root) => {
       if (root === null) return false;
-      const rel = import_node_path18.default.relative(root, real);
-      return rel !== "" && !rel.startsWith("..") && !import_node_path18.default.isAbsolute(rel);
+      const rel = import_node_path19.default.relative(root, real);
+      return rel !== "" && !rel.startsWith("..") && !import_node_path19.default.isAbsolute(rel);
     });
     if (!inside) return null;
-    handle = await (0, import_promises13.open)(file, import_node_fs8.constants.O_RDONLY | import_node_fs8.constants.O_NOFOLLOW);
+    handle = await (0, import_promises14.open)(file, import_node_fs8.constants.O_RDONLY | import_node_fs8.constants.O_NOFOLLOW);
     const info = await handle.stat();
     if (!info.isFile()) return null;
     if (info.size > ERROR_CONTEXT_MAX_READ_BYTES) return "too_large";
@@ -4624,15 +4910,15 @@ async function playwrightResults(report, env, redact) {
   const rootDir = config?.rootDir;
   const outputDirs = (config?.projects ?? []).flatMap((p) => typeof p.outputDir === "string" ? [p.outputDir] : []);
   const allowedRoots = [env.workspace, ...outputDirs];
-  const real = (p) => (0, import_promises13.realpath)(p).catch(() => p);
+  const real = (p) => (0, import_promises14.realpath)(p).catch(() => p);
   const workspace = await real(env.workspace);
   let budget = ERROR_CONTEXT_TOTAL_BYTES;
   const results = [];
   for (const { test, specFile, errorContextPath } of summaries) {
     let file = null;
     if (typeof rootDir === "string" && specFile !== "") {
-      const rel = import_node_path18.default.relative(workspace, await real(import_node_path18.default.resolve(rootDir, specFile)));
-      if (rel !== "" && !rel.startsWith("..") && !import_node_path18.default.isAbsolute(rel)) file = rel.split(import_node_path18.default.sep).join("/");
+      const rel = import_node_path19.default.relative(workspace, await real(import_node_path19.default.resolve(rootDir, specFile)));
+      if (rel !== "" && !rel.startsWith("..") && !import_node_path19.default.isAbsolute(rel)) file = rel.split(import_node_path19.default.sep).join("/");
     }
     let evidence = {};
     if (errorContextPath !== null) {
@@ -4730,9 +5016,9 @@ async function projectGraph(env, run = runCapture, extraEnv = {}, scrub = (text2
   let dir = null;
   const limitMs = 2 * 60 * 1e3;
   try {
-    dir = await (0, import_promises13.mkdtemp)(import_node_path18.default.join((0, import_node_os8.tmpdir)(), "peeps-graph-"));
-    const reporter = import_node_path18.default.join(dir, "graph-reporter.cjs");
-    await (0, import_promises13.writeFile)(reporter, PROJECT_GRAPH_REPORTER);
+    dir = await (0, import_promises14.mkdtemp)(import_node_path19.default.join((0, import_node_os8.tmpdir)(), "peeps-graph-"));
+    const reporter = import_node_path19.default.join(dir, "graph-reporter.cjs");
+    await (0, import_promises14.writeFile)(reporter, PROJECT_GRAPH_REPORTER);
     const cmd = ["playwright", "test", "--list", `--reporter=${reporter}`];
     if (env.configPath) cmd.push("--config", env.configPath);
     const started = Date.now();
@@ -4762,7 +5048,7 @@ async function projectGraph(env, run = runCapture, extraEnv = {}, scrub = (text2
   } catch (error) {
     return { unavailable: `the listing did not start: ${scrub(String(error.message ?? error)).slice(0, 500)}` };
   } finally {
-    if (dir) await (0, import_promises13.rm)(dir, { recursive: true, force: true }).catch(() => {
+    if (dir) await (0, import_promises14.rm)(dir, { recursive: true, force: true }).catch(() => {
     });
   }
 }
@@ -4940,7 +5226,7 @@ async function runnerInfoFor(env) {
       { cwd: env.workspace }
     );
     const [toplevel = "", sha = ""] = stdout.trim().split("\n");
-    const [realTop, realWorkspace] = await Promise.all([(0, import_promises14.realpath)(toplevel), (0, import_promises14.realpath)(env.workspace)]);
+    const [realTop, realWorkspace] = await Promise.all([(0, import_promises15.realpath)(toplevel), (0, import_promises15.realpath)(env.workspace)]);
     if (realTop === realWorkspace && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) info.checkoutSha = sha;
   } catch {
   }
@@ -4968,9 +5254,9 @@ function playwrightJob(env) {
 
 // src/attach.ts
 var import_node_crypto8 = require("node:crypto");
-var import_promises15 = require("node:fs/promises");
+var import_promises16 = require("node:fs/promises");
 var import_node_os9 = require("node:os");
-var import_node_path19 = __toESM(require("node:path"));
+var import_node_path20 = __toESM(require("node:path"));
 var import_node_url3 = require("node:url");
 var ATTACH_STATE_FILE = "state.json";
 var CONFIG_RECORD = "config-path";
@@ -4982,7 +5268,7 @@ async function exportVariables(vars) {
 ${lines}`);
     return;
   }
-  await (0, import_promises15.appendFile)(file, lines);
+  await (0, import_promises16.appendFile)(file, lines);
 }
 function attachConfigSource(input2) {
   const load = !input2.original ? "const loaded = {};" : input2.esm ? `import * as loaded from ${JSON.stringify((0, import_node_url3.pathToFileURL)(input2.original).href)};` : `const loaded = await require(${JSON.stringify(input2.original)});`;
@@ -5012,23 +5298,23 @@ return { default: withPeeps };
 `;
 }
 async function runAttachStart(env) {
-  const stateDir = import_node_path19.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os9.tmpdir)(), `peeps-attach-${(0, import_node_crypto8.randomUUID)()}`);
-  await (0, import_promises15.mkdir)(stateDir, { recursive: true, mode: 448 });
+  const stateDir = import_node_path20.default.join(process.env.RUNNER_TEMP ?? (0, import_node_os9.tmpdir)(), `peeps-attach-${(0, import_node_crypto8.randomUUID)()}`);
+  await (0, import_promises16.mkdir)(stateDir, { recursive: true, mode: 448 });
   const { dir, file } = await configLocation(env);
   const esm = file ? await isModule(file) : false;
-  const configPath = import_node_path19.default.join(dir, `.peeps-attach-${(0, import_node_crypto8.randomUUID)()}.config.${esm ? "mjs" : "cjs"}`);
-  const reporterPath = import_node_path19.default.join(__dirname, "reporter.js");
+  const configPath = import_node_path20.default.join(dir, `.peeps-attach-${(0, import_node_crypto8.randomUUID)()}.config.${esm ? "mjs" : "cjs"}`);
+  const reporterPath = import_node_path20.default.join(__dirname, "reporter.js");
   try {
-    await (0, import_promises15.writeFile)(configPath, attachConfigSource({ original: file, esm, reporterPath, stateDir }), {
+    await (0, import_promises16.writeFile)(configPath, attachConfigSource({ original: file, esm, reporterPath, stateDir }), {
       flag: "wx",
       mode: 384
     });
   } catch (error) {
-    if (error.code !== "EEXIST") await (0, import_promises15.unlink)(configPath).catch(() => {
+    if (error.code !== "EEXIST") await (0, import_promises16.unlink)(configPath).catch(() => {
     });
     throw error;
   }
-  await (0, import_promises15.writeFile)(import_node_path19.default.join(stateDir, CONFIG_RECORD), configPath, { mode: 384 });
+  await (0, import_promises16.writeFile)(import_node_path20.default.join(stateDir, CONFIG_RECORD), configPath, { mode: 384 });
   await exportVariables({
     PEEPS_ATTACH_CONFIG: configPath,
     PEEPS_ATTACH_DIR: stateDir,
@@ -5042,10 +5328,10 @@ async function runAttachFinish(_env, peeps) {
     console.log("[peeps] attach: no PEEPS_ATTACH_DIR (attach-start did not run); nothing to finish");
     return;
   }
-  const configPath = await (0, import_promises15.readFile)(import_node_path19.default.join(stateDir, CONFIG_RECORD), "utf8").catch(() => null);
-  if (configPath) await (0, import_promises15.unlink)(configPath).catch(() => {
+  const configPath = await (0, import_promises16.readFile)(import_node_path20.default.join(stateDir, CONFIG_RECORD), "utf8").catch(() => null);
+  if (configPath) await (0, import_promises16.unlink)(configPath).catch(() => {
   });
-  const raw = await (0, import_promises15.readFile)(import_node_path19.default.join(stateDir, ATTACH_STATE_FILE), "utf8").catch(() => null);
+  const raw = await (0, import_promises16.readFile)(import_node_path20.default.join(stateDir, ATTACH_STATE_FILE), "utf8").catch(() => null);
   if (!raw) {
     console.log("[peeps] attach: the run planned nothing with Peeps (no tests ran, or Peeps was unreachable)");
     return;
@@ -5259,8 +5545,8 @@ async function waitForVercelPreview(request, deps = {}) {
   const now = deps.now ?? Date.now;
   const pollMs = deps.pollMs ?? 1e4;
   const short = request.sha.slice(0, 7);
-  const github = async (path20) => {
-    const res = await doFetch(`${request.apiUrl}/repos/${request.repository}${path20}`, {
+  const github = async (path21) => {
+    const res = await doFetch(`${request.apiUrl}/repos/${request.repository}${path21}`, {
       headers: {
         authorization: `Bearer ${request.token}`,
         accept: "application/vnd.github+json",
@@ -5272,10 +5558,10 @@ async function waitForVercelPreview(request, deps = {}) {
     }
     if (res.status === 403 || res.status === 404) {
       throw new Error(
-        `GitHub refused ${path20} (${res.status}). Give the job \`deployments: read\` and \`statuses: read\` in its permissions.`
+        `GitHub refused ${path21} (${res.status}). Give the job \`deployments: read\` and \`statuses: read\` in its permissions.`
       );
     }
-    if (!res.ok) throw new Error(`GitHub ${path20}: ${res.status} ${nameForLog((await res.text()).slice(0, 300))}`);
+    if (!res.ok) throw new Error(`GitHub ${path21}: ${res.status} ${nameForLog((await res.text()).slice(0, 300))}`);
     return await res.json();
   };
   const deadline = now() + request.timeoutMs;
@@ -5425,21 +5711,21 @@ async function main() {
   const framework = mode === "agent" ? "playwright" : resolveFramework(env);
   if (framework === "pytest" || framework === "appium") {
     console.log(`[peeps] framework=${framework}`);
-    const path20 = framework === "pytest" ? { inventory: runPytestInventory, report: runPytestReport, run: runPytestDispatched } : { inventory: runAppiumInventory, report: runAppiumReport, run: runAppiumDispatched };
+    const path21 = framework === "pytest" ? { inventory: runPytestInventory, report: runPytestReport, run: runPytestDispatched } : { inventory: runAppiumInventory, report: runAppiumReport, run: runAppiumDispatched };
     switch (mode) {
       case "inventory":
-        await path20.inventory(env, peeps);
+        await path21.inventory(env, peeps);
         return;
       case "report":
         if (onDefaultBranch(env)) {
-          await path20.inventory(env, peeps).catch(
+          await path21.inventory(env, peeps).catch(
             (error) => console.log(`[peeps] inventory skipped: ${String(error)}`)
           );
         }
-        await path20.report(env, peeps);
+        await path21.report(env, peeps);
         return;
       case "run":
-        await path20.run(env, peeps);
+        await path21.run(env, peeps);
         return;
       default:
         throw new Error(`unknown mode ${mode}`);

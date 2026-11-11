@@ -31,6 +31,8 @@ export interface Collect {
   projectId: string;
   coverage: boolean;
   fingerprint: boolean;
+  /** Read the job's Postgres log (`PEEPS_PG_LOG`) for the tables its tests touched (PR 5). */
+  tables: boolean;
   key: Buffer;
   keyVersion: string;
 }
@@ -52,11 +54,11 @@ function readCollect(project: unknown): Collect | null {
   if (typeof project !== "object" || project === null) return null;
   const { projectId, collect } = project as { projectId?: unknown; collect?: unknown };
   if (typeof projectId !== "string" || projectId === "" || typeof collect !== "object" || collect === null) return null;
-  const { coverage, fingerprint, key, keyVersion } = collect as Record<string, unknown>;
+  const { coverage, fingerprint, tables, key, keyVersion } = collect as Record<string, unknown>;
   const parsed = typeof key === "string" && /^[0-9a-f]{64}$/.test(key) ? parseProjectKey(key) : null;
   if (!parsed || typeof keyVersion !== "string" || !/^V[1-9][0-9]*$/.test(keyVersion)) return null;
   if (coverage !== true && fingerprint !== true) return null;
-  return { projectId, coverage: coverage === true, fingerprint: fingerprint === true, key: parsed, keyVersion };
+  return { projectId, coverage: coverage === true, fingerprint: fingerprint === true, tables: tables === true, key: parsed, keyVersion };
 }
 
 /** GitHub hides a masked value wherever the job's log would print it. */
