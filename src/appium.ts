@@ -19,7 +19,7 @@
  *              test whose (spec file, title path) is not planned.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, unlinkSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
@@ -290,7 +290,77 @@ export async function runAppiumInventory(env: RunnerEnv, peeps: PeepsClient): Pr
 }
 
 interface BatchResponse {
-  batches: Array<{ batchId: string; batchNumber: number; runs: PlanEntry[]; unmatched: PlannedTest[] }>;
+  batches: Array<{
+    batchId: string;
+    batchNumber: number;
+    runs: PlanEntry[];
+    unmatched: PlannedTest[];
+    /** The project's "Record video" is on; absent from an older Peeps. */
+    recordVideo?: boolean;
+  }>;
+}
+
+/** The runs of the batches whose project asked for video. */
+export function recordVideoRunIdsOf(batches: Array<{ recordVideo?: boolean; runs: PlanEntry[] }>): string[] {
+  return batches.filter((b) => b.recordVideo === true).flatMap((b) => b.runs.map((r) => r.runId));
+}
+
+/** Whether `ffmpeg` and `ffprobe` run here: recording on iOS, long Android recordings and frames need both. */
+export async function ffmpegAvailable(pathEnv = process.env.PATH ?? ""): Promise<boolean> {
+  const runs = (bin: string) =>
+    new Promise<boolean>((resolve) => {
+      execFile(bin, ["-version"], { timeout: 10_000, env: { ...process.env, PATH: pathEnv } }, (error) => resolve(!error));
+    });
+  return (await runs("ffmpeg")) && (await runs("ffprobe"));
+}
+
+/**
+ * The shell command that installs ffmpeg (with ffprobe) on this runner, or
+ * null where there is none to try. `sudo -n` fails at once instead of asking
+ * for a password a CI job cannot type.
+ */
+export function ffmpegInstallCommand(platform: NodeJS.Platform = process.platform): string | null {
+  if (platform === "linux") {
+    return "sudo -n apt-get update -qq && sudo -n apt-get install -y -qq --no-install-recommends ffmpeg";
+  }
+  if (platform === "darwin") return "HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ffmpeg";
+  return null;
+}
+
+/** At most this long installing ffmpeg; past it the job goes on without it. */
+const FFMPEG_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+function installFfmpeg(): Promise<void> {
+  const command = ffmpegInstallCommand();
+  if (!command) return Promise.reject(new Error(`no installer for ${process.platform}`));
+  return new Promise((resolve, reject) => {
+    execFile("bash", ["-c", command], { timeout: FFMPEG_INSTALL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }, (error, _out, err) =>
+      error ? reject(new Error(err.trim().split("\n").pop() || error.message)) : resolve(),
+    );
+  });
+}
+
+/**
+ * Whether ffmpeg is here, installing it first when it is missing. Only a job
+ * that records video calls this, so a job with Record video off never pays
+ * for the install. Best effort: a failed install is logged and the job goes
+ * on, recording what it can without ffmpeg.
+ */
+export async function ensureFfmpeg(
+  deps: { available: () => Promise<boolean>; install: () => Promise<void> } = {
+    available: () => ffmpegAvailable(),
+    install: installFfmpeg,
+  },
+): Promise<boolean> {
+  if (await deps.available()) return true;
+  console.log("[peeps] Record video: ffmpeg is not on this runner; installing it");
+  try {
+    await deps.install();
+  } catch (error) {
+    console.log(`[peeps] Record video: could not install ffmpeg (${error instanceof Error ? error.message : String(error)})`);
+    return false;
+  }
+  return deps.available();
 }
 
 /** `report`: run this workflow's whole suite and report every planned test. */
@@ -317,6 +387,7 @@ export async function runAppiumReport(env: RunnerEnv, peeps: PeepsClient): Promi
   await executeAppiumAndReport(env, peeps, {
     configPath,
     runs,
+    recordVideoRunIds: recordVideoRunIdsOf(response.batches),
     batches: response.batches.map((b) => ({
       batchId: b.batchId,
       batchNumber: b.batchNumber,
@@ -331,6 +402,8 @@ interface Plan {
   runs: PlanEntry[];
   /** The Peeps environment the run was started in; absent from an older Peeps. */
   environment?: PlanEnvironment | null;
+  /** The project's "Record video" is on; absent from an older Peeps. */
+  recordVideo?: boolean;
 }
 
 /**
@@ -425,6 +498,7 @@ export async function runAppiumDispatched(env: RunnerEnv, peeps: PeepsClient): P
   await executeAppiumAndReport(env, peeps, {
     configPath,
     runs: matched,
+    recordVideoRunIds: plan.recordVideo === true ? matched.map((r) => r.runId) : [],
     batches: [{ batchId: plan.batchId, batchNumber: plan.batchNumber }],
     selection: { specs, capabilitySpecs, grep: mochaGrepFor(matched.map((r) => r.titlePath)) },
     extraEnv: environment.vars,
@@ -590,6 +664,10 @@ export async function executeAppiumAndReport(
     selection?: { specs: string[]; capabilitySpecs?: string[][]; grep: string };
     /** Run mode: the Peeps environment's variables (`environment.ts`). */
     extraEnv?: Record<string, string>;
+    /** The runs whose project has "Record video" on. */
+    recordVideoRunIds?: string[];
+    /** For tests: instead of looking for (and installing) ffmpeg on the runner. */
+    ffmpegCheck?: () => Promise<boolean>;
     /** For tests: run this instead of `npx wdio run <config>`. */
     runner?: (configPath: string, extraEnv: Record<string, string>) => Promise<number>;
   },
@@ -601,6 +679,14 @@ export async function executeAppiumAndReport(
   const plan: AppiumPlanFile = { peepsUrl: env.peepsUrl, workspace: env.workspace, runs: input.runs };
   // Run mode: the grep matches titles only; the root hook holds it to the planned (file, title path) pairs.
   if (input.selection) plan.onlyPlanned = true;
+  if (input.recordVideoRunIds?.length) {
+    plan.recordVideoRunIds = input.recordVideoRunIds;
+    plan.ffmpeg = await (input.ffmpegCheck ?? (() => ensureFfmpeg()))();
+    console.log(
+      `[peeps] Record video is on: recording ${input.recordVideoRunIds.length} run(s)` +
+        (plan.ffmpeg ? "" : "; ffmpeg is not on this runner, so iOS does not record, Android stops at 3 minutes and no frames are cut"),
+    );
+  }
   await writeFile(planFile, JSON.stringify(plan), { mode: 0o600 });
   const junitDir = hasPackage("@wdio/junit-reporter", path.dirname(input.configPath)) ? path.join(scratch, "junit") : null;
   const options: PeepsWdioOptions = { junitDir };
