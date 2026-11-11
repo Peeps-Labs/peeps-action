@@ -1712,6 +1712,7 @@ async function runInvocation(app, options, tests) {
     say3(`app-reset failed before this ${options.kind} invocation: its server evidence reads partial`);
     problems.push("reset_failed");
   }
+  await options.startAfter?.catch(() => void 0);
   try {
     if ((await fetch(app.readyUrl, { signal: AbortSignal.timeout(2e3) })).ok) {
       say3(`something already answers ${app.readyUrl} before the app starts: this ${options.kind} invocation's server evidence reads partial`);
@@ -1745,7 +1746,6 @@ async function runInvocation(app, options, tests) {
   for (const s2 of signals) process.on(s2, onSignal);
   let exited = false;
   child.on("exit", () => exited = true);
-  options.whileStarting?.();
   child.on("error", () => exited = true);
   const ready = await waitUntil(
     async () => {
@@ -1901,7 +1901,8 @@ var FILES_PER_RUN = 2;
 var MAP_AFTER_MS = 300;
 function groupsOf(specs, perRun = FILES_PER_RUN) {
   const groups = [];
-  for (let i = 0; i < specs.length; i += perRun) groups.push(specs.slice(i, i + perRun));
+  const size = Math.max(1, Math.floor(perRun));
+  for (let i = 0; i < specs.length; i += size) groups.push(specs.slice(i, i + size));
   return groups;
 }
 function realBuildDir(nextDir) {
@@ -1919,7 +1920,7 @@ async function runAmbient(input2) {
   const invoke = input2.invoke ?? runInvocation;
   const build = input2.buildDir ?? realBuildDir(input2.nextDir);
   build.snapshot();
-  const run = await invoke(input2.app, { dir: import_node_path14.default.join(input2.coverageDir, "ambient"), preload: input2.preload, kind: "ambient", defer: true }, input2.runTests);
+  const run = await invoke(input2.app, { dir: import_node_path14.default.join(input2.coverageDir, "ambient"), preload: input2.preload, kind: "ambient", defer: true, startAfter: input2.startAfter }, input2.runTests);
   timing("ambient", run.timings);
   const rewrote = settleBuild(build);
   return { exitCode: run.exitCode, read: run.read ?? (() => run.coverage), timings: run.timings, build, rewrote };
@@ -1957,9 +1958,17 @@ async function recordServer(input2) {
     const before = counts();
     const run = await invoke(input2.app, { dir: import_node_path14.default.join(input2.coverageDir, `spec-${i}`), preload: input2.preload, kind: "spec", defer: true }, () => {
       const tests = input2.runTests(files, i + 1);
-      const work = setTimeout(flush, MAP_AFTER_MS);
+      let failed;
+      const work = setTimeout(() => {
+        try {
+          flush();
+        } catch (error) {
+          failed = error;
+        }
+      }, MAP_AFTER_MS);
       return tests.finally(() => {
         clearTimeout(work);
+        if (failed !== void 0) throw failed;
         flush();
       });
     });
@@ -2238,73 +2247,81 @@ async function runReport(env, peeps) {
     files,
     ...announceFieldsOf(negotiated)
   };
-  const earlyAmbient = negotiated.collect ? startEarlyAmbient(env, negotiated.collect, list) : void 0;
-  let impact = negotiated.collect ? await prepareImpact({
-    appDir: env.workingDirectory,
-    sha: env.sha,
-    eventName: env.eventName,
-    leg: process.env.GITHUB_JOB ?? "",
-    collect: negotiated.collect,
-    repository: await localRepository(env.workspace),
-    transport: peepsTransport(env.peepsUrl, () => peeps.token())
-  }) : null;
-  let reach = computed;
-  let response;
+  let fingerprinted;
+  const fingerprintRead = new Promise((resolve) => fingerprinted = resolve);
+  const earlyAmbient = negotiated.collect ? startEarlyAmbient(env, negotiated.collect, list, fingerprintRead) : void 0;
   try {
-    response = await peeps.post("/api/v1/ci/batches", { ...announce, ...reach ? { reach } : {}, ...impact ? { impact: { receipts: impact.projects.slice(0, MAX_RECEIPTS).map(({ receipt }) => receipt) } } : {} });
-  } catch (error) {
-    if (!reach && !impact || !(error instanceof PeepsHttpError) || error.status >= 500 || error.status === 401 || error.status === 403) throw error;
-    console.log(`[peeps] Peeps refused what this ${reach ? "pull request reaches" : "job recorded"} (${error.status}), so everything runs and nothing is recorded`);
-    reach = void 0;
-    impact = null;
-    response = await peeps.post("/api/v1/ci/batches", announce);
+    let impact = negotiated.collect ? await prepareImpact({
+      appDir: env.workingDirectory,
+      sha: env.sha,
+      eventName: env.eventName,
+      leg: process.env.GITHUB_JOB ?? "",
+      collect: negotiated.collect,
+      repository: await localRepository(env.workspace),
+      transport: peepsTransport(env.peepsUrl, () => peeps.token())
+    }) : null;
+    fingerprinted();
+    let reach = computed;
+    let response;
+    try {
+      response = await peeps.post("/api/v1/ci/batches", { ...announce, ...reach ? { reach } : {}, ...impact ? { impact: { receipts: impact.projects.slice(0, MAX_RECEIPTS).map(({ receipt }) => receipt) } } : {} });
+    } catch (error) {
+      if (!reach && !impact || !(error instanceof PeepsHttpError) || error.status >= 500 || error.status === 401 || error.status === 403) throw error;
+      console.log(`[peeps] Peeps refused what this ${reach ? "pull request reaches" : "job recorded"} (${error.status}), so everything runs and nothing is recorded`);
+      reach = void 0;
+      impact = null;
+      response = await peeps.post("/api/v1/ci/batches", announce);
+    }
+    const recorded = impact?.projects.slice(0, MAX_RECEIPTS).map((project) => ({ project, batch: response.batches.find((b) => b.projectId === project.projectId) })).filter((p) => p.batch !== void 0).map(({ project, batch }) => ({ ...project, batchId: batch.batchId, runIds: batch.runs.map((run) => run.runId) }));
+    const conflict = recorded?.some((p) => p.collect.coverage) ? await coverageConflictIn([rootDirAbs, env.workingDirectory]) : null;
+    if (conflict) console.log(`[peeps] not recording browser coverage: ${conflict}`);
+    const planned = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list), list.config.shard) : null;
+    const server = planned && earlyAmbient ? { ...planned, ambient: earlyAmbient } : planned;
+    if (earlyAmbient && !server) await earlyAmbient;
+    const recording = impact && recorded && recorded.length > 0 ? { impact: { fingerprint: impact.fingerprint, projects: recorded, coverage: conflict === null, ...server ? { server } : {} } } : {};
+    const runs = response.batches.flatMap((b) => b.runs);
+    const unmatched = response.batches.flatMap((b) => b.unmatched);
+    console.log(
+      `[peeps] planned ${runs.length} run(s) in ${response.batches.length} batch(es); ${unmatched.length} test(s) unknown to Peeps`
+    );
+    for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} \u203A ${u.titlePath}`);
+    const batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
+    let footprints;
+    if (negotiated.protocol && response.batches.some((b) => b.collectFootprints === true)) {
+      const globalSetups = [list.config.globalSetup ?? []].flat().map((file) => import_node_path16.default.relative(env.workspace, import_node_path16.default.resolve(rootDirAbs, file)).split(import_node_path16.default.sep).join("/"));
+      const sources = await workspaceTestSources(env.workspace, specFiles, globalSetups);
+      for (const { file, why } of sources.reasons.slice(0, 5)) console.log(`[peeps] not recording footprints: ${file}: ${why}`);
+      if (sources.reasons.length > 0) console.log("[peeps] so every test here reads unknown, and always runs");
+      footprints = { origins: response.batches.flatMap((b) => b.footprintOrigins ?? []), hiddenRequests: sources.hiddenRequests, record: sources.reasons.length === 0 };
+    }
+    if (!answeredNarrowed(response)) {
+      await executeAndReport(env, peeps, { ...recording, rootDir, runs, batches, footprints, executed: reach && { mode: "full", tests: tests.length } });
+      return;
+    }
+    const listed = listedTestsOf(list, rootDir);
+    const reporterRuns = withReporterTitles(runs, listed);
+    if (!isNarrowed(response)) {
+      console.log("[peeps] not narrowing, running the full suite: Peeps did not narrow every project's batch");
+      await executeAndReport(env, peeps, { ...recording, rootDir, runs: reporterRuns, batches, ranFullSuite: true, executed: reach && { mode: "full", tests: tests.length } });
+      return;
+    }
+    const selected = [...runs, ...unmatched];
+    if (selected.length === 0) {
+      console.log("[peeps] narrowed to 0 test(s) for this pull request");
+      await completeBatches(peeps, batches, reach && { mode: "targeted", tests: 0 });
+      return;
+    }
+    const grep = await verifiedGrep(env, selected, listed, rootDir);
+    if (grep === null) {
+      await executeAndReport(env, peeps, { ...recording, rootDir, runs: reporterRuns, batches, ranFullSuite: true, executed: reach && { mode: "full", tests: tests.length } });
+      return;
+    }
+    console.log(`[peeps] narrowed to ${selected.length} test(s) for this pull request`);
+    await executeAndReport(env, peeps, { ...recording, rootDir, runs: reporterRuns, batches, selection: { files: [], grep }, narrowed: true, executed: reach && { mode: "targeted", tests: selected.length } });
+  } finally {
+    fingerprinted();
+    await earlyAmbient;
   }
-  const recorded = impact?.projects.slice(0, MAX_RECEIPTS).map((project) => ({ project, batch: response.batches.find((b) => b.projectId === project.projectId) })).filter((p) => p.batch !== void 0).map(({ project, batch }) => ({ ...project, batchId: batch.batchId, runIds: batch.runs.map((run) => run.runId) }));
-  const conflict = recorded?.some((p) => p.collect.coverage) ? await coverageConflictIn([rootDirAbs, env.workingDirectory]) : null;
-  if (conflict) console.log(`[peeps] not recording browser coverage: ${conflict}`);
-  const planned = recorded && recorded.length > 0 ? serverPlanOf(env, recorded, rootDirAbs, testFilesOf(list), list.config.shard) : null;
-  const server = planned && earlyAmbient ? { ...planned, ambient: earlyAmbient } : planned;
-  if (earlyAmbient && !server) await earlyAmbient;
-  const recording = impact && recorded && recorded.length > 0 ? { impact: { fingerprint: impact.fingerprint, projects: recorded, coverage: conflict === null, ...server ? { server } : {} } } : {};
-  const runs = response.batches.flatMap((b) => b.runs);
-  const unmatched = response.batches.flatMap((b) => b.unmatched);
-  console.log(
-    `[peeps] planned ${runs.length} run(s) in ${response.batches.length} batch(es); ${unmatched.length} test(s) unknown to Peeps`
-  );
-  for (const u of unmatched.slice(0, 10)) console.log(`[peeps]   unknown: ${u.path} \u203A ${u.titlePath}`);
-  const batches = response.batches.map((b) => ({ batchId: b.batchId, batchNumber: b.batchNumber }));
-  let footprints;
-  if (negotiated.protocol && response.batches.some((b) => b.collectFootprints === true)) {
-    const globalSetups = [list.config.globalSetup ?? []].flat().map((file) => import_node_path16.default.relative(env.workspace, import_node_path16.default.resolve(rootDirAbs, file)).split(import_node_path16.default.sep).join("/"));
-    const sources = await workspaceTestSources(env.workspace, specFiles, globalSetups);
-    for (const { file, why } of sources.reasons.slice(0, 5)) console.log(`[peeps] not recording footprints: ${file}: ${why}`);
-    if (sources.reasons.length > 0) console.log("[peeps] so every test here reads unknown, and always runs");
-    footprints = { origins: response.batches.flatMap((b) => b.footprintOrigins ?? []), hiddenRequests: sources.hiddenRequests, record: sources.reasons.length === 0 };
-  }
-  if (!answeredNarrowed(response)) {
-    await executeAndReport(env, peeps, { ...recording, rootDir, runs, batches, footprints, executed: reach && { mode: "full", tests: tests.length } });
-    return;
-  }
-  const listed = listedTestsOf(list, rootDir);
-  const reporterRuns = withReporterTitles(runs, listed);
-  if (!isNarrowed(response)) {
-    console.log("[peeps] not narrowing, running the full suite: Peeps did not narrow every project's batch");
-    await executeAndReport(env, peeps, { ...recording, rootDir, runs: reporterRuns, batches, ranFullSuite: true, executed: reach && { mode: "full", tests: tests.length } });
-    return;
-  }
-  const selected = [...runs, ...unmatched];
-  if (selected.length === 0) {
-    console.log("[peeps] narrowed to 0 test(s) for this pull request");
-    await completeBatches(peeps, batches, reach && { mode: "targeted", tests: 0 });
-    return;
-  }
-  const grep = await verifiedGrep(env, selected, listed, rootDir);
-  if (grep === null) {
-    await executeAndReport(env, peeps, { ...recording, rootDir, runs: reporterRuns, batches, ranFullSuite: true, executed: reach && { mode: "full", tests: tests.length } });
-    return;
-  }
-  console.log(`[peeps] narrowed to ${selected.length} test(s) for this pull request`);
-  await executeAndReport(env, peeps, { ...recording, rootDir, runs: reporterRuns, batches, selection: { files: [], grep }, narrowed: true, executed: reach && { mode: "targeted", tests: selected.length } });
 }
 var named = (tests) => tests.slice(0, 10).map((test) => `${test.path} \u203A ${test.titlePath}`).join("; ");
 async function verifiedGrep(env, selected, listed, rootDir) {
@@ -2356,7 +2373,8 @@ async function executeAndReport(env, peeps, input2) {
     const plan2 = input2.impact?.server;
     let server;
     const ambient = plan2?.ambient ? await plan2.ambient : null;
-    if (evidence && plan2 && !input2.selection && coverage !== void 0) {
+    const ambientFailed = plan2?.ambient !== void 0 && ambient === null;
+    if (evidence && plan2 && !input2.selection && coverage !== void 0 && !ambientFailed) {
       const blobDir = import_node_path16.default.join(scratch, "blobs");
       const recorded = await recordServer({
         app: { ...plan2.app, cwd: env.workingDirectory, env: { ...process.env, ...input2.extraEnv, CI: "1" } },
@@ -2511,7 +2529,7 @@ function realOr(file) {
     return file;
   }
 }
-function startEarlyAmbient(env, collect, list) {
+function startEarlyAmbient(env, collect, list, startAfter) {
   if (!env.app || !collect.some((c) => c.coverage) || process.env.NODE_V8_COVERAGE || list.config.shard) return void 0;
   let nextDir;
   try {
@@ -2527,10 +2545,11 @@ function startEarlyAmbient(env, collect, list) {
       preload: realOr(import_node_path16.default.join(__dirname, "evidence-preload.js")),
       coverageDir: dir,
       nextDir,
+      startAfter,
       runTests: () => runPlaywright(env, "", "", void 0, { PEEPS_INVOCATION: "ambient" }, false, false, void 0, { files: null, blobFile: null })
     });
   })().catch((error) => {
-    console.log(`[peeps] the early ambient run failed (${String(error).slice(0, 200)}): the recording runs its own`);
+    console.log(`[peeps] not recording server evidence: the ambient run failed (${String(error).slice(0, 200)})`);
     return null;
   });
 }
@@ -2561,7 +2580,7 @@ function serverPlanOf(env, recorded, rootDirAbs, specFiles, shard) {
     return null;
   }
   const specs = [...new Set(specFiles.map((file) => realOr(import_node_path16.default.resolve(rootDirAbs, file))))].sort();
-  console.log(`[peeps] recording server evidence: ${specs.length} spec file(s), each with the app to itself, after one ambient run`);
+  console.log(`[peeps] recording server evidence: ${specs.length} test file(s) in runs of ${FILES_PER_RUN}, each run with the app to itself, after one ambient run`);
   const tracked = trackedFiles(env.workingDirectory);
   return { app: env.app, specs, nextDir, tracked: (file) => tracked.has(file) };
 }

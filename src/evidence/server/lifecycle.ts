@@ -40,8 +40,8 @@ export interface InvocationOptions {
   stopTimeoutMs?: number;
   /** Set the coverage aside at the stop and return a reader, instead of parsing it then. */
   defer?: boolean;
-  /** Runs right after the app is spawned, while it starts: work that can overlap it. */
-  whileStarting?: () => void;
+  /** Wait for this after the reset, before the app starts: the build is still being read. */
+  startAfter?: Promise<unknown>;
 }
 
 const READY_TIMEOUT_MS = 180_000;
@@ -117,6 +117,8 @@ export async function runInvocation(
     say(`app-reset failed before this ${options.kind} invocation: its server evidence reads partial`);
     problems.push("reset_failed");
   }
+  // The fingerprint reads `.next`: the app, which may write into it, waits for that.
+  await options.startAfter?.catch(() => undefined);
   // Whatever answers before the app starts (a server left running, another job's) isn't it.
   try {
     if ((await fetch(app.readyUrl, { signal: AbortSignal.timeout(2_000) })).ok) {
@@ -155,7 +157,6 @@ export async function runInvocation(
   for (const s of signals) process.on(s, onSignal);
   let exited = false;
   child.on("exit", () => (exited = true));
-  options.whileStarting?.();
   child.on("error", () => (exited = true));
   const ready = await waitUntil(
     async () => {

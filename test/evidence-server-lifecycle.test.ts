@@ -174,16 +174,21 @@ test("a worker thread's own take can't vouch for a main thread that stopped cove
   assert.deepEqual(coverage.taken, []);
 });
 
-test("a deferred read sets the coverage aside at the stop, and reads it later; the hook runs while the app starts", async () => {
-  const command = await app();
+test("a deferred read sets the coverage aside at the stop and reads it later; the app starts only after startAfter, the reset before", async () => {
+  const command = await app({ reset: 'echo reset >> order.log' });
   const dir = path.join(command.cwd, "cov");
-  const order: string[] = [];
-  const run = await runInvocation(command, { dir, preload: PRELOAD, kind: "spec", defer: true, whileStarting: () => order.push("starting") }, async () => {
-    order.push("tests");
+  let release!: () => void;
+  const fingerprinted = new Promise<void>((resolve) => (release = resolve));
+  const running = runInvocation(command, { dir, preload: PRELOAD, kind: "spec", defer: true, startAfter: fingerprinted }, async () => {
     await fetch(command.readyUrl.replace("/ready", "/work"));
     return 0;
   });
-  assert.deepEqual(order, ["starting", "tests"]);
+  await new Promise((r) => setTimeout(r, 800));
+  const log = () => require("node:fs").readFileSync(path.join(command.cwd, "order.log"), "utf8").trim();
+  assert.equal(log(), "reset", "the reset ran");
+  assert.ok(!existsSync(dir) || require("node:fs").readdirSync(dir).length === 0, "no app process yet");
+  release();
+  const run = await running;
   assert.equal(run.coverage, undefined, "nothing parsed at the stop");
   assert.ok(!existsSync(dir), "the directory is free for the next run");
   const coverage = run.read!();

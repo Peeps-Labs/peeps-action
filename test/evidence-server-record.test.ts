@@ -175,6 +175,7 @@ test("two files per run: both files' tests hold that run's footprint, and only t
 });
 
 test("a run's coverage is mapped while the next run's tests run, never while its app starts", async () => {
+  // (Mapping runs inside the tests' window, after a short delay, or when they end.)
   const order: string[] = [];
   const ids: Array<{ testId: string; file: string | null }> = [];
   await recordServer({
@@ -193,7 +194,6 @@ test("a run's coverage is mapped while the next run's tests run, never while its
     },
     attempts: () => [...ids],
     invoke: async (_a, options, tests) => {
-      options.whileStarting?.();
       order.push(`started ${options.kind}`);
       const exitCode = await tests();
       return { exitCode, read: () => (order.push("mapped"), ran("Badge")) };

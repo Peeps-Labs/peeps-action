@@ -28,7 +28,8 @@ const MAP_AFTER_MS = 300;
 /** The suite's test files in runs of `perRun`, in order. */
 export function groupsOf(specs: readonly string[], perRun: number = FILES_PER_RUN): string[][] {
   const groups: string[][] = [];
-  for (let i = 0; i < specs.length; i += perRun) groups.push(specs.slice(i, i + perRun));
+  const size = Math.max(1, Math.floor(perRun));
+  for (let i = 0; i < specs.length; i += size) groups.push(specs.slice(i, i + size));
   return groups;
 }
 
@@ -71,6 +72,8 @@ export interface AmbientInput {
   runTests: () => Promise<number>;
   invoke?: Invoke;
   buildDir?: BuildDir;
+  /** The app starts once this settles (the fingerprint reading `.next`); the reset needn't wait. */
+  startAfter?: Promise<unknown>;
 }
 
 /**
@@ -81,7 +84,7 @@ export async function runAmbient(input: AmbientInput): Promise<AmbientRun> {
   const invoke = input.invoke ?? runInvocation;
   const build = input.buildDir ?? realBuildDir(input.nextDir);
   build.snapshot();
-  const run = await invoke(input.app, { dir: path.join(input.coverageDir, "ambient"), preload: input.preload, kind: "ambient", defer: true }, input.runTests);
+  const run = await invoke(input.app, { dir: path.join(input.coverageDir, "ambient"), preload: input.preload, kind: "ambient", defer: true, startAfter: input.startAfter }, input.runTests);
   timing("ambient", run.timings);
   const rewrote = settleBuild(build);
   return { exitCode: run.exitCode, read: run.read ?? (() => run.coverage!), timings: run.timings, build, rewrote };
@@ -157,10 +160,19 @@ export async function recordServer(input: RecordServerInput): Promise<{ exitCode
     const before = counts();
     const run = await invoke(input.app, { dir: path.join(input.coverageDir, `spec-${i}`), preload: input.preload, kind: "spec", defer: true }, () => {
       const tests = input.runTests(files, i + 1);
-      // Once Playwright has started; it takes longer than that to start its first test.
-      const work = setTimeout(flush, MAP_AFTER_MS);
+      // Once Playwright has started; it takes longer than that to start its first test. A
+      // mapping that throws there fails the run when its tests end, as it would have inline.
+      let failed: unknown;
+      const work = setTimeout(() => {
+        try {
+          flush();
+        } catch (error) {
+          failed = error;
+        }
+      }, MAP_AFTER_MS);
       return tests.finally(() => {
         clearTimeout(work);
+        if (failed !== undefined) throw failed;
         flush();
       });
     });
