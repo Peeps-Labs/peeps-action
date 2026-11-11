@@ -5,6 +5,7 @@
  * answer means none of them, and a full run. A scan is for a pull request, and only one
  * whose project has targeted runs switched on pays for it (`scan: true`).
  */
+import { RECORDING_CODEC_VERSION } from "../evidence/codec";
 import type { RunnerEnv } from "../env";
 import { parseProjectKey } from "../evidence/hash";
 import type { PeepsClient } from "../peeps";
@@ -33,6 +34,8 @@ export interface Collect {
   fingerprint: boolean;
   key: Buffer;
   keyVersion: string;
+  /** The recording codec version to write: the newest Peeps reads that this action writes (PQA-3430). */
+  codecVersion: number;
 }
 
 const NONE: Negotiated = { protocol: false, scan: false };
@@ -52,11 +55,17 @@ function readCollect(project: unknown): Collect | null {
   if (typeof project !== "object" || project === null) return null;
   const { projectId, collect } = project as { projectId?: unknown; collect?: unknown };
   if (typeof projectId !== "string" || projectId === "" || typeof collect !== "object" || collect === null) return null;
-  const { coverage, fingerprint, key, keyVersion } = collect as Record<string, unknown>;
+  const { coverage, fingerprint, key, keyVersion, codecVersions } = collect as Record<string, unknown>;
   const parsed = typeof key === "string" && /^[0-9a-f]{64}$/.test(key) ? parseProjectKey(key) : null;
   if (!parsed || typeof keyVersion !== "string" || !/^V[1-9][0-9]*$/.test(keyVersion)) return null;
   if (coverage !== true && fingerprint !== true) return null;
-  return { projectId, coverage: coverage === true, fingerprint: fingerprint === true, key: parsed, keyVersion };
+  return { projectId, coverage: coverage === true, fingerprint: fingerprint === true, key: parsed, keyVersion, codecVersion: codecVersionOf(codecVersions) };
+}
+
+/** A server from before version 2 says nothing, and reads version 1 only. */
+function codecVersionOf(offered: unknown): number {
+  const readable = Array.isArray(offered) ? offered.filter((v): v is number => Number.isInteger(v) && v >= 1 && v <= RECORDING_CODEC_VERSION) : [];
+  return readable.length > 0 ? Math.max(...readable) : 1;
 }
 
 /** GitHub hides a masked value wherever the job's log would print it. */

@@ -89,22 +89,22 @@ export function membersOf(
     if (collected.coverage) {
       const files = covered.get(`${record.testId}\u0000${record.retry}`) ?? [];
       const arrived = new Set(files.map((file) => file.contextId));
-      if (taintedAttempts.has(`${record.testId}\u0000${record.retry}`)) member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], reasons: ["marker_failed"] });
-      if (files.length === 0) member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], reasons: ["coverage_missing"] });
+      if (taintedAttempts.has(`${record.testId}\u0000${record.retry}`)) member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], layers: ["browser"], reasons: ["marker_failed"] });
+      if (files.length === 0) member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], layers: ["browser"], reasons: ["coverage_missing"] });
       // A context the attempt opened whose final record never came: what ran there is unknown.
       else if ([...(owed.get(`${record.testId}\u0000${record.retry}`) ?? [])].some((id) => !arrived.has(id)))
-        member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], reasons: ["context_unfinished"] });
-      for (const file of files) member.evidence.push(collector.collect(file.coverage));
+        member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], layers: ["browser"], reasons: ["context_unfinished"] });
+      for (const file of files) member.evidence.push({ ...collector.collect(file.coverage), layers: ["browser"] });
     }
     if (server) {
       const own = server.byTest.get(record.testId);
       member.evidence.push(
         own
-          ? { keys: own.keys, paths: [], partial: own.partial, reasons: own.reasons.map((r) => `server_${r}`) }
-          : { keys: [], paths: [], partial: ["code"], reasons: ["server_missing"] },
+          ? { keys: own.keys, paths: [], partial: own.partial, layers: ["server"], reasons: own.reasons.map((r) => `server_${r}`) }
+          : { keys: [], paths: [], partial: ["code"], layers: ["server"], reasons: ["server_missing"] },
       );
       // Unknown shared work is unknown for every test.
-      if (server.ambient.partial.length > 0) member.evidence.push({ keys: [], paths: [], partial: ["code"], reasons: server.ambient.reasons.map((r) => `ambient_${r}`) });
+      if (server.ambient.partial.length > 0) member.evidence.push({ keys: [], paths: [], partial: ["code"], layers: ["server"], reasons: server.ambient.reasons.map((r) => `ambient_${r}`) });
     }
   }
   for (const member of byRun.values()) member.attempts.sort((a, b) => a.retry - b.retry);

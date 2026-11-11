@@ -32,8 +32,18 @@ test("a union keeps every key and path once, and every collector's partial", () 
     keys: ["file:a.ts", "fn:browser:a.ts:f"],
     paths: ["/api/items", "/cart"],
     partial: ["code", "route"],
+    // Neither said which layers: every one (PQA-3430).
+    layers: ["browser", "server", "worker_thread", "worker_process", "build", "database"],
     reasons: ["har_incomplete", "target_lost"],
   });
+});
+
+test("a union's partial holds for the layers its parts said, or every layer when one didn't (PQA-3430)", () => {
+  const browser = { ...none, partial: ["code", "css"] as const, layers: ["browser"] as const, reasons: ["coverage_missing"] };
+  const server = { ...none, keys: ["fn:server:a.ts:f", "file:a.ts"], partial: [], layers: ["server"] as const, reasons: [] };
+  assert.deepEqual(unionEvidence([{ ...browser, partial: [...browser.partial], layers: [...browser.layers] }, { ...server, partial: [], layers: [...server.layers] }]).layers, ["browser"], "a whole part adds no layer");
+  assert.deepEqual(unionEvidence([{ ...none, partial: ["code"], layers: ["server"] }, { ...none, partial: ["css"], layers: ["browser"] }]).layers, ["browser", "server"]);
+  assert.equal(unionEvidence([{ ...none, keys: ["file:a.ts"] }]).layers, undefined, "nothing partial, no layers");
 });
 
 test("an attempt's tokens: its keys matcher-free, its paths path-side, sorted and unique", () => {

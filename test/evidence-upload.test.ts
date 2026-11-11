@@ -158,3 +158,14 @@ test("ambient code leaves keyed, like every other token (PQA-3201 PR 3)", () => 
   const none = footprintsRecording(key, { layers: ["browser"], measured: ["code"], members: [] });
   assert.deepEqual(none.kind === "footprints" && none.universe.ambient, []);
 });
+
+test("codec 2: each member says which layers its partial holds for; codec 1 doesn't (PQA-3430)", () => {
+  const members = [
+    { run: "r1", attempts: [{ retry: 0, passed: true }], evidence: [{ keys: ["file:a.ts"], paths: [], partial: ["code" as const], layers: ["browser" as const], reasons: ["coverage_missing"] }] },
+    { run: "r2", attempts: [{ retry: 0, passed: true }], evidence: [{ keys: ["file:a.ts"], paths: [], partial: [], reasons: [] }] },
+  ];
+  const v2 = footprintsRecording(key, { layers: ["browser", "server"], measured: ["code"], members, codecVersion: 2 });
+  assert.deepEqual(v2.kind === "footprints" && v2.members.map((m) => m.partialLayers), [["browser"], []]);
+  const v1 = footprintsRecording(key, { layers: ["browser", "server"], measured: ["code"], members });
+  assert.deepEqual(v1.kind === "footprints" && v1.members.map((m) => "partialLayers" in m), [false, false]);
+});

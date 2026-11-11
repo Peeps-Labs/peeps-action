@@ -111,7 +111,7 @@ async function fakePeeps(t: TestContext, batchExtra: Record<string, unknown>, le
         return;
       }
       response = preflight === "legacy" ? { scan: true } : preflight === "v3" ? { scan: true, protocolVersion: 3 } : { scan: preflight === "on" || preflight === "collect", protocolVersion: 2, projects: [{ projectId: "project", executionMode: "shadow" }] };
-      if (preflight === "collect") response = { ...(response as object), projects: [{ projectId: "project", executionMode: "shadow", collect: { coverage: true, fingerprint: true, key: COLLECT_KEY, keyVersion: "V1" } }] };
+      if (preflight === "collect") response = { ...(response as object), projects: [{ projectId: "project", executionMode: "shadow", collect: { coverage: true, fingerprint: true, key: COLLECT_KEY, keyVersion: "V1", codecVersions: [1, 2] } }] };
     } else if (url.pathname === "/api/v1/ci/impact/fingerprint") {
       fingerprints.push(url.search);
       response = { uploadId: "upload-1" };
@@ -961,8 +961,14 @@ test("server evidence: one invocation per spec file with the app the action owns
   });
   const app = `http://127.0.0.1:${port}`;
   const root = await suite(t, COMMON("", "webServer: { command: \"exit 1\", url: \"http://127.0.0.1:9\" },"), `import { test, expect } from "@playwright/test";
-test("logs in", async ({ page }) => { await page.goto("/login"); await expect(page.getByRole("heading")).toHaveText("ok"); });
+test("logs in", async ({ page }) => {
+  require("node:fs").appendFileSync(${JSON.stringify("INVOCATIONS_LOG")}, process.env.PEEPS_INVOCATION + "\\n");
+  await page.goto("/login");
+  await expect(page.getByRole("heading")).toHaveText("ok");
+});
 `);
+  const specFile = path.join(root, "suite/specs/cart.spec.ts");
+  await writeFile(specFile, (await readFile(specFile, "utf8")).replace("INVOCATIONS_LOG", path.join(root, "test-invocations.log")));
   await writeFile(path.join(root, "suite/specs/badge.spec.ts"), `import { test, expect } from "@playwright/test";
 test("shows a badge", async ({ page }) => { await page.goto("/badge"); await expect(page.getByRole("heading")).toHaveText("ok"); });
 `);
@@ -987,6 +993,7 @@ test("calls the api", async ({ request }) => { expect((await request.get("/login
   // Ambient first, then each of the three spec files, each reset and started on its own; the config's webServer never ran.
   assert.deepEqual((await readFile(path.join(root, "resets.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec", "spec"]);
   assert.deepEqual((await readFile(path.join(root, "starts.log"), "utf8")).trim().split("\n"), ["ambient", "spec", "spec", "spec"]);
+  assert.deepEqual((await readFile(path.join(root, "test-invocations.log"), "utf8")).trim().split("\n"), ["spec"], "the tests see which run they're in");
   // The invocations' reports, merged into the one HTML report the batch gets.
   assert.ok([...peeps.artifacts.keys()].includes("index.html"), [...peeps.artifacts.keys()].join(", "));
 
@@ -1010,6 +1017,10 @@ test("calls the api", async ({ request }) => { expect((await request.get("/login
   assert.ok(logsIn.tokens.includes(tokenOf(key, login)) && logsIn.tokens.includes(tokenOf(key, "file:src/app/login/LoginForm.tsx")));
   assert.ok(!logsIn.tokens.includes(tokenOf(key, badge)), "another file's invocation ran Badge, not this one's");
   assert.ok(showsBadge.tokens.includes(tokenOf(key, badge)) && !showsBadge.tokens.includes(tokenOf(key, login)));
-  // Known gap: a test that opens no browser context has no browser coverage, so it reads partial and always runs.
-  assert.ok(member("calls the api").partial.includes("code"));
+  // A test that opens no browser context has no browser coverage: partial in the browser only (PQA-3430),
+  // so a server-only change still judges it by its server footprint, which holds what /login ran.
+  const api = member("calls the api");
+  assert.deepEqual([api.partial, api.partialLayers], [["code", "css"], ["browser"]]);
+  assert.ok(api.tokens.includes(tokenOf(key, login)));
+  assert.deepEqual([logsIn.partialLayers, showsBadge.partialLayers], [[], []]);
 });

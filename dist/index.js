@@ -685,7 +685,7 @@ var import_node_path7 = __toESM(require("node:path"));
 var ACTION_VERSION = "1.13.0";
 
 // src/evidence/codec.ts
-var RECORDING_CODEC_VERSION = 1;
+var RECORDING_CODEC_VERSION = 2;
 var LAYERS = ["browser", "server", "worker_thread", "worker_process", "build", "database"];
 var EVIDENCE_KINDS = ["code", "out", "css", "route", "table"];
 var MAGIC = [80, 81, 73, 82];
@@ -737,7 +737,9 @@ function encodePayload(value) {
     indexes.forEach((index, i) => varint(i === 0 ? index : index - indexes[i - 1] - 1));
   };
   bytes.push(...MAGIC);
-  u8(RECORDING_CODEC_VERSION);
+  const layered = value.kind === "footprints" ? value.members.filter((m) => m.partialLayers !== void 0).length : 0;
+  if (value.kind === "footprints" && layered > 0 && layered < value.members.length) fail("partial layers on some members only");
+  u8(layered > 0 ? 2 : 1);
   u8(value.kind === "fingerprint" ? 1 : 2);
   varint(dictionary.length);
   for (const entry of dictionary) string(entry);
@@ -777,6 +779,10 @@ function encodePayload(value) {
       u8(attempt.passed ? 1 : 0);
     }
     u8(bitmask(EVIDENCE_KINDS, member.partial, "partial"));
+    if (member.partialLayers !== void 0) {
+      if (member.partialLayers.length === 0 !== (member.partial.length === 0)) fail("partial layers without partial kinds, or the reverse");
+      u8(bitmask(LAYERS, member.partialLayers, "partialLayers"));
+    }
     indexList(member.tokens);
   }
   return new Uint8Array(bytes);
@@ -856,10 +862,13 @@ function evidenceTokens(key, evidence) {
 // src/evidence/port.ts
 var sortedUnique = (values) => [...new Set(values)].sort();
 function unionEvidence(parts) {
+  const partial = sortedUnique(parts.flatMap((p) => p.partial));
+  const layers = new Set(parts.filter((p) => p.partial.length > 0).flatMap((p) => p.layers ?? LAYERS));
   return {
     keys: sortedUnique(parts.flatMap((p) => p.keys)),
     paths: sortedUnique(parts.flatMap((p) => p.paths)),
-    partial: sortedUnique(parts.flatMap((p) => p.partial)),
+    partial,
+    ...partial.length > 0 ? { layers: LAYERS.filter((layer) => layers.has(layer)) } : {},
     reasons: sortedUnique(parts.flatMap((p) => p.reasons))
   };
 }
@@ -887,9 +896,10 @@ function fingerprintRecording(fingerprint, key) {
 }
 function footprintsRecording(key, input2) {
   const members = input2.members.map(({ run, attempts, evidence }) => {
-    if (evidence.length === 0) return { run, attempts, partial: [...input2.measured], tokens: [] };
+    const layered = input2.codecVersion === 2;
+    if (evidence.length === 0) return { run, attempts, partial: [...input2.measured], ...layered && input2.measured.length > 0 ? { partialLayers: [...LAYERS] } : layered ? { partialLayers: [] } : {}, tokens: [] };
     const union = unionEvidence(evidence);
-    return { run, attempts, partial: union.partial, tokens: evidenceTokens(key, union) };
+    return { run, attempts, partial: union.partial, ...layered ? { partialLayers: union.layers ?? [] } : {}, tokens: evidenceTokens(key, union) };
   });
   return { kind: "footprints", browser: input2.browser ?? null, universe: { layers: input2.layers, measured: input2.measured, loadedFiles: (input2.loadedFiles ?? []).map((f) => tokenOf(key, f)), ambient: (input2.ambient ?? []).map((k) => tokenOf(key, k)) }, members };
 }
@@ -945,7 +955,7 @@ async function uploadFingerprint(transport, input2, log = say) {
 async function uploadEvidence(transport, input2, log = say) {
   try {
     if (input2.members.length > MAX_MEMBERS) throw new Error(`${input2.members.length} tests, over ${MAX_MEMBERS}`);
-    const blob = footprintsRecording(input2.key, { layers: input2.layers, measured: input2.measured, loadedFiles: input2.loadedFiles, ambient: input2.ambient, browser: input2.browser, members: input2.members });
+    const blob = footprintsRecording(input2.key, { layers: input2.layers, measured: input2.measured, loadedFiles: input2.loadedFiles, ambient: input2.ambient, browser: input2.browser, members: input2.members, codecVersion: input2.codecVersion });
     const bytes = gzipRecording(blob);
     if (bytes.length > MAX_BLOB_BYTES) throw new Error(`the footprints are ${bytes.length} bytes, over ${MAX_BLOB_BYTES}`);
     await transport.postBytes(`${evidencePath(input2.batchId)}?protocolVersion=${PROTOCOL_VERSION}`, bytes, UPLOAD_TIMEOUT_MS);
@@ -957,7 +967,7 @@ async function uploadEvidence(transport, input2, log = say) {
 }
 
 // src/evidence/job.ts
-var TOOLCHAIN = `peeps-action@${ACTION_VERSION}/codec${RECORDING_CODEC_VERSION}/routes${ROUTE_ENCODER_VERSION}`;
+var toolchain = (codecVersion = RECORDING_CODEC_VERSION) => `peeps-action@${ACTION_VERSION}/codec${codecVersion}/routes${ROUTE_ENCODER_VERSION}`;
 var FINGERPRINT_BUDGET_MS = 9e4;
 async function scannerFingerprint(nextDir, sourcePrefix) {
   const answer = await runBundled(import_node_path7.default.join(__dirname, "reach.js"), { kind: "fingerprint", root: nextDir, nextDir, sourcePrefix }, FINGERPRINT_BUDGET_MS);
@@ -1000,7 +1010,7 @@ async function prepareImpact(input2, log = say2) {
   const projects = [];
   for (const collect of asked) {
     const blob = fingerprintRecording(fingerprint, collect.key);
-    const receipt = await uploadFingerprint(input2.transport, { blob, projectId: collect.projectId, base, leg: input2.leg, keyVersion: collect.keyVersion, binding: TOOLCHAIN }, log);
+    const receipt = await uploadFingerprint(input2.transport, { blob, projectId: collect.projectId, base, leg: input2.leg, keyVersion: collect.keyVersion, binding: toolchain(collect.codecVersion) }, log);
     if (receipt) projects.push({ projectId: collect.projectId, collect, receipt });
   }
   return projects.length > 0 ? { fingerprint, projects } : null;
@@ -1183,18 +1193,18 @@ function membersOf(records, coverage, fingerprint, collected, contexts, taints =
     if (collected.coverage) {
       const files = covered.get(`${record.testId}\0${record.retry}`) ?? [];
       const arrived = new Set(files.map((file) => file.contextId));
-      if (taintedAttempts.has(`${record.testId}\0${record.retry}`)) member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], reasons: ["marker_failed"] });
-      if (files.length === 0) member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], reasons: ["coverage_missing"] });
+      if (taintedAttempts.has(`${record.testId}\0${record.retry}`)) member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], layers: ["browser"], reasons: ["marker_failed"] });
+      if (files.length === 0) member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], layers: ["browser"], reasons: ["coverage_missing"] });
       else if ([...owed.get(`${record.testId}\0${record.retry}`) ?? []].some((id) => !arrived.has(id)))
-        member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], reasons: ["context_unfinished"] });
-      for (const file of files) member.evidence.push(collector.collect(file.coverage));
+        member.evidence.push({ keys: [], paths: [], partial: ["code", "css"], layers: ["browser"], reasons: ["context_unfinished"] });
+      for (const file of files) member.evidence.push({ ...collector.collect(file.coverage), layers: ["browser"] });
     }
     if (server) {
       const own = server.byTest.get(record.testId);
       member.evidence.push(
-        own ? { keys: own.keys, paths: [], partial: own.partial, reasons: own.reasons.map((r) => `server_${r}`) } : { keys: [], paths: [], partial: ["code"], reasons: ["server_missing"] }
+        own ? { keys: own.keys, paths: [], partial: own.partial, layers: ["server"], reasons: own.reasons.map((r) => `server_${r}`) } : { keys: [], paths: [], partial: ["code"], layers: ["server"], reasons: ["server_missing"] }
       );
-      if (server.ambient.partial.length > 0) member.evidence.push({ keys: [], paths: [], partial: ["code"], reasons: server.ambient.reasons.map((r) => `ambient_${r}`) });
+      if (server.ambient.partial.length > 0) member.evidence.push({ keys: [], paths: [], partial: ["code"], layers: ["server"], reasons: server.ambient.reasons.map((r) => `ambient_${r}`) });
     }
   }
   for (const member of byRun.values()) member.attempts.sort((a, b) => a.retry - b.retry);
@@ -1408,11 +1418,11 @@ function serverFootprint(coverage, scripts, nextDir) {
       for (const fn of script.functions) {
         const range = fn.ranges[0];
         if (!range || range.count === 0) continue;
-        if (range.startOffset === 0 && fn.functionName === "") continue;
         if (index?.whole) {
           keys.add(index.whole);
           continue;
         }
+        if (range.startOffset === 0 && fn.functionName === "") continue;
         const span = index && spanAt(index, { name: fn.functionName, start: range.startOffset, end: range.endOffset });
         if (!span) {
           unmapped++;
@@ -1631,11 +1641,15 @@ function readCollect(project) {
   if (typeof project !== "object" || project === null) return null;
   const { projectId, collect } = project;
   if (typeof projectId !== "string" || projectId === "" || typeof collect !== "object" || collect === null) return null;
-  const { coverage, fingerprint, key, keyVersion } = collect;
+  const { coverage, fingerprint, key, keyVersion, codecVersions } = collect;
   const parsed = typeof key === "string" && /^[0-9a-f]{64}$/.test(key) ? parseProjectKey(key) : null;
   if (!parsed || typeof keyVersion !== "string" || !/^V[1-9][0-9]*$/.test(keyVersion)) return null;
   if (coverage !== true && fingerprint !== true) return null;
-  return { projectId, coverage: coverage === true, fingerprint: fingerprint === true, key: parsed, keyVersion };
+  return { projectId, coverage: coverage === true, fingerprint: fingerprint === true, key: parsed, keyVersion, codecVersion: codecVersionOf(codecVersions) };
+}
+function codecVersionOf(offered) {
+  const readable = Array.isArray(offered) ? offered.filter((v) => Number.isInteger(v) && v >= 1 && v <= RECORDING_CODEC_VERSION) : [];
+  return readable.length > 0 ? Math.max(...readable) : 1;
 }
 var addMask = (line) => console.log(line);
 function announceFieldsOf(negotiated) {
@@ -1836,7 +1850,7 @@ async function executeAndReport(env, peeps, input2) {
         coverageDir: import_node_path14.default.join(scratch, "server-coverage"),
         scripts: input2.impact.fingerprint.scripts,
         nextDir: plan2.nextDir,
-        runTests: (spec, index) => runPlaywright(env, planFile, reportDir, void 0, input2.extraEnv, input2.narrowed, input2.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : import_node_path14.default.join(blobDir, `report-${index}.zip`) }),
+        runTests: (spec, index) => runPlaywright(env, planFile, reportDir, void 0, { ...input2.extraEnv, PEEPS_INVOCATION: spec === null ? "ambient" : "spec" }, input2.narrowed, input2.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : import_node_path14.default.join(blobDir, `report-${index}.zip`) }),
         attempts: () => evidence.read("att-").map((record) => ({ testId: record.testId, file: typeof record.file === "string" ? realOr(record.file) : null }))
       });
       exitCode = recorded.exitCode;
@@ -1910,6 +1924,7 @@ async function recordEvidence(env, peeps, impact, scratch, collected, server) {
       loadedFiles: job.loadedFiles,
       ambient: job.ambient,
       browser: job.browser,
+      codecVersion: project.collect.codecVersion,
       members: job.members
     });
     if (ok) console.log(`[peeps] recorded what ${job.members.length} test(s) ran`);

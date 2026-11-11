@@ -1,6 +1,6 @@
 {
   "format": "PQA-3201 recording codec payload (peeps src/server/repo-backed/pr-impact/infrastructure/recording-codec.ts)",
-  "version": 1,
+  "version": 2,
   "note": "payloadHex is the payload before gzip. A stored blob is any valid gzip of it. Encoders must produce payloadHex exactly from value; decoders must return value exactly from payloadHex and refuse every invalid entry.",
   "cases": [
     {
@@ -198,6 +198,49 @@
         ]
       },
       "payloadHex": "50514952010209246373733a63316331633163316331633163316331633163316331633163316331633163312566696c653a61316131613161316131613161316131613161316131613161316131613161312566696c653a61326132613261326132613261326132613261326132613261326132613261322566696c653a613361336133613361336133613361336133613361336133613361336133613323666e3a623162316231623162316231623162316231623162316231623162316231623123666e3a623262326232623262326232623262326232623262326232623262326232623223666e3a6233623362336233623362336233623362336233623362336233623362336233246f75743a64316431643164316431643164316431643164316431643164316431643164311b726f7574653a2f653165316531653165316531653165312f3a696400030f03010000020302032430623365316635322d366134642d346331652d396630612d3164326333623461356636300100010004000002032435643763396531302d326233612d346636652d386331642d3061396238633764366535660300000100020109030202012439613862376336642d356534662d346133622d386332642d316530663961386237633664018201011f00"
+    },
+    {
+      "name": "footprints v2: a browser-only partial beside a whole member",
+      "value": {
+        "kind": "footprints",
+        "browser": {
+          "name": "chromium",
+          "version": "147.0.1"
+        },
+        "universe": {
+          "layers": ["browser", "server"],
+          "measured": ["code", "css"],
+          "loadedFiles": ["file:a"],
+          "ambient": ["file:a", "fn:a"]
+        },
+        "members": [
+          {
+            "run": "r1",
+            "attempts": [
+              {
+                "retry": 0,
+                "passed": true
+              }
+            ],
+            "partial": ["code", "css"],
+            "partialLayers": ["browser"],
+            "tokens": ["file:a", "fn:b"]
+          },
+          {
+            "run": "r2",
+            "attempts": [
+              {
+                "retry": 0,
+                "passed": true
+              }
+            ],
+            "partial": [],
+            "partialLayers": [],
+            "tokens": ["file:a"]
+          }
+        ]
+      },
+      "payloadHex": "505149520202030666696c653a6104666e3a6104666e3a6201086368726f6d69756d073134372e302e310305010002000002027231010001050102000102723201000100000100"
     }
   ],
   "invalid": [
@@ -206,8 +249,8 @@
       "payloadHex": "005149520102030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e3101090100000102723102000001010403000000"
     },
     {
-      "name": "version 2",
-      "payloadHex": "505149520202030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e3101090100000102723102000001010403000000"
+      "name": "version 3",
+      "payloadHex": "505149520302030666696c653a6104666e3a6208726f7574653a2f7801086368726f6d69756d073133302e302e3101090100000102723102000001010403000000"
     },
     {
       "name": "an unknown kind",
@@ -248,6 +291,14 @@
     {
       "name": "a global id past the dictionary",
       "payloadHex": "505149520101020666696c653a6104666e3a620101010001020304050607080102"
+    },
+    {
+      "name": "footprints v2: a partial member with no partial layers",
+      "payloadHex": "505149520202030666696c653a6104666e3a6104666e3a6201086368726f6d69756d073134372e302e310305000002000002027231010001050102000102723201000100000100"
+    },
+    {
+      "name": "footprints v2: an unknown partial layer bit",
+      "payloadHex": "505149520202030666696c653a6104666e3a6104666e3a6201086368726f6d69756d073134372e302e310305800002000002027231010001050102000102723201000100000100"
     }
   ]
 }

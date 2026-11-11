@@ -56,6 +56,12 @@ test("a script whose whole is its key: the key, run or loaded", () => {
   assert.deepEqual([result.keys, result.loaded], [[`out:${manifest}`], [`out:${manifest}`]]);
 });
 
+test("a whole script whose only code is its top level still ran: its key", () => {
+  const manifest = "server/app/sso/page_client-reference-manifest.js";
+  const result = serverFootprint(invocation([script(manifest, [fn("", 0, 120)])]), fingerprint.scripts, NEXT);
+  assert.deepEqual(result.keys, [`out:${manifest}`]);
+});
+
 test("chunk scaffolding runs and is no one's code", () => {
   const page = "server/app/sso/page.js";
   const scaffold = fingerprint.scripts.get(page)!.spans.find((s) => s.key === null)!;

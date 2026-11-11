@@ -319,7 +319,7 @@ export async function executeAndReport(
         scripts: input.impact!.fingerprint.scripts,
         nextDir: plan.nextDir,
         runTests: (spec, index) =>
-          runPlaywright(env, planFile, reportDir, undefined, input.extraEnv, input.narrowed, input.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : path.join(blobDir, `report-${index}.zip`) }),
+          runPlaywright(env, planFile, reportDir, undefined, { ...input.extraEnv, PEEPS_INVOCATION: spec === null ? "ambient" : "spec" }, input.narrowed, input.footprints?.record === true, coverage, { spec, blobFile: spec === null ? null : path.join(blobDir, `report-${index}.zip`) }),
         attempts: () => (evidence.read("att-") as AttemptRecord[]).map((record) => ({ testId: record.testId, file: typeof record.file === "string" ? realOr(record.file) : null })),
       });
       exitCode = recorded.exitCode;
@@ -416,6 +416,7 @@ async function recordEvidence(
       loadedFiles: job.loadedFiles,
       ambient: job.ambient,
       browser: job.browser,
+      codecVersion: project.collect.codecVersion,
       members: job.members,
     });
     if (ok) console.log(`[peeps] recorded what ${job.members.length} test(s) ran`);

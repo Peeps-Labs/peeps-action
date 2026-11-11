@@ -165,3 +165,14 @@ test("no server evidence without browser coverage: code is never claimed measure
   assert.deepEqual([result.layers, result.measured, result.ambient], [["browser"], ["route"], []]);
   assert.ok(result.members[0]!.evidence.every((e) => e.keys.length === 0));
 });
+
+test("each collector's partial names its layer: the browser's, the server's, ambient's (PQA-3430)", () => {
+  const result = membersOfAll([record("t1", "run-1", 0, true, null), record("t2", "run-2", 0, true, null)], [], fingerprint, { coverage: true, har: false }, [], [], {
+    ambient: serverFp([], [], ["not_ready"]),
+    byTest: new Map([["t1", serverFp(["file:a.ts"])], ["t2", serverFp([], [], ["not_taken"])]]),
+  });
+  const layersOf = (run: string, reason: string) => result.members.find((m) => m.run === run)!.evidence.find((e) => e.reasons.includes(reason))!.layers;
+  assert.deepEqual(layersOf("run-1", "coverage_missing"), ["browser"]);
+  assert.deepEqual(layersOf("run-2", "server_not_taken"), ["server"]);
+  assert.deepEqual(layersOf("run-1", "ambient_not_ready"), ["server"]);
+});

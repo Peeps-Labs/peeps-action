@@ -17,8 +17,8 @@ import { ROUTE_ENCODER_VERSION } from "./hash";
 import { fingerprintRecording } from "./recording";
 import { uploadFingerprint, type EvidenceTransport, type Receipt } from "./upload";
 
-/** What records a fingerprint: a change to any of it reads every recording unbound. */
-export const TOOLCHAIN = `peeps-action@${ACTION_VERSION}/codec${RECORDING_CODEC_VERSION}/routes${ROUTE_ENCODER_VERSION}`;
+/** What records a fingerprint: a change to any of it reads every recording unbound. The codec is the version written. */
+export const toolchain = (codecVersion: number = RECORDING_CODEC_VERSION) => `peeps-action@${ACTION_VERSION}/codec${codecVersion}/routes${ROUTE_ENCODER_VERSION}`;
 
 export interface PreparedProject {
   projectId: string;
@@ -98,7 +98,7 @@ export async function prepareImpact(input: PrepareInput, log: (line: string) => 
   const projects: PreparedProject[] = [];
   for (const collect of asked) {
     const blob = fingerprintRecording(fingerprint, collect.key);
-    const receipt = await uploadFingerprint(input.transport, { blob, projectId: collect.projectId, base, leg: input.leg, keyVersion: collect.keyVersion, binding: TOOLCHAIN }, log);
+    const receipt = await uploadFingerprint(input.transport, { blob, projectId: collect.projectId, base, leg: input.leg, keyVersion: collect.keyVersion, binding: toolchain(collect.codecVersion) }, log);
     if (receipt) projects.push({ projectId: collect.projectId, collect, receipt });
   }
   return projects.length > 0 ? { fingerprint, projects } : null;

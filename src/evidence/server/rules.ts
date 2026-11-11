@@ -72,12 +72,13 @@ export function serverFootprint(coverage: InvocationCoverage, scripts: ReadonlyM
       for (const fn of script.functions) {
         const range = fn.ranges[0];
         if (!range || range.count === 0) continue;
-        // The script's own top level, which V8 reports as a function.
-        if (range.startOffset === 0 && fn.functionName === "") continue;
+        // A script with no map is one entity: its top level running is it running.
         if (index?.whole) {
           keys.add(index.whole);
           continue;
         }
+        // The script's own top level, which V8 reports as a function.
+        if (range.startOffset === 0 && fn.functionName === "") continue;
         const span = index && spanAt(index, { name: fn.functionName, start: range.startOffset, end: range.endOffset });
         if (!span) {
           unmapped++;

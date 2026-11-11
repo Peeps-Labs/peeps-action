@@ -20,7 +20,7 @@ const prepareImpact = (input: Omit<PrepareInput, "fingerprint" | "collect"> & { 
   prepare({ ...input, collect: [{ projectId: "p1", ...input.collect }], fingerprint: async (nextDir, prefix) => fingerprintNextDir(nextDir, prefix) }, log).then((r) => r && { ...r, ...r.projects[0]! });
 
 const key = parseProjectKey(Buffer.alloc(32, 5).toString("hex"))!;
-const collect = { coverage: true, fingerprint: true, key, keyVersion: "V1" };
+const collect = { coverage: true, fingerprint: true, key, keyVersion: "V1", codecVersion: 2 };
 
 /** A repository whose app sits in `apps/web`, built, with a merge commit at HEAD as GitHub makes for a pull request. */
 async function repository(t: TestContext): Promise<{ root: string; app: string; sha: string; base: string }> {
@@ -137,4 +137,13 @@ test("a build that can't be read is no impact, nothing sent, never a thrown job"
   assert.equal(impact, null);
   assert.deepEqual(sink.sent, []);
   assert.match(lines.join("\n"), /couldn't be fingerprinted/);
+});
+
+test("the binding names the codec version written, so a codec 1 recording never binds as codec 2 (PQA-3430)", async (t) => {
+  const { app, sha } = await repository(t);
+  for (const codecVersion of [1, 2]) {
+    const sink = transport();
+    await prepareImpact({ appDir: app, sha, eventName: "push", leg: "chromium", collect: { ...collect, codecVersion }, repository: await localRepository(app), transport: sink }, () => {});
+    assert.match(new URLSearchParams(sink.sent[0]!.path.split("?")[1]).get("binding") ?? "", new RegExp(`/codec${codecVersion}/`));
+  }
 });
