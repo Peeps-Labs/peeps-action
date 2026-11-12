@@ -67,7 +67,7 @@ export function chunk(modules: Module[], mapName: string, prologue = "(globalThi
   lines.push("}]);");
   mappings.push([]);
   lines.push(`//# sourceMappingURL=${mapName}`);
-  const map = { version: 3, sources: modules.map((m) => m.source), names: [], mappings: encodeMappings(mappings) };
+  const map = { version: 3, sources: modules.map((m) => m.source), sourcesContent: modules.map((m) => m.code), names: [], mappings: encodeMappings(mappings) };
   return { code: lines.join("\n"), map: JSON.stringify(map) };
 }
 
