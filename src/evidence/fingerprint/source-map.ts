@@ -11,6 +11,8 @@ export interface BasicMap {
   sources: string[];
   names: string[];
   mappings: string;
+  /** Each source's original text, where the map carries it; null where it doesn't. */
+  sourcesContent: Array<string | null>;
 }
 
 export interface Section {
@@ -68,7 +70,13 @@ export function parseSourceMap(text: string): Section[] | null {
   const basic = (value: unknown): BasicMap | null => {
     const map = value as Partial<BasicMap> | null;
     if (!map || !Array.isArray(map.sources) || typeof map.mappings !== "string") return null;
-    return { sources: map.sources.map((s) => (typeof s === "string" ? s : "")), names: Array.isArray(map.names) ? map.names : [], mappings: map.mappings };
+    const content = Array.isArray(map.sourcesContent) ? map.sourcesContent : [];
+    return {
+      sources: map.sources.map((s) => (typeof s === "string" ? s : "")),
+      names: Array.isArray(map.names) ? map.names : [],
+      mappings: map.mappings,
+      sourcesContent: map.sources.map((_, i) => (typeof content[i] === "string" ? content[i] : null)),
+    };
   };
   const sections = (json as { sections?: unknown }).sections;
   if (Array.isArray(sections)) {
