@@ -14,16 +14,19 @@
  *
  * And the two a minified server build needs (PQA-3494): its minifier names locals per
  * chunk, so a module beside a changed one gets new names in both its keys and its text.
- * 6. A name the minifier may have chosen never reaches a key or a value. A binding (a
- *    function's or variable's name, a parameter) is its original name where the map
- *    names it or the source text shows it, else its original position; the binding is
- *    the one TypeScript resolves, so two bindings never share a position. A function with
- *    no such name is `@<line>:<column>` where it starts in its source. Property names,
- *    and anything that resolves to no binding (a global), stay as built.
- * 7. Next's build templates (`next/…/build/templates/`) are scaffolding: every route
- *    compiles a copy, so one entity would join every route to every other, and the copy
- *    a boot-time health check ran would make every route's change ambient. A template only
- *    changes with Next itself, which the traced runtime makes global.
+ * 6. A name the minifier may have chosen never reaches a key or a value. In a value, a
+ *    binding (a function's or variable's name, a parameter), as TypeScript resolves it, is
+ *    its original name and place where the map places it, or for one the minifier made,
+ *    its function's k-th such binding; numbered when two would share a name, and left as
+ *    built in a chunk with a direct `eval` or `with`. Property names and globals stay as
+ *    built, and `{ a }` keeps its property. A function's key is its original name, or a
+ *    property's, with its place `@<line>:<column>` when two functions of its source share
+ *    the name; with no name, only its place.
+ * 7. A copy of Next's build templates (`next/…/build/templates/`) belongs to the route
+ *    whose entry instantiates it: `<name>#<entry>`, with no source, since every route has
+ *    one and a boot-time health check runs its own. Each copy keeps its own hash, so what
+ *    the build folds into it (the page, the config's output, a constant) still changes it.
+ *    A copy no entry names stays one shared entity, as before.
  *
  * Normalised away: the random `BUILD_ID`, preview and encryption keys, hashed chunk names.
  * Keys hold plaintext source paths here; `hash.ts` keys them before anything leaves.
@@ -125,12 +128,29 @@ export function fingerprintBuild(input: BuildInput): Fingerprint {
   };
   const norm = normaliser(input.read("BUILD_ID")?.trim() ?? "", files);
 
+  const owners = entryOwners(files, input.read);
+  const pending: Pending[] = [];
   for (const file of files.filter((f) => f.endsWith(".js"))) {
     const code = input.read(file);
     if (code === null) continue;
-    const index = fingerprintScript(file, code, input, norm, put);
-    for (const span of index.spans) if (span.key && span.source) fingerprint.files.set(span.key, span.source);
-    fingerprint.scripts.set(file, index);
+    fingerprint.scripts.set(file, fingerprintScript(file, code, input, norm, put, owners, pending));
+  }
+  // A name two functions of one source share takes each one's place (rule 6): merged, a
+  // swap between them would change neither the set of hashes nor their callers.
+  const places = new Map<string, Set<string>>();
+  const group = (p: Pending) => `${p.prefix}\u0000${p.name}\u0000${p.entry ?? ""}`;
+  for (const p of pending) {
+    if (p.name === null) continue;
+    let set = places.get(group(p));
+    if (!set) places.set(group(p), (set = new Set()));
+    set.add(p.place);
+  }
+  for (const p of pending) {
+    const name = p.name === null ? p.place : places.get(group(p))!.size > 1 ? `${p.name}${p.place}` : p.name;
+    const key = `${p.prefix}${name}${p.entry === null ? "" : `#${p.entry}`}`;
+    p.span.key = key;
+    put(key, p.hash);
+    if (p.span.source) fingerprint.files.set(key, p.span.source);
   }
   for (const file of files.filter((f) => /^server\/(?:app|pages)\//.test(f) && /\.(?:html|rsc|meta)$/.test(f))) {
     const text = input.read(file);
@@ -232,10 +252,8 @@ function flatten(sections: Section[], mapFile: string, sourcePrefix: string): Ma
   return lines;
 }
 
-const lineStartsOf = new Map<string, number[]>();
-
 /** Whether the source's own text at a segment is this identifier: an unminified name. */
-function sourceSays(segment: Mapped, name: string): boolean {
+function sourceSays(segment: Mapped, name: string, lineStartsOf: Map<string, number[]>): boolean {
   const content = segment.content;
   if (content === null) return false;
   let starts = lineStartsOf.get(content);
@@ -370,12 +388,63 @@ function functionsOf(source: ts.SourceFile): Fn[] {
   return top;
 }
 
+/** A function whose key waits for every script: its name may need its place (rule 6). */
+interface Pending {
+  span: Span;
+  /** `fn:<layer>:<source>:` */
+  prefix: string;
+  /** Null: it has no name, only its place. */
+  name: string | null;
+  /** `@<line>:<column>` where it starts in its source. */
+  place: string;
+  /** A template copy's route entry (rule 7); null otherwise, or when no entry names it. */
+  entry: string | null;
+  hash: string;
+}
+
+/** A route's or page's built entry: webpack's holds its template copy, Turbopack's names the module that does. */
+const ENTRY = /^server\/(?:app|pages)\/.+\.js$/;
+
+/** Turbopack's module ids each entry instantiates, to its entry; an id two entries name is no one's. */
+function entryOwners(files: string[], read: BuildInput["read"]): Map<string, string | null> {
+  const owners = new Map<string, string | null>();
+  for (const file of files.filter((f) => ENTRY.test(f))) {
+    const id = /module\.exports\s*=\s*[\w$]+\.m\((\d+)\)\.exports/.exec(read(file) ?? "")?.[1];
+    if (id === undefined) continue;
+    owners.set(id, owners.has(id) && owners.get(id) !== file ? null : file);
+  }
+  return owners;
+}
+
+/** A built script's index. One the parser or checker can't take (too deep, say) is one entity: never a lost fingerprint. */
 function fingerprintScript(
   file: string,
   code: string,
   input: BuildInput,
   norm: (text: string) => string,
   put: (key: string, hash: string) => void,
+  owners: Map<string, string | null>,
+  pending: Pending[],
+): ScriptIndex {
+  const mark = pending.length;
+  try {
+    return indexScript(file, code, input, norm, put, owners, pending);
+  } catch {
+    pending.length = mark;
+    const key = `out:${norm(file)}`;
+    put(key, sha16(norm(code)));
+    return { spans: [], whole: key };
+  }
+}
+
+function indexScript(
+  file: string,
+  code: string,
+  input: BuildInput,
+  norm: (text: string) => string,
+  put: (key: string, hash: string) => void,
+  owners: Map<string, string | null>,
+  pending: Pending[],
 ): ScriptIndex {
   const layer = file.startsWith("static/") ? "browser" : "server";
   const whole = (): ScriptIndex => {
@@ -396,60 +465,78 @@ function fingerprintScript(
     for (const segment of segments) if (!at.has(lineStarts[l]! + segment.col)) at.set(lineStarts[l]! + segment.col, segment);
   });
 
+  const lineStartsOf = new Map<string, number[]>();
   /** A binding's original name, from the map or its source's text; null when neither says (rule 6). */
   const originalName = (id: ts.Identifier): string | null => {
     const segment = at.get(id.getStart(source));
     if (!segment) return null;
     if (segment.name) return segment.name;
-    return sourceSays(segment, id.text) ? id.text : null;
+    return sourceSays(segment, id.text, lineStartsOf) ? id.text : null;
   };
-  /** What a binding is called in a value: its original name, else its original place, else null (as built). */
-  const canonical = new Map<ts.Symbol, string | null>();
-  const bindingName = (symbol: ts.Symbol | undefined): string | null => {
-    if (!symbol) return null;
-    if (canonical.has(symbol)) return canonical.get(symbol)!;
-    let name: string | null = null;
-    const declared = symbol.declarations?.find((d) => d.getSourceFile() === source);
-    const id = declared && (declared as { name?: ts.Node }).name;
-    if (id && ts.isIdentifier(id)) {
-      const segment = at.get(id.getStart(source));
-      name = originalName(id) ?? (segment ? `\u0000${segment.source}@${segment.line + 1}:${segment.column + 1}` : unmapped().get(id) ?? null);
-    }
-    canonical.set(symbol, name);
-    return name;
+  const place = (segment: Mapped) => `@${segment.line + 1}:${segment.column + 1}`;
+
+  // A direct eval or a `with` reads bindings by their built names: keep every name as built.
+  let renames = true;
+  const scan = (node: ts.Node): void => {
+    if (ts.isWithStatement(node) || (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "eval")) renames = false;
+    else ts.forEachChild(node, scan);
   };
+  scan(source);
+
   /**
-   * A binding the minifier made (a temporary, say) maps nowhere: it is its function's
-   * k-th such binding, that function placed by where it starts in its source. Its own
-   * function changing renumbers it, which is that function's change anyway.
+   * Every binding's value name (rule 6): its original name and place where the map places
+   * it; a binding the minifier made (a temporary, say) maps nowhere and is its function's
+   * k-th such binding, that function placed. Two bindings one name and place would give are
+   * numbered in order, so no two bindings share a name. Null: no name, left as built.
    */
-  let unmappedNames: Map<ts.Identifier, string | null> | null = null;
-  const unmapped = () => {
-    if (unmappedNames) return unmappedNames;
-    unmappedNames = new Map();
-    const byContainer = new Map<ts.Node, ts.Identifier[]>();
+  let declNames: Map<ts.Identifier, string | null> | null = null;
+  const declared = () => {
+    if (declNames) return declNames;
+    const ids: ts.Identifier[] = [];
     const visit = (node: ts.Node) => {
       const parent = node.parent;
-      if (ts.isIdentifier(node) && parent && (parent as { name?: ts.Node }).name === node && DECLARES.has(parent.kind) && !at.has(node.getStart(source))) {
-        let container: ts.Node = parent;
-        while (!FUNCTION_KINDS.has(container.kind) && container.parent) container = container.parent;
-        const list = byContainer.get(container);
-        if (list) list.push(node);
-        else byContainer.set(container, [node]);
-      }
+      if (ts.isIdentifier(node) && parent && (parent as { name?: ts.Node }).name === node && DECLARES.has(parent.kind)) ids.push(node);
       ts.forEachChild(node, visit);
     };
     visit(source);
-    for (const [container, ids] of byContainer) {
+    const unmappedIn = new Map<ts.Node, number>();
+    const base = ids.map((id) => {
+      const segment = at.get(id.getStart(source));
+      if (segment) return `${originalName(id) ?? ""}\u0000${segment.source}${place(segment)}`;
+      let container: ts.Node = id.parent;
+      while (!FUNCTION_KINDS.has(container.kind) && container.parent) container = container.parent;
+      const k = unmappedIn.get(container) ?? 0;
+      unmappedIn.set(container, k + 1);
       const fn = fnOf.get(container);
       const found = fn ? origin(fn) : null;
-      ids.forEach((id, k) => unmappedNames!.set(id, found ? `\u0000${found.source}@${found.start.line + 1}:${found.start.column + 1}#${k}` : null));
-    }
-    return unmappedNames;
+      return found ? `\u0000${found.source}${place(found.start)}#${k}` : null;
+    });
+    const seen = new Map<string, number>();
+    declNames = new Map();
+    ids.forEach((id, i) => {
+      const name = base[i]!;
+      if (name === null) return declNames!.set(id, null);
+      const n = seen.get(name) ?? 0;
+      seen.set(name, n + 1);
+      declNames!.set(id, n === 0 ? name : `${name}#${n}`);
+    });
+    return declNames;
+  };
+  const bindingName = (symbol: ts.Symbol | undefined): string | null => {
+    const declaration = symbol?.declarations?.find((d) => d.getSourceFile() === source);
+    const id = declaration && (declaration as { name?: ts.Node }).name;
+    return id && ts.isIdentifier(id) ? declared().get(id) ?? null : null;
   };
   const fnOf = new Map<ts.Node, Fn>();
 
-  const origin = (fn: Fn): { source: string; name: string | null; start: Mapped } | null => {
+  interface Origin {
+    source: string;
+    name: string | null;
+    start: Mapped;
+    /** A copy of Next's template: no source of its own (rule 7). */
+    template: boolean;
+  }
+  const origin = (fn: Fn): Origin | null => {
     const votes = new Map<string, number>();
     const firstOf = new Map<string, Mapped>();
     let first: Mapped | null = null;
@@ -473,9 +560,7 @@ function fingerprintScript(
     }
     if (!first) return null;
     const winner = [...votes].sort((a, b) => b[1] - a[1])[0]![0];
-    // Every route's copy of a template is no one's code (rule 7).
-    if (TEMPLATE.test(winner)) return null;
-    return { source: winner, name: first.source === winner ? first.name : null, start: firstOf.get(winner)! };
+    return { source: winner, name: first.source === winner ? first.name : null, start: firstOf.get(winner)!, template: TEMPLATE.test(winner) };
   };
   /** The function's text, nested functions as a marker, every binding by its rule 6 name. */
   const ownText = (fn: Fn) => {
@@ -486,19 +571,18 @@ function fingerprintScript(
       if (kidAt.has(node)) return;
       if (ts.isIdentifier(node)) {
         const parent = node.parent;
-        if (ts.isShorthandPropertyAssignment(parent) && parent.name === node) {
-          // `{ a }` is the property `a` and the binding `a`: keep the one, rename the other.
-          const name = bindingName(checker.getShorthandAssignmentValueSymbol(parent));
-          if (name !== null && name !== node.text) edits.push([node.getStart(source), node.end, `${node.text}:${name}`]);
-        } else if (!notBinding(node)) {
-          const name = bindingName(checker.getSymbolAtLocation(node));
-          if (name !== null && name !== node.text) edits.push([node.getStart(source), node.end, name]);
-        }
+        // `{ a }`, made or taken apart, is the property `a` and the binding `a`: keep the one, rename the other.
+        const shorthand =
+          (ts.isShorthandPropertyAssignment(parent) && parent.name === node) ||
+          (ts.isBindingElement(parent) && parent.name === node && !parent.propertyName && !parent.dotDotDotToken && ts.isObjectBindingPattern(parent.parent));
+        const symbol = ts.isShorthandPropertyAssignment(parent) && parent.name === node ? checker.getShorthandAssignmentValueSymbol(parent) : notBinding(node) ? undefined : checker.getSymbolAtLocation(node);
+        const name = symbol ? bindingName(symbol) : null;
+        if (name !== null && name !== node.text) edits.push([node.getStart(source), node.end, shorthand ? `${node.text}:${name}` : name]);
         return;
       }
       ts.forEachChild(node, visit);
     };
-    ts.forEachChild(fn.node, visit);
+    if (renames) ts.forEachChild(fn.node, visit);
     edits.sort((a, b) => a[0] - b[0]);
     let text = "";
     let from = fn.start;
@@ -508,26 +592,44 @@ function fingerprintScript(
     }
     return text + code.slice(from, fn.end);
   };
-  /** A function's key name: the map's, a property's, a binding's original, else where it starts (rule 6). */
-  const keyName = (fn: Fn, found: { name: string | null; start: Mapped }) => {
+  /** A function's name: the map's, a property's, a binding's original; null for none, so its place (rule 6). */
+  const keyName = (fn: Fn, found: Origin): string | null => {
     if (found.name) return found.name;
     if (fn.name && fn.name.binding === null) return fn.name.text;
-    const original = fn.name?.binding ? originalName(fn.name.binding) : null;
-    return original ?? `@${found.start.line + 1}:${found.start.column + 1}`;
+    return fn.name?.binding ? originalName(fn.name.binding) : null;
   };
-  const walk = (fns: Fn[]) => {
+  /** The route entry a Turbopack module factory belongs to, from where it sits in the chunk's array. */
+  const factoryEntry = (fn: Fn): string | null => {
+    const parent = fn.node.parent;
+    if (!parent || !ts.isArrayLiteralExpression(parent)) return null;
+    const i = parent.elements.indexOf(fn.node as ts.Expression);
+    const id = parent.elements[i - 1];
+    return id && ts.isNumericLiteral(id) ? owners.get(id.text) ?? null : null;
+  };
+  const walk = (fns: Fn[], entry: string | null) => {
     for (const fn of fns) {
       const found = origin(fn);
-      const key = found ? `fn:${layer}:${found.source}:${keyName(fn, found)}` : null;
-      if (key) put(key, sha16(norm(ownText(fn))));
-      spans.push({ start: fn.start, end: fn.end, key, source: found?.source ?? null });
-      walk(fn.kids);
+      // Webpack's entry holds its route's template copy; Turbopack's factory is named by one.
+      const owner = entry ?? (ENTRY.test(file) ? file : factoryEntry(fn));
+      const span: Span = { start: fn.start, end: fn.end, key: null, source: found && !found.template ? found.source : null };
+      if (found) {
+        pending.push({
+          span,
+          prefix: `fn:${layer}:${found.source}:`,
+          name: keyName(fn, found),
+          place: place(found.start),
+          entry: found.template ? owner : null,
+          hash: sha16(norm(ownText(fn))),
+        });
+      }
+      spans.push(span);
+      walk(fn.kids, owner);
     }
   };
   const fns = functionsOf(source);
   const index = (list: Fn[]) => list.forEach((fn) => (fnOf.set(fn.node, fn), index(fn.kids)));
   index(fns);
-  walk(fns);
+  walk(fns, null);
   spans.sort((a, b) => a.start - b.start || b.end - a.end);
   return { spans };
 }

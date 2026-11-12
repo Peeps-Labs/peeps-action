@@ -52,7 +52,8 @@ export interface ServerModule {
   code: string;
 }
 
-const TOKEN = /"(?:[^"\\]|\\.)*"|[A-Za-z_$][\w$]*|\S/g;
+/** A string, an identifier written `built@original` (the map names `original`), an identifier, or any other character. */
+const TOKEN = /"(?:[^"\\]|\\.)*"|[A-Za-z_$][\w$]*@[A-Za-z_$][\w$]*|[A-Za-z_$][\w$]*|\S/g;
 
 /** One server chunk and its map, `renames` applied to every identifier not after a `.`. */
 export function serverChunk(modules: ServerModule[], renames: Record<string, Rename>, mapName: string): { code: string; map: string } {
@@ -71,8 +72,15 @@ export function serverChunk(modules: ServerModule[], renames: Record<string, Ren
       for (const match of line.matchAll(TOKEN)) {
         out += line.slice(last, match.index!);
         last = match.index! + match[0].length;
-        const rename = /^[A-Za-z_$]/.test(match[0]) && line[match.index! - 1] !== "." ? renames[match[0]] : undefined;
         const source = sources.indexOf(module.source);
+        const named = /^([A-Za-z_$][\w$]*)@([A-Za-z_$][\w$]*)$/.exec(match[0]);
+        if (named) {
+          if (!names.includes(named[2]!)) names.push(named[2]!);
+          segments.push([out.length, source, srcLine, match.index!, names.indexOf(named[2]!)]);
+          out += named[1];
+          continue;
+        }
+        const rename = /^[A-Za-z_$]/.test(match[0]) && line[match.index! - 1] !== "." ? renames[match[0]] : undefined;
         if (rename === undefined) {
           segments.push([out.length, source, srcLine, match.index!]);
           out += match[0];
@@ -98,8 +106,15 @@ export function serverChunk(modules: ServerModule[], renames: Record<string, Ren
 }
 
 /** A `.next` of server chunks: chunk file name → its modules and the renames its minifier chose. */
-export function serverBuild(chunks: Record<string, { modules: ServerModule[]; renames: Record<string, Rename> }>): Map<string, string> {
+export function serverBuild(
+  chunks: Record<string, { modules: ServerModule[]; renames: Record<string, Rename> }>,
+  /** Turbopack's route entries: the built file (`server/app/api/a/route.js`) → the module it instantiates. */
+  entries: Record<string, number> = {},
+): Map<string, string> {
   const files = new Map<string, string>();
+  for (const [file, id] of Object.entries(entries)) {
+    files.set(file, `var R=require("../../chunks/[turbopack]_runtime.js")("${file}")\nR.c("server/chunks/a.js")\nR.m(${id})\nmodule.exports=R.m(${id}).exports\n`);
+  }
   for (const [name, { modules, renames }] of Object.entries(chunks)) {
     const built = serverChunk(modules, renames, `${name}.map`);
     files.set(`server/chunks/${name}`, built.code);
