@@ -738,6 +738,10 @@ access token Peeps was given (Maintainer).
   browser code coverage, network requests, and a fingerprint of the build.
   It sends only keyed hashes, never source, URLs or query text. Anything it
   can't measure fully is marked partial, so that test always runs.
+- Build fingerprint: it tells your routes apart and ignores the names a
+  minifier picks, so a change to one route on a Next App Router app is no
+  longer a change to every route. The first comparison after you upgrade
+  runs every test once.
 - Server evidence: the new inputs `app-start`, `app-ready-url` and
   optionally `app-reset` let a recorded run start your app itself and record
   what its server ran for each test file.
