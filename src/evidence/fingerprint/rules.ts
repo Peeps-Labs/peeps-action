@@ -23,8 +23,8 @@
  *    property's, with its place `@<line>:<column>` when two functions of its source share
  *    the name; with no name, only its place.
  * 7. A copy of Next's build templates (`next/…/build/templates/`) belongs to the route
- *    whose entry instantiates it: `<name>#<entry>`, with no source, since every route has
- *    one and a boot-time health check runs its own. Each copy keeps its own hash, so what
+ *    whose entry instantiates it: `<name>#<entry>`, its file `<template>#<entry>`, since
+ *    every route has one and a boot-time health check runs its own. Each copy keeps its own hash, so what
  *    the build folds into it (the page, the config's output, a constant) still changes it.
  *    A copy no entry names stays one shared entity, as before.
  *
@@ -622,6 +622,17 @@ function indexScript(
     const id = parent.elements[i - 1];
     return id && ts.isNumericLiteral(id) ? owners.get(id.text) ?? null : null;
   };
+  /**
+   * The file a function's footprint holds beside its key: Peeps pairs every `fn:` token
+   * with one (its evidence contract). A template copy's is its own copy's, `<template>#<entry>`,
+   * so the copy a boot-time health check ran stands for no other route (rule 7); a copy no
+   * entry names keeps the template's. A borrowed key's is `<source>#^`: running a module's
+   * generated glue is not running every function of that file.
+   */
+  const fileOfFn = (found: Origin, borrowed: boolean, owner: string | null): string => {
+    if (found.template) return owner === null ? found.source : `${found.source}#${owner}`;
+    return borrowed ? `${found.source}#^` : found.source;
+  };
   /** The first function under this one with a source of its own, depth first. */
   const firstMapped = (fn: Fn): Origin | null => {
     for (const kid of fn.kids) {
@@ -643,11 +654,10 @@ function indexScript(
         spans.push(span);
       } else {
         // A top-level function that maps nowhere (a module factory of declarations and
-        // generated exports) is keyed by the first function in it that maps somewhere, but
-        // holds no source: running it is not running that file.
+        // generated exports) is keyed by the first function in it that maps somewhere.
         const borrowed = own ? null : firstMapped(fn);
         const found = own ?? borrowed;
-        const span: Span = { start: fn.start, end: fn.end, key: null, source: own && !own.template ? own.source : null };
+        const span: Span = { start: fn.start, end: fn.end, key: null, source: found ? fileOfFn(found, own === null, owner) : null };
         spans.push(span);
         if (found) {
           into = {

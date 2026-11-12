@@ -153,15 +153,16 @@ test("a template copy no entry names stays one shared entity: a change to any co
   assert.ok(diffFingerprints(unentried, build({ entries: false, statusA: 201 })).some((key) => key.includes("build/templates")));
 });
 
-test("a template copy belongs to its route's entry, with no source a footprint could hold", () => {
+test("a template copy belongs to its route's entry, its file its own copy's, never the template's", () => {
   const copies = [...base.entities.keys()].filter((key) => key.includes("build/templates"));
   assert.ok(copies.length > 0);
   assert.ok(copies.every((key) => key.endsWith("#server/app/api/a/route.js") || key.endsWith("#server/app/api/b/route.js")));
-  assert.deepEqual([...base.files.values()].filter((file) => file.includes("build/templates")), []);
+  const TEMPLATE_FILE = "node_modules/next/src/build/templates/app-route.ts";
+  assert.ok(![...base.files.values()].includes(TEMPLATE_FILE));
   const code = buildFiles().get("server/chunks/a.js")!;
   const handler = base.scripts.get("server/chunks/a.js")!.spans.find((span) => code.slice(span.start).startsWith("async function i(n,o)"));
   assert.ok(handler, "the template's handler is indexed for coverage");
-  assert.equal(handler.source, null);
+  assert.equal(handler.source, `${TEMPLATE_FILE}#server/app/api/a/route.js`);
   assert.match(handler.key ?? "", /^fn:server:node_modules\/next\/src\/build\/templates\/app-route\.ts:handler#server\/app\/api\/a\/route\.js$/);
 });
 
@@ -230,4 +231,30 @@ test("an unmapped function takes its parent's key, so coverage of it reaches tha
   const factory = spans.find((span) => code.slice(span.start).startsWith("e=>{"))!;
   assert.ok(factory.key);
   assert.deepEqual([getter.key, getter.source], [factory.key, factory.source]);
+});
+
+test("every function entity names a file, and a footprint that ran it holds that file: Peeps' pairing contract", async () => {
+  // Peeps refuses a codec 2 upload whose `fn:` token has no `file:` beside it
+  // (`applyEvidenceContract`, `unpaired_function`, 400): bench #55 hit it.
+  const { fingerprintRecording } = await import("../src/evidence/recording");
+  const { tokenOf } = await import("../src/evidence/hash");
+  const key = Buffer.alloc(32, 7);
+  const glue = serverBuild({ "g.js": { modules: [{ id: 1, source: "turbopack:///[project]/lib/x.ts", code: 'function a@alpha(){return 1}\n!e.s(["GET",0,a])' }], renames: {} } });
+  const files = new Map([...buildFiles({ routeC: true }), ...glue]);
+  const fp = fingerprint(files);
+  const blob = fingerprintRecording(fp, key);
+  assert.equal(blob.kind, "fingerprint");
+  const fileOf = new Map(blob.kind === "fingerprint" ? blob.entities.map((e) => [e.id, e.file] as const) : []);
+  for (const [file, index] of fp.scripts) {
+    for (const span of index.spans) {
+      if (!span.key?.startsWith("fn:")) continue;
+      // What a footprint holds when this span ran (server/rules.ts): its key, and its source's file.
+      assert.ok(span.source, `${file} ${span.key} has no source`);
+      assert.equal(fileOf.get(tokenOf(key, span.key)), tokenOf(key, `file:${span.source}`), `${span.key} pairs`);
+    }
+  }
+  // A template copy's file is its own copy's: the health route's never stands for another route's.
+  const copies = [...fp.files].filter(([k]) => k.includes("build/templates"));
+  assert.ok(copies.length > 0);
+  assert.ok(copies.every(([k, f]) => f.endsWith(k.slice(k.indexOf("#")))));
 });

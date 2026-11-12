@@ -78,11 +78,11 @@ test("chunk scaffolding runs and is no one's code", () => {
   assert.deepEqual([result.keys, result.partial], [[], []]);
 });
 
-test("a module factory of declarations alone is keyed by what it holds, but runs no file (PQA-3494)", () => {
+test("a module factory of declarations alone is keyed by what it holds, its file its own, not its module's (PQA-3494)", () => {
   const page = "server/app/sso/page.js";
-  const factory = fingerprint.scripts.get(page)!.spans.find((s) => s.key !== null && s.source === null)!;
+  const factory = fingerprint.scripts.get(page)!.spans.find((s) => s.source === "src/app/sso/page.tsx#^")!;
   const result = serverFootprint(invocation([script(page, [fn("", factory.start, factory.end)])]), fingerprint.scripts, NEXT);
-  assert.deepEqual([result.keys, result.partial], [[factory.key], []]);
+  assert.deepEqual([result.keys, result.partial], [[factory.key, "file:src/app/sso/page.tsx#^"].sort(), []]);
 });
 
 const partialOf = (over: Partial<InvocationCoverage>, scripts: V8Script[] = []) => {
