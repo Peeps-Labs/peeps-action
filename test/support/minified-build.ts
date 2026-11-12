@@ -66,6 +66,12 @@ export function serverChunk(modules: ServerModule[], renames: Record<string, Ren
     lines.push(`${module.id},e=>{`);
     mappings.push([]);
     module.code.split("\n").forEach((line, srcLine) => {
+      // A line starting `!` is generated glue: written as it is, mapped to nothing.
+      if (line.startsWith("!")) {
+        lines.push(line.slice(1));
+        mappings.push([]);
+        return;
+      }
       let out = "";
       const segments: Segment[] = [];
       let last = 0;

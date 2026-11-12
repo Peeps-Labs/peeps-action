@@ -149,6 +149,7 @@ export function fingerprintBuild(input: BuildInput): Fingerprint {
     const name = p.name === null ? p.place : places.get(group(p))!.size > 1 ? `${p.name}${p.place}` : p.name;
     const key = `${p.prefix}${name}${p.entry === null ? "" : `#${p.entry}`}`;
     p.span.key = key;
+    for (const span of p.also) span.key = key;
     put(key, p.hash);
     if (p.span.source) fingerprint.files.set(key, p.span.source);
   }
@@ -391,6 +392,8 @@ function functionsOf(source: ts.SourceFile): Fn[] {
 /** A function whose key waits for every script: its name may need its place (rule 6). */
 interface Pending {
   span: Span;
+  /** The spans of functions inside it that map nowhere: they share its key. */
+  also: Span[];
   /** `fn:<layer>:<source>:` */
   prefix: string;
   /** Null: it has no name, only its place. */
@@ -518,7 +521,8 @@ function indexScript(
       if (name === null) return declNames!.set(id, null);
       const n = seen.get(name) ?? 0;
       seen.set(name, n + 1);
-      declNames!.set(id, n === 0 ? name : `${name}#${n}`);
+      // `~`, not the unmapped bindings' `#`: a numbered name never meets an unmapped one.
+      declNames!.set(id, n === 0 ? name : `${name}~${n}`);
     });
     return declNames;
   };
@@ -536,7 +540,12 @@ function indexScript(
     /** A copy of Next's template: no source of its own (rule 7). */
     template: boolean;
   }
+  const origins = new Map<Fn, Origin | null>();
   const origin = (fn: Fn): Origin | null => {
+    if (!origins.has(fn)) origins.set(fn, ownOrigin(fn));
+    return origins.get(fn)!;
+  };
+  const ownOrigin = (fn: Fn): Origin | null => {
     const votes = new Map<string, number>();
     const firstOf = new Map<string, Mapped>();
     let first: Mapped | null = null;
@@ -562,14 +571,21 @@ function indexScript(
     const winner = [...votes].sort((a, b) => b[1] - a[1])[0]![0];
     return { source: winner, name: first.source === winner ? first.name : null, start: firstOf.get(winner)!, template: TEMPLATE.test(winner) };
   };
-  /** The function's text, nested functions as a marker, every binding by its rule 6 name. */
+  /**
+   * The function's text, every binding by its rule 6 name. A nested function with a source
+   * of its own is a marker; one that maps nowhere (generated glue: an export's getter, say)
+   * stays in this text, since nothing else would hash it.
+   */
   const ownText = (fn: Fn) => {
     const edits: Array<[number, number, string]> = [];
-    for (const kid of fn.kids) edits.push([kid.start, kid.end, "\u0000F"]);
-    const kidAt = new Set(fn.kids.map((kid) => kid.node));
     const visit = (node: ts.Node) => {
-      if (kidAt.has(node)) return;
+      const nested = node === fn.node ? undefined : fnOf.get(node);
+      if (nested && origin(nested)) {
+        edits.push([nested.start, nested.end, "\u0000F"]);
+        return;
+      }
       if (ts.isIdentifier(node)) {
+        if (!renames) return;
         const parent = node.parent;
         // `{ a }`, made or taken apart, is the property `a` and the binding `a`: keep the one, rename the other.
         const shorthand =
@@ -582,7 +598,7 @@ function indexScript(
       }
       ts.forEachChild(node, visit);
     };
-    if (renames) ts.forEachChild(fn.node, visit);
+    ts.forEachChild(fn.node, visit);
     edits.sort((a, b) => a[0] - b[0]);
     let text = "";
     let from = fn.start;
@@ -606,30 +622,53 @@ function indexScript(
     const id = parent.elements[i - 1];
     return id && ts.isNumericLiteral(id) ? owners.get(id.text) ?? null : null;
   };
-  const walk = (fns: Fn[], entry: string | null) => {
+  /** The first function under this one with a source of its own, depth first. */
+  const firstMapped = (fn: Fn): Origin | null => {
+    for (const kid of fn.kids) {
+      const found = origin(kid) ?? firstMapped(kid);
+      if (found) return found;
+    }
+    return null;
+  };
+  const walk = (fns: Fn[], entry: string | null, holder: Pending | null) => {
     for (const fn of fns) {
-      const found = origin(fn);
       // Webpack's entry holds its route's template copy; Turbopack's factory is named by one.
       const owner = entry ?? (ENTRY.test(file) ? file : factoryEntry(fn));
-      const span: Span = { start: fn.start, end: fn.end, key: null, source: found && !found.template ? found.source : null };
-      if (found) {
-        pending.push({
-          span,
-          prefix: `fn:${layer}:${found.source}:`,
-          name: keyName(fn, found),
-          place: place(found.start),
-          entry: found.template ? owner : null,
-          hash: sha16(norm(ownText(fn))),
-        });
+      const own = origin(fn);
+      let into = holder;
+      if (!own && holder) {
+        // It maps nowhere: its text is in the function around it, and so is its coverage.
+        const span: Span = { start: fn.start, end: fn.end, key: null, source: holder.span.source };
+        holder.also.push(span);
+        spans.push(span);
+      } else {
+        // A top-level function that maps nowhere (a module factory of declarations and
+        // generated exports) is keyed by the first function in it that maps somewhere, but
+        // holds no source: running it is not running that file.
+        const borrowed = own ? null : firstMapped(fn);
+        const found = own ?? borrowed;
+        const span: Span = { start: fn.start, end: fn.end, key: null, source: own && !own.template ? own.source : null };
+        spans.push(span);
+        if (found) {
+          into = {
+            span,
+            also: [],
+            prefix: `fn:${layer}:${found.source}:`,
+            name: own ? keyName(fn, own) : null,
+            place: `${place(found.start)}${own ? "" : "^"}`,
+            entry: found.template ? owner : null,
+            hash: sha16(norm(ownText(fn))),
+          };
+          pending.push(into);
+        } else into = null;
       }
-      spans.push(span);
-      walk(fn.kids, owner);
+      walk(fn.kids, owner, into);
     }
   };
   const fns = functionsOf(source);
   const index = (list: Fn[]) => list.forEach((fn) => (fnOf.set(fn.node, fn), index(fn.kids)));
   index(fns);
-  walk(fns, null);
+  walk(fns, null, null);
   spans.sort((a, b) => a.start - b.start || b.end - a.end);
   return { spans };
 }

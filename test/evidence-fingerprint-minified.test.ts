@@ -211,3 +211,23 @@ test("a chunk the checker can't read is one entity, never a lost fingerprint", (
   assert.equal(fp.scripts.get("server/chunks/deep.js")?.whole, "out:server/chunks/deep.js");
   assert.ok(fp.entities.has("fn:server:lib/variant.ts:label"));
 });
+
+test("generated export glue that maps nowhere is still in a hashed text: re-pointing an export is a change", () => {
+  // Turbopack's direct export, in a module with no other top-level statement.
+  const direct = (to: string) => bare(`function a@alpha(){return 1}\nfunction b@beta(){return 2}\n!e.s(["GET",0,${to}])`);
+  assert.notDeepEqual(diffFingerprints(direct("a"), direct("b")), []);
+  // Webpack's export getter, an arrow of its own inside a keyed factory.
+  const getter = (to: string) => bare(`let ready@ready=1;\nfunction a@alpha(){return 1}\nfunction b@beta(){return 2}\n!e.d(t,{n:()=>${to}})`);
+  assert.notDeepEqual(diffFingerprints(getter("a"), getter("b")), []);
+});
+
+test("an unmapped function takes its parent's key, so coverage of it reaches that entity", () => {
+  const files = serverBuild({ "a.js": { modules: [{ id: 1, source: "turbopack:///[project]/lib/x.ts", code: "let ready@ready=1;\nfunction a@alpha(){return 1}\n!e.d(t,{n:()=>a})" }], renames: {} } });
+  const fp = fingerprint(files);
+  const code = files.get("server/chunks/a.js")!;
+  const spans = fp.scripts.get("server/chunks/a.js")!.spans;
+  const getter = spans.find((span) => code.slice(span.start).startsWith("()=>a"))!;
+  const factory = spans.find((span) => code.slice(span.start).startsWith("e=>{"))!;
+  assert.ok(factory.key);
+  assert.deepEqual([getter.key, getter.source], [factory.key, factory.source]);
+});
