@@ -727,6 +727,29 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
+## 1.14.0
+
+- Targeted runs: the action asks Peeps, in one request capped at 3 seconds,
+  what this job may do. Unless Peeps answers with the new protocol, it
+  behaves exactly as before and runs every test. Older Peeps, an error,
+  a timeout and GitLab all run everything.
+- Impact recording: when Peeps asks a repository to record (a setting
+  that is off by default), the action records what each test exercised:
+  browser code coverage, network requests, and a fingerprint of the build.
+  It sends only keyed hashes, never source, URLs or query text. Anything it
+  can't measure fully is marked partial, so that test always runs.
+- Build fingerprint: it tells your routes apart and ignores the names a
+  minifier picks, so a change to one route on a Next App Router app is no
+  longer a change to every route. The first comparison after you upgrade
+  runs every test once.
+- Server evidence: the new inputs `app-start`, `app-ready-url` and
+  optionally `app-reset` let a recorded run start your app itself and record
+  what its server ran for each test file.
+- Database evidence: with `PEEPS_PG_LOG` pointing at your Postgres jsonlog
+  (auto_explain on), a recorded run also reports which tables the job read
+  and wrote. Only hashed table names leave the job.
+- Nothing narrows a run yet: every test still runs on every pull request.
+
 ## 1.13.0
 
 - Appium: **Record video**. When the project's setting is on in Peeps, each

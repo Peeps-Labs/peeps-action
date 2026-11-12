@@ -728,7 +728,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path7 = __toESM(require("node:path"));
 
 // src/version.ts
-var ACTION_VERSION = "1.13.0";
+var ACTION_VERSION = "1.14.0";
 
 // src/evidence/codec.ts
 var RECORDING_CODEC_VERSION = 2;
