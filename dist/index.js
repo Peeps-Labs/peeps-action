@@ -148,8 +148,15 @@ function readRunnerEnv(env = process.env) {
       input(env, "app-start") ?? variable(env, "PEEPS_APP_START"),
       input(env, "app-ready-url") ?? variable(env, "PEEPS_APP_READY_URL"),
       input(env, "app-reset") ?? variable(env, "PEEPS_APP_RESET")
+    ),
+    sharedVariablesFrom: sharedVariablesFromInputs(
+      input(env, "peeps-environment"),
+      input(env, "peeps-project")
     )
   };
+}
+function sharedVariablesFromInputs(environment, project) {
+  return environment ? { environment, project } : null;
 }
 
 // src/inventory.ts
@@ -728,7 +735,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path7 = __toESM(require("node:path"));
 
 // src/version.ts
-var ACTION_VERSION = "1.14.0";
+var ACTION_VERSION = "1.15.0";
 
 // src/evidence/codec.ts
 var RECORDING_CODEC_VERSION = 2;
@@ -2731,6 +2738,93 @@ async function runDispatched(env, peeps) {
     selection: { files, grep: grepFor(plan.runs.map((r) => r.titlePath)) },
     extraEnv: environment.vars
   });
+}
+
+// src/shared-variables.ts
+var KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+var RESERVED = /^(?:BASE_URL|PEEPS_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|INPUT_.*|CI|PATH|HOME|SHELL|USER|TMPDIR|IFS|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PS[0-4]|BASH_.*|PROMPT_COMMAND|ENV|EDITOR|VISUAL|PAGER|BROWSER|SSH_.*|NODE_.*|NPM_.*|YARN_.*|PNPM_.*|BUN_.*|DENO_.*|ELECTRON_.*|LD_.*|DYLD_.*|GCONV_PATH|LOCPATH|MALLOC_.*|PYTHON.*|PIP_.*|PYTEST_.*|UV_.*|VIRTUAL_ENV|CONDA_.*|PERL.*|RUBY.*|GEM_.*|BUNDLE_.*|JAVA_.*|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|MAVEN_.*|GRADLE_.*|DOTNET_.*|COMPLUS_.*|CORECLR_.*|HTTPS?_PROXY|ALL_PROXY|NO_PROXY|SSL_CERT_.*|OPENSSL_.*|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|PLAYWRIGHT_.*|PW_.*|GIT_.*|XDG_.*)$/i;
+function escapeCommandData(value) {
+  return value.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+function maskCommands(value) {
+  const parts = new Set([value, ...value.split(/\r?\n/)].filter((p) => p.trim() !== ""));
+  return [...parts].map((p) => `::add-mask::${escapeCommandData(p)}`);
+}
+function exportSharedVariables(variables, options) {
+  const current = options.current ?? process.env;
+  const write = options.write ?? ((line) => console.log(line));
+  const set = [];
+  const kept = [];
+  const refused = [];
+  if (current.GITHUB_ACTIONS !== "true") {
+    if (variables.length > 0) {
+      write(
+        `[peeps] ${variables.length} variable(s) from Peeps not set: only GitHub Actions can mask them in the job log.`
+      );
+    }
+    return { set, kept, refused: variables.map((v) => v.key) };
+  }
+  const usable = variables.filter((v) => typeof v.key === "string" && typeof v.value === "string");
+  for (const v of usable) for (const line of maskCommands(v.value)) write(line);
+  for (const v of usable) {
+    if (!KEY.test(v.key) || RESERVED.test(v.key)) {
+      refused.push(v.key);
+    } else if (current[v.key] !== void 0) {
+      kept.push(v.key);
+    } else {
+      current[v.key] = v.value;
+      set.push(v.key);
+    }
+  }
+  const names = (keys) => keys.map(nameForLog).join(", ");
+  if (set.length > 0) write(`[peeps] variables from ${options.source}, masked: ${names(set)}`);
+  if (kept.length > 0) write(`[peeps] the workflow's own value runs for ${names(kept)}`);
+  if (refused.length > 0) write(`[peeps] not set (reserved name): ${names(refused)}`);
+  return { set, kept, refused };
+}
+async function fetchAndExport(peeps, body, options) {
+  let answer;
+  try {
+    answer = await peeps.post("/api/v1/ci/environment-variables", body);
+  } catch (error) {
+    if (options.quietWhenNotFound && error instanceof PeepsHttpError && error.status === 404) {
+      console.log("[peeps] no variables from Peeps for this run");
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(
+      `::warning::Could not get the variables of ${options.asked}; the tests run without them. ${nameForLog(message)}`
+    );
+    return;
+  }
+  const variables = Array.isArray(answer.variables) ? answer.variables : [];
+  const where = `Peeps ${nameForLog(answer.project ?? "")} environment ${nameForLog(answer.environment ?? "")}`;
+  if (variables.length === 0) {
+    console.log(`[peeps] ${where} has no variables switched on for CI`);
+    return;
+  }
+  exportSharedVariables(variables, { source: where });
+}
+async function exportWorkflowVariables(env, peeps) {
+  const from = env.sharedVariablesFrom;
+  if (!from) return;
+  if (env.platform !== "github") {
+    console.log("[peeps] peeps-environment is ignored outside GitHub Actions: GitLab cannot mask a value in the job log.");
+    return;
+  }
+  await fetchAndExport(
+    peeps,
+    { environment: from.environment, project: from.project },
+    { asked: `Peeps environment ${nameForLog(from.environment)}`, quietWhenNotFound: false }
+  );
+}
+async function exportDispatchedVariables(env, peeps) {
+  if (env.platform !== "github" || !env.sessionId) return;
+  await fetchAndExport(
+    peeps,
+    { batchId: env.sessionId },
+    { asked: "this run's Peeps environment", quietWhenNotFound: true }
+  );
 }
 
 // src/agent.ts
@@ -6298,6 +6392,8 @@ async function main() {
   console.log(
     `[peeps] mode=${mode} repo=${env.repository ?? "?"} sha=${env.sha?.slice(0, 7) ?? "?"} ref=${env.ref ?? "?"} peeps=${env.peepsUrl}`
   );
+  if (mode === "run") await exportDispatchedVariables(env, peeps);
+  if (mode === "report") await exportWorkflowVariables(env, peeps);
   const previewUrl2 = await previewBaseUrl(mode, process.env, githubToken);
   if (previewUrl2) process.env.BASE_URL = previewUrl2;
   const dispatched = await dispatchedPreviewUrl(mode, process.env, githubToken, () => headSha(env.workspace));

@@ -45,6 +45,12 @@ inputs:
   app-reset:
     description: "With app-start: a command run before every one of those runs to put your app's state back (e.g. clone a seeded template database). PEEPS_INVOCATION is `ambient` for the first run, `spec` after, in its environment and in the tests'"
     required: false
+  peeps-environment:
+    description: "report mode: the Peeps environment whose Send to CI variables this run gets (e.g. dev). Each value is masked in the job log before anything runs; a variable the workflow sets itself wins. GitHub only. Runs Peeps starts get their environment's variables without it"
+    required: false
+  peeps-project:
+    description: "With peeps-environment: the Peeps project's acronym, for a repository that backs more than one project with an environment of that name"
+    required: false
   github-token:
     description: "Token for reading the pull request's deployments with preview (default: the job's GITHUB_TOKEN). The action removes it from its environment before anything runs, so test processes don't inherit it"
     required: false

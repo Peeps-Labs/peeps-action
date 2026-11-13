@@ -21,6 +21,7 @@ import { runInventory } from "./inventory";
 import { PeepsClient } from "./peeps";
 import { runReport } from "./report";
 import { runDispatched } from "./run";
+import { exportDispatchedVariables, exportWorkflowVariables } from "./shared-variables";
 import { runAgent } from "./agent";
 import { runAppiumDispatched, runAppiumInventory, runAppiumReport } from "./appium";
 import {
@@ -76,6 +77,12 @@ async function main(): Promise<void> {
   console.log(
     `[peeps] mode=${mode} repo=${env.repository ?? "?"} sha=${env.sha?.slice(0, 7) ?? "?"} ref=${env.ref ?? "?"} peeps=${env.peepsUrl}`,
   );
+
+  // The environment's "Send to CI" variables, masked, before any test is
+  // listed or collected: a run Peeps started names its batch, a run the
+  // workflow started its `peeps-environment` input (shared-variables.ts).
+  if (mode === "run") await exportDispatchedVariables(env, peeps);
+  if (mode === "report") await exportWorkflowVariables(env, peeps);
 
   // `preview: vercel` on a pull request: test that pull request's own preview.
   const previewUrl = await previewBaseUrl(mode, process.env, githubToken);

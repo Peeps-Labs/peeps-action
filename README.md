@@ -504,7 +504,46 @@ https://docs.peepsai.com/repository/vercel-previews.
 | `github-token` | no, defaults to the job's `GITHUB_TOKEN` | Reads the pull request's deployments for `preview`. Removed from the action's environment before anything runs, so test processes don't inherit it |
 | `app-start` | no | With `app-ready-url`: the command that starts your app (from `working-directory`) for server evidence on recorded pushes. The suite then runs in runs of two test files, each against a fresh start of the app the action owns, after one run with no tests (started beside the fingerprint); your config's `webServer` isn't used for those runs. Setup (dependency) projects run once per run, and `test-results/` keeps only the last run (the HTML report has all) |
 | `app-ready-url` | no | With `app-start`: a URL that answers 2xx once the app serves |
+| `peeps-environment` | no | `report` mode: the Peeps environment whose **Send to CI** variables this run gets, e.g. `dev` (see "Variables from Peeps"). GitHub only |
+| `peeps-project` | with several projects | With `peeps-environment`: the Peeps project's acronym, for a repository that backs more than one project with an environment of that name |
 | `app-reset` | no | With `app-start`: run before each of those runs to put the app's state back, for example by cloning a seeded template database. `PEEPS_INVOCATION` is `ambient` for the first run and `spec` after, here and in the tests' environment |
+
+## Variables from Peeps
+
+A variable you store in a Peeps environment can go to your CI runs too, so a
+login or an API key lives in one place. In Peeps, open the project's
+environment and turn on **Send to CI** for each variable your tests need. Only
+stored values can be sent: text, email, URL, username, password and API key.
+
+- **Runs Peeps starts** (a run, a schedule) get the switched-on variables of
+  the environment they run in, before any test is listed or loaded. Nothing to
+  set in the workflow.
+- **Runs your workflow starts** (a pull request's check, a push) name the
+  environment with `peeps-environment`:
+
+  ```yaml
+      - uses: Peeps-Labs/peeps-action@v1
+        with:
+          mode: ${{ inputs.mode }}
+          session-id: ${{ inputs.sessionId }}
+          peeps-environment: dev
+  ```
+
+The action masks every value in the job log before anything else runs, then
+gives each one to the test process as an environment variable, by its name in
+Peeps (`process.env.E2E_USER_PASSWORD`, `os.environ["E2E_USER_PASSWORD"]`). A
+variable your workflow sets itself wins, and the job log names the variables
+it set, never their values. Peeps sends them only to a job whose OIDC token
+proves it runs in a repository connected to that project. Names that change how
+a program starts or that the CI system owns (`PATH`, `SHELLOPTS`, `NODE_OPTIONS`,
+`LD_*`, `PYTEST_*`, `GITHUB_*`, `PEEPS_*` and more) are never sent or set. `BASE_URL` comes the way it
+always has.
+
+GitHub Actions only for now: GitLab can't mask a value while a job runs, so
+there the action sets none of them. An `inventory` run Peeps starts doesn't get
+them either, so a config that needs one to list its tests should fall back to a
+placeholder. The agent session that writes a fix or a
+new test never gets them; the run that checks a fix does.
 
 ## Modes
 
@@ -727,6 +766,17 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
+## 1.15.0
+
+- Variables from Peeps: turn on **Send to CI** for a variable in a Peeps
+  environment, and a run Peeps starts in that environment gets it as an
+  environment variable. A run your workflow starts gets them with the new
+  `peeps-environment` input (and `peeps-project` for a repository that backs
+  several projects). Each value is masked in the job log before anything else
+  runs, and a variable your workflow sets itself wins. GitHub Actions only.
+  Needs a Peeps that sends them; with an older one nothing changes. See
+  "Variables from Peeps".
+
 ## 1.14.0
 
 - Targeted runs: the action asks Peeps, in one request capped at 3 seconds,
@@ -860,7 +910,8 @@ access token Peeps was given (Maintainer).
   `PEEPS_ENVIRONMENT` (its name) and `PEEPS_BASE_URL` (its `BASE_URL`, when
   it has one), and `BASE_URL` too unless the workflow already sets it: a
   workflow's own `BASE_URL` always wins, and the job log says which one runs.
-  No other variable or secret comes from Peeps. Read `process.env.BASE_URL` (or
+  No other variable or secret comes from Peeps (1.15.0 adds the ones you turn
+  on, see "Variables from Peeps"). Read `process.env.BASE_URL` (or
   `PEEPS_BASE_URL`) in `use.baseURL`, or map `PEEPS_ENVIRONMENT` to your own
   settings. Needs a Peeps that sends the environment in the plan; with an older
   one nothing changes.

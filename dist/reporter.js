@@ -172,8 +172,15 @@ function readRunnerEnv(env = process.env) {
       input(env, "app-start") ?? variable(env, "PEEPS_APP_START"),
       input(env, "app-ready-url") ?? variable(env, "PEEPS_APP_READY_URL"),
       input(env, "app-reset") ?? variable(env, "PEEPS_APP_RESET")
+    ),
+    sharedVariablesFrom: sharedVariablesFromInputs(
+      input(env, "peeps-environment"),
+      input(env, "peeps-project")
     )
   };
+}
+function sharedVariablesFromInputs(environment, project) {
+  return environment ? { environment, project } : null;
 }
 
 // src/footprint/rules.ts
