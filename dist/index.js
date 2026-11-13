@@ -735,7 +735,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path7 = __toESM(require("node:path"));
 
 // src/version.ts
-var ACTION_VERSION = "1.15.0";
+var ACTION_VERSION = "1.15.1";
 
 // src/evidence/codec.ts
 var RECORDING_CODEC_VERSION = 2;
@@ -2769,7 +2769,7 @@ function exportSharedVariables(variables, options) {
   for (const v of usable) {
     if (!KEY.test(v.key) || RESERVED.test(v.key)) {
       refused.push(v.key);
-    } else if (current[v.key] !== void 0) {
+    } else if (current[v.key] !== void 0 && current[v.key] !== "") {
       kept.push(v.key);
     } else {
       current[v.key] = v.value;

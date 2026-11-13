@@ -78,7 +78,9 @@ export function exportSharedVariables(
   for (const v of usable) {
     if (!KEY.test(v.key) || RESERVED.test(v.key)) {
       refused.push(v.key);
-    } else if (current[v.key] !== undefined) {
+    } else if (current[v.key] !== undefined && current[v.key] !== "") {
+      // A workflow that maps a secret it doesn't have (`X: ${{ secrets.X }}`)
+      // sets "", which is no value of its own: Peeps' value runs instead.
       kept.push(v.key);
     } else {
       current[v.key] = v.value;
