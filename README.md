@@ -532,8 +532,9 @@ stored values can be sent: text, email, URL, username, password and API key.
 The action masks every value in the job log before anything else runs, then
 gives each one to the test process as an environment variable, by its name in
 Peeps (`process.env.E2E_USER_PASSWORD`, `os.environ["E2E_USER_PASSWORD"]`). A
-variable your workflow sets itself wins, and the job log names the variables
-it set, never their values. Peeps sends them only to a job whose OIDC token
+variable your workflow sets itself wins (an empty value, as from a secret
+the repository doesn't have, counts as not set), and the job log names the
+variables it set, never their values. Peeps sends them only to a job whose OIDC token
 proves it runs in a repository connected to that project. Names that change how
 a program starts or that the CI system owns (`PATH`, `SHELLOPTS`, `NODE_OPTIONS`,
 `LD_*`, `PYTEST_*`, `GITHUB_*`, `PEEPS_*` and more) are never sent or set. `BASE_URL` comes the way it
@@ -765,6 +766,13 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## 1.15.1
+
+- Variables from Peeps: a workflow variable that is set but empty, as when a
+  workflow maps a secret the repository doesn't have
+  (`E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}`), no longer hides
+  the value from Peeps. The workflow's own value still wins whenever it has one.
 
 ## 1.15.0
 

@@ -64,6 +64,20 @@ test("the workflow's own value wins, and is still masked", () => {
   assert.equal(out.lines[0], "::add-mask::peeps@example.com");
 });
 
+test("an empty workflow value, as from a missing secret, does not hide the Peeps value", () => {
+  const out = capture();
+  // `E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}` with no such secret sets "".
+  const current: NodeJS.ProcessEnv = { GITHUB_ACTIONS: "true", E2E_USER_PASSWORD: "" };
+  const result = exportSharedVariables([{ key: "E2E_USER_PASSWORD", value: "s3cret" }], {
+    current,
+    write: out.write,
+    source: "x",
+  });
+  assert.deepEqual(result, { set: ["E2E_USER_PASSWORD"], kept: [], refused: [] });
+  assert.equal(current.E2E_USER_PASSWORD, "s3cret");
+  assert.equal(out.lines[0], "::add-mask::s3cret");
+});
+
 test("refuses names that change how a program starts, or that Peeps and the CI system own", () => {
   const out = capture();
   const current: NodeJS.ProcessEnv = { GITHUB_ACTIONS: "true" };
