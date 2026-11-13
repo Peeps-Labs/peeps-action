@@ -52,6 +52,12 @@ export interface RunnerEnv {
    * Null when either of the first two is missing.
    */
   app?: AppInput | null;
+  /**
+   * GitHub only: the Peeps environment (and, for a repository that backs two
+   * projects, the project's acronym) whose "Send to CI" variables a run the
+   * workflow started gets (`shared-variables.ts`). Null when not asked for.
+   */
+  sharedVariablesFrom?: { environment: string; project: string | null } | null;
 }
 
 export interface AppInput {
@@ -240,5 +246,16 @@ export function readRunnerEnv(env: NodeJS.ProcessEnv = process.env): RunnerEnv {
       input(env, "app-ready-url") ?? variable(env, "PEEPS_APP_READY_URL"),
       input(env, "app-reset") ?? variable(env, "PEEPS_APP_RESET"),
     ),
+    sharedVariablesFrom: sharedVariablesFromInputs(
+      input(env, "peeps-environment"),
+      input(env, "peeps-project"),
+    ),
   };
+}
+
+function sharedVariablesFromInputs(
+  environment: string | null,
+  project: string | null,
+): RunnerEnv["sharedVariablesFrom"] {
+  return environment ? { environment, project } : null;
 }

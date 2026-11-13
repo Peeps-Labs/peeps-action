@@ -134,6 +134,24 @@ too unless your workflow sets one. Those tests run with the job's own secrets,
 such as a login. A `BASE_URL` your workflow sets always wins, and the job log says
 which URL runs.
 
+**Peeps can send your runs the variables you turn on in Peeps.** A variable with
+**Send to CI** on in a Peeps environment, a password included, reaches a `run`
+mode job in that environment, and a `report` mode job that names it with
+`peeps-environment`. Peeps sends it only to a job whose OIDC token proves your
+repository, and the action masks each value in the job log before anything else
+runs, then sets it for the test process unless your workflow sets that name
+itself. It never sets names that change how a program starts or that the CI
+system owns (`PATH`, `SHELLOPTS`, `NODE_OPTIONS`, `LD_*`, `PYTEST_*`, `GITHUB_*` and
+others; Peeps refuses to send them too), and it sets
+none of them on GitLab, where nothing can mask them. A person with Contributor
+access to the Peeps project decides which variables are sent (and anyone or any
+connected coding agent who can edit the environment can change a sent value); everything else in
+the environment stays in Peeps. Any step of your job can read a variable the
+test process can, the same as a GitHub secret you put in `env:`. And any
+branch's workflow can name any environment of the project, so a variable you
+turn on is readable by anyone who can push a workflow change to the repository:
+turn on only what such a person may see.
+
 The rest of this section applies only in `agent` mode, and only for the duration
 of one session.
 

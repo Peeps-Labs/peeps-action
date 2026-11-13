@@ -6,7 +6,9 @@
  * the workflow has not set one: a value the workflow set is the customer's own
  * choice, and Peeps never edits the workflow. Agent mode reads the same two
  * fields from the attach answer and gives the same variables to what `run_tests`
- * starts, never to its own `process.env` (see `createToolServer`).
+ * starts, never to its own `process.env` (see `createToolServer`). The
+ * variables a person turned on with "Send to CI" come separately, masked
+ * (`shared-variables.ts`).
  */
 
 export interface PlanEnvironment {
