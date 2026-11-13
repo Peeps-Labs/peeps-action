@@ -402,6 +402,30 @@ that allows). For an Appium suite two things differ from Playwright:
   Without Appium installed in the working directory or on `PATH`, every
   device call answers with what to install.
 
+### Running iOS jobs on your own Macs
+
+GitHub's macOS minutes cost several times as much as Linux ones. To run iOS
+simulator jobs on Macs you already have instead, register each one as a
+self-hosted runner with [`mac-runner/setup.sh`](mac-runner/setup.sh):
+
+```sh
+RUNNER_SCOPE=acme/ios-app RUNNER_LABEL=ios-mac ./setup.sh
+```
+
+It checks the Mac (Apple silicon, 16 GB of RAM, 30 GB free, Xcode and an iOS
+simulator runtime), installs GitHub's runner after checking its checksum,
+registers it as `<user>-<hostname>` with your label and that name as labels,
+and starts it as a login service. Registering takes a runner token from an
+admin of the repository or org. Afterwards `mac-runner status`, `off`, `on`
+and `remove` check, pause, resume and uninstall it. Then set the job's
+`runs-on` to `[self-hosted, macOS, ARM64, ios-mac]`.
+
+With no Mac online, the job waits in GitHub's queue; nothing falls back to a
+hosted Mac. Jobs run as the person whose Mac it is, so keep this to code your
+own team pushes (see [Self-hosted runners](SECURITY.md#self-hosted-runners)),
+and give each job its own simulator rather than one someone has open. This is
+an early version we are proving with one team.
+
 ## Failure evidence
 
 In Playwright `report` and `run` modes, Peeps defaults an unset `use.screenshot`
