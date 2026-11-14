@@ -21,6 +21,20 @@ function expiryOf(token: string): number {
   }
 }
 
+/**
+ * Which machine ran the job, for the batch page's "Ran on" row: the runner's
+ * name and whether GitHub or the team hosts it. Only what the runner set, and
+ * only printable ASCII, since a header value can carry nothing else.
+ */
+export function runnerHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const name = env.RUNNER_NAME?.replace(/[^\x20-\x7e]/g, "").trim().slice(0, 64);
+  const hosting = env.RUNNER_ENVIRONMENT?.replace(/[^\x20-\x7e]/g, "").trim().slice(0, 32);
+  if (name) headers["X-Peeps-Runner-Name"] = name;
+  if (hosting) headers["X-Peeps-Runner-Environment"] = hosting;
+  return headers;
+}
+
 /** A non-2xx answer from Peeps, with what it said, so a caller can tell answers apart. */
 export class PeepsHttpError extends Error {
   constructor(
@@ -117,6 +131,7 @@ export class PeepsClient {
             "Content-Type": "application/octet-stream",
             "Content-Length": String(bytes.byteLength),
             "User-Agent": "peeps-action/0.1",
+            ...runnerHeaders(),
           },
           body: new Uint8Array(bytes),
           signal: AbortSignal.timeout(120_000),
@@ -142,6 +157,7 @@ export class PeepsClient {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
         "User-Agent": "peeps-action/0.1",
+        ...runnerHeaders(),
       },
       signal: AbortSignal.timeout(40_000),
     });
@@ -159,6 +175,7 @@ export class PeepsClient {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
         "User-Agent": "peeps-action/0.1",
+        ...runnerHeaders(),
       },
       ...(signal ? { signal } : {}),
     });
@@ -177,6 +194,7 @@ export class PeepsClient {
         "Content-Type": "application/json",
         Accept: "application/json",
         "User-Agent": "peeps-action/0.1",
+        ...runnerHeaders(),
       },
       body: JSON.stringify(body),
     });
