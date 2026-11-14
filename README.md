@@ -791,6 +791,13 @@ Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
 
+## 1.16.0
+
+- Each request to Peeps now says which machine ran the job: the runner's
+  name and whether GitHub or your team hosts it. Peeps shows it on the batch
+  page as "Ran on", with a team runner's name masked (`ale******Pro`). Nothing
+  else changes, and an older Peeps ignores it.
+
 ## 1.15.1
 
 - Variables from Peeps: a workflow variable that is set but empty, as when a

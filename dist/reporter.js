@@ -450,6 +450,14 @@ function expiryOf(token) {
     return Number.MAX_SAFE_INTEGER;
   }
 }
+function runnerHeaders(env = process.env) {
+  const headers = {};
+  const name = env.RUNNER_NAME?.replace(/[^\x20-\x7e]/g, "").trim().slice(0, 64);
+  const hosting = env.RUNNER_ENVIRONMENT?.replace(/[^\x20-\x7e]/g, "").trim().slice(0, 32);
+  if (name) headers["X-Peeps-Runner-Name"] = name;
+  if (hosting) headers["X-Peeps-Runner-Environment"] = hosting;
+  return headers;
+}
 var PeepsHttpError = class extends Error {
   constructor(path4, status, body) {
     super(`Peeps ${path4} \u2192 ${status}: ${body.slice(0, 500)}`);
@@ -530,7 +538,8 @@ var PeepsClient = class {
             Authorization: `Bearer ${await this.token()}`,
             "Content-Type": "application/octet-stream",
             "Content-Length": String(bytes.byteLength),
-            "User-Agent": "peeps-action/0.1"
+            "User-Agent": "peeps-action/0.1",
+            ...runnerHeaders()
           },
           body: new Uint8Array(bytes),
           signal: AbortSignal.timeout(12e4)
@@ -554,7 +563,8 @@ var PeepsClient = class {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
-        "User-Agent": "peeps-action/0.1"
+        "User-Agent": "peeps-action/0.1",
+        ...runnerHeaders()
       },
       signal: AbortSignal.timeout(4e4)
     });
@@ -570,7 +580,8 @@ var PeepsClient = class {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
-        "User-Agent": "peeps-action/0.1"
+        "User-Agent": "peeps-action/0.1",
+        ...runnerHeaders()
       },
       ...signal ? { signal } : {}
     });
@@ -587,7 +598,8 @@ var PeepsClient = class {
         Authorization: `Bearer ${await this.token()}`,
         "Content-Type": "application/json",
         Accept: "application/json",
-        "User-Agent": "peeps-action/0.1"
+        "User-Agent": "peeps-action/0.1",
+        ...runnerHeaders()
       },
       body: JSON.stringify(body)
     });

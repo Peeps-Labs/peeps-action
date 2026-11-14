@@ -319,6 +319,14 @@ function expiryOf(token) {
     return Number.MAX_SAFE_INTEGER;
   }
 }
+function runnerHeaders(env = process.env) {
+  const headers = {};
+  const name = env.RUNNER_NAME?.replace(/[^\x20-\x7e]/g, "").trim().slice(0, 64);
+  const hosting = env.RUNNER_ENVIRONMENT?.replace(/[^\x20-\x7e]/g, "").trim().slice(0, 32);
+  if (name) headers["X-Peeps-Runner-Name"] = name;
+  if (hosting) headers["X-Peeps-Runner-Environment"] = hosting;
+  return headers;
+}
 var PeepsHttpError = class extends Error {
   constructor(path25, status, body) {
     super(`Peeps ${path25} \u2192 ${status}: ${body.slice(0, 500)}`);
@@ -399,7 +407,8 @@ var PeepsClient = class {
             Authorization: `Bearer ${await this.token()}`,
             "Content-Type": "application/octet-stream",
             "Content-Length": String(bytes.byteLength),
-            "User-Agent": "peeps-action/0.1"
+            "User-Agent": "peeps-action/0.1",
+            ...runnerHeaders()
           },
           body: new Uint8Array(bytes),
           signal: AbortSignal.timeout(12e4)
@@ -423,7 +432,8 @@ var PeepsClient = class {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
-        "User-Agent": "peeps-action/0.1"
+        "User-Agent": "peeps-action/0.1",
+        ...runnerHeaders()
       },
       signal: AbortSignal.timeout(4e4)
     });
@@ -439,7 +449,8 @@ var PeepsClient = class {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
-        "User-Agent": "peeps-action/0.1"
+        "User-Agent": "peeps-action/0.1",
+        ...runnerHeaders()
       },
       ...signal ? { signal } : {}
     });
@@ -456,7 +467,8 @@ var PeepsClient = class {
         Authorization: `Bearer ${await this.token()}`,
         "Content-Type": "application/json",
         Accept: "application/json",
-        "User-Agent": "peeps-action/0.1"
+        "User-Agent": "peeps-action/0.1",
+        ...runnerHeaders()
       },
       body: JSON.stringify(body)
     });
@@ -735,7 +747,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path7 = __toESM(require("node:path"));
 
 // src/version.ts
-var ACTION_VERSION = "1.15.1";
+var ACTION_VERSION = "1.16.0";
 
 // src/evidence/codec.ts
 var RECORDING_CODEC_VERSION = 2;
