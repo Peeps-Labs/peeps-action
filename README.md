@@ -6,7 +6,7 @@ access; Peeps cloud does the reporting, failure analysis, healing and test
 generation. Peeps' prompts and models stay in Peeps.
 
 Your repository stores **no Peeps secret**: the job authenticates with GitHub's
-OIDC token for that job.
+OIDC token for that job, so there is nothing to rotate.
 
 **Before you install this, read [SECURITY.md](SECURITY.md).** It lists exactly
 what this action sends to Peeps and what Peeps can do on your runner. Both are
