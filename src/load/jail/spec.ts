@@ -105,9 +105,14 @@ export function rootDir(runId: string): string {
   return `/run/peeps-root-${runId}`;
 }
 
-/** The runner reads `::name::` and `##[name]` at the start of a line as a workflow command. */
+/**
+ * The runner reads `::name::` after any leading whitespace (its own idea of it, U+0085
+ * included) and `##[name]` anywhere in a line as a workflow command. A fixed, visible
+ * prefix keeps every line from starting with `::`, and no `##[` survives.
+ */
+export const OUTPUT_PREFIX = "jail| ";
 export function neutralize(line: string): string {
-  return line.replace(/^(\s*)(::|##\[)/, "$1\u200b$2");
+  return OUTPUT_PREFIX + line.replaceAll("##[", "## [");
 }
 
 /** Why a spec cannot be launched, or nothing. */

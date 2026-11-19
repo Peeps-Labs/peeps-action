@@ -128,7 +128,7 @@ async function runToExit(command: string[]): Promise<{ out: string; handle: Jail
 test("inside the jail, the relay is the only way out (Peeps' own probe)", options, async () => {
   sinkHits = [];
   const { out } = await runToExit(["/run/peeps/node/bin/node", "/run/peeps/action/load-init.js", "--probe", "SINK"].map((a) => (a === "SINK" ? sinkAddr : a)));
-  const line = out.split("\n").find((l) => l.startsWith("PEEPS-PROBE "));
+  const line = out.split("\n").map((l) => l.replace(/^jail\| /, "")).find((l) => l.startsWith("PEEPS-PROBE "));
   assert.ok(line, out);
   const probe = JSON.parse(line!.slice("PEEPS-PROBE ".length));
   assert.equal(probe.uid, process.getuid!());
@@ -168,7 +168,7 @@ test("vsock (64- and 32-bit), io_uring, bpf, setns and keyrings are refused by t
     "c('bpf', 321, 0, 0, 0)",
   ].join("\n");
   const { out } = await runToExit(["/bin/sh", "-c", '/usr/bin/python3 -c "$0"; /run/peeps/ws/vsock32; echo "VSOCK32-EXIT $?"', script]);
-  const rows = Object.fromEntries(out.split("\n").filter((l) => l.startsWith("ESCAPE ")).map((l) => [l.split(" ")[1], l.split(" ").slice(2).join(" ")]));
+  const rows = Object.fromEntries(out.split("\n").map((l) => l.replace(/^jail\| /, "")).filter((l) => l.startsWith("ESCAPE ")).map((l) => [l.split(" ")[1], l.split(" ").slice(2).join(" ")]));
   assert.match(rows.vsock ?? "", /EAFNOSUPPORT|EPERM/, out);
   assert.equal(rows.io_uring, "-1 EPERM");
   assert.equal(rows.setns, "-1 EPERM", "unfiltered: EBADF");
@@ -181,7 +181,15 @@ test("vsock (64- and 32-bit), io_uring, bpf, setns and keyrings are refused by t
 
 test("the jail's output reaches the job log with workflow commands neutralized", options, async () => {
   const { out } = await runToExit(["/bin/sh", "-c", "echo '::save-state name=x::1'; echo '  ##[group]x'; echo plain"]);
-  assert.deepEqual(out.split("\n").filter(Boolean), ["\u200b::save-state name=x::1", "  \u200b##[group]x", "plain"]);
+  assert.deepEqual(out.split("\n").filter(Boolean), ["jail| ::save-state name=x::1", "jail|   ## [group]x", "jail| plain"]);
+});
+
+test("a line longer than 64 KiB reaches the log cut into pieces, each prefixed", options, async () => {
+  const { out } = await runToExit(["/usr/bin/python3", "-c", "import sys; sys.stdout.write('a' * 200000 + '##[x')"]);
+  const lines = out.split("\n").filter(Boolean);
+  assert.equal(lines.length, 4);
+  assert.ok(lines.every((l) => l.startsWith("jail| ") && l.length <= 64 * 1024 + 6));
+  assert.ok(!out.includes("##["));
 });
 
 test("end() with the executor still running empties the cgroup within 5 s", options, async () => {

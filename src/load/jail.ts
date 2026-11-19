@@ -7,8 +7,8 @@
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
-import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import net from "node:net";
 import { promisify } from "node:util";
 import { decode, encode, LineSplitter, sameNonce, type CtlFrame } from "./jail/ctl";
@@ -18,6 +18,8 @@ const exec = promisify(execFile);
 const HEARTBEAT_MS = 1000;
 const STOP_GRACE_MS = 2000;
 const EMPTY_WAIT_MS = 3000;
+const READY_MS = 60_000;
+const CALL_MS = 15_000;
 
 export interface JailExit {
   code: number | null;
@@ -127,7 +129,12 @@ export async function startJail(spec: JailSpec, options: StartJailOptions): Prom
   child.once("exit", () => void end());
   child.once("error", () => void end());
 
-  const ready = Promise.race([ctl.then((c) => c.ready), died]);
+  const late = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => reject(new Error(`load jail was not ready within ${READY_MS / 1000} s`)), READY_MS);
+    timer.unref();
+    void Promise.race([ctl.then((c) => c.ready), died]).finally(() => clearTimeout(timer)).catch(() => undefined);
+  });
+  const ready = Promise.race([ctl.then((c) => c.ready), died, late]);
   ready.catch(() => undefined);
   const exited = new Promise<JailExit>((resolve) => {
     ctl.then((c) => c.exit.then(resolve), () => resolve({ code: null, signal: null }));
@@ -136,19 +143,46 @@ export async function startJail(spec: JailSpec, options: StartJailOptions): Prom
   return {
     unit,
     ready,
-    start: () => void ctl.then((c) => ending === undefined && c.send({ type: "start" })),
+    start: () => void ready.then(() => ctl).then((c) => ending === undefined && c.send({ type: "start" }), () => undefined),
     exited,
     end,
     stdout: options.stdout === "pipe" ? stdout : null,
   };
 }
 
-/** A line the runner would read as a workflow command gets a zero-width space before its marker. */
+/**
+ * Every line gets a fixed prefix so the runner never reads a workflow command in it. A line
+ * longer than 64 KiB is cut, and the jail's pipe is paused while the output is backed up, so
+ * customer output cannot grow this process's memory.
+ */
+const MAX_LINE = 64 * 1024;
 function neutralized(source: NodeJS.ReadableStream): PassThrough {
   const out = new PassThrough();
-  const lines = createInterface({ input: source, crlfDelay: Infinity });
-  lines.on("line", (line) => out.write(`${neutralize(line)}\n`));
-  lines.on("close", () => out.end());
+  const decoder = new StringDecoder("utf8");
+  let pending = "";
+  const emit = (line: string) => {
+    if (!out.write(`${neutralize(line.endsWith("\r") ? line.slice(0, -1) : line)}\n`)) {
+      source.pause();
+      out.once("drain", () => source.resume());
+    }
+  };
+  source.on("data", (chunk: Buffer) => {
+    pending += decoder.write(chunk);
+    let nl: number;
+    while ((nl = pending.indexOf("\n")) !== -1) {
+      emit(pending.slice(0, nl));
+      pending = pending.slice(nl + 1);
+    }
+    while (pending.length > MAX_LINE) {
+      emit(pending.slice(0, MAX_LINE));
+      pending = pending.slice(MAX_LINE);
+    }
+  });
+  source.on("end", () => {
+    pending += decoder.end();
+    if (pending) emit(pending);
+    out.end();
+  });
   return out;
 }
 
@@ -182,8 +216,10 @@ export function acceptCtl(server: net.Server, nonce: string): Promise<Ctl> {
       const lines = new LineSplitter();
       let hello = false;
       let markReady!: () => void;
+      let failReady!: (error: Error) => void;
       let markExit!: (exit: JailExit) => void;
-      const ready = new Promise<void>((r) => (markReady = r));
+      const ready = new Promise<void>((r, j) => ((markReady = r), (failReady = j)));
+      ready.catch(() => undefined);
       const exit = new Promise<JailExit>((r) => (markExit = r));
       socket.setEncoding("utf8");
       socket.setTimeout(10_000, () => !hello && socket.destroy());
@@ -197,6 +233,8 @@ export function acceptCtl(server: net.Server, nonce: string): Promise<Ctl> {
             if (frame?.type !== "hello" || !sameNonce(frame.nonce, nonce)) return socket.destroy();
             hello = true;
             socket.setTimeout(0);
+            // Init closing its control socket before ready means it will never be ready.
+            socket.once("close", () => failReady(new Error("load jail's init closed its control socket before ready")));
             server.close();
             others.delete(socket);
             for (const other of others) other.destroy();
@@ -210,12 +248,12 @@ export function acceptCtl(server: net.Server, nonce: string): Promise<Ctl> {
 }
 
 async function sudo(...args: string[]): Promise<void> {
-  await exec("sudo", ["-n", ...args]);
+  await exec("sudo", ["-n", ...args], { timeout: CALL_MS });
 }
 
 async function controlGroup(unit: string): Promise<string> {
   for (let i = 0; i < 50; i++) {
-    const { stdout } = await exec("systemctl", ["show", "-p", "ControlGroup", "--value", `${unit}.service`]).catch(() => ({ stdout: "" }));
+    const { stdout } = await exec("systemctl", ["show", "-p", "ControlGroup", "--value", `${unit}.service`], { timeout: CALL_MS }).catch(() => ({ stdout: "" }));
     if (stdout.trim()) return stdout.trim();
     await sleep(100);
   }
@@ -225,7 +263,7 @@ async function controlGroup(unit: string): Promise<string> {
 async function becomesInactive(unit: string, ms: number): Promise<boolean> {
   const until = performance.now() + ms;
   do {
-    const { stdout } = await exec("systemctl", ["is-active", `${unit}.service`]).catch((e: { stdout?: string }) => ({ stdout: e.stdout ?? "" }));
+    const { stdout } = await exec("systemctl", ["is-active", `${unit}.service`], { timeout: CALL_MS }).catch((e: { stdout?: string }) => ({ stdout: e.stdout ?? "" }));
     if (["inactive", "failed"].includes(stdout.trim())) return true;
     await sleep(100);
   } while (performance.now() < until);

@@ -162,8 +162,12 @@ test("the control socket takes one connection with the nonce; a wrong nonce or a
 });
 
 test("lines the runner would read as workflow commands are neutralized", () => {
-  assert.equal(neutralize("::save-state name=x::1"), "\u200b::save-state name=x::1");
-  assert.equal(neutralize("  ::add-mask::x"), "  \u200b::add-mask::x");
-  assert.equal(neutralize("##[group]x"), "\u200b##[group]x");
-  assert.equal(neutralize("a ::not-a-command::"), "a ::not-a-command::");
+  // The runner trims whitespace (U+0085 included) before it looks for `::`, and finds `##[` anywhere.
+  const runnerReadsCommand = (line: string) => /^[\s\u0085\u200b\ufeff]*::/u.test(line) || line.includes("##[");
+  const hostile = ["::save-state name=x::1", "  ::add-mask::x", "##[group]x", "x ##[set-output name=r;]passed", "\u0085::set-output name=r::1", "\ufeff::stop-commands::t"];
+  for (const line of hostile) {
+    assert.ok(runnerReadsCommand(line), line);
+    assert.ok(!runnerReadsCommand(neutralize(line)), line);
+  }
+  assert.equal(neutralize("plain ::text::"), "jail| plain ::text::");
 });
