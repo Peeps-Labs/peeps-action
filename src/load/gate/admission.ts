@@ -33,7 +33,7 @@ export interface PhaseCaps {
 }
 
 export interface GateLimits {
-  /** Canonical origins (`https://host:port`), each with its request total for the run. */
+  /** Canonical origins (as `normalize.canonicalOrigin` writes them), each with its request total for the run. */
   origins: Readonly<Record<string, number>>;
   /** Upper-case methods the plan may send. */
   methods: readonly string[];
