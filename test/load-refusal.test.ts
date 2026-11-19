@@ -118,14 +118,37 @@ async function setUp(t: TestContext) {
   return { root, marker, spawns, workspace, spy, peeps, oidc, env };
 }
 
-for (const [name, mode] of [
-  ["the mode input", { INPUT_MODE: "load" }],
-  ["the mode input with whitespace", { INPUT_MODE: "  load\n" }],
-  ["PEEPS_MODE, as GitLab sets it", { PEEPS_MODE: "load" }],
+/** The same job as GitLab CI/CD runs it: no GitHub variables, an ID token, PEEPS_MODE. */
+function gitlab(s: Awaited<ReturnType<typeof setUp>>): NodeJS.ProcessEnv {
+  return {
+    PATH: s.env.PATH,
+    HOME: s.root,
+    NODE_OPTIONS: s.env.NODE_OPTIONS,
+    GITLAB_CI: "true",
+    CI_PROJECT_DIR: s.workspace,
+    CI_PROJECT_PATH: "acme/shop",
+    CI_COMMIT_SHA: "0123456789abcdef0123456789abcdef01234567",
+    CI_COMMIT_BRANCH: "main",
+    CI_PIPELINE_SOURCE: "api",
+    CI_SERVER_URL: "https://gitlab.example.com",
+    PEEPS_API_URL: s.env.PEEPS_API_URL,
+    PEEPS_ID_TOKEN: "id-token",
+  };
+}
+
+type Setup = Awaited<ReturnType<typeof setUp>>;
+
+for (const [name, envOf] of [
+  ["the mode input", (s: Setup) => ({ ...s.env, INPUT_MODE: "load" })],
+  ["the mode input with whitespace", (s: Setup) => ({ ...s.env, INPUT_MODE: "  load\n" })],
+  ["PEEPS_MODE on GitHub with no mode input", (s: Setup) => ({ ...s.env, PEEPS_MODE: "load" })],
+  // GitHub passes an input left blank as an empty INPUT_MODE; dispatch then reads PEEPS_MODE.
+  ["PEEPS_MODE on GitHub with a blank mode input", (s: Setup) => ({ ...s.env, INPUT_MODE: "  ", PEEPS_MODE: "load" })],
+  ["PEEPS_MODE on GitLab", (s: Setup) => ({ ...gitlab(s), PEEPS_MODE: "load" })],
 ] as const) {
   test(`mode: load from ${name} refuses before any customer code, request or process`, async (t) => {
     const s = await setUp(t);
-    const result = await runAction({ ...s.env, ...mode }, s.workspace);
+    const result = await runAction(envOf(s), s.workspace);
 
     assert.equal(result.code, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
     assert.equal(result.stderr.trim(), MESSAGE);
@@ -155,3 +178,24 @@ test("another mode in the same trapped workspace does reach out, so the traps ar
   const reached = s.peeps.hits.length + s.oidc.hits.length + (existsSync(s.spawns) ? 1 : 0) + (existsSync(s.marker) ? 1 : 0);
   assert.ok(reached > 0, `inventory touched nothing: ${result.stdout}${result.stderr}`);
 });
+
+/** Did the action go on to do another mode's work (reach Peeps or OIDC, spawn, load code)? */
+async function reachedOut(s: Setup, result: { stdout: string; stderr: string }) {
+  const reached = s.peeps.hits.length + s.oidc.hits.length + (existsSync(s.spawns) ? 1 : 0) + (existsSync(s.marker) ? 1 : 0);
+  assert.ok(reached > 0, `the other mode touched nothing: ${result.stdout}${result.stderr}`);
+}
+
+for (const [name, envOf] of [
+  // GitLab dispatch reads only PEEPS_MODE: a stray INPUT_MODE must not abort its mode.
+  ["a stray INPUT_MODE=load on GitLab", (s: Setup) => ({ ...gitlab(s), INPUT_MODE: "load", PEEPS_MODE: "inventory" })],
+  // On GitHub the mode input wins over PEEPS_MODE.
+  ["PEEPS_MODE=load under a GitHub mode input", (s: Setup) => ({ ...s.env, INPUT_MODE: "inventory", PEEPS_MODE: "load" })],
+] as const) {
+  test(`${name} runs the mode dispatch would run, not the refusal`, async (t) => {
+    const s = await setUp(t);
+    const result = await runAction(envOf(s), s.workspace);
+    assert.notEqual(result.stderr.trim(), MESSAGE);
+    assert.match(result.stdout, /\[peeps\] mode=inventory/);
+    await reachedOut(s, result);
+  });
+}

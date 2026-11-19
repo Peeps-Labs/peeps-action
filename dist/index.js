@@ -87,6 +87,10 @@ function variable(env, name) {
   const value = env[name];
   return value && value.trim() !== "" ? value.trim() : null;
 }
+function resolveMode(env) {
+  if (env.GITLAB_CI === "true") return variable(env, "PEEPS_MODE") ?? "ci";
+  return input(env, "mode") ?? env.PEEPS_MODE ?? "ci";
+}
 function readGitLabRunnerEnv(env) {
   const workspace = env.CI_PROJECT_DIR ?? process.cwd();
   const workingDirectory = variable(env, "PEEPS_WORKING_DIRECTORY");
@@ -94,7 +98,7 @@ function readGitLabRunnerEnv(env) {
   const ref = branch ? `refs/heads/${branch}` : env.CI_COMMIT_TAG ? `refs/tags/${env.CI_COMMIT_TAG}` : null;
   return {
     platform: "gitlab",
-    mode: variable(env, "PEEPS_MODE") ?? "ci",
+    mode: resolveMode(env),
     sessionId: variable(env, "PEEPS_SESSION_ID"),
     configPath: variable(env, "PEEPS_PLAYWRIGHT_CONFIG"),
     framework: variable(env, "PEEPS_FRAMEWORK"),
@@ -126,7 +130,7 @@ function readRunnerEnv(env = process.env) {
   const runId = env.GITHUB_RUN_ID ?? null;
   return {
     platform: "github",
-    mode: input(env, "mode") ?? env.PEEPS_MODE ?? "ci",
+    mode: resolveMode(env),
     sessionId: input(env, "session-id") ?? env.PEEPS_SESSION_ID ?? null,
     configPath: input(env, "config") ?? env.PEEPS_PLAYWRIGHT_CONFIG ?? null,
     framework: input(env, "framework") ?? env.PEEPS_FRAMEWORK ?? null,
@@ -6388,7 +6392,7 @@ function onDefaultBranch(env) {
 }
 async function main() {
   const githubToken = takeGithubToken(process.env);
-  const requested = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
+  const requested = resolveMode(process.env).trim();
   if (requested === "load") {
     console.error("::error::Load testing isn't available for this repository yet.");
     process.exit(1);

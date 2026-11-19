@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readDefaultBranch, readRunnerEnv, resolvePeepsUrl } from "../src/env";
+import { readDefaultBranch, readRunnerEnv, resolveMode, resolvePeepsUrl } from "../src/env";
 
 test("resolvePeepsUrl accepts https and trims trailing slashes", () => {
   assert.equal(resolvePeepsUrl("https://app.peepsai.com"), "https://app.peepsai.com");
@@ -113,4 +113,15 @@ test("the app the action owns for server evidence: start and ready together, res
   assert.equal(readRunnerEnv({ GITHUB_WORKSPACE: "/workspace", "INPUT_APP-START": "npm start" }).app, null, "no ready URL: the action can't tell when it serves");
   const gitlab = readRunnerEnv({ GITLAB_CI: "true", PEEPS_APP_START: "npm start", PEEPS_APP_READY_URL: "http://localhost:3000" });
   assert.deepEqual(gitlab.app, { start: "npm start", readyUrl: "http://localhost:3000", reset: null });
+});
+
+test("resolveMode reads the mode the way dispatch does, on each platform", () => {
+  assert.equal(resolveMode({ INPUT_MODE: "inventory", PEEPS_MODE: "load" }), "inventory");
+  assert.equal(resolveMode({ INPUT_MODE: "  ", PEEPS_MODE: "load" }), "load");
+  assert.equal(resolveMode({}), "ci");
+  assert.equal(resolveMode({ GITLAB_CI: "true", INPUT_MODE: "load", PEEPS_MODE: "inventory" }), "inventory");
+  assert.equal(resolveMode({ GITLAB_CI: "true", INPUT_MODE: "load" }), "ci");
+  for (const env of [{ INPUT_MODE: "x", PEEPS_MODE: "y" }, { GITLAB_CI: "true", PEEPS_MODE: "y" }]) {
+    assert.equal(resolveMode(env), readRunnerEnv(env).mode);
+  }
 });

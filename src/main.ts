@@ -16,7 +16,7 @@
  *               decide from the event here.
  */
 
-import { readRunnerEnv, type RunnerEnv } from "./env";
+import { readRunnerEnv, resolveMode, type RunnerEnv } from "./env";
 import { runInventory } from "./inventory";
 import { PeepsClient } from "./peeps";
 import { runReport } from "./report";
@@ -55,7 +55,7 @@ async function main(): Promise<void> {
   const githubToken = takeGithubToken(process.env);
   // The attach steps sit in the customer's own workflow, around their own test step, so
   // nothing in them may fail the job: not even an environment Peeps cannot read.
-  const requested = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
+  const requested = resolveMode(process.env).trim();
   // Load testing ships its engine (dist/load.js) before Peeps can grant a load run, so this
   // mode refuses here: before the environment is read, Peeps or OIDC is asked anything,
   // variables are exported, the framework is resolved or a browser probe spawns, and without
