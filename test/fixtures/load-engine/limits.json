@@ -1,0 +1,6 @@
+{
+  "allowedOrigins": ["https://staging.example.com", "https://auth.staging.example.com"],
+  "maxUsers": 50,
+  "requestBudget": 1200,
+  "policyRevision": 2
+}
