@@ -17,11 +17,11 @@ function main(): void {
   const init = `${actionDir}/${initInJail.slice(initInJail.lastIndexOf("/") + 1)}`;
 
   let nonce: string | undefined;
-  let last = Date.now();
+  let last = performance.now();
   let pending = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk: string) => {
-    last = Date.now();
+    last = performance.now();
     if (nonce !== undefined) return;
     pending += chunk;
     const newline = pending.indexOf("\n");
@@ -33,7 +33,7 @@ function main(): void {
   process.stdin.on("end", () => fail("lifeline closed"));
   process.stdin.on("error", () => fail("lifeline error"));
   setInterval(() => {
-    if (Date.now() - last > HEARTBEAT_GRACE_MS) fail("missed heartbeats");
+    if (performance.now() - last > HEARTBEAT_GRACE_MS) fail("missed heartbeats");
   }, 250).unref();
 }
 

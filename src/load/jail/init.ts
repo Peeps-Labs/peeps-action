@@ -9,10 +9,10 @@
  * Init never imports the loader, a journey or Playwright.
  */
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, readlinkSync, rmdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { decode, encode, LineSplitter, type CtlFrame } from "./ctl";
-import { dropArgs, executorEnv, IN_JAIL, RELAY_UID, type InitConfig } from "./spec";
+import { dropArgs, executorEnv, IN_JAIL, RELAY_UID, rootDir, type InitConfig } from "./spec";
 
 function run(cmd: string, args: string[]): void {
   execFileSync(cmd, args, { stdio: ["ignore", "ignore", "inherit"] });
@@ -26,9 +26,9 @@ function bindReadOnly(source: string, target: string): void {
 /** Builds the jail's root and pivots into it. Inputs are staged before anything is masked (Sol r2 1). */
 export function isolate(config: InitConfig): void {
   run("mount", ["--make-rprivate", "/"]);
-  const root = `/run/peeps-root-${config.runId}`;
+  const root = rootDir(config.runId);
   mkdirSync(root, { recursive: true });
-  run("mount", ["-t", "tmpfs", "-o", "mode=755", "tmpfs", root]);
+  run("mount", ["-t", "tmpfs", "-o", "mode=755,nosuid,nodev,size=16m", "tmpfs", root]);
   const at = (p: string) => `${root}${p}`;
   for (const dir of ["/usr", "/etc", "/dev", "/proc", "/tmp", "/oldroot", "/run/peeps/ws-lower", IN_JAIL.workspace, IN_JAIL.node, IN_JAIL.action, IN_JAIL.home, "/run/peeps/up", IN_JAIL.sockets]) {
     mkdirSync(at(dir), { recursive: true });
@@ -43,6 +43,7 @@ export function isolate(config: InitConfig): void {
     bindReadOnly(config.caPem, at(IN_JAIL.ca));
   }
   run("mount", ["--bind", config.socketDir, at(IN_JAIL.sockets)]);
+  run("mount", ["-o", "remount,bind,nosuid,nodev,noexec", at(IN_JAIL.sockets)]);
 
   // 2. A minimal system.
   bindReadOnly("/usr", at("/usr"));
@@ -70,18 +71,23 @@ export function isolate(config: InitConfig): void {
     writeFileSync(at(`/dev/${node}`), "");
     run("mount", ["--bind", `/dev/${node}`, at(`/dev/${node}`)]);
   }
-  run("mount", ["-t", "tmpfs", "-o", "mode=1777,nosuid,nodev", "tmpfs", at("/tmp")]);
-  run("mount", ["-t", "tmpfs", "-o", "mode=1777,nosuid,nodev", "tmpfs", at(IN_JAIL.home)]);
+  run("mount", ["-t", "tmpfs", "-o", "mode=1777,nosuid,nodev,size=256m", "tmpfs", at("/tmp")]);
+  run("mount", ["-t", "tmpfs", "-o", "mode=1777,nosuid,nodev,size=256m", "tmpfs", at(IN_JAIL.home)]);
 
   // 3. The workspace: writes land in a capped tmpfs, never in the checkout.
-  run("mount", ["-t", "tmpfs", "-o", "size=512m,mode=755", "tmpfs", at("/run/peeps/up")]);
+  run("mount", ["-t", "tmpfs", "-o", "size=512m,mode=755,nosuid,nodev", "tmpfs", at("/run/peeps/up")]);
   mkdirSync(at("/run/peeps/up/upper"));
   // The overlay's root takes the upper folder's owner and mode, so match the checkout's.
   const lower = statSync(config.workspace);
   chownSync(at("/run/peeps/up/upper"), lower.uid, lower.gid);
   chmodSync(at("/run/peeps/up/upper"), lower.mode & 0o7777);
   mkdirSync(at("/run/peeps/up/work"));
-  run("mount", ["-t", "overlay", "overlay", "-o", `lowerdir=${at("/run/peeps/ws-lower")},upperdir=${at("/run/peeps/up/upper")},workdir=${at("/run/peeps/up/work")}`, at(IN_JAIL.workspace)]);
+  run("mount", ["-t", "overlay", "overlay", "-o", `nosuid,nodev,lowerdir=${at("/run/peeps/ws-lower")},upperdir=${at("/run/peeps/up/upper")},workdir=${at("/run/peeps/up/work")}`, at(IN_JAIL.workspace)]);
+  // The overlay holds its own references: hide its backing folders from the executor.
+  run("umount", ["-l", at("/run/peeps/up")]);
+  run("umount", ["-l", at("/run/peeps/ws-lower")]);
+  rmdirSync(at("/run/peeps/up"));
+  rmdirSync(at("/run/peeps/ws-lower"));
 
   // 4. Loopback, then pivot. /proc is mounted before the old root goes: umount reads it.
   run("ip", ["link", "set", "lo", "up"]);
@@ -152,15 +158,34 @@ async function init(): Promise<void> {
 }
 
 /** 127.0.0.1:3128 to the supervisor's proxy socket. Runs as uid 65533. */
+const RELAY_MAX_CONNECTIONS = 1024;
+const RELAY_IDLE_MS = 120_000;
+
 function relay(): void {
-  net
-    .createServer((client) => {
-      const upstream = net.connect(`${IN_JAIL.sockets}/proxy.sock`);
-      client.pipe(upstream).pipe(client);
-      upstream.on("error", () => client.destroy());
-      client.on("error", () => upstream.destroy());
-    })
-    .listen(IN_JAIL.relayPort, "127.0.0.1", () => process.stdout.write("relay ready\n"));
+  const server = net.createServer((client) => {
+    const upstream = net.connect(`${IN_JAIL.sockets}/proxy.sock`);
+    const close = () => {
+      client.destroy();
+      upstream.destroy();
+    };
+    client.pipe(upstream).pipe(client);
+    for (const side of [client, upstream]) {
+      side.on("error", close);
+      side.on("close", close);
+      side.setTimeout(RELAY_IDLE_MS, close);
+    }
+  });
+  server.maxConnections = RELAY_MAX_CONNECTIONS;
+  server.listen(IN_JAIL.relayPort, "127.0.0.1", () => process.stdout.write("relay ready\n"));
+}
+
+function errno(read: () => unknown): string {
+  try {
+    read();
+    return "readable";
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code ?? "error";
+  }
 }
 
 /** Peeps' own self-test: every way out but the relay must fail. Prints one JSON line. */
@@ -173,7 +198,9 @@ async function probe(target: string): Promise<void> {
       s.once("error", (e: NodeJS.ErrnoException) => resolve(e.code ?? "error"));
       s.once("connect", () => {
         s.write(`GET ${path} HTTP/1.0\r\nHost: ${host}\r\n\r\n`);
-        s.once("data", () => (s.destroy(), resolve("connected")));
+        resolve("connected");
+        s.once("data", () => s.destroy());
+        s.setTimeout(3000, () => s.destroy());
       });
     });
   const dns = await import("node:dns/promises").then((d) => d.lookup("example.com").then(() => "resolved", (e: NodeJS.ErrnoException) => e.code ?? "error"));
@@ -195,15 +222,11 @@ async function probe(target: string): Promise<void> {
     dns,
     unixProxy,
     workspaceWrite,
-    hostHome: existsSync("/home"),
-    procOne: (() => {
-      try {
-        execFileSync("cat", ["/proc/1/environ"], { stdio: "ignore" });
-        return "readable";
-      } catch {
-        return "denied";
-      }
-    })(),
+    hostPaths: ["/home", "/oldroot", "/etc/shadow", "/var", "/root", "/mnt", "/opt"].filter((p) => existsSync(p)),
+    mounts: readFileSync("/proc/self/mountinfo", "utf8").split("\n").filter(Boolean).map((l) => l.split(" ")[4]),
+    procOne: errno(() => readFileSync("/proc/1/environ")),
+    procOneRoot: errno(() => readdirSync("/proc/1/root")),
+    procSelf: errno(() => readFileSync("/proc/self/status")),
   };
   process.stdout.write(`PEEPS-PROBE ${JSON.stringify(result)}\n`);
 }

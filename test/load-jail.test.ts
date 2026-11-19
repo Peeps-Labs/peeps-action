@@ -10,11 +10,22 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { buildSync } from "esbuild";
 import { startJail, type JailHandle } from "../src/load/jail";
 import type { JailSpec } from "../src/load/jail/spec";
 
 const enabled = process.env.LOAD_JAIL_TESTS === "1";
+
+const VSOCK32 = `#include <stdio.h>
+#include <sys/mman.h>
+int main(void) {
+  unsigned int *args = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+  args[0] = 40; args[1] = 1; args[2] = 0;
+  long r;
+  __asm__ volatile ("int $0x80" : "=a"(r) : "a"(102), "b"(1), "c"(args) : "memory");
+  printf(r >= 0 ? "VSOCK32 allowed\\n" : "VSOCK32 refused %ld\\n", -r);
+  return 0;
+}
+`;
 const options = { skip: enabled ? false : "set LOAD_JAIL_TESTS=1 on a Linux runner with sudo and systemd" };
 
 let actionDir = "";
@@ -23,26 +34,26 @@ let sink: net.Server;
 let sinkHits: string[] = [];
 let sinkAddr = "";
 let runs = 0;
+const HOLD = ["/bin/sh", "-c", "setsid sleep 900 </dev/null >/dev/null 2>&1 & exec sleep 900"];
 
 before(() => {
   if (!enabled) return;
   execFileSync("sudo", ["-n", "true"]);
   assert.equal(execFileSync("stat", ["-fc", "%T", "/sys/fs/cgroup"], { encoding: "utf8" }).trim(), "cgroup2fs");
-  actionDir = mkdtempSync(path.join(os.tmpdir(), "peeps-jail-action-"));
-  chmodSync(actionDir, 0o755);
-  for (const [entry, out] of [["src/load/jail/outer.ts", "load-outer.js"], ["src/load/jail/init.ts", "load-init.js"]] as const) {
-    buildSync({ entryPoints: [path.resolve(__dirname, "..", entry)], bundle: true, platform: "node", target: "node24", format: "cjs", outfile: path.join(actionDir, out), logLevel: "warning" });
-    chmodSync(path.join(actionDir, out), 0o644);
-  }
+  // The committed bundles: what ships is what is tested (CI checks dist/ matches src/).
+  actionDir = path.resolve(__dirname, "../dist");
+
   // Under the runner's 0750 home, as a real checkout is (E0 row 2).
   workspace = mkdtempSync(path.join(os.homedir(), "peeps-jail-ws-"));
   chmodSync(workspace, 0o755);
   writeFileSync(path.join(workspace, "package.json"), '{"name":"fixture"}\n');
+  // A binary in the checkout, as customer code could ship: i386 socketcall(AF_VSOCK) through int 0x80.
+  writeFileSync(path.join(workspace, "vsock32.c"), VSOCK32);
+  execFileSync("gcc", ["-O0", "-o", path.join(workspace, "vsock32"), path.join(workspace, "vsock32.c")]);
 });
 
 after(() => {
   sink?.close();
-  if (actionDir) rmSync(actionDir, { recursive: true, force: true });
   if (workspace) rmSync(workspace, { recursive: true, force: true });
 });
 
@@ -107,7 +118,8 @@ async function runToExit(command: string[]): Promise<{ out: string; handle: Jail
   handle.stdout!.on("data", (d: string) => (out += d));
   await handle.ready;
   handle.start();
-  await handle.exited;
+  const exit = await handle.exited;
+  assert.deepEqual(exit, { code: 0, signal: null }, "the executor exited cleanly");
   const end = await handle.end();
   assert.ok(end.clean, "the unit's cgroup is empty after end()");
   return { out, handle };
@@ -124,34 +136,75 @@ test("inside the jail, the relay is the only way out (Peeps' own probe)", option
   assert.notEqual(probe.direct, "connected");
   assert.notEqual(probe.dns, "resolved");
   assert.equal(probe.unixProxy, "EACCES");
-  assert.equal(probe.hostHome, false);
-  assert.equal(probe.procOne, "denied");
+  assert.deepEqual(probe.hostPaths, []);
+  assert.equal(probe.procOne, "EACCES");
+  assert.equal(probe.procOneRoot, "EACCES");
+  assert.equal(probe.procSelf, "readable", "a positive control: /proc works");
+  const allowed = /^\/(usr|bin|sbin|lib\w*|etc\/[\w.]+|dev(\/\w+)?|tmp|proc|run\/peeps\/[\w-]+)?$/;
+  assert.deepEqual(probe.mounts.filter((m: string) => !allowed.test(m)), [], "only the manifest's mounts are visible");
+  assert.deepEqual(probe.mounts.filter((m: string) => /ws-lower|\/up$/.test(m)), [], "the overlay's backing folders are hidden");
   // Writes land in the overlay, never in the checkout.
   assert.equal(probe.workspaceWrite, "written");
   assert.equal(existsSync(path.join(workspace, ".peeps-probe")), false);
   assert.deepEqual(sinkHits, ["GET /probe-relay HTTP/1.0"]);
 });
 
-test("vsock, packet, raw sockets, io_uring and bpf are refused to the executor", options, async () => {
+test("vsock (64- and 32-bit), io_uring, bpf, setns and keyrings are refused by the unit's filter", options, async () => {
+  // Each of these succeeds, or fails differently, for an unprivileged process with no filter.
+  const host = execFileSync(path.join(workspace, "vsock32"), { encoding: "utf8" });
+  assert.match(host, /VSOCK32 allowed/, "without the filter, i386 socketcall opens vsock: the test can fail");
   const script = [
     "import socket, ctypes, errno",
     "def t(k, f):",
     "    try: f(); print('ESCAPE', k, 'allowed')",
     "    except OSError as e: print('ESCAPE', k, errno.errorcode.get(e.errno, e.errno))",
     "t('vsock', lambda: socket.socket(40, socket.SOCK_STREAM))",
-    "t('packet', lambda: socket.socket(17, socket.SOCK_RAW, 0))",
-    "t('raw', lambda: socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP))",
     "libc = ctypes.CDLL(None, use_errno=True)",
-    "print('ESCAPE io_uring', libc.syscall(425, 8, ctypes.c_void_p(0)), errno.errorcode.get(ctypes.get_errno()))",
-    "print('ESCAPE bpf', libc.syscall(321, 0, 0, 0), errno.errorcode.get(ctypes.get_errno()))",
+    "def c(k, *a):",
+    "    r = libc.syscall(*a); print('ESCAPE', k, r, errno.errorcode.get(ctypes.get_errno()))",
+    "c('io_uring', 425, 8, ctypes.c_void_p(0))",
+    "c('setns', 308, -1, 0)",
+    "c('keyctl', 250, 0, -3, 0)",
+    "c('bpf', 321, 0, 0, 0)",
   ].join("\n");
-  const { out } = await runToExit(["/usr/bin/python3", "-c", script]);
+  const { out } = await runToExit(["/bin/sh", "-c", '/usr/bin/python3 -c "$0"; /run/peeps/ws/vsock32', script]);
   const rows = Object.fromEntries(out.split("\n").filter((l) => l.startsWith("ESCAPE ")).map((l) => [l.split(" ")[1], l.split(" ").slice(2).join(" ")]));
   assert.match(rows.vsock ?? "", /EAFNOSUPPORT|EPERM/, out);
-  assert.match(rows.packet ?? "", /EAFNOSUPPORT|EPERM/, out);
-  assert.match(rows.raw ?? "", /EPERM/, out);
   assert.equal(rows.io_uring, "-1 EPERM");
+  assert.equal(rows.setns, "-1 EPERM", "unfiltered: EBADF");
+  assert.equal(rows.keyctl, "-1 EPERM", "unfiltered: a keyring id");
   assert.equal(rows.bpf, "-1 EPERM");
+  assert.doesNotMatch(out, /VSOCK32 allowed/, out);
+});
+
+test("the jail's output reaches the job log with workflow commands neutralized", options, async () => {
+  const { out } = await runToExit(["/bin/sh", "-c", "echo '::save-state name=x::1'; echo '  ##[group]x'; echo plain"]);
+  assert.deepEqual(out.split("\n").filter(Boolean), ["\u200b::save-state name=x::1", "  \u200b##[group]x", "plain"]);
+});
+
+test("end() with the executor still running empties the cgroup within 5 s", options, async () => {
+  await startSink();
+  const handle = await startJail(spec(HOLD), { listenProxy: forwardToSink });
+  await handle.ready;
+  handle.start();
+  await new Promise((r) => setTimeout(r, 500));
+  const end = await handle.end();
+  assert.ok(end.clean);
+  assert.ok(end.ms < 5000, `${end.ms} ms`);
+  assert.equal(existsSync(`/run/peeps-load-${handle.unit.slice("peeps-load-".length)}`), false);
+});
+
+test("a jail that cannot start rejects ready, and a failed setup leaves nothing behind", options, async () => {
+  await startSink();
+  const broken = spec(HOLD);
+  broken.caPem = path.join(workspace, "missing-ca.pem");
+  const handle = await startJail(broken, { listenProxy: forwardToSink });
+  await assert.rejects(Promise.race([handle.ready, new Promise((_, r) => setTimeout(() => r(new Error("ready never settled")), 15_000))]), /ended before it was ready/);
+  assert.ok((await handle.end()).clean);
+
+  const s = spec(HOLD);
+  await assert.rejects(startJail(s, { listenProxy: () => Promise.reject(new Error("no gate")) }), /no gate/);
+  assert.equal(existsSync(`/run/peeps-load-${s.runId}`), false);
 });
 
 test("the runner's user cannot reach either socket", options, async () => {
@@ -195,7 +248,6 @@ async function emptiesWithin(cgroup: string, ms: number): Promise<number | null>
   return null;
 }
 
-const HOLD = ["/bin/sh", "-c", "setsid sleep 900 </dev/null >/dev/null 2>&1 & exec sleep 900"];
 
 for (const [name, freezeInit] of [["the supervisor is killed", false], ["init is stopped and then the supervisor is killed", true]] as const) {
   test(`every process ends within 5 s when ${name}, detached descendants too`, options, async () => {
@@ -203,7 +255,9 @@ for (const [name, freezeInit] of [["the supervisor is killed", false], ["init is
     const { child, unit } = await holder(HOLD);
     const cgroup = await cgroupOf(unit);
     assert.ok(cgroup);
-    assert.ok(Number(execFileSync("sh", ["-c", `wc -l < /sys/fs/cgroup${cgroup}/cgroup.procs`], { encoding: "utf8" })) >= 4);
+    const procs = execFileSync("cat", [`/sys/fs/cgroup${cgroup}/cgroup.procs`], { encoding: "utf8" }).trim().split("\n");
+    const sleeps = procs.filter((pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").startsWith("sleep\x00900"));
+    assert.equal(sleeps.length, 2, "the executor and its detached descendant are both in the unit");
     if (freezeInit) {
       const pids = execFileSync("sh", ["-c", `cat /sys/fs/cgroup${cgroup}/cgroup.procs`], { encoding: "utf8" }).trim().split("\n");
       const init = pids.find((pid) => {

@@ -100,6 +100,16 @@ export function socketDir(runId: string): string {
   return `/run/peeps-load-${runId}`;
 }
 
+/** Where init builds the jail's root. The folder stays behind on the host's /run, empty. */
+export function rootDir(runId: string): string {
+  return `/run/peeps-root-${runId}`;
+}
+
+/** The runner reads `::name::` and `##[name]` at the start of a line as a workflow command. */
+export function neutralize(line: string): string {
+  return line.replace(/^(\s*)(::|##\[)/, "$1\u200b$2");
+}
+
 /** Why a spec cannot be launched, or nothing. */
 export function specProblems(spec: JailSpec): string[] {
   const problems: string[] = [];
@@ -163,13 +173,18 @@ export function systemdRunArgs(spec: JailSpec): string[] {
     "--service-type=exec",
     "--working-directory=/",
     ...property("KillMode=control-group"),
+    // No grace on stop: the gate is already closed, and customer code gets no last word.
+    ...property("KillSignal=SIGKILL"),
     ...property("TimeoutStopSec=2s"),
     ...property(`RuntimeMaxSec=${Math.ceil(maxRunMs / 1000)}s`),
     ...property(`MemoryMax=${memoryMax}`),
     ...property(`TasksMax=${tasksMax}`),
+    ...property("LimitNOFILE=4096"),
     ...property(`CPUQuota=${cpuQuotaPercent}%`),
     ...property(`RestrictAddressFamilies=${ADDRESS_FAMILIES.join(" ")}`),
     ...property("SystemCallErrorNumber=EPERM"),
+    // RestrictAddressFamilies does not cover i386 socketcall(); without this, int 0x80 opens vsock.
+    ...property("SystemCallArchitectures=native"),
     ...property(`SystemCallFilter=~${DENIED_SYSCALLS.join(" ")}`),
     `--setenv=PEEPS_JAIL_CONFIG=${JSON.stringify(initConfig(spec))}`,
     spec.node,

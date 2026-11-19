@@ -10,7 +10,7 @@ import os from "node:os";
 import { acceptCtl } from "../src/load/jail";
 import path from "node:path";
 import { decode, encode, LineSplitter, MAX_FRAME_BYTES, sameNonce } from "../src/load/jail/ctl";
-import { dropArgs, executorEnv, initConfig, RELAY_UID, specProblems, systemdRunArgs, type JailSpec } from "../src/load/jail/spec";
+import { dropArgs, executorEnv, initConfig, neutralize, RELAY_UID, specProblems, systemdRunArgs, type JailSpec } from "../src/load/jail/spec";
 
 const spec = (over: Partial<JailSpec> = {}): JailSpec => ({
   runId: "r-123",
@@ -35,6 +35,8 @@ test("the unit refuses vsock and packet sockets and turns denied system calls in
   assert.deepEqual(property(args, "RestrictAddressFamilies"), ["RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"]);
   // systemd's default action kills; Node's libuv probes io_uring at start (E0 run 1).
   assert.deepEqual(property(args, "SystemCallErrorNumber"), ["SystemCallErrorNumber=EPERM"]);
+  // RestrictAddressFamilies does not cover i386 socketcall().
+  assert.deepEqual(property(args, "SystemCallArchitectures"), ["SystemCallArchitectures=native"]);
   const [filter] = property(args, "SystemCallFilter");
   assert.ok(filter?.startsWith("SystemCallFilter=~"));
   for (const call of ["@debug", "bpf", "setns", "pidfd_getfd", "io_uring_setup", "keyctl"]) assert.ok(filter!.split(/[~ ]/).includes(call), call);
@@ -43,6 +45,7 @@ test("the unit refuses vsock and packet sockets and turns denied system calls in
 test("the unit's whole cgroup is killed on stop, with a hard end and resource limits", () => {
   const args = systemdRunArgs(spec());
   assert.deepEqual(property(args, "KillMode"), ["KillMode=control-group"]);
+  assert.deepEqual(property(args, "KillSignal"), ["KillSignal=SIGKILL"]);
   assert.deepEqual(property(args, "TimeoutStopSec"), ["TimeoutStopSec=2s"]);
   assert.deepEqual(property(args, "RuntimeMaxSec"), ["RuntimeMaxSec=600s"]);
   assert.deepEqual(property(args, "MemoryMax"), ["MemoryMax=2G"]);
@@ -156,4 +159,11 @@ test("the control socket takes one connection with the nonce; a wrong nonce or a
   assert.deepEqual(await ctl.exit, { code: 7, signal: null });
   real.destroy();
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("lines the runner would read as workflow commands are neutralized", () => {
+  assert.equal(neutralize("::save-state name=x::1"), "\u200b::save-state name=x::1");
+  assert.equal(neutralize("  ::add-mask::x"), "  \u200b::add-mask::x");
+  assert.equal(neutralize("##[group]x"), "\u200b##[group]x");
+  assert.equal(neutralize("a ::not-a-command::"), "a ::not-a-command::");
 });
