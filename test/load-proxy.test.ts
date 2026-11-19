@@ -1058,25 +1058,34 @@ test("a lease that runs out while the dial is resolving sends nothing at all to 
   assert.equal(r.dials.count, 1, "the dial started under a live lease");
   r.clock.wallMs += 3_600_000; // the lease runs out on the wall clock while DNS answers
   const { response } = await pending;
-  assert.equal(deniedOf(response), "dial");
+  assert.equal(statusOf(response), 503);
+  assert.equal(deniedOf(response), "lease", "the gate's reason, not a failed dial");
+  assert.deepEqual(r.journal.snapshot().denied, { lease: 1 });
   assert.equal(r.sink.stats.connections, 0, "no SYN after the lease ran out");
   assert.equal(r.gate.admitted, 0);
 });
 
 test("an early response while the request's write is still pending resets the upstream", async (t) => {
+  let liveResets = 0;
   const r = await rig(t, {
     dial: (inner) => async (o, signal, pinned, ready) => {
       const u = await inner(o, signal, pinned, ready);
       const write = u.socket.write.bind(u.socket) as (data: Buffer) => boolean;
       // The bytes go out; the write's callback never confirms them.
       u.socket.write = ((data: Buffer) => write(data)) as typeof u.socket.write;
-      return u;
+      return {
+        ...u,
+        reset: () => {
+          if (!u.socket.destroyed) liveResets += 1;
+          u.reset();
+        },
+      };
     },
   });
   const { response } = await exchange(r, get(r));
   assert.equal(statusOf(response), 200);
   await sleep(50);
-  assert.equal(r.dials.resets >= 1, true, "reset, not ended");
+  assert.equal(liveResets, 1, "reset while the socket was still open, not ended");
   const snap = r.journal.snapshot();
   assert.equal(snap.unresolved, 1, "its delivery stays unknown");
   assert.equal(snap.received, 1);
@@ -1091,9 +1100,10 @@ test("a close-delimited response cut by the exchange deadline is a failure, not 
     },
   });
   // The journey sees the head and part of the body, then the tunnel closes with no clean end.
-  const raw = await exchange(r, get(r), { readLimit: 1 });
-  assert.equal(statusOf(raw.response), 200);
-  await sleep(300);
+  const { response } = await exchange(r, get(r));
+  assert.equal(statusOf(response), 200);
+  assert.match(response, /7\r\npartial\r\n$/);
+  assert.equal(response.endsWith("0\r\n\r\n"), false, "no terminating chunk: the journey sees a truncated body");
   assert.deepEqual(r.journal.snapshot().cut, { exchange_timeout: 1 }, "cut once, by its first reason");
   assert.equal(r.gate.inFlight, 0);
   assert.equal(r.dials.resets >= 1, true);
@@ -1110,4 +1120,66 @@ test("a response with ambiguous framing is refused before it counts as received"
   assert.equal(statusOf(response), 502);
   assert.equal(r.journal.snapshot().received, 0);
   assert.deepEqual(r.journal.snapshot().cut, { upstream: 1 });
+});
+
+test("a dial that lands on another address than the pin is reset and refused; a revoked dial pins nothing", async (t) => {
+  let n = 0;
+  const r = await rig(t, { dial: (inner) => async (o, signal, pinned, ready) => ({ ...(await inner(o, signal, pinned, ready)), address: ++n === 1 ? "93.184.216.34" : "151.101.1.1" }) });
+  assert.equal(statusOf((await exchange(r, get(r))).response), 200);
+  assert.equal(deniedOf((await exchange(r, get(r))).response), "pin");
+  assert.equal(r.sink.arrivals.length, 1);
+  assert.equal(r.gate.admitted, 1);
+  assert.deepEqual([...r.proxy.pinned.values()], ["93.184.216.34"]);
+
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const s2 = await rig(t, {
+    dial: (inner) => async (o, signal, pinned, ready) => {
+      const u = await inner(o, signal, pinned, ready);
+      await held;
+      return u;
+    },
+  });
+  const pending = exchange(s2, get(s2));
+  for (let k = 0; k < 100 && s2.dials.count === 0; k++) await sleep(5);
+  s2.proxy.closeTurn(s2.turn);
+  release();
+  await pending;
+  assert.equal(s2.proxy.pinned.size, 0, "only a live dial pins its origin");
+});
+
+test("every caller of close() waits on the same close", async (t) => {
+  const r = await rig(t);
+  const a = r.proxy.close();
+  assert.equal(r.proxy.close(), a);
+  await a;
+});
+
+test("an address with a zone id is never reachable", async () => {
+  assert.equal(reachable("fe80::1%eth0", ORIGIN, new Set()), false);
+  assert.equal(await refusal(checkedAddresses(ORIGIN, { lookup: lookupOf("93.184.216.34", "fe80::1%eth0") })), "address");
+});
+
+test("the shared lookup lasts until a connect on it settles", async () => {
+  const origin: ApprovedOrigin = { host: "shop.test", port: 443, privateCidrs: [] };
+  let lookups = 0;
+  const connected: string[] = [];
+  const dial = makeDial({
+    lookup: async () => {
+      lookups += 1;
+      await sleep(5);
+      return [{ address: lookups === 1 ? "93.184.216.34" : "151.101.1.1", family: 4 }];
+    },
+    connect: async (address) => {
+      connected.push(address);
+      await sleep(100);
+      throw new DialRefused("tls", "test: connect ECONNREFUSED");
+    },
+  });
+  const first = dial(origin, new AbortController().signal, undefined);
+  await sleep(20);
+  const second = dial(origin, new AbortController().signal, undefined);
+  await Promise.allSettled([first, second]);
+  assert.equal(lookups, 1);
+  assert.deepEqual(connected, ["93.184.216.34", "93.184.216.34"]);
 });

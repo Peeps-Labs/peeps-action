@@ -113,7 +113,9 @@ export function unmap(address: string): string {
 /** One spelling per address: unmapped, and IPv6 in its compressed lower-case form. */
 export function canonical(address: string): string {
   const a = unmap(address);
-  return isIP(a) === 6 ? new URL(`http://[${a}]`).hostname.slice(1, -1) : a;
+  // A zone id names a link: left as it is, so classify() calls it invalid.
+  if (isIP(a) !== 6 || a.includes("%")) return a;
+  return new URL(`http://[${a}]`).hostname.slice(1, -1);
 }
 
 export interface ApprovedOrigin {

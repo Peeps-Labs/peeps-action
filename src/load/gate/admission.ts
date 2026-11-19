@@ -260,9 +260,10 @@ export class Gate {
     return { ok: true, ticket };
   }
 
-  /** Whether `admit` would still pass every check but the rate, for a request with a paid ticket. */
-  stillAdmissible(r: PreparedRequest, t: Clocks): boolean {
-    return "turn" in this.check(r, t, NONE_AHEAD, 0);
+  /** Why `admit` would refuse now, the rate aside (a paid ticket); undefined when it would pass. */
+  whyNot(r: PreparedRequest, t: Clocks): Denied | undefined {
+    const d = this.check(r, t, NONE_AHEAD, 0);
+    return "turn" in d ? undefined : d;
   }
 
   /** A dial that ended without `admit`: its ticket goes, its token stays spent. */

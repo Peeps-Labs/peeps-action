@@ -128,12 +128,13 @@ export interface DialSeams {
 
 /**
  * The production dial. A pinned origin goes to its pinned address with no lookup. Before the
- * pin, dials started together share one lookup per origin, so the customer's DNS cannot spread
+ * pin, dials share one lookup per origin until a connect on it settles, so the customer's DNS cannot spread
  * a run's first dials across addresses; the shared answer is dropped once it settles.
  */
 export function makeDial(seams: DialSeams = {}): Dial {
   const connect = seams.connect ?? connectVerified;
   const resolving = new Map<string, Promise<string[]>>();
+  const drops = new WeakMap<Promise<string[]>, () => void>();
   return async (origin, signal, pinned, ready) => {
     let address: string;
     if (pinned) {
@@ -146,17 +147,31 @@ export function makeDial(seams: DialSeams = {}): Dial {
       if (!addresses) {
         // Not tied to one dial's signal: another dial may be waiting on the same answer. One
         // lookup at a time per approved origin, so lookups are bounded by the origins.
-        addresses = checkedAddresses(origin, { lookup: seams.lookup });
-        resolving.set(key, addresses);
-        const settled = () => {
-          if (resolving.get(key) === addresses) resolving.delete(key);
-        };
-        addresses.then(settled, settled);
+        const answer = checkedAddresses(origin, { lookup: seams.lookup });
+        addresses = answer;
+        resolving.set(key, answer);
+        // Kept until a connect on it settles (by then the origin is usually pinned); a failed
+        // lookup is dropped at once.
+        drops.set(answer, () => {
+          if (resolving.get(key) === answer) resolving.delete(key);
+        });
+        answer.catch(() => drops.get(answer)!());
       }
-      // One address per dial: a dial spends one rate token and makes at most one TCP attempt.
-      address = (await Promise.race([addresses, abortedSignal(signal, origin.host)]))[0]!;
+      const answer = addresses;
+      const drop = drops.get(answer)!;
+      try {
+        // One address per dial: a dial spends one rate token and makes at most one TCP attempt.
+        address = (await Promise.race([answer, abortedSignal(signal, origin.host)]))[0]!;
+        // The lease and the turn are checked again just before the SYN: DNS may have taken a while.
+        if (signal.aborted || (ready && !ready())) throw new DialRefused("aborted", origin.host);
+      } catch (error) {
+        drop();
+        throw error;
+      }
+      const connecting = connect(address, origin, { ca: seams.ca, signal });
+      connecting.then(drop, drop);
+      return connecting;
     }
-    // The lease and the turn are checked again just before the SYN: DNS may have taken a while.
     if (signal.aborted || (ready && !ready())) throw new DialRefused("aborted", origin.host);
     return connect(address, origin, { ca: seams.ca, signal });
   };
@@ -414,11 +429,18 @@ export class GateProxy {
       this.pending.turn.set(turn, turnDials + 1);
       this.pending.origin.set(n.origin, (this.pending.origin.get(n.origin) ?? 0) + 1);
       let upstream: Upstream;
+      let lapsed: Denied | undefined;
       try {
         const request = { turn, origin: n.origin, method: n.method };
-        const ready = () => !this.closed && !tunnel.revoked && !res.destroyed && gate.stillAdmissible(request, this.clocks());
+        const ready = () => {
+          if (this.closed || tunnel.revoked || res.destroyed) return false;
+          lapsed = gate.whyNot(request, this.clocks());
+          return lapsed === undefined;
+        };
         upstream = await this.dial(origin, controller.signal, this.pins.get(n.origin), ready);
       } catch {
+        // The gate refused just before the connect: say why, as admit would have.
+        if (lapsed && !this.closed && !tunnel.revoked) return this.denied(res, lapsed);
         return this.refuse(res, controller.signal.aborted ? 503 : 502, this.closed ? "stopped" : tunnel.revoked ? "revoked" : timedOut ? "dial_timeout" : "dial");
       } finally {
         clearTimeout(timer);
