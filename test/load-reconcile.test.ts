@@ -8,7 +8,7 @@ import { crashRange, EventLedger, receivedOutsideGate } from "../src/load/gate/r
 
 const META = { turn: 1, origin: "https://shop.test", method: "GET", path: "/", address: "93.184.216.34" };
 
-test("the journal keeps accepted, received, unresolved and denied apart; debited is accepted + unresolved", () => {
+test("the journal keeps accepted, received, unresolved, denied and cut apart; debited is accepted + unresolved", () => {
   const j = new Journal();
   for (const seq of [1, 2, 3, 4]) j.begin(seq, META);
   j.accept(1);
@@ -18,11 +18,14 @@ test("the journal keeps accepted, received, unresolved and denied apart; debited
   j.deny("rate");
   j.deny("rate");
   j.deny("not_allowed");
-  assert.deepEqual(j.snapshot(), { debited: 4, accepted: 2, received: 2, unresolved: 2, denied: { rate: 2, not_allowed: 1 } });
+  j.cut(3, "exchange_timeout");
+  j.cut(3, "upstream"); // only the first reason counts
+  j.cut(99, "upstream"); // an unknown seq is never cut
+  assert.deepEqual(j.snapshot(), { debited: 4, accepted: 2, received: 2, unresolved: 2, denied: { rate: 2, not_allowed: 1 }, cut: { exchange_timeout: 1 } });
   assert.equal(j.entry(3)?.written, "unresolved", "a response does not prove the whole write");
   j.accept(1);
   j.receive(1);
-  assert.deepEqual(j.snapshot(), { debited: 4, accepted: 2, received: 2, unresolved: 2, denied: { rate: 2, not_allowed: 1 } }, "repeats change nothing");
+  assert.deepEqual(j.snapshot(), { debited: 4, accepted: 2, received: 2, unresolved: 2, denied: { rate: 2, not_allowed: 1 }, cut: { exchange_timeout: 1 } }, "repeats change nothing");
   assert.throws(() => j.begin(2, META), /out of order/);
   assert.throws(() => j.begin(6, META), /out of order/);
   j.accept(99);
@@ -39,7 +42,7 @@ test("the journal keeps entries only while open, and bounds what it keeps", () =
     j.finish(seq);
   }
   assert.equal(j.openCount, 0);
-  assert.deepEqual(j.snapshot(), { debited: 10_000, accepted: 10_000, received: 10_000, unresolved: 0, denied: {} });
+  assert.deepEqual(j.snapshot(), { debited: 10_000, accepted: 10_000, received: 10_000, unresolved: 0, denied: {}, cut: {} });
   j.begin(10_001, { ...META, path: "/" + "y".repeat(1000) });
   j.finish(10_001);
   assert.equal(j.openCount, 1, "an unresolved write stays open after its exchange ends");

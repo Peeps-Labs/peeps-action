@@ -58,6 +58,12 @@ export class ResponseReader {
     } else this.fail(new Error("upstream closed before the response ended"));
   }
 
+  /** The exchange was ended from outside (a reset, a deadline): never a clean end. */
+  abort(error: Error): void {
+    if (this.done) return;
+    this.fail(error);
+  }
+
   private fail(error: Error): void {
     if (this.failed) return;
     this.failed = true;
@@ -75,8 +81,11 @@ export class ResponseReader {
         this.buf = this.buf.subarray(at + 4);
         if (head.status === 101) throw new Error("upstream switched protocols");
         if (head.status < 200) continue; // interim response: the real one follows
+        // Framing is validated before the head is passed on: a malformed response is never
+        // reported as received.
+        const mode = bodyMode(this.requestMethod, head);
         this.on.head(head);
-        this.mode = bodyMode(this.requestMethod, head);
+        this.mode = mode;
         if (this.mode.kind === "done") return this.on.end();
         continue;
       }

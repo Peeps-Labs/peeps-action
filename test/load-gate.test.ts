@@ -310,40 +310,62 @@ test("the gate reads no clock and holds no timer", () => {
   assert.doesNotMatch(src, /Date\.now|performance\.now|setTimeout|setInterval|process\.hrtime|^import (?!type)/m);
 });
 
-test("precheck takes nothing, and counts the dials ahead of it against every limit", () => {
+test("reserve spends a rate token for good, debits nothing, and counts the dials ahead against every other limit", () => {
   const none = { run: 0, turn: 0, origin: 0 };
+  const rsv = (g: Gate, r: Parameters<Gate["reserve"]>[0], ahead = none, t = at(0)) => g.reserve(r, t, ahead);
+  const why = (x: ReturnType<Gate["reserve"]>) => (x.ok ? "ok" : x.reason);
   {
+    // burst 3: three dials may start, a fourth may not, however each of them ends.
     const { g, req } = gate();
-    for (let i = 0; i < 5; i++) assert.equal(reason(g.precheck(req(), at(0), none)), "ok");
-    assert.equal(g.admitted, 0, "a precheck debits nothing");
+    const tickets = [rsv(g, req()), rsv(g, req()), rsv(g, req())];
+    assert.deepEqual(tickets.map(why), ["ok", "ok", "ok"]);
+    assert.equal(why(rsv(g, req())), "rate", "an abandoned dial does not give its token back");
+    for (const x of tickets) if (x.ok) g.drop(x.ticket);
+    assert.equal(why(rsv(g, req())), "rate", "nor does dropping its ticket");
+    assert.equal(g.admitted, 0, "reserving debits nothing");
     assert.equal(g.inFlight, 0);
-    for (let i = 0; i < 3; i++) assert.ok(sendOk(g, req(), at(0)).ok, "the burst is still whole");
+    assert.equal(reason(g.admit(req(), at(0))), "rate", "admit without a ticket needs a token of its own");
   }
   {
-    // burst 3: two dials ahead leave room for this one, three do not.
-    const { g, req } = gate();
-    assert.equal(reason(g.precheck(req(), at(0), { run: 2, turn: 0, origin: 0 })), "ok");
-    assert.equal(reason(g.precheck(req(), at(0), { run: 3, turn: 0, origin: 0 })), "rate");
+    // A paid ticket admits once without a second token; the same ticket is not good twice.
+    const { g, req } = gate({}, { burst: 1 });
+    const x = rsv(g, req());
+    assert.ok(x.ok);
+    const a = g.admit(req(), at(0), x.ticket);
+    assert.ok(a.ok, "the ticket pays for the admit");
+    g.resolve(a.seq, true);
+    g.finish(a.seq);
+    assert.equal(reason(g.admit(req(), at(0), x.ticket)), "rate", "a used ticket pays for nothing");
+    assert.equal(g.admitted, 1);
+  }
+  {
+    // A refused admit keeps the ticket's token spent but lets the ticket be dropped.
+    const { g, req } = gate({}, { burst: 1 });
+    const x = rsv(g, req());
+    assert.ok(x.ok);
+    g.stop();
+    assert.equal(reason(g.admit(req(), at(0), x.ticket)), "stopped");
+    g.drop(x.ticket);
   }
   {
     const { g, req } = gate({ maxOutstandingPerTurn: 2 });
-    assert.equal(reason(g.precheck(req(), at(0), { run: 0, turn: 1, origin: 0 })), "ok");
-    assert.equal(reason(g.precheck(req(), at(0), { run: 0, turn: 2, origin: 0 })), "outstanding");
+    assert.equal(why(rsv(g, req(), { run: 0, turn: 1, origin: 0 })), "ok");
+    assert.equal(why(rsv(g, req(), { run: 0, turn: 2, origin: 0 })), "outstanding");
   }
   {
     const { g, req } = gate({ origins: { [ORIGIN]: 2, [OTHER]: 1000 } });
-    assert.equal(reason(g.precheck(req(), at(0), { run: 0, turn: 0, origin: 1 })), "ok");
-    assert.equal(reason(g.precheck(req(), at(0), { run: 0, turn: 0, origin: 2 })), "origin_total", "the per-origin total counts dials ahead");
-    assert.equal(reason(g.precheck(req("GET", OTHER), at(0), { run: 0, turn: 0, origin: 0 })), "ok", "another origin has its own total");
+    assert.equal(why(rsv(g, req(), { run: 0, turn: 0, origin: 1 })), "ok");
+    assert.equal(why(rsv(g, req(), { run: 0, turn: 0, origin: 2 })), "origin_total", "the per-origin total counts dials ahead");
+    assert.equal(why(rsv(g, req("GET", OTHER))), "ok", "another origin has its own total");
   }
   {
     const { g, req } = gate({ runTotal: 2 });
-    assert.equal(reason(g.precheck(req(), at(0), { run: 1, turn: 0, origin: 0 })), "ok");
-    assert.equal(reason(g.precheck(req(), at(0), { run: 2, turn: 0, origin: 0 })), "total", "the run total counts dials ahead");
+    assert.equal(why(rsv(g, req(), { run: 1, turn: 0, origin: 0 })), "ok");
+    assert.equal(why(rsv(g, req(), { run: 2, turn: 0, origin: 0 })), "total", "the run total counts dials ahead");
   }
   {
     const { g, req } = gate();
     g.stop();
-    assert.equal(reason(g.precheck(req(), at(0), none)), "stopped", "a stopped gate refuses before any dial");
+    assert.equal(why(rsv(g, req())), "stopped", "a stopped gate refuses before any dial");
   }
 });

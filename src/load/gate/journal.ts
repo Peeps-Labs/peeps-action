@@ -7,7 +7,9 @@
  *   - **accepted**: the write's callback confirmed the kernel took every byte;
  *   - **received**: a response arrived. That proves the target saw the request's head, not its
  *     whole body, so it never moves a request from unresolved to accepted;
- *   - **denied**: never written, counted by reason, and never debited.
+ *   - **denied**: never written, counted by reason, and never debited;
+ *   - **cut**: admitted, then ended early by the gate or the target (a timeout, the response
+ *     cap, an upstream error), counted by its first reason, once per request. Still debited.
  *
  * `debited` = accepted + unresolved, the number each renewal reports, equal to the gate's
  * `admitted`. Seqs are dense (1…debited), so the set handed off is that range. Entries are kept
@@ -36,6 +38,7 @@ interface Entry {
   written: "unresolved" | "accepted";
   received: boolean;
   finished: boolean;
+  cut?: string;
 }
 
 export interface JournalSnapshot {
@@ -44,11 +47,13 @@ export interface JournalSnapshot {
   received: number;
   unresolved: number;
   denied: Readonly<Record<string, number>>;
+  cut: Readonly<Record<string, number>>;
 }
 
 export class Journal {
   private readonly open = new Map<number, Entry>();
   private readonly deniedBy = new Map<string, number>();
+  private readonly cutBy = new Map<string, number>();
   private counts = { debited: 0, accepted: 0, received: 0 };
 
   /** Admitted and about to be written. Seqs come from the gate, in order, each once. */
@@ -83,6 +88,14 @@ export class Journal {
     this.prune(seq, e);
   }
 
+  /** An admitted request ended early. Only its first reason counts. */
+  cut(seq: number, reason: string): void {
+    const e = this.open.get(seq);
+    if (!e || e.cut !== undefined) return;
+    e.cut = reason;
+    this.cutBy.set(reason, (this.cutBy.get(reason) ?? 0) + 1);
+  }
+
   deny(reason: string): void {
     this.deniedBy.set(reason, (this.deniedBy.get(reason) ?? 0) + 1);
   }
@@ -100,7 +113,7 @@ export class Journal {
 
   snapshot(): JournalSnapshot {
     const { debited, accepted, received } = this.counts;
-    return { debited, accepted, received, unresolved: debited - accepted, denied: Object.fromEntries(this.deniedBy) };
+    return { debited, accepted, received, unresolved: debited - accepted, denied: Object.fromEntries(this.deniedBy), cut: Object.fromEntries(this.cutBy) };
   }
 
   /** An unresolved write stays open: its delivery is the one thing the counts cannot say. */

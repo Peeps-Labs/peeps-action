@@ -110,6 +110,12 @@ export function unmap(address: string): string {
   return address;
 }
 
+/** One spelling per address: unmapped, and IPv6 in its compressed lower-case form. */
+export function canonical(address: string): string {
+  const a = unmap(address);
+  return isIP(a) === 6 ? new URL(`http://[${a}]`).hostname.slice(1, -1) : a;
+}
+
 export interface ApprovedOrigin {
   /** Lower-case approved host name. */
   host: string;
@@ -124,16 +130,16 @@ function ownAddresses(): Set<string> {
     Object.values(networkInterfaces())
       .flat()
       .filter((i) => i !== undefined)
-      .map((i) => unmap(i.address.toLowerCase())),
+      .map((i) => canonical(i.address)),
   );
 }
 
 /** Whether an origin may reach one address. */
 export function reachable(address: string, origin: Pick<ApprovedOrigin, "privateCidrs">, own: ReadonlySet<string> = ownAddresses()): boolean {
-  const a = unmap(address);
+  const a = canonical(address);
   const c = classify(a);
-  if (c === "public") return !own.has(a.toLowerCase());
-  if (c !== "private" || own.has(a.toLowerCase()) || origin.privateCidrs.length === 0) return false;
+  if (c === "public") return !own.has(a);
+  if (c !== "private" || own.has(a) || origin.privateCidrs.length === 0) return false;
   const list = new BlockList();
   for (const cidr of origin.privateCidrs) {
     const [net, bits] = cidr.split("/");
@@ -195,7 +201,11 @@ export async function checkedAddresses(origin: ApprovedOrigin, options: Pick<Dia
   for (const { address } of addresses) {
     if (!reachable(address, origin, own)) throw new DialRefused("address", `${origin.host} resolves to a ${classify(unmap(address))} address`);
   }
-  return [...new Set(addresses.map(({ address }) => unmap(address)))];
+  // IPv4 only for now: a runner may translate a global-looking IPv6 answer (a local NAT64
+  // prefix) to an address the table cannot see. Every answer is still checked above.
+  const v4 = [...new Set(addresses.map(({ address }) => canonical(address)))].filter((a) => isIP(a) === 4);
+  if (v4.length === 0) throw new DialRefused("address", `${origin.host} has no IPv4 address; IPv6 targets are not supported yet`);
+  return v4;
 }
 
 /** A verified upstream connection, and the TCP socket under it so it can be reset. */
@@ -230,11 +240,16 @@ export async function dial(origin: ApprovedOrigin, options: DialOptions = {}): P
 }
 
 /** Try checked addresses in order; a refused or failed connection moves to the next. A TLS failure does not. */
-export async function connectFirst(addresses: readonly string[], origin: ApprovedOrigin, options: Pick<DialOptions, "ca" | "signal"> = {}): Promise<Upstream> {
+export async function connectFirst(
+  addresses: readonly string[],
+  origin: ApprovedOrigin,
+  options: Pick<DialOptions, "ca" | "signal"> & { connect?: typeof connectVerified } = {},
+): Promise<Upstream> {
+  const { connect = connectVerified, ...rest } = options;
   let last: unknown;
   for (const address of addresses) {
     try {
-      return await connectVerified(address, origin, options);
+      return await connect(address, origin, rest);
     } catch (error) {
       last = error;
       if (!(error instanceof DialRefused) || error.reason !== "tls" || !/ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EADDRNOTAVAIL/.test(error.message)) throw error;

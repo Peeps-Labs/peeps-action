@@ -10,6 +10,8 @@
  */
 import { isApprovedHostName } from "./ca";
 
+const METHOD_IN_BODY = /(?:_|%5f|\\u005f)method/i;
+
 export const MAX_BODY_BYTES = 1024 * 1024;
 export const MAX_TARGET_BYTES = 2048;
 export const MAX_HEADERS = 100;
@@ -176,6 +178,10 @@ export function normalize(req: ArrivedRequest, tunnel: Tunnel, policy: RequestPo
     if (!policy.allowedRequests.some((r) => r.method === req.method && r.path === path)) return refuse("not_allowed", 403);
     // Rails, Laravel and Symfony read a method override from the query.
     if (q >= 0 && [...new URLSearchParams(req.target.slice(q + 1)).keys()].some((k) => k.toLowerCase() === "_method")) return refuse("not_allowed", 403);
+    // Rack, Symfony and Laravel also read it from a form, multipart or JSON body. Matched in any
+    // encoding those decode, whatever the Content-Type says: a plan whose bodies really carry
+    // the text `_method` is refused.
+    if (METHOD_IN_BODY.test(req.body.toString("latin1"))) return refuse("not_allowed", 403);
   }
 
   const hostLine = authority.port === 443 ? authority.host : `${authority.host}:${authority.port}`;
