@@ -154,7 +154,7 @@ test("vsock, packet, raw sockets, io_uring and bpf are refused to the executor",
   assert.equal(rows.bpf, "-1 EPERM");
 });
 
-test("the runner's user cannot reach either socket; a wrong nonce gets nowhere", options, async () => {
+test("the runner's user cannot reach either socket", options, async () => {
   await startSink();
   const handle = await startJail(spec(["/bin/sleep", "30"]), { listenProxy: forwardToSink });
   const dir = `/run/peeps-load-${handle.unit.slice("peeps-load-".length)}`;
@@ -162,13 +162,6 @@ test("the runner's user cannot reach either socket; a wrong nonce gets nowhere",
     const code = await new Promise<string>((resolve) => net.connect(`${dir}/${sock}`).once("error", (e: NodeJS.ErrnoException) => resolve(e.code ?? "")).once("connect", () => resolve("connected")));
     assert.equal(code, "EACCES", sock);
   }
-  const hostile = execFileSync("sudo", ["-n", process.execPath, "-e", `
-    const s = require("net").connect(${JSON.stringify(`${dir}/ctl.sock`)});
-    s.on("connect", () => s.write(JSON.stringify({ type: "hello", nonce: "0".repeat(64) }) + "\\n"));
-    s.on("close", () => console.log("closed")); s.on("error", (e) => console.log(e.code));
-    setTimeout(() => { console.log("still open"); process.exit(); }, 3000);
-  `], { encoding: "utf8" }).trim();
-  assert.match(hostile, /^(closed|ENOENT|ECONNREFUSED)$/);
   await handle.ready;
   const end = await handle.end();
   assert.ok(end.clean);

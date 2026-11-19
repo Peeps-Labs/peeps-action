@@ -109,14 +109,14 @@ export async function startJail(spec: JailSpec, options: StartJailOptions): Prom
   };
 }
 
-interface Ctl {
+export interface Ctl {
   ready: Promise<void>;
   exit: Promise<JailExit>;
   send(frame: CtlFrame): void;
 }
 
-/** Accepts exactly one connection that presents the nonce, then stops listening. Any other is dropped. */
-function acceptCtl(server: net.Server, nonce: string): Promise<Ctl> {
+/** Accepts exactly one connection that presents the nonce, then stops listening. Any other is dropped. Exported for tests. */
+export function acceptCtl(server: net.Server, nonce: string): Promise<Ctl> {
   return new Promise((resolve, reject) => {
     server.on("error", reject);
     server.on("connection", (socket) => {

@@ -9,7 +9,7 @@
  * Init never imports the loader, a journey or Playwright.
  */
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readlinkSync, rmdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, readlinkSync, rmdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { decode, encode, LineSplitter, type CtlFrame } from "./ctl";
 import { dropArgs, executorEnv, IN_JAIL, RELAY_UID, type InitConfig } from "./spec";
@@ -76,6 +76,10 @@ export function isolate(config: InitConfig): void {
   // 3. The workspace: writes land in a capped tmpfs, never in the checkout.
   run("mount", ["-t", "tmpfs", "-o", "size=512m,mode=755", "tmpfs", at("/run/peeps/up")]);
   mkdirSync(at("/run/peeps/up/upper"));
+  // The overlay's root takes the upper folder's owner and mode, so match the checkout's.
+  const lower = statSync(config.workspace);
+  chownSync(at("/run/peeps/up/upper"), lower.uid, lower.gid);
+  chmodSync(at("/run/peeps/up/upper"), lower.mode & 0o7777);
   mkdirSync(at("/run/peeps/up/work"));
   run("mount", ["-t", "overlay", "overlay", "-o", `lowerdir=${at("/run/peeps/ws-lower")},upperdir=${at("/run/peeps/up/upper")},workdir=${at("/run/peeps/up/work")}`, at(IN_JAIL.workspace)]);
 

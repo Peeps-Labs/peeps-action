@@ -4,7 +4,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import { acceptCtl } from "../src/load/jail";
 import path from "node:path";
 import { decode, encode, LineSplitter, MAX_FRAME_BYTES, sameNonce } from "../src/load/jail/ctl";
 import { dropArgs, executorEnv, initConfig, RELAY_UID, specProblems, systemdRunArgs, type JailSpec } from "../src/load/jail/spec";
@@ -86,6 +89,7 @@ test("a spec is refused when it could escape its own shape", () => {
     [{ executorUid: RELAY_UID }, /executorUid/],
     [{ executorGid: RELAY_UID }, /executorGid/],
     [{ command: [] }, /command/],
+    [{ command: ["a\0b"] }, /command/],
     [{ env: { NODE_OPTIONS: "--require x" } }, /NODE_OPTIONS/],
     [{ env: { LD_PRELOAD: "x" } }, /LD_PRELOAD/],
     [{ env: { lower: "x" } }, /lower/],
@@ -122,4 +126,34 @@ test("nothing under src/load signals a process; init imports no customer-facing 
   for (const file of files(root)) assert.doesNotMatch(readFileSync(file, "utf8"), /process\.kill\(|\.kill\(/, file);
   const imports = readFileSync(path.join(root, "jail/init.ts"), "utf8").match(/from "([^"]+)"/g) ?? [];
   assert.deepEqual(imports.filter((i) => !/from "node:[a-z_/]+"|from "\.\/(ctl|spec)"/.test(i)), []);
+});
+
+test("the control socket takes one connection with the nonce; a wrong nonce or a late one gets nowhere", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "peeps-ctl-"));
+  const sock = path.join(dir, "ctl.sock");
+  const server = net.createServer();
+  await new Promise<void>((resolve) => server.listen(sock, resolve));
+  const nonce = "b".repeat(64);
+  const accepted = acceptCtl(server, nonce);
+  const outcome = (payload: string) =>
+    new Promise<string>((resolve) => {
+      const s = net.connect(sock);
+      s.on("connect", () => s.write(payload));
+      s.on("close", () => resolve("closed"));
+      s.on("error", (e: NodeJS.ErrnoException) => resolve(e.code ?? "error"));
+      setTimeout(() => (s.destroy(), resolve("open")), 1500);
+    });
+  assert.equal(await outcome(encode({ type: "hello", nonce: "0".repeat(64) })), "closed");
+  assert.equal(await outcome("not a frame\n"), "closed");
+  const real = net.connect(sock);
+  await new Promise((r) => real.once("connect", r));
+  real.write(encode({ type: "hello", nonce }));
+  const ctl = await accepted;
+  real.write(encode({ type: "ready" }));
+  await ctl.ready;
+  assert.match(await outcome(encode({ type: "hello", nonce })), /^(ENOENT|ECONNREFUSED|closed)$/);
+  real.write(encode({ type: "exit", code: 7, signal: null }));
+  assert.deepEqual(await ctl.exit, { code: 7, signal: null });
+  real.destroy();
+  rmSync(dir, { recursive: true, force: true });
 });

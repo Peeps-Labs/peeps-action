@@ -119,7 +119,7 @@ export function specProblems(spec: JailSpec): string[] {
   if (dirOf(spec.outer) !== spec.actionDir || dirOf(spec.init) !== spec.actionDir) problems.push("outer and init must sit directly in actionDir");
   if (!Number.isInteger(spec.executorUid) || spec.executorUid <= 0 || spec.executorUid === RELAY_UID) problems.push("executorUid must be a non-root uid other than the relay's");
   if (!Number.isInteger(spec.executorGid) || spec.executorGid <= 0 || spec.executorGid === RELAY_UID) problems.push("executorGid must be a non-root gid other than the relay's");
-  if (spec.command.length === 0 || spec.command.some((arg) => /[\0\n]/.test(arg))) problems.push("command must be non-empty, without newlines or NUL");
+  if (spec.command.length === 0 || spec.command.some((arg) => arg.includes("\0"))) problems.push("command must be non-empty, without NUL");
   for (const [name, value] of Object.entries(spec.env)) {
     if (!ENV_NAME.test(name) || RESERVED_ENV.has(name)) problems.push(`env ${name} is not allowed`);
     if (/[\0\n]/.test(value)) problems.push(`env ${name} has a newline or NUL`);
