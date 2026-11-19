@@ -50,16 +50,17 @@ export interface Outstanding {
   nonce: string;
   requestHash: string;
   firstSendMono: number;
+  firstSendWall: number;
 }
 
 export type Ignored = "binding" | "seq" | "nonce";
-export type Rejected = "late" | "clock_rollback" | "expired";
+export type Rejected = "malformed";
 
 export type Decision =
   /** Not this renewal's answer: drop it, keep waiting. */
   | { kind: "ignored"; reason: Ignored }
-  /** This renewal's answer, unusable: the gate keeps the lease it has, which runs out on its own. */
-  | { kind: "rejected"; reason: Rejected }
+  /** This renewal's answer, malformed: the gate keeps the lease it has, which runs out on its own. */
+  | { kind: "rejected"; reason: Rejected; stop?: RenewReply["stop"] }
   /** The lease is gone: revoke the gate now. */
   | { kind: "lost"; stop?: RenewReply["stop"] }
   | { kind: "lease"; grant: LeaseGrant; stop?: RenewReply["stop"] };
@@ -69,6 +70,7 @@ export class RunnerLease {
   private readonly rttMs: number;
   private readonly renewEveryMs: number;
   private current: LeaseGrant;
+  private readonly binding: LeaseBinding;
   private remainingMs: number;
   private lastServerNowMs: number;
   private lastSeq = 0;
@@ -84,13 +86,14 @@ export class RunnerLease {
     sent: Clocks,
     received: Clocks,
   ) {
+    this.binding = { ...claim.binding };
     this.offsetMs = claim.serverNowMs - (sent.wallMs + received.wallMs) / 2;
     this.rttMs = Math.max(0, received.monoMs - sent.monoMs);
     this.renewEveryMs = claim.renewEveryMs;
     this.lastServerNowMs = claim.serverNowMs;
-    this.remainingMs = remaining(claim);
-    this.current = this.grant(claim, sent.monoMs, this.remainingMs);
-    if (!(received.monoMs < this.current.monoUntil)) this.lose();
+    this.remainingMs = wellFormed(claim) ? remaining(claim) : 0;
+    this.current = this.grant(claim, 0, sent, this.remainingMs);
+    if (!(this.remainingMs > 0) || !live(this.current, received)) this.lose();
   }
 
   get grantNow(): LeaseGrant {
@@ -102,18 +105,21 @@ export class RunnerLease {
   }
 
   get outstanding(): Outstanding | undefined {
-    return this.inFlight;
+    return this.inFlight && { ...this.inFlight };
   }
 
-  /** Whether the lease is still running at `t`; false once either clock passes its deadline. */
+  /** Whether the lease is still running at `t`. Once either clock passes its deadline it is lost for good. */
   held(t: Clocks): boolean {
-    return !this.lostFlag && t.monoMs < this.current.monoUntil && t.wallMs < this.current.wallUntil;
+    if (this.lostFlag) return false;
+    if (live(this.current, t)) return true;
+    this.lose();
+    return false;
   }
 
   /** Starts the next renewal. One at a time: refused while one is in flight or the lease is lost. */
   begin(t: Clocks, nonce: string, requestHash: string): Outstanding | null {
     if (this.lostFlag || this.inFlight || !this.held(t)) return null;
-    this.inFlight = { seq: this.lastSeq + 1, nonce, requestHash, firstSendMono: t.monoMs };
+    this.inFlight = { seq: this.lastSeq + 1, nonce, requestHash, firstSendMono: t.monoMs, firstSendWall: t.wallMs };
     return { ...this.inFlight };
   }
 
@@ -135,7 +141,7 @@ export class RunnerLease {
 
   apply(reply: RenewReply, t: Clocks): Decision {
     const tx = this.inFlight;
-    const b = this.claim.binding;
+    const b = this.binding;
     if (reply.claimId !== b.claimId || reply.epoch !== b.epoch || reply.planHash !== b.planHash) return { kind: "ignored", reason: "binding" };
     if (!tx || reply.seq !== tx.seq) return { kind: "ignored", reason: "seq" };
     if (reply.nonce !== tx.nonce) return { kind: "ignored", reason: "nonce" };
@@ -143,22 +149,27 @@ export class RunnerLease {
     this.lastSeq = tx.seq;
     if (this.lostFlag) return { kind: "lost", stop: reply.stop };
     if (!this.held(t)) return this.lose(reply.stop);
-    if (reply.lease === "lost" || reply.stop?.mode === "now") return this.lose(reply.stop);
-    if (reply.serverNowMs < this.lastServerNowMs) return { kind: "rejected", reason: "clock_rollback" };
+    if (reply.lease !== "held" || reply.stop?.mode === "now") return this.lose(reply.stop);
+    if (!wellFormed(reply)) return rejected("malformed", reply.stop);
+    // A matching answer that cannot be used is a lost lease, not a kept one: the server may
+    // have shortened it (a drain), and the old, longer grant must not outlive that.
+    if (reply.serverNowMs < this.lastServerNowMs) return this.lose(reply.stop);
     const rem = remaining(reply);
-    if (rem <= 0) return this.lose(reply.stop);
-    const grant = this.grant(reply, tx.firstSendMono, rem);
-    if (!(t.monoMs < grant.monoUntil)) return { kind: "rejected", reason: "late" };
+    if (!(rem > 0)) return this.lose(reply.stop);
+    const grant = this.grant(reply, tx.seq, { monoMs: tx.firstSendMono, wallMs: tx.firstSendWall }, rem);
+    if (!live(grant, t)) return this.lose(reply.stop);
     this.lastServerNowMs = reply.serverNowMs;
     this.remainingMs = rem;
     this.current = grant;
     return { kind: "lease", grant: { ...grant }, stop: reply.stop };
   }
 
-  private grant(lease: ServerLease, firstSendMono: number, rem: number): LeaseGrant {
+  /** Both deadlines run at most `rem` from the first send, so the wall clock backstops the monotonic one. */
+  private grant(lease: ServerLease, seq: number, firstSend: Clocks, rem: number): LeaseGrant {
     return {
-      monoUntil: firstSendMono + rem,
-      wallUntil: lease.leaseUntilServerMs - this.offsetMs - this.rttMs / 2,
+      seq,
+      monoUntil: firstSend.monoMs + rem,
+      wallUntil: Math.min(lease.leaseUntilServerMs - this.offsetMs - this.rttMs / 2, firstSend.wallMs + rem),
       ceiling: lease.ceiling,
     };
   }
@@ -168,6 +179,19 @@ export class RunnerLease {
     this.current = { ...this.current, monoUntil: Number.NEGATIVE_INFINITY, wallUntil: Number.NEGATIVE_INFINITY };
     return { kind: "lost", stop };
   }
+}
+
+function live(g: LeaseGrant, t: Clocks): boolean {
+  return t.monoMs < g.monoUntil && t.wallMs < g.wallUntil;
+}
+
+function rejected(reason: Rejected, stop: RenewReply["stop"]): Decision {
+  return stop ? { kind: "rejected", reason, stop } : { kind: "rejected", reason };
+}
+
+/** Every number the lease is built from is finite, and the ceiling a whole count. */
+function wellFormed(lease: ServerLease): boolean {
+  return [lease.ttlMs, lease.leaseUntilServerMs, lease.serverNowMs].every(Number.isFinite) && Number.isSafeInteger(lease.ceiling) && lease.ceiling >= 0;
 }
 
 function remaining(lease: ServerLease): number {

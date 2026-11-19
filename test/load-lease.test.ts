@@ -97,14 +97,14 @@ test("a reply to an older seq is ignored", () => {
   assert.deepEqual(l.apply(reply(1, "n1", SERVER0 + 1100), at(2600)), { kind: "ignored", reason: "seq" });
 });
 
-test("a reply read after its own deadline is rejected, and one read after the held lease loses it", () => {
+test("a reply read after its own deadline, or after the held lease, loses it", () => {
   {
     // Sent at 1000; the server grants only 1 s; read at 2100: past firstSend + remaining.
     const l = lease();
     l.begin(at(1000), "n1", "h1");
     const late = reply(1, "n1", SERVER0 + 1100, { leaseUntilServerMs: SERVER0 + 2100 });
-    assert.deepEqual(l.apply(late, at(2100)), { kind: "rejected", reason: "late" });
-    assert.equal(l.grantNow.monoUntil, 5000, "the current lease is unchanged, and runs out on its own");
+    assert.deepEqual(l.apply(late, at(2100)), { kind: "lost", stop: undefined });
+    assert.equal(l.held(at(2101)), false, "the server may have shortened it: the old grant does not outlive the answer");
   }
   {
     const l = lease();
@@ -115,12 +115,12 @@ test("a reply read after its own deadline is rejected, and one read after the he
   }
 });
 
-test("a server clock that runs back is rejected", () => {
+test("a server clock that runs back loses the lease", () => {
   const l = lease();
   l.begin(at(1000), "n1", "h1");
   assert.equal(l.apply(reply(1, "n1", SERVER0 + 1100), at(1200)).kind, "lease");
   l.begin(at(2500), "n2", "h2");
-  assert.deepEqual(l.apply(reply(2, "n2", SERVER0 + 1000), at(2600)), { kind: "rejected", reason: "clock_rollback" });
+  assert.deepEqual(l.apply(reply(2, "n2", SERVER0 + 1000), at(2600)), { kind: "lost", stop: undefined });
 });
 
 test("lost, a hard stop, and an empty remaining lose the lease; a graceful stop is passed on", () => {
@@ -162,6 +162,39 @@ test("the next send waits for the answer and at most renewEvery or half the rema
 test("a claim answered after its own lease is lost from the start", () => {
   const l = new RunnerLease(claim(), at(0), at(5000));
   assert.equal(l.lost, true);
+});
+
+test("an unknown lease value loses the lease; a malformed reply is rejected and changes nothing", () => {
+  {
+    const l = lease();
+    l.begin(at(1000), "n1", "h1");
+    assert.equal(l.apply(reply(1, "n1", SERVER0 + 1100, { lease: "revoked" as "held" }), at(1200)).kind, "lost");
+  }
+  for (const bad of [{ ceiling: undefined as unknown as number }, { ceiling: 1.5 }, { ceiling: -1 }, { ttlMs: Number.NaN }, { leaseUntilServerMs: Number.POSITIVE_INFINITY }]) {
+    const l = lease();
+    l.begin(at(1000), "n1", "h1");
+    const before = l.grantNow;
+    assert.deepEqual(l.apply(reply(1, "n1", SERVER0 + 1100, bad), at(1200)), { kind: "rejected", reason: "malformed" }, JSON.stringify(bad));
+    assert.deepEqual(l.grantNow, before);
+  }
+  assert.equal(lease({ ceiling: Number.NaN }).lost, true, "a malformed claim is lost from the start");
+});
+
+test("an unusable answer loses the lease and still passes on its stop", () => {
+  const l = lease();
+  l.begin(at(1000), "n1", "h1");
+  assert.equal(l.apply(reply(1, "n1", SERVER0 + 1100), at(1200)).kind, "lease");
+  l.begin(at(2500), "n2", "h2");
+  const drain = { mode: "graceful" as const, reason: "drain" };
+  assert.deepEqual(l.apply(reply(2, "n2", SERVER0 + 1000, { stop: drain }), at(2600)), { kind: "lost", stop: drain });
+});
+
+test("the wall deadline is capped at remaining from the first send too", () => {
+  const l = lease({ ttlMs: 60_000, leaseUntilServerMs: SERVER0 + 50 + 60_000 });
+  assert.equal(l.grantNow.wallUntil, at(0).wallMs + MAX_REMAINING_MS);
+  l.begin(at(1000), "n1", "h1");
+  assert.equal(l.apply(reply(1, "n1", SERVER0 + 1100, { ttlMs: 60_000, leaseUntilServerMs: SERVER0 + 61_100 }), at(1200)).kind, "lease");
+  assert.equal(l.grantNow.wallUntil, at(1000).wallMs + MAX_REMAINING_MS);
 });
 
 test("the lease reads no clock and holds no timer", () => {
