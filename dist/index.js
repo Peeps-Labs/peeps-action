@@ -6389,6 +6389,10 @@ function onDefaultBranch(env) {
 async function main() {
   const githubToken = takeGithubToken(process.env);
   const requested = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
+  if (requested === "load") {
+    console.error("::error::Load testing isn't available for this repository yet.");
+    process.exit(1);
+  }
   if (requested === "attach-start" || requested === "attach-finish") {
     const deadline = Number(process.env.PEEPS_ATTACH_DEADLINE_MS) || (requested === "attach-start" ? ATTACH_START_DEADLINE_MS : ATTACH_FINISH_DEADLINE_MS);
     await runAttachStep(async () => {

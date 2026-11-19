@@ -56,6 +56,14 @@ async function main(): Promise<void> {
   // The attach steps sit in the customer's own workflow, around their own test step, so
   // nothing in them may fail the job: not even an environment Peeps cannot read.
   const requested = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
+  // Load testing ships its engine (dist/load.js) before Peeps can grant a load run, so this
+  // mode refuses here: before the environment is read, Peeps or OIDC is asked anything,
+  // variables are exported, the framework is resolved or a browser probe spawns, and without
+  // loading any engine code (test/load-refusal.test.ts).
+  if (requested === "load") {
+    console.error("::error::Load testing isn't available for this repository yet.");
+    process.exit(1);
+  }
   if (requested === "attach-start" || requested === "attach-finish") {
     const deadline = Number(process.env.PEEPS_ATTACH_DEADLINE_MS) ||
       (requested === "attach-start" ? ATTACH_START_DEADLINE_MS : ATTACH_FINISH_DEADLINE_MS);
