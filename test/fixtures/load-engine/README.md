@@ -8,3 +8,5 @@ peeps' and carries its root hash):
 - `histogram-vectors.json`: `hist/1` golden vectors (`src/load/timing.ts`).
 - `loader/`: TypeScript journeys for the loader (`docs/load-loader.md`).
 - `journeys/`: journeys the engine tests run against the sink.
+- `v2/`: the bench's robots check, vendored, as a load journey, a Playwright spec and its
+  config: `test/load-v2.test.ts` runs it both ways and compares the verdicts.
