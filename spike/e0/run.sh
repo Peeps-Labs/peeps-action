@@ -40,13 +40,14 @@ echo "$SINK" > "$SPIKE/fixture/sink.txt"
 PROPS=(--pipe --wait --collect --quiet --service-type=exec --working-directory=/
   -p KillMode=control-group -p TimeoutStopSec=2s -p RuntimeMaxSec=300s -p MemoryMax=2G -p TasksMax=512
   "-p" "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"
+  -p SystemCallErrorNumber=EPERM
   "-p" "SystemCallFilter=~@debug bpf keyctl add_key request_key pidfd_getfd setns io_uring_setup io_uring_enter io_uring_register"
   --setenv=WS="$WS" --setenv=NODE_DIR="$NODE_DIR" --setenv=SPIKE="$SPIKE" --setenv=SINK_ADDR="$SINK")
 NODE=$(readlink -f "$(command -v node)")
 
 # Rows 2, 6, 7: the probe.
 sudo -n systemd-run --unit=e0-probe "${PROPS[@]}" --setenv=E0_LIFELINE=0 "$NODE" "$SPIKE/outer.js" "$SPIKE/init.sh" probe < /dev/null 2>&1 | tee "$OUT/probe.txt" | grep '^ROW' >> "$LOG"
-cat "$OUT/probe.txt"
+cat "$OUT/probe.txt"; [ -s "$OUT/probe.txt" ] || sudo -n journalctl -u e0-probe --no-pager | tail -20
 [ -e "$WS/e0-write-probe" ] && row 7_write_reached_checkout FAIL-yes || row 7_write_reached_checkout pass-no
 # Same probe without the family filter, to show what the filter alone buys.
 P2=(); for p in "${PROPS[@]}"; do case "$p" in RestrictAddressFamilies=*|SystemCallFilter=*) P2=("${P2[@]:0:${#P2[@]}-1}") ;; *) P2+=("$p") ;; esac; done
@@ -70,6 +71,7 @@ teardown_case() { # name, fault
   node "$SPIKE/sup.js" "$unit" "$HOLD_ARGS" > "$OUT/td-$name.txt" 2>&1 & local sup=$!
   for i in $(seq 1 40); do grep -q 'INIT hold ready' "$OUT/td-$name.txt" && break; sleep 0.25; done
   local cg; cg=$(systemctl show -p ControlGroup --value "$unit.service")
+  [ -z "$cg" ] && tail -5 "$OUT/td-$name.txt"
   local sudopid; sudopid=$(grep -o 'sudo=[0-9]*' "$OUT/td-$name.txt" | cut -d= -f2)
   local initpid; initpid=$(pgrep -f "^/bin/bash .*init.sh hold" | head -1)
   row "4_${name}_before" "active=$(systemctl is-active "$unit.service") cg=$cg procs=$(cat /sys/fs/cgroup$cg/cgroup.procs 2>/dev/null | wc -l)"
@@ -84,7 +86,7 @@ teardown_case() { # name, fault
     sleep 0.25
   done
   local dt; dt=$(awk -v a="$(date +%s.%N)" -v b="$t0" 'BEGIN{printf "%.2f", a-b}')
-  [ "$gone" = yes ] && awk -v d="$dt" 'BEGIN{exit !(d<5)}' && row "4_${name}" "pass ${dt}s" || row "4_${name}" "FAIL gone=$gone ${dt}s"
+  [ -n "$cg" ] && [ "$gone" = yes ] && awk -v d="$dt" 'BEGIN{exit !(d<5)}' && row "4_${name}" "pass ${dt}s" || row "4_${name}" "FAIL gone=$gone ${dt}s"
   pgrep -f 'sleep 900' > /dev/null && row "4_${name}_descendant" FAIL-alive || row "4_${name}_descendant" pass-gone
   sudo -n systemctl stop "$unit.service" > /dev/null 2>&1; sudo -n pkill -f 'sleep 900'; wait "$sup" 2>/dev/null
 }
