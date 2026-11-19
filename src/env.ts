@@ -169,8 +169,10 @@ function variable(env: NodeJS.ProcessEnv, name: string): string | null {
 /**
  * The mode this job runs, exactly as dispatch reads it, with no side effects: GitLab reads
  * only `PEEPS_MODE`; GitHub reads the `mode` input (blank counts as absent) and then
- * `PEEPS_MODE`. `main` refuses `load` with it before anything else, so the refusal and
- * dispatch can never disagree about the mode.
+ * `PEEPS_MODE`. `main` first picks the attach steps with their own `INPUT_MODE`-first read
+ * (they never fail the job, even on GitLab with `PEEPS_MODE=load`), then refuses `load` with
+ * this, before the environment is read, so the refusal and dispatch never disagree. Don't
+ * unify the two reads: test/attach.test.ts pins the GitLab attach cases.
  */
 export function resolveMode(env: NodeJS.ProcessEnv): string {
   if (env.GITLAB_CI === "true") return variable(env, "PEEPS_MODE") ?? "ci";
