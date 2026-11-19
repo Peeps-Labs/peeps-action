@@ -242,6 +242,16 @@ observes the runs your own CI starts, and reporting, inventory and failure
 analysis all keep working. That is a supported configuration, not a degraded
 one.
 
+## Load testing
+
+**`mode: load` refuses in this release.** It exits 1 with "Load testing isn't
+available for this repository yet." before it reads your workspace, loads any of
+your code, makes a network call, asks GitHub for an OIDC token or starts a
+process. `dist/load.js` and `dist/load-executor.js`, the load engine and the
+process it runs your journey in, ship in `dist/` but nothing in this release
+starts them. When load testing is turned on, this section will say what it sends
+and what it runs.
+
 ## Self-hosted runners
 
 On a GitHub-hosted runner each job gets a fresh, disposable VM. On a self-hosted
@@ -266,7 +276,9 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
 - Pin the action to a commit sha rather than a moving tag if you want to review
   exactly what you run: `uses: Peeps-Labs/peeps-action@<sha>`. A tag such as
   `@v1` is repointed at new releases.
-- The action has no runtime dependencies. It bundles to one file and calls only
+- The action bundles each entry point to one file, with no runtime dependency
+  but [Sucrase](https://github.com/alangpierce/sucrase) (MIT), bundled into
+  `dist/load-executor.js`, which this release never starts. It calls only
   `git`, `npx playwright`, for a pytest suite `python -m pytest`, and for an
   Appium suite `npx wdio run`, the job's own Node and, in `agent` mode with
   `device-tools: true`, your own `appium`, always with an argument array and
