@@ -1,7 +1,7 @@
 /**
  * The engine's input check: `{plan, limits}` in peeps' shape, refused on anything unknown,
- * out of range, inconsistent or escaping the repository. The pinned peeps corpus is checked
- * in `load-corpus.test.ts`; these use the action's own hand-written plan.
+ * out of range, inconsistent or escaping the repository. Each case starts from a golden plan
+ * of peeps' corpus (`load-corpus.test.ts` pins the copy) and breaks one thing.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -10,19 +10,22 @@ import path from "node:path";
 
 import { isCanonicalOrigin, isContainedModulePath, validatePlanInput, type PlanInput } from "../src/load/plan-input";
 
-const dir = path.resolve(__dirname, "fixtures/load-engine");
+const dir = path.resolve(__dirname, "fixtures/load-plans/v1/common");
 const read = (file: string) => JSON.parse(readFileSync(path.join(dir, file), "utf8")) as unknown;
-const good = (): PlanInput => ({ plan: read("plan.json"), limits: read("limits.json") }) as PlanInput;
+const limits = () => (read("limits.json") as { limits: unknown }).limits;
+/** The §5.3 example (no allowed requests) and the monorepo case (two). */
+const good = (): PlanInput => ({ plan: read("spec-example.plan.json"), limits: limits() }) as PlanInput;
+const withAllowed = (): PlanInput => ({ plan: read("monorepo.plan.json"), limits: limits() }) as PlanInput;
 
-function refused(mutate: (input: PlanInput & Record<string, unknown>) => void): string[] {
-  const input = good() as PlanInput & Record<string, unknown>;
+function refused(mutate: (input: PlanInput & Record<string, unknown>) => void, from = good): string[] {
+  const input = from() as PlanInput & Record<string, unknown>;
   mutate(input);
   const result = validatePlanInput(input);
   assert.equal(result.ok, false, "expected a refusal");
   return result.ok ? [] : result.errors;
 }
 
-test("the hand-written plan and limits are accepted, as a copy", () => {
+test("a golden plan and limits are accepted, as a copy", () => {
   const input = good();
   const result = validatePlanInput(input);
   assert.ok(result.ok, result.ok ? "" : result.errors.join("\n"));
@@ -58,9 +61,9 @@ for (const [name, mutate, expected] of [
     /stages\[1\]\.plannedStarts: must be 48, what the schedule produces/,
   ],
   ["a ceiling that is not starts × per journey", (i: any) => (i.plan.requests.ceiling = 1199), /^plan\.requests\.ceiling: must be plannedStarts × perJourneyMax/],
-  ["a GET in the allowed requests", (i: any) => (i.plan.allowedRequests[0].method = "GET"), /allowedRequests\[0\]\.method/],
-  ["an allowed request with a query", (i: any) => (i.plan.allowedRequests[0].path = "/auth/token?x=1"), /allowedRequests\[0\]\.path/],
-  ["an allowed request listed twice", (i: any) => i.plan.allowedRequests.push({ method: "POST", path: "/auth/token" }), /allowedRequests\[1\]: is listed twice/],
+  ["a GET in the allowed requests", (i: any) => (i.plan.allowedRequests = [{ method: "GET", path: "/auth/token" }]), /allowedRequests\[0\]\.method/],
+  ["an allowed request with a query", (i: any) => (i.plan.allowedRequests = [{ method: "POST", path: "/auth/token?x=1" }]), /allowedRequests\[0\]\.path/],
+  ["an allowed request listed twice", (i: any) => (i.plan.allowedRequests = [{ method: "POST", path: "/a" }, { method: "POST", path: "/a" }]), /allowedRequests\[1\]: is listed twice/],
   ["a bare host as an origin", (i: any) => (i.limits.allowedOrigins = ["staging.example.com"]), /allowedOrigins\[0\]: must be an exact origin/],
   ["an origin with a path", (i: any) => (i.limits.allowedOrigins = ["https://staging.example.com/"]), /allowedOrigins\[0\]: must be an exact origin/],
   ["an origin in capitals", (i: any) => (i.limits.allowedOrigins = ["https://Staging.example.com"]), /allowedOrigins\[0\]/],
@@ -84,6 +87,12 @@ for (const module of ["../secrets.ts", "/etc/passwd", "a/../../b.ts", "a/./b.ts"
     assert.ok(errors.some((e) => e.startsWith("plan.journey.module")), errors.join("\n"));
   });
 }
+
+test("the monorepo case's allowed requests are accepted, and one more unknown field in them is not", () => {
+  assert.equal(validatePlanInput(withAllowed()).ok, true);
+  const errors = refused((i: any) => (i.plan.allowedRequests[1].body = "{}"), withAllowed);
+  assert.ok(errors.some((e) => /allowedRequests\[1\]\.body: is not a known field/.test(e)), errors.join("\n"));
+});
 
 test("a nested repository-relative module is fine", () => {
   assert.equal(isContainedModulePath("tools/e2e/src/journeys/checkout-quote.ts"), true);

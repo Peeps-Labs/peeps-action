@@ -10,9 +10,9 @@ import path from "node:path";
 import { ENGINE_LIMITS, engineBudgets } from "../src/load/engine-limits";
 import { validatePlanInput } from "../src/load/plan-input";
 
-const dir = path.resolve(__dirname, "fixtures/load-engine");
+const dir = path.resolve(__dirname, "fixtures");
 const read = (file: string) => JSON.parse(readFileSync(path.join(dir, file), "utf8")) as unknown;
-const mapping = read("limits-mapping.json") as {
+const mapping = read("load-engine/limits-mapping.json") as {
   cases: { name: string; plan: string | object; limits: object; budgets: unknown }[];
 };
 

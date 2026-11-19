@@ -1,0 +1,164 @@
+[
+  {
+    "name": "spec example",
+    "input": {
+      "pacingEveryMs": 5000,
+      "stages": [
+        {
+          "name": "Warm up",
+          "kind": "ramp",
+          "durationMs": 20000,
+          "fromUsers": 0,
+          "toUsers": 4
+        },
+        {
+          "name": "Hold",
+          "kind": "hold",
+          "durationMs": 60000,
+          "fromUsers": 4,
+          "toUsers": 4
+        },
+        {
+          "name": "Wind down",
+          "kind": "ramp",
+          "durationMs": 20000,
+          "fromUsers": 4,
+          "toUsers": 0
+        }
+      ]
+    },
+    "expectedStarts": [
+      6,
+      48,
+      6
+    ]
+  },
+  {
+    "name": "durations not divisible by pacing",
+    "input": {
+      "pacingEveryMs": 3000,
+      "stages": [
+        {
+          "name": "Up",
+          "kind": "ramp",
+          "durationMs": 7000,
+          "fromUsers": 0,
+          "toUsers": 3
+        },
+        {
+          "name": "Hold",
+          "kind": "hold",
+          "durationMs": 10000,
+          "fromUsers": 3,
+          "toUsers": 3
+        },
+        {
+          "name": "Down",
+          "kind": "ramp",
+          "durationMs": 7000,
+          "fromUsers": 3,
+          "toUsers": 0
+        }
+      ]
+    },
+    "expectedStarts": [
+      3,
+      11,
+      2
+    ]
+  },
+  {
+    "name": "hold first, then down and back up",
+    "input": {
+      "pacingEveryMs": 2000,
+      "stages": [
+        {
+          "name": "Hold",
+          "kind": "hold",
+          "durationMs": 5000,
+          "fromUsers": 2,
+          "toUsers": 2
+        },
+        {
+          "name": "Down",
+          "kind": "ramp",
+          "durationMs": 4000,
+          "fromUsers": 2,
+          "toUsers": 0
+        },
+        {
+          "name": "Up",
+          "kind": "ramp",
+          "durationMs": 4000,
+          "fromUsers": 0,
+          "toUsers": 2
+        },
+        {
+          "name": "Hold",
+          "kind": "hold",
+          "durationMs": 4000,
+          "fromUsers": 2,
+          "toUsers": 2
+        }
+      ]
+    },
+    "expectedStarts": [
+      6,
+      1,
+      1,
+      4
+    ]
+  },
+  {
+    "name": "pacing longer than the stages",
+    "input": {
+      "pacingEveryMs": 60000,
+      "stages": [
+        {
+          "name": "Up",
+          "kind": "ramp",
+          "durationMs": 10000,
+          "fromUsers": 0,
+          "toUsers": 5
+        },
+        {
+          "name": "Hold",
+          "kind": "hold",
+          "durationMs": 30000,
+          "fromUsers": 5,
+          "toUsers": 5
+        }
+      ]
+    },
+    "expectedStarts": [
+      4,
+      1
+    ]
+  },
+  {
+    "name": "more users than milliseconds",
+    "input": {
+      "pacingEveryMs": 1000,
+      "stages": [
+        {
+          "name": "Up",
+          "kind": "ramp",
+          "durationMs": 3,
+          "fromUsers": 0,
+          "toUsers": 7
+        },
+        {
+          "name": "Hold",
+          "kind": "hold",
+          "durationMs": 2500,
+          "fromUsers": 7,
+          "toUsers": 7
+        }
+      ]
+    },
+    "expectedStarts": [
+      6,
+      15
+    ]
+  }
+]

@@ -1,0 +1,16 @@
+# A journey in a monorepo package: module paths are relative to the repository root.
+schema: 1
+journey: { module: tools/e2e/src/journeys/checkout-quote.ts, export: quoteCheckout }
+cohort:
+  kind: protocol
+  demand: users
+  stages:
+    - { name: Ramp, ramp: 30s, from: 0, to: 3 }
+    - { name: Hold, hold: 2m, users: 3 }
+    - { name: Step up, ramp: 10s, from: 3, to: 5 }
+    - { name: Peak, hold: 1m, users: 5 }
+    - { ramp: 15s, from: 5, to: 0 }
+  pacing: { every: 4s }
+requests: { per_journey_max: 6 }
+allow: [POST /auth/token, POST /api/quotes]
+on_reduced: refuse

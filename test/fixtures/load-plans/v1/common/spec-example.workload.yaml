@@ -1,0 +1,11 @@
+schema: 1
+journey: { module: tests/shared/search.ts, export: searchCatalogue }
+cohort:
+  kind: protocol
+  demand: users
+  stages:
+    - { name: Warm up, ramp: 20s, from: 0, to: 4 }
+    - { name: Hold, hold: 60s, users: 4 }
+    - { name: Wind down, ramp: 20s, from: 4, to: 0 }
+  pacing: { every: 5s }
+on_reduced: refuse

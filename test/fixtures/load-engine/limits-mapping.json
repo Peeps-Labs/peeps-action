@@ -1,9 +1,10 @@
 {
   "constants": "src/load/engine-limits.ts ENGINE_LIMITS",
+  "plans": "paths are relative to test/fixtures/",
   "cases": [
     {
-      "name": "the hand-written plan with its limits",
-      "plan": "plan.json",
+      "name": "the §5.3 example with the golden limits",
+      "plan": "load-plans/v1/common/spec-example.plan.json",
       "limits": {
         "allowedOrigins": [
           "https://staging.example.com",
@@ -36,6 +37,80 @@
         "startSlackMs": 1000,
         "leaseMs": 45000,
         "absoluteEndMs": 250000
+      }
+    },
+    {
+      "name": "the starter with the golden limits",
+      "plan": "load-plans/v1/common/starter.plan.json",
+      "limits": {
+        "allowedOrigins": [
+          "https://staging.example.com",
+          "https://auth.staging.example.com"
+        ],
+        "maxUsers": 50,
+        "requestBudget": 1200,
+        "policyRevision": 2
+      },
+      "budgets": {
+        "checking": {
+          "users": 2,
+          "totalRequests": 40,
+          "ratePerSecond": 8,
+          "burst": 40,
+          "concurrency": 2,
+          "phaseDeadlineMs": 120000,
+          "turnDeadlineMs": 30000
+        },
+        "measurement": {
+          "users": 2,
+          "totalRequests": 560,
+          "ratePerSecond": 8,
+          "burst": 40,
+          "concurrency": 2,
+          "phaseDeadlineMs": 130000,
+          "turnDeadlineMs": 30000
+        },
+        "stopGraceMs": 30000,
+        "startSlackMs": 1000,
+        "leaseMs": 45000,
+        "absoluteEndMs": 250000
+      }
+    },
+    {
+      "name": "the monorepo case with the golden limits",
+      "plan": "load-plans/v1/common/monorepo.plan.json",
+      "limits": {
+        "allowedOrigins": [
+          "https://staging.example.com",
+          "https://auth.staging.example.com"
+        ],
+        "maxUsers": 50,
+        "requestBudget": 1200,
+        "policyRevision": 2
+      },
+      "budgets": {
+        "checking": {
+          "users": 5,
+          "totalRequests": 30,
+          "ratePerSecond": 8,
+          "burst": 30,
+          "concurrency": 5,
+          "phaseDeadlineMs": 120000,
+          "turnDeadlineMs": 30000
+        },
+        "measurement": {
+          "users": 5,
+          "totalRequests": 1140,
+          "ratePerSecond": 8,
+          "burst": 30,
+          "concurrency": 5,
+          "phaseDeadlineMs": 265000,
+          "turnDeadlineMs": 30000
+        },
+        "stopGraceMs": 30000,
+        "startSlackMs": 1000,
+        "leaseMs": 45000,
+        "absoluteEndMs": 385000
       }
     },
     {
@@ -116,7 +191,7 @@
     },
     {
       "name": "a budget above the ceiling: the ceiling is the measurement total",
-      "plan": "plan.json",
+      "plan": "load-plans/v1/common/spec-example.plan.json",
       "limits": {
         "allowedOrigins": [
           "https://staging.example.com",

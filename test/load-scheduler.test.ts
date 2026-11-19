@@ -10,7 +10,7 @@ import path from "node:path";
 
 import { Scheduler, scheduleStageStarts, stageAt, userEpochs, type ScheduleInput } from "../src/load/scheduler";
 
-const plan = JSON.parse(readFileSync(path.resolve(__dirname, "fixtures/load-engine/plan.json"), "utf8")) as {
+const plan = JSON.parse(readFileSync(path.resolve(__dirname, "fixtures/load-plans/v1/common/spec-example.plan.json"), "utf8")) as {
   cohort: ScheduleInput;
 };
 
@@ -47,7 +47,7 @@ function simulate(input: ScheduleInput, stepMs: number, workMs: (userId: number,
 }
 
 const cases: [string, ScheduleInput][] = [
-  ["the hand-written plan", plan.cohort],
+  ["the §5.3 example", plan.cohort],
   [
     "durations not divisible by pacing",
     { pacingEveryMs: 3000, stages: [
@@ -83,7 +83,7 @@ for (const [name, input] of cases) {
   });
 }
 
-test("the hand-written plan's starts are 6, 48 and 6", () => {
+test("the §5.3 example's starts are 6, 48 and 6", () => {
   assert.deepEqual(scheduleStageStarts(plan.cohort), [6, 48, 6]);
 });
 

@@ -45,11 +45,6 @@
     "perJourneyMax": 20,
     "ceiling": 1200
   },
-  "allowedRequests": [
-    {
-      "method": "POST",
-      "path": "/auth/token"
-    }
-  ],
+  "allowedRequests": [],
   "onReduced": "refuse"
 }
