@@ -798,8 +798,12 @@ access token Peeps was given (Maintainer).
   isn't available for this repository yet." before it loads your code, calls
   the network, asks for an OIDC token or starts a process. Every other mode is
   unchanged.
-- `dist/` gains `load.js` and `load-executor.js`, the load engine and the
-  process it runs a journey in. Nothing in this release starts them.
+- The refusal reads the mode the way each platform's dispatch does: on GitHub
+  the `mode` input, then `PEEPS_MODE`; on GitLab only `PEEPS_MODE`. The attach
+  steps keep their own selection, so a GitLab attach step whose job also sets
+  `PEEPS_MODE` stays an attach step.
+- The action's CI runs on Node 24, the Node the action runs on, and fails when
+  a build writes a `dist/` file nobody committed.
 - Targeted runs widen for a while: each evidence footprint records the action's
   version, and Peeps uses a footprint only from the same version. Footprints
   recorded by 1.16.x stop narrowing runs until a 1.17.0 run records new ones, so
@@ -1038,10 +1042,6 @@ moves `v1` back to it, so stop the workflow first:
 4. Check that `git ls-remote origin 'refs/tags/v1^{}'` names that commit.
 5. Fix forward as the next patch version (`release.sh` refuses an older one),
    then re-enable the workflow.
-
-**Third-party code.** `package.json`'s one runtime dependency is
-[Sucrase](https://github.com/alangpierce/sucrase) (MIT licence), bundled into `dist/load-executor.js` to compile TypeScript load
-journeys without the customer's toolchain (`docs/load-loader.md`).
 
 ## License
 
