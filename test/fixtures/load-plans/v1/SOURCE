@@ -1,7 +1,0 @@
-common/ is a byte-for-byte copy of peeps' plan corpus. Do not edit it here: a
-change of meaning is a new v2/ in peeps, copied again.
-
-repository: Peeps-Labs/peeps
-commit:     cdeebfcc4d4b4c1b048d4f148a7fc5d97f6920ec ("Load testing 1a: gate, plan protocol and workload compiler")
-path:       src/server/load-testing/protocol/__fixtures__/v1/common/
-root hash:  2909d040f280522a925100218d35375fca8f6528fb68a963deb94de092400b14 (sha256 of common/MANIFEST)

@@ -15,9 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The Node the action runs on (`action.yml`: node24). The load engine's
-      # loader uses `module.registerHooks`, so its tests must run on that Node,
-      # not whatever the runner image happens to ship.
+      # The Node the action runs on (`action.yml`: node24), so the tests run on
+      # that Node, not whatever the runner image happens to ship.
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -51,30 +50,8 @@ jobs:
         run: git diff --exit-code -- dist/
 
       # `git diff` sees only tracked files: a new bundle the build writes but
-      # nobody committed (dist/load.js, say) would pass it.
+      # nobody committed would pass it.
       - name: dist/ has no uncommitted bundle
         run: |
           status="$(git status --porcelain -- dist/)"
           if [ -n "$status" ]; then echo "$status"; exit 1; fi
-
-  # The load engine's executor runs the customer's journey with the customer's
-  # Playwright, inside whatever image their job uses. This runs the loader,
-  # V2 and isolation tests against the COMMITTED dist/load-executor.js in
-  # Playwright's stock image, as root in a container, with the fixtures inside
-  # the checked-out workspace (the same tests also run in `check` above, on the
-  # hosted runner).
-  load-stock-image:
-    runs-on: ubuntu-latest
-    container:
-      image: mcr.microsoft.com/playwright:v1.59.1-jammy
-    steps:
-      - uses: actions/checkout@v7
-      # The action runs on Node 24; the image's own Node is older.
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-      - run: npm ci
-      - run: node --version
-      - run: node --test --import tsx test/load-loader.test.ts test/load-v2.test.ts test/load-isolation.test.ts
-        env:
-          PEEPS_LOAD_STOCK_IMAGE: "1"

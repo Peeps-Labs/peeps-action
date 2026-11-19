@@ -59,10 +59,9 @@ async function main(): Promise<void> {
   // The attach steps keep their own selection, from before load testing: INPUT_MODE first,
   // on GitLab too, so a GitLab attach step with PEEPS_MODE=ci stays an attach step.
   const attach = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
-  // Load testing ships its engine (dist/load.js) before Peeps can grant a load run, so this
-  // mode refuses here: before the environment is read, Peeps or OIDC is asked anything,
-  // variables are exported, the framework is resolved or a browser probe spawns, and without
-  // loading any engine code (test/load-refusal.test.ts).
+  // Load testing isn't available yet, so this mode refuses here: before the environment is
+  // read, Peeps or OIDC is asked anything, variables are exported, the framework is resolved
+  // or a browser probe spawns (test/load-refusal.test.ts).
   if (requested === "load") {
     console.error("::error::Load testing isn't available for this repository yet.");
     process.exit(1);
