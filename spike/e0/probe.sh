@@ -4,7 +4,7 @@ row() { echo "ROW $1 $2"; }
 row exec_id "$(id -u):$(id -g)"
 cat /run/peeps/ws/package.json > /dev/null 2>&1 && row read_ws pass || row read_ws FAIL
 touch /run/peeps/ws/e0-write-probe 2>/dev/null && row write_ws_root allowed || row write_ws_root denied
-curl -s -m 3 "http://127.0.0.1:3128/via-relay" > /dev/null && row relay_positive pass || row relay_positive FAIL
+r=$(curl -sS -m 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:3128/via-relay" 2>&1); [ "$r" = 200 ] && row relay_positive pass || row relay_positive "FAIL [$r]"
 curl -s -m 3 "http://$SINK_ADDR/direct-tcp" > /dev/null && row direct_tcp FAIL || row direct_tcp pass
 getent hosts example.com > /dev/null && row dns FAIL || row dns pass
 python3 - "$SINK_ADDR" <<'PY'

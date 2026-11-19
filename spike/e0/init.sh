@@ -49,6 +49,7 @@ N=/run/peeps/node/bin/node
 
 case "$mode" in
   probe)
+    row sockdir "$(stat -c '%a:%U:%G' /run/peeps/sock /run/peeps/sock/proxy.sock 2>&1 | tr '\n' ' ')"
     drop 65533 $N /run/peeps/spike/relay.js &
     sleep 1
     cd /run/peeps/ws && drop 65534 bash /run/peeps/spike/probe.sh
