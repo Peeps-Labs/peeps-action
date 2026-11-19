@@ -56,6 +56,9 @@ async function main(): Promise<void> {
   // The attach steps sit in the customer's own workflow, around their own test step, so
   // nothing in them may fail the job: not even an environment Peeps cannot read.
   const requested = resolveMode(process.env).trim();
+  // The attach steps keep their own selection, from before load testing: INPUT_MODE first,
+  // on GitLab too, so a GitLab attach step with PEEPS_MODE=ci stays an attach step.
+  const attach = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
   // Load testing ships its engine (dist/load.js) before Peeps can grant a load run, so this
   // mode refuses here: before the environment is read, Peeps or OIDC is asked anything,
   // variables are exported, the framework is resolved or a browser probe spawns, and without
@@ -64,12 +67,12 @@ async function main(): Promise<void> {
     console.error("::error::Load testing isn't available for this repository yet.");
     process.exit(1);
   }
-  if (requested === "attach-start" || requested === "attach-finish") {
+  if (attach === "attach-start" || attach === "attach-finish") {
     const deadline = Number(process.env.PEEPS_ATTACH_DEADLINE_MS) ||
-      (requested === "attach-start" ? ATTACH_START_DEADLINE_MS : ATTACH_FINISH_DEADLINE_MS);
+      (attach === "attach-start" ? ATTACH_START_DEADLINE_MS : ATTACH_FINISH_DEADLINE_MS);
     await runAttachStep(async () => {
       const env = readRunnerEnv();
-      if (requested === "attach-start") await runAttachStart(env);
+      if (attach === "attach-start") await runAttachStart(env);
       else await runAttachFinish(env, new PeepsClient(env));
     }, deadline);
     // A request Peeps never answered would otherwise hold the step open.
