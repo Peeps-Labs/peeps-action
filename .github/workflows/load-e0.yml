@@ -1,0 +1,28 @@
+# Throwaway spike for the load engine (plan v3 §9). Deleted before the engine's E4 PR merges.
+name: load E0 spike
+on:
+  push:
+    branches: [claude/project-thread-v5n0g4]
+    paths: ["spike/e0/**", ".github/workflows/load-e0.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  e0:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: bash spike/e0/run.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e0-${{ matrix.os }}
+          path: /tmp/e0/out

