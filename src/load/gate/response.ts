@@ -69,10 +69,8 @@ export class ResponseReader {
       const m = this.mode;
       if (m.kind === "head") {
         const at = this.buf.indexOf(HEAD_END);
-        if (at < 0) {
-          if (this.buf.length > MAX_HEAD_BYTES) throw new Error("response head too large");
-          return;
-        }
+        if (at > MAX_HEAD_BYTES || (at < 0 && this.buf.length > MAX_HEAD_BYTES)) throw new Error("response head too large");
+        if (at < 0) return;
         const head = parseHead(this.buf.subarray(0, at).toString("latin1"));
         this.buf = this.buf.subarray(at + 4);
         if (head.status === 101) throw new Error("upstream switched protocols");
@@ -167,12 +165,13 @@ function bodyMode(method: string, head: ResponseHead): Mode {
   if (method === "HEAD" || head.status === 204 || head.status === 304) return { kind: "done" };
   const values = (name: string) => head.headers.filter(([n]) => n.toLowerCase() === name).map(([, v]) => v);
   const te = values("transfer-encoding");
+  const cl = values("content-length");
+  if (te.length && cl.length) throw new Error("ambiguous framing: both transfer-encoding and content-length");
   if (te.length) {
     const codings = te.join(",").split(",").map((s) => s.trim().toLowerCase());
     if (codings.length !== 1 || codings[0] !== "chunked") throw new Error("unsupported transfer-coding");
     return { kind: "chunk-size" };
   }
-  const cl = values("content-length");
   if (cl.length) {
     if (new Set(cl).size !== 1 || !/^[0-9]{1,15}$/.test(cl[0]!)) throw new Error("bad content-length");
     const n = Number(cl[0]);

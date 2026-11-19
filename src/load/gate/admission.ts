@@ -82,10 +82,19 @@ export type DenyReason =
   | "users"
   | "rate";
 
-export type Admit =
-  | { ok: true; seq: number }
-  /** `final`: waiting cannot change the answer for this turn. `retryInMs` only for `rate`. */
-  | { ok: false; reason: DenyReason; final: boolean; retryInMs?: number };
+/** `final`: waiting cannot change the answer for this turn. `retryInMs` only for `rate`. */
+export type Denied = { ok: false; reason: DenyReason; final: boolean; retryInMs?: number };
+
+export type Admit = { ok: true; seq: number } | Denied;
+
+/** Requests already on their way to `admit` (dials in progress): for the run, this turn and this origin. */
+export interface Ahead {
+  run: number;
+  turn: number;
+  origin: number;
+}
+
+const NONE_AHEAD: Ahead = { run: 0, turn: 0, origin: 0 };
 
 export type OpenTurn = { ok: true; turn: number } | { ok: false; reason: "stopped" | "draining" | "run_end" | "users" | "slot_busy" };
 
@@ -226,7 +235,33 @@ export class Gate {
     if (state.outstanding === 0) this.turns.delete(turn);
   }
 
+  /**
+   * Whether `admit` could let this request through now, if the `ahead` requests already on
+   * their way to `admit` (dials in progress) went first. Debits nothing. The proxy asks before
+   * it dials, so no TCP or TLS reaches a target for a request the gate would refuse: dials
+   * started are bounded by the same lease, totals, ceiling, outstanding cap and rate.
+   */
+  precheck(r: PreparedRequest, t: Clocks, ahead: Ahead): Admit {
+    const d = this.check(r, t, ahead);
+    return "turn" in d ? { ok: true, seq: this.seq + ahead.run + 1 } : d;
+  }
+
   admit(r: PreparedRequest, t: Clocks): Admit {
+    const d = this.check(r, t, NONE_AHEAD);
+    if (!("turn" in d)) return d;
+    const turn = d.turn;
+    this.milliTokens -= MILLI;
+    const seq = ++this.seq;
+    this.phaseCount += 1;
+    this.perOrigin.set(r.origin, (this.perOrigin.get(r.origin) ?? 0) + 1);
+    this.undelivered.add(seq);
+    this.exchanges.set(seq, r.turn);
+    turn.outstanding += 1;
+    return { ok: true, seq };
+  }
+
+  /** Every limit, in one order, for `admit` and `precheck`. Mutates only the expired latch and the bucket's refill time. */
+  private check(r: PreparedRequest, t: Clocks, ahead: Ahead): { turn: Turn } | Denied {
     if (this.stoppedFlag) return deny("stopped", true);
     if (!(t.monoMs < this.limits.runEndMono)) return deny("run_end", true);
     if (!(t.monoMs < this.lease.monoUntil && t.wallMs < this.lease.wallUntil)) {
@@ -242,26 +277,21 @@ export class Gate {
     const originTotal = Object.hasOwn(this.limits.origins, r.origin) ? this.limits.origins[r.origin] : undefined;
     if (originTotal === undefined) return deny("origin", true);
     if (!this.methods.has(r.method)) return deny("method", true);
-    if (!(this.seq < this.limits.runTotal)) return deny("total", true);
-    if (!(this.phaseCount < this.phase.total)) return deny("phase_total", false);
-    if (!((this.perOrigin.get(r.origin) ?? 0) < originTotal)) return deny("origin_total", true);
-    if (!(this.seq < this.lease.ceiling)) return deny("ceiling", false);
-    if (!(turn.outstanding < this.limits.maxOutstandingPerTurn)) return deny("outstanding", false);
+    const seq = this.seq + ahead.run;
+    if (!(seq < this.limits.runTotal)) return deny("total", true);
+    if (!(this.phaseCount + ahead.run < this.phase.total)) return deny("phase_total", false);
+    if (!((this.perOrigin.get(r.origin) ?? 0) + ahead.origin < originTotal)) return deny("origin_total", true);
+    if (!(seq < this.lease.ceiling)) return deny("ceiling", false);
+    if (!(turn.outstanding + ahead.turn < this.limits.maxOutstandingPerTurn)) return deny("outstanding", false);
     // A phase that lowered the users below those live sends nothing until enough turns close.
     if (!(this.liveTurns <= this.phase.maxUsers)) return deny("users", false);
     this.refill(t.monoMs);
-    if (this.milliTokens < MILLI) {
-      const retryInMs = Math.ceil((MILLI - this.milliTokens) / this.phase.ratePerSecond);
+    const need = (ahead.run + 1) * MILLI;
+    if (this.milliTokens < need) {
+      const retryInMs = Math.ceil((need - this.milliTokens) / this.phase.ratePerSecond);
       return { ok: false, reason: "rate", final: false, retryInMs };
     }
-    this.milliTokens -= MILLI;
-    const seq = ++this.seq;
-    this.phaseCount += 1;
-    this.perOrigin.set(r.origin, (this.perOrigin.get(r.origin) ?? 0) + 1);
-    this.undelivered.add(seq);
-    this.exchanges.set(seq, r.turn);
-    turn.outstanding += 1;
-    return { ok: true, seq };
+    return { turn };
   }
 
   /**
@@ -306,6 +336,6 @@ function checkPhase(caps: PhaseCaps): void {
   if (!(Number.isSafeInteger(caps.total) && caps.total >= 0)) throw new Error("gate: total must be a whole number ≥ 0");
 }
 
-function deny(reason: DenyReason, final: boolean): Admit {
+function deny(reason: DenyReason, final: boolean): Denied {
   return { ok: false, reason, final };
 }

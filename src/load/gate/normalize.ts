@@ -11,6 +11,8 @@
 import { isApprovedHostName } from "./ca";
 
 export const MAX_BODY_BYTES = 1024 * 1024;
+export const MAX_TARGET_BYTES = 2048;
+export const MAX_HEADERS = 100;
 
 export const READ_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "OPTIONS"]);
 const WRITE_METHODS: ReadonlySet<string> = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -39,6 +41,12 @@ const PASSED_HEADERS: ReadonlySet<string> = new Set([
 /** Headers whose presence means the request cannot be rebuilt one way only. */
 const REFUSED_HEADERS: ReadonlySet<string> = new Set(["transfer-encoding", "te", "trailer", "upgrade", "expect", "http2-settings"]);
 
+/**
+ * Headers that let a framework route to another method or path than the one the gate checked.
+ * Never passed, even if a policy names them.
+ */
+const OVERRIDE_HEADERS = /^(x-http-method(-override)?|x-method-override|x-original-(url|uri|method)|x-rewrite-url|x-forwarded(-.*)?|forwarded|x-real-ip|via)$/;
+
 /** Set by the gate itself, never copied. */
 const GATE_HEADERS: ReadonlySet<string> = new Set(["host", "content-length", "connection", "keep-alive", "proxy-connection", "proxy-authorization"]);
 
@@ -53,6 +61,18 @@ export interface RequestPolicy {
   allowedRequests: readonly AllowedRequest[];
   /** Extra header names (lower-case) the plan lets through. */
   headers?: readonly string[];
+}
+
+/** A policy's extra header names must be plain tokens that are not framing, gate or override headers. */
+export function validatePolicy(policy: RequestPolicy): void {
+  for (const raw of policy.headers ?? []) {
+    const h = raw.toLowerCase();
+    const folded = h.replaceAll("_", "-");
+    if (!/^[a-z0-9-]+$/.test(h) || REFUSED_HEADERS.has(folded) || GATE_HEADERS.has(folded) || OVERRIDE_HEADERS.test(folded)) {
+      throw new Error(`load gate: the policy may not name the header ${JSON.stringify(raw)}`);
+    }
+  }
+  for (const r of policy.allowedRequests) if (!unambiguousPath(r.path)) throw new Error(`load gate: ambiguous allowed path ${JSON.stringify(r.path)}`);
 }
 
 export interface Authority {
@@ -101,6 +121,7 @@ export type Refusal =
   | "host"
   | "length"
   | "too_large"
+  | "too_long"
   | "sni"
   | "origin"
   | "not_allowed";
@@ -117,12 +138,14 @@ export function normalize(req: ArrivedRequest, tunnel: Tunnel, policy: RequestPo
   if (!policy.allowedOrigins.includes(authority.origin)) return refuse("origin", 403);
   if (req.httpVersion !== "1.1") return refuse("version", 505);
   if (!READ_METHODS.has(req.method) && !WRITE_METHODS.has(req.method)) return refuse("method", 405);
+  if (req.target.length > MAX_TARGET_BYTES) return refuse("too_long", 414);
   if (!req.target.startsWith("/")) return refuse("form");
+  if (req.rawHeaders.length > 2 * MAX_HEADERS) return refuse("header", 431);
   const q = req.target.indexOf("?");
   const path = q < 0 ? req.target : req.target.slice(0, q);
   if (!unambiguousPath(path) || !/^[\x21-\x7e]*$/.test(req.target) || req.target.includes("#")) return refuse("path");
 
-  const extra = new Set((policy.headers ?? []).map((h) => h.toLowerCase()));
+  const extra = new Set((policy.headers ?? []).map((h) => h.toLowerCase()).filter((h) => !OVERRIDE_HEADERS.test(h.replaceAll("_", "-"))));
   const lines: string[] = [];
   let host: string | undefined;
   let length: string | undefined;
@@ -149,7 +172,11 @@ export function normalize(req: ArrivedRequest, tunnel: Tunnel, policy: RequestPo
   if (length !== undefined && (!/^(0|[1-9][0-9]*)$/.test(length) || Number(length) !== req.body.length)) return refuse("length");
   if (READ_METHODS.has(req.method) && req.body.length > 0) return refuse("length");
 
-  if (!READ_METHODS.has(req.method) && !policy.allowedRequests.some((r) => r.method === req.method && r.path === path)) return refuse("not_allowed", 403);
+  if (!READ_METHODS.has(req.method)) {
+    if (!policy.allowedRequests.some((r) => r.method === req.method && r.path === path)) return refuse("not_allowed", 403);
+    // Rails, Laravel and Symfony read a method override from the query.
+    if (q >= 0 && [...new URLSearchParams(req.target.slice(q + 1)).keys()].some((k) => k.toLowerCase() === "_method")) return refuse("not_allowed", 403);
+  }
 
   const hostLine = authority.port === 443 ? authority.host : `${authority.host}:${authority.port}`;
   const framing = WRITE_METHODS.has(req.method) || req.body.length > 0 ? [`content-length: ${req.body.length}`] : [];
@@ -163,8 +190,9 @@ function hostMatches(value: string, a: Authority): boolean {
 }
 
 /** No empty segment, no dot segment, nothing percent-encoded that a server might read as a separator or dot. */
-function unambiguousPath(path: string): boolean {
-  if (!path.startsWith("/") || path.includes("\\")) return false;
+export function unambiguousPath(path: string): boolean {
+  // `;` starts a matrix parameter that some routers drop before matching.
+  if (!path.startsWith("/") || path.includes("\\") || path.includes(";")) return false;
   if (/%(2f|5c|2e|00)/i.test(path)) return false;
   if (/%(?![0-9a-f]{2})/i.test(path)) return false;
   const segments = path.slice(1).split("/");

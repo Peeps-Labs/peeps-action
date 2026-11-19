@@ -4,8 +4,9 @@
  * `nameConstraints` (critical) permit exactly those DNS names and exclude every IP address, so
  * even a leaked key could not impersonate anything else to a verifier that honours them.
  *
- * Keys are made here and kept in memory: the CA certificate is the only thing ever written
- * (for `NODE_EXTRA_CA_CERTS`). Leaf certificates are made once per host, on first use.
+ * RFC 5280 constraints also permit descendants of an approved name, so the CA issues every leaf
+ * when it is made and its signing key is then dropped: nothing can be issued later. Keys stay in
+ * memory; the CA certificate is the only thing ever written (for `NODE_EXTRA_CA_CERTS`).
  *
  * Pure apart from key generation and randomness: the caller passes the time.
  */
@@ -50,7 +51,7 @@ export interface LeafCredentials {
 
 export interface RunCa {
   readonly certPem: string;
-  /** The leaf for an approved host, or undefined for any other name. */
+  /** The leaf issued for an approved host, or undefined for any other name. */
   leaf(host: string): LeafCredentials | undefined;
 }
 
@@ -58,9 +59,31 @@ export function createRunCa(options: RunCaOptions): RunCa {
   const hosts = [...new Set(options.hosts)];
   if (hosts.length === 0) throw new Error("ca: at least one approved host is required");
   for (const h of hosts) if (!isApprovedHostName(h)) throw new Error(`ca: not an approved host name: ${JSON.stringify(h)}`);
-  if (!Number.isFinite(options.nowMs) || !(options.validForMs > 0)) throw new Error("ca: nowMs and validForMs must be finite, validForMs > 0");
   const notBefore = options.nowMs - BACKDATE_MS;
   const notAfter = options.nowMs + options.validForMs;
+  if (!Number.isFinite(options.nowMs) || !(options.validForMs > 0) || !representable(notBefore) || !representable(notAfter)) throw new Error("ca: nowMs and validForMs must give a representable validity, validForMs > 0");
+  const ca = buildCa(hosts, notBefore, notAfter);
+  // Every leaf is issued now, and the CA's signing key goes out of scope with this call: nothing
+  // later in the run can issue another certificate, for a descendant name or anything else.
+  const leaves = new Map(hosts.map((host) => [host, issueLeaf({ host, issuer: ca.name, issuerKeyId: ca.keyId, signer: ca.key, notBefore, notAfter })] as const));
+  return { certPem: ca.certPem, leaf: (host) => leaves.get(host) };
+}
+
+/** Between 1950 and 9999, as X.509 times can say it. */
+function representable(ms: number): boolean {
+  return Number.isFinite(ms) && ms >= Date.UTC(1950, 0, 1) && ms < Date.UTC(10000, 0, 1);
+}
+
+export interface BuiltCa {
+  certPem: string;
+  name: Buffer;
+  keyId: Buffer;
+  /** The signing key. `createRunCa` drops it once the leaves are issued; tests use it to issue a leaf outside the constraints. */
+  key: KeyObject;
+}
+
+/** The CA certificate and its key. Exported for tests; production goes through `createRunCa`. */
+export function buildCa(hosts: readonly string[], notBefore: number, notAfter: number): BuiltCa {
   const ca = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const caSpki = ca.publicKey.export({ type: "spki", format: "der" });
   const caKeyId = keyId(caSpki);
@@ -79,30 +102,16 @@ export function createRunCa(options: RunCaOptions): RunCa {
       extension(OID.subjectKeyId, false, octets(caKeyId)),
     ],
   });
-  const certPem = pem(caDer);
-  const leaves = new Map<string, LeafCredentials>();
-  const approved = new Set(hosts);
-  return {
-    certPem,
-    leaf(host) {
-      if (!approved.has(host)) return undefined;
-      let leaf = leaves.get(host);
-      if (!leaf) {
-        leaf = issueLeaf({ host, issuer: caName, issuerKeyId: caKeyId, signer: ca.privateKey, notBefore, notAfter });
-        leaves.set(host, leaf);
-      }
-      return leaf;
-    },
-  };
+  return { certPem: pem(caDer), name: caName, keyId: caKeyId, key: ca.privateKey };
 }
 
-/** Exported for tests that need a leaf the CA would never issue (a name outside its constraints). */
+/** One leaf for `host`: empty subject, the name only in a critical SAN (RFC 5280 §4.2.1.6), so a long name fits. */
 export function issueLeaf(o: { host: string; issuer: Buffer; issuerKeyId: Buffer; signer: KeyObject; notBefore: number; notAfter: number }): LeafCredentials {
   const pair = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const spki = pair.publicKey.export({ type: "spki", format: "der" });
   const der = certificate({
     issuer: o.issuer,
-    subject: name(o.host),
+    subject: seq(),
     notBefore: o.notBefore,
     notAfter: o.notAfter,
     spki,
@@ -111,7 +120,7 @@ export function issueLeaf(o: { host: string; issuer: Buffer; issuerKeyId: Buffer
       extension(OID.basicConstraints, true, seq()),
       extension(OID.keyUsage, true, bits(Buffer.from([0x80]), 7)), // digitalSignature
       extension(OID.extKeyUsage, false, seq(oid(OID.serverAuth))),
-      extension(OID.subjectAltName, false, seq(implicit(2, Buffer.from(o.host, "ascii")))),
+      extension(OID.subjectAltName, true, seq(implicit(2, Buffer.from(o.host, "ascii")))),
       extension(OID.subjectKeyId, false, octets(keyId(spki))),
       extension(OID.authorityKeyId, false, seq(implicit(0, o.issuerKeyId))),
     ],

@@ -18,6 +18,8 @@ export interface Sink {
   port: number;
   caPem: string;
   arrivals: Arrival[];
+  /** TCP connections accepted, TLS handshakes completed, and socket error codes seen. */
+  stats: { connections: number; handshakes: number; socketErrors: string[] };
   close(): Promise<void>;
 }
 
@@ -44,11 +46,27 @@ export async function startSink(options: SinkOptions = {}): Promise<Sink> {
       res.end("ok");
     });
   });
+  const stats = { connections: 0, handshakes: 0, socketErrors: [] as string[] };
+  server.on("connection", (s: import("node:net").Socket) => {
+    stats.connections += 1;
+    s.on("error", (e: NodeJS.ErrnoException) => stats.socketErrors.push(e.code ?? e.message));
+  });
+  server.on("secureConnection", (s: import("node:tls").TLSSocket) => {
+    stats.handshakes += 1;
+    s.on("error", (e: NodeJS.ErrnoException) => stats.socketErrors.push(`tls:${e.code ?? e.message}`));
+  });
+  // After the handshake, the HTTP layer reports socket errors (a reset among them) here.
+  server.on("clientError", (e: NodeJS.ErrnoException, s: import("node:stream").Duplex) => {
+    stats.socketErrors.push(e.code ?? e.message);
+    s.destroy();
+  });
+  server.on("tlsClientError", () => undefined);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
     port: (server.address() as AddressInfo).port,
     caPem: ca.certPem,
     arrivals,
+    stats,
     close: () =>
       new Promise((resolve) => {
         server.closeAllConnections();
