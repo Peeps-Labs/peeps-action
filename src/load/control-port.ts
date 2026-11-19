@@ -18,6 +18,9 @@ export interface LeaseAnswer {
   /** The `seq` this answers. An answer for an older seq than one accepted is ignored. */
   seq: number;
   granted: boolean;
+  /** How long from the request's send time this grant lasts; the engine never takes more than
+   * its own lease, and a shorter grant is honoured. */
+  validForMs?: number;
   /** Set when someone asked the run to stop. */
   stop?: "graceful" | "now";
 }

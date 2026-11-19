@@ -23933,6 +23933,11 @@ function originalLocation(stack, root) {
   return null;
 }
 
+// src/load/shared-clock.ts
+function sharedNowMs() {
+  return Number(process.hrtime.bigint()) / 1e6;
+}
+
 // src/load/transport.ts
 var PERMIT_HEADER = "X-Peeps-Load-Permit";
 var LoadRefusal = class extends Error {
@@ -23948,91 +23953,165 @@ var TurnDeadline = class extends Error {
   }
 };
 var METHODS = { get: "GET", post: "POST", put: "PUT", patch: "PATCH", delete: "DELETE", head: "HEAD" };
+var VERBS = new Set(Object.values(METHODS));
+var ALLOWED_OPTIONS = /* @__PURE__ */ new Set(["data", "form", "multipart", "headers", "params", "timeout", "failOnStatusCode", "ignoreHTTPSErrors"]);
+var CHECKED_OPTIONS = /* @__PURE__ */ new Set(["method", "maxRetries", "maxRedirects"]);
+var FORBIDDEN_HEADERS = /* @__PURE__ */ new Set(["host", PERMIT_HEADER.toLowerCase()]);
+function facade(response) {
+  const r = response;
+  const call = (name) => (...args) => r[name].apply(response, args);
+  return {
+    status: call("status"),
+    statusText: call("statusText"),
+    ok: call("ok"),
+    url: call("url"),
+    headers: call("headers"),
+    headersArray: call("headersArray"),
+    body: call("body"),
+    text: call("text"),
+    json: call("json"),
+    // Disposed with the turn.
+    dispose: async () => void 0
+  };
+}
 var UserSession = class {
   constructor(playwright2, options) {
     this.playwright = playwright2;
     this.options = options;
   }
   context = null;
-  responses = [];
-  async real() {
-    this.context ??= await this.playwright.newContext({
+  turnStates = /* @__PURE__ */ new Map();
+  real() {
+    this.context ??= this.playwright.newContext({
       baseURL: this.options.baseURL,
       maxRedirects: 0
       // Deliberately no httpCredentials: a 401 Basic challenge is an answer, never a resend.
     });
     return this.context;
   }
+  stateOf(turn) {
+    let state = this.turnStates.get(turn.id);
+    if (!state) {
+      state = { outstanding: /* @__PURE__ */ new Set(), responses: [] };
+      this.turnStates.set(turn.id, state);
+    }
+    return state;
+  }
+  /** Checks a call and builds exactly what will be asked for and sent; throws a refusal. */
+  prepare(verb, url, options) {
+    if (typeof url !== "string") throw new LoadRefusal("requests take a URL string");
+    for (const key of Object.keys(options)) {
+      if (!ALLOWED_OPTIONS.has(key) && !CHECKED_OPTIONS.has(key)) throw new LoadRefusal(`the request option "${key}" is not supported in a load journey`);
+    }
+    if (options.maxRetries !== void 0 && options.maxRetries !== 0) throw new LoadRefusal("retries are not allowed in a load journey");
+    if (options.maxRedirects !== void 0 && options.maxRedirects !== 0) throw new LoadRefusal("redirects are not followed in a load journey");
+    if (!VERBS.has(verb)) throw new LoadRefusal(`the method ${verb} is not supported in a load journey`);
+    let target;
+    try {
+      target = new URL(url, this.options.baseURL);
+    } catch {
+      throw new LoadRefusal(`not a URL: ${url}`);
+    }
+    if (target.username || target.password) throw new LoadRefusal("a URL may not carry credentials");
+    if (options.params !== void 0) {
+      const params = options.params;
+      if (typeof params === "string") for (const [k, v] of new URLSearchParams(params)) target.searchParams.append(k, v);
+      else if (params && typeof params === "object") {
+        for (const [k, v] of Object.entries(params)) target.searchParams.append(k, String(v));
+      } else throw new LoadRefusal("params must be an object or a string");
+    }
+    const headers = {};
+    if (options.headers !== void 0) {
+      if (!options.headers || typeof options.headers !== "object") throw new LoadRefusal("headers must be an object");
+      for (const [k, v] of Object.entries(options.headers)) {
+        if (FORBIDDEN_HEADERS.has(k.toLowerCase())) throw new LoadRefusal(`the header ${k} cannot be set in a load journey`);
+        headers[k] = String(v);
+      }
+    }
+    const forward = {};
+    for (const key of ALLOWED_OPTIONS) if (key !== "params" && key !== "headers" && options[key] !== void 0) forward[key] = options[key];
+    forward.headers = headers;
+    return { absolute: target.href, forward };
+  }
   /** The context the journey gets for one turn. */
   guarded(turn) {
+    const state = this.stateOf(turn);
     const send2 = async (method, url, options = {}) => {
       if (turn.ended) throw new LoadRefusal("this turn has ended");
-      if (typeof url !== "string") throw new LoadRefusal("requests take a URL string");
-      if (options.maxRetries !== void 0 && options.maxRetries !== 0) throw new LoadRefusal("retries are not allowed in a load journey");
-      if (options.maxRedirects !== void 0 && options.maxRedirects !== 0) throw new LoadRefusal("redirects are not followed in a load journey");
-      const verb = String(options.method ?? method).toUpperCase();
-      let absolute;
+      if (options === null || typeof options !== "object") throw new LoadRefusal("request options must be an object");
+      const verb = String(method).toUpperCase();
+      const { absolute, forward } = this.prepare(verb, url, options);
+      const work = this.sendOnce(turn, state, verb, absolute, forward, options.timeout);
+      state.outstanding.add(work);
       try {
-        absolute = new URL(url, this.options.baseURL).href;
-      } catch {
-        throw new LoadRefusal(`not a URL: ${url}`);
-      }
-      const context = await this.real();
-      const permit = await this.options.ask({ turn: turn.id, method: verb, url: absolute });
-      const receivedAt = this.options.now();
-      const remaining = Math.floor(turn.deadlineAt - receivedAt);
-      if (turn.ended || remaining <= 0) {
-        this.options.done(permit.id);
-        throw new LoadRefusal("this turn has ended");
-      }
-      try {
-        if (this.options.now() - receivedAt > this.options.permitTtlMs) throw new LoadRefusal("the permit expired before the send");
-        const headers = { ...options.headers ?? {}, [PERMIT_HEADER]: permit.id };
-        const timeout = typeof options.timeout === "number" && options.timeout > 0 ? Math.min(options.timeout, remaining) : remaining;
-        let response;
-        try {
-          response = await context.fetch(absolute, {
-            ...options,
-            method: verb,
-            headers,
-            maxRetries: 0,
-            maxRedirects: 0,
-            timeout
-          });
-        } catch (error) {
-          if (this.options.now() >= turn.deadlineAt - 1) throw new TurnDeadline();
-          throw error;
-        }
-        this.responses.push(response);
-        return response;
+        return await work;
       } finally {
-        this.options.done(permit.id);
+        state.outstanding.delete(work);
       }
     };
     const api = {
-      fetch: (url, options) => send2("GET", url, options),
+      fetch: (url, options = {}) => {
+        const { method, ...rest } = options ?? {};
+        return send2(method === void 0 ? "GET" : String(method), url, rest);
+      },
       storageState: async (options) => (await this.real()).storageState(options),
       dispose: async () => {
         throw new LoadRefusal("a journey cannot dispose its request context");
       }
     };
     for (const [name, verb] of Object.entries(METHODS)) {
-      api[name] = (url, options) => send2(verb, url, { ...options, method: verb });
+      api[name] = async (url, options = {}) => {
+        if (options && typeof options === "object" && options.method !== void 0) throw new LoadRefusal(`${name}() takes no method option`);
+        return send2(verb, url, options);
+      };
     }
     return api;
   }
-  /** After a turn: release response bodies, keep cookies. */
-  async afterTurn() {
-    const responses = this.responses;
-    this.responses = [];
-    await Promise.allSettled(responses.map((r) => r.dispose()));
+  async sendOnce(turn, state, verb, absolute, forward, asked) {
+    const context = await this.real();
+    const permit = await this.options.ask({ turn: turn.id, method: verb, url: absolute });
+    try {
+      const now = this.options.now();
+      if (now >= permit.expiresAt || !this.options.usable(permit)) throw new LoadRefusal("the permit expired before the send");
+      const remaining = Math.floor(turn.deadlineAt - now);
+      if (turn.ended || remaining <= 0) throw new LoadRefusal("this turn has ended");
+      const timeout = typeof asked === "number" && asked > 0 ? Math.min(asked, remaining) : remaining;
+      let response;
+      try {
+        response = await context.fetch(absolute, {
+          ...forward,
+          method: verb,
+          headers: { ...forward.headers, [PERMIT_HEADER]: permit.id },
+          maxRetries: 0,
+          maxRedirects: 0,
+          timeout
+        });
+      } catch (error) {
+        if (this.options.now() >= turn.deadlineAt - 1) throw new TurnDeadline();
+        throw error;
+      }
+      state.responses.push(response);
+      return facade(response);
+    } finally {
+      this.options.done(permit.id);
+    }
+  }
+  /**
+   * After a turn: wait for the sends it left outstanding (each ends by the turn's deadline),
+   * then release its responses. Cookies stay.
+   */
+  async afterTurn(turn) {
+    const state = this.turnStates.get(turn.id);
+    if (!state) return;
+    while (state.outstanding.size > 0) await Promise.allSettled([...state.outstanding]);
+    this.turnStates.delete(turn.id);
+    await Promise.allSettled(state.responses.map((r) => r.dispose()));
   }
   /** After a timeout: drop the context (cancelling what is in flight); the next turn gets a new one. */
   async reset() {
     const context = this.context;
     this.context = null;
-    this.responses = [];
-    if (context) await context.dispose({ reason: "load: turn deadline" }).catch(() => void 0);
+    if (context) await context.then((c) => c.dispose({ reason: "load: turn deadline" })).catch(() => void 0);
   }
 };
 
@@ -24091,6 +24170,20 @@ function resolvePlaywright(dirs) {
   }
   throw new Error("Playwright was not found from the working directory or the journey's folder");
 }
+function unreadableNodeModules(dirs) {
+  for (const start of dirs) {
+    for (let dir = start; ; dir = import_node_path2.default.dirname(dir)) {
+      const candidate = import_node_path2.default.join(dir, "node_modules");
+      try {
+        (0, import_node_fs2.accessSync)(candidate, import_node_fs2.constants.R_OK | import_node_fs2.constants.X_OK);
+      } catch (error) {
+        if (error.code === "EACCES") return candidate;
+      }
+      if (import_node_path2.default.dirname(dir) === dir) break;
+    }
+  }
+  return null;
+}
 function hasPermitHeader(args) {
   for (const arg of args) {
     if (arg && typeof arg === "object" && "headers" in arg) {
@@ -24139,6 +24232,8 @@ var playwright = null;
 var lastHeard = import_node_perf_hooks.performance.now();
 var nextAsk = 0;
 var asks = /* @__PURE__ */ new Map();
+var generationSeen = 0;
+var minGeneration = 0;
 var sessions = /* @__PURE__ */ new Map();
 var turns = /* @__PURE__ */ new Map();
 function session(user) {
@@ -24146,8 +24241,8 @@ function session(user) {
   if (!s) {
     s = new UserSession(playwright, {
       baseURL: init.baseURL,
-      permitTtlMs: init.permitTtlMs,
-      now: () => import_node_perf_hooks.performance.now(),
+      now: sharedNowMs,
+      usable: (permit) => permit.generation >= minGeneration,
       ask: ({ turn, method, url }) => new Promise((resolve, reject) => {
         const req = ++nextAsk;
         asks.set(req, { resolve, reject });
@@ -24163,57 +24258,78 @@ function failureOf(error) {
   const e = error instanceof Error ? error : new Error(String(error));
   return { message: e.message.slice(0, MAX_MESSAGE), location: originalLocation(e.stack, init.repositoryRoot) };
 }
-async function runTurn(id, user, deadlineInMs) {
+async function runTurn(id, user, deadlineAt) {
   const startedAt = import_node_perf_hooks.performance.now();
-  const turn = { id, deadlineAt: startedAt + deadlineInMs, ended: false };
+  const turn = { id, deadlineAt, ended: false };
   turns.set(id, turn);
   const s = session(user);
   let settled = false;
-  const finish = (kind, extra = {}) => {
+  const finish = (kind2, extra2 = {}, durationMs = import_node_perf_hooks.performance.now() - startedAt) => {
     if (settled) return;
     settled = true;
     turn.ended = true;
     turns.delete(id);
-    send({ t: "outcome", turn: id, kind, durationUs: Math.round((import_node_perf_hooks.performance.now() - startedAt) * 1e3), ...extra });
+    send({ t: "outcome", turn: id, kind: kind2, durationUs: Math.round(durationMs * 1e3), ...extra2 });
   };
   const timer = setTimeout(() => {
-    finish("timeout");
+    turn.ended = true;
     void s.reset();
-  }, Math.max(0, deadlineInMs));
+    finish("timeout");
+  }, Math.max(0, deadlineAt - sharedNowMs()));
   send({ t: "started", turn: id, user, wallMs: Date.now() });
+  let kind = "success";
+  let extra = {};
   try {
     await journey(s.guarded(turn));
-    finish("success");
   } catch (error) {
-    if (error instanceof TurnDeadline) {
-      finish("timeout");
-      void s.reset();
-    } else finish("failure", failureOf(error));
-  } finally {
-    clearTimeout(timer);
-    await s.afterTurn();
+    if (error instanceof TurnDeadline) kind = "timeout";
+    else {
+      kind = "failure";
+      extra = failureOf(error);
+    }
   }
+  const duration = import_node_perf_hooks.performance.now() - startedAt;
+  turn.ended = true;
+  if (kind === "timeout") void s.reset();
+  await s.afterTurn(turn);
+  clearTimeout(timer);
+  finish(kind, extra, duration);
 }
 var lastCheck = import_node_perf_hooks.performance.now();
-function deadMan() {
+function checkPause() {
   if (!init) return;
   const now = import_node_perf_hooks.performance.now();
   const gap = now - lastCheck;
   lastCheck = now;
   if (gap > Math.max(500, init.deadManMs / 2)) {
     lastHeard = now;
-    return;
+    minGeneration = Math.max(minGeneration, generationSeen + 1);
   }
-  if (now - lastHeard > init.deadManMs) {
+}
+function deadMan() {
+  if (!init) return;
+  checkPause();
+  if (import_node_perf_hooks.performance.now() - lastHeard > init.deadManMs) {
     process.stderr.write("load executor: supervisor silent, stopping\n");
     process.exit(75);
   }
 }
+function noteGeneration(frame) {
+  const generation = Number(frame.generation);
+  if (Number.isFinite(generation)) generationSeen = Math.max(generationSeen, generation);
+}
+var ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+var ENV_FORBIDDEN = /^(?:NODE_|LD_|DYLD_|UV_|PEEPS_LOAD_)/;
 async function onFrame(frame) {
   lastHeard = import_node_perf_hooks.performance.now();
   switch (frame.t) {
     case "init": {
       init = frame;
+      for (const [key, value] of Object.entries(init.env ?? {})) {
+        if (!ENV_NAME.test(key) || ENV_FORBIDDEN.test(key) || typeof value !== "string") throw new FrameError(`environment variable ${key} refused`);
+        process.env[key] = value;
+      }
+      lastCheck = import_node_perf_hooks.performance.now();
       setInterval(deadMan, Math.max(10, Math.min(100, Math.floor(init.deadManMs / 4)))).unref();
       return;
     }
@@ -24232,7 +24348,9 @@ async function onFrame(frame) {
       try {
         found = resolvePlaywright([init.workingDirectory, import_node_path2.default.dirname(module2)]);
       } catch (error) {
-        send({ t: "fatal", code: "playwright", message: failureOf(error).message });
+        const closed = unreadableNodeModules([init.workingDirectory, import_node_path2.default.dirname(module2)]);
+        if (closed) send({ t: "fatal", code: "unreadable", message: `${closed} cannot be read` });
+        else send({ t: "fatal", code: "playwright", message: failureOf(error).message });
         return;
       }
       playwright = found.request;
@@ -24243,18 +24361,31 @@ async function onFrame(frame) {
         send({ t: "fatal", code: "journey", ...failureOf(error) });
         return;
       }
+      lastCheck = import_node_perf_hooks.performance.now();
+      lastHeard = lastCheck;
       send({ t: "ready", playwright: found.version, playwrightFrom: found.from });
       return;
     }
     case "hb":
+      noteGeneration(frame);
       return;
-    case "start":
-      void runTurn(String(frame.turn), Number(frame.user), Number(frame.deadlineInMs));
+    case "start": {
+      noteGeneration(frame);
+      const generation = Number(frame.generation);
+      const deadlineAt = Number(frame.deadlineAt);
+      const leaseEndsAt = Number(frame.leaseEndsAt);
+      if (!(generation >= minGeneration) || !(sharedNowMs() < Math.min(deadlineAt, leaseEndsAt))) {
+        send({ t: "outcome", turn: String(frame.turn), kind: "interrupted", message: "stale start", durationUs: 0 });
+        return;
+      }
+      void runTurn(String(frame.turn), Number(frame.user), deadlineAt);
       return;
+    }
     case "permit": {
+      noteGeneration(frame);
       const ask = asks.get(Number(frame.req));
       asks.delete(Number(frame.req));
-      ask?.resolve({ id: String(frame.id) });
+      ask?.resolve({ id: String(frame.id), expiresAt: Number(frame.expiresAt), generation: Number(frame.generation) });
       return;
     }
     case "deny": {
@@ -24289,6 +24420,7 @@ process.stdin.on("data", (chunk) => {
 `);
     process.exit(76);
   }
+  checkPause();
   for (const frame of frames) {
     onFrame(frame).catch((error) => {
       process.stderr.write(`load executor: ${String(error)}

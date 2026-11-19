@@ -26,11 +26,13 @@ import { QualifiedClock, type ClockBounds, type ClockSources } from "./clock";
 import { spawnContained, type ContainedProcess, type ContainmentLevel } from "./containment";
 import type { ControlPort, LeaseAnswer, Marker, MarkerKind, Phase } from "./control-port";
 import { ENGINE_LIMITS, engineBudgets, type EngineBudgets, type EngineConstants } from "./engine-limits";
+import { Lease } from "./lease";
 import { encodeFrame, FrameError, FrameReader, type Frame } from "./frames";
 import type { PlanInput } from "./plan-input";
 import { checkRequest } from "./policy";
 import { Scheduler } from "./scheduler";
 import { histogramOf, mergeHistograms, percentile, type Histogram } from "./timing";
+import { sharedNowMs } from "./shared-clock";
 
 export interface EngineOptions {
   /** The checked-out repository: the journey module is relative to it. */
@@ -49,7 +51,7 @@ export interface EngineOptions {
   heartbeatMs?: number;
   /** How long the executor waits for the supervisor before it ends all traffic itself. */
   deadManMs?: number;
-  /** How long after a permit the send must begin. */
+  /** The longest a permit lasts (it also ends with the turn and the lease). */
   permitTtlMs?: number;
   clockBounds?: ClockBounds;
   clockSources?: ClockSources;
@@ -70,10 +72,10 @@ export interface EngineOptions {
 
 export type EngineEvent =
   | { type: "started"; turn: string; user: number; phase: Phase; wallMs: number }
-  | { type: "permit"; id: string; turn: string; wallMs: number }
+  | { type: "permit"; id: string; turn: string; method: string; url: string; generation: number; wallMs: number }
   | { type: "outcome"; turn: string; kind: Outcome; phase: Phase; message?: string; location?: string | null }
   | { type: "marker"; marker: Marker; wallMs: number }
-  | { type: "renewal"; seq: number; accepted: boolean; wallMs: number }
+  | { type: "renewal"; seq: number; accepted: boolean; reason?: string; generation: number; wallMs: number }
   | { type: "bypass"; kind: string; url: string }
   | { type: "executor"; pid: number | null; hostPid: number; containment: ContainmentLevel }
   | { type: "log"; line: string };
@@ -114,6 +116,9 @@ export interface EngineResult {
 const MAX_RENEWALS_IN_FLIGHT = 3;
 
 const ALLOWED_ENV = ["PATH", "LANG", "LC_ALL", "TZ"];
+/** What the journey's environment may name: no loader, preload or runtime switches. */
+const JOURNEY_ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+const JOURNEY_ENV_FORBIDDEN = /^(?:NODE_|LD_|DYLD_|UV_|PEEPS_LOAD_)/;
 
 interface ActiveTurn {
   id: string;
@@ -153,15 +158,15 @@ export class Supervisor {
   private isolation: EngineResult["isolation"] = { uid: null, level: "limited", limitedBecause: "not started" };
   private playwrightVersion: string | null = null;
 
-  private leaseUntil = Number.NEGATIVE_INFINITY;
+  private readonly lease: Lease;
   private renewSeq = 0;
-  private lastAcceptedSeq = 0;
   /** Renewals asked and not yet answered. A few may overlap, so one lost answer doesn't stall
    * the lease; their answers can then arrive out of order, and only a newer seq counts. */
   private renewalsInFlight = 0;
   private lastRenewSentAt = Number.NEGATIVE_INFINITY;
-  private leaseLostMarked = false;
   private fenceMarked = false;
+  /** The executor was told to load the journey. */
+  private went = false;
 
   private phase: Phase | "starting" | "done" = "starting";
   private gate: PhaseGate | null = null;
@@ -209,6 +214,7 @@ export class Supervisor {
     this.heartbeatMs = options.heartbeatMs ?? Math.max(10, Math.min(250, Math.floor((options.deadManMs ?? this.budgets.leaseMs) / 4)));
     this.killGraceMs = options.killGraceMs ?? 2_000;
     this.maxRenewalAgeMs = options.maxRenewalAgeMs ?? Math.floor(this.budgets.leaseMs / 2);
+    this.lease = new Lease({ leaseMs: this.budgets.leaseMs, maxAgeMs: this.maxRenewalAgeMs });
     this.scheduler = new Scheduler(input.plan.cohort, this.budgets.startSlackMs);
     this.accounting = new Accounting(options.intervalMs ?? 10_000);
     this.checkingAccounting = new Accounting(options.intervalMs ?? 10_000);
@@ -240,26 +246,48 @@ export class Supervisor {
   // ---------------------------------------------------------------- start up
 
   async start(): Promise<void> {
+    // The lease first: no customer code is loaded before Peeps has granted the run.
+    this.renew();
+    this.timer = setInterval(() => this.tick(), this.tickMs);
     try {
       await this.spawnExecutor(this.options.dropPrivileges ?? true);
     } catch (error) {
-      this.status = "didnt_start";
-      this.reason = error instanceof Error ? error.message : String(error);
-      await this.finish(false);
-      return;
+      if (this.finishing) return;
+      if (this.stopMode === null) {
+        this.status = "didnt_start";
+        this.reason = error instanceof Error ? error.message : String(error);
+      }
+      await this.finish(true);
     }
-    this.renew();
-    this.timer = setInterval(() => this.tick(), this.tickMs);
+  }
+
+  /** Resolves once the lease is held and nothing stops or fences the run; rejects otherwise. */
+  private waitForLease(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        if (this.finishing || this.stopMode !== null) return reject(new Error("stopped before the journey was loaded"));
+        const now = this.observe();
+        if (this.lease.held(now) && !this.clock.fenced) return resolve();
+        if (now > this.budgets.leaseMs) return reject(new Error("no lease"));
+        setTimeout(check, this.tickMs);
+      };
+      check();
+    });
   }
 
   private async spawnExecutor(drop: boolean): Promise<void> {
     const executor = this.options.executorPath ?? path.join(__dirname, "load-executor.js");
+    // The process starts with a minimal environment: nothing Node reads at startup (no
+    // NODE_OPTIONS), nothing the journey is given. The journey's variables go in the init
+    // frame, set only after the uid drop, and never on a command line (sudo's included).
     const env: Record<string, string> = {};
     for (const key of ALLOWED_ENV) if (process.env[key]) env[key] = process.env[key]!;
     env.HOME = tmpdir();
     const baseURL = this.options.baseURL ?? this.input.limits.allowedOrigins[0]!;
-    env.BASE_URL = baseURL;
-    Object.assign(env, this.options.executorEnv ?? {});
+    const journeyEnv: Record<string, string> = { ...(this.options.executorEnv ?? {}), BASE_URL: baseURL };
+    for (const key of Object.keys(journeyEnv)) {
+      if (!JOURNEY_ENV_NAME.test(key) || JOURNEY_ENV_FORBIDDEN.test(key)) throw new Error(`the journey's environment may not set ${key}`);
+    }
     this.contained = spawnContained(
       { command: process.execPath, args: [executor], env: { ...env, ...(drop ? { PEEPS_LOAD_DROP_UID: "65534" } : {}) }, cwd: "/" },
       { prefer: this.options.containment ?? "auto", name: this.runId },
@@ -288,10 +316,12 @@ export class Supervisor {
       journey: this.input.plan.journey,
       baseURL,
       deadManMs: this.options.deadManMs ?? this.budgets.leaseMs,
-      permitTtlMs: this.options.permitTtlMs ?? 1_000,
+      env: journeyEnv,
     });
-    // Enclosed before any customer code can run.
+    // Enclosed before any customer code can run, and only once the lease is held.
     this.contained.enclose();
+    await this.waitForLease();
+    this.went = true;
     this.sendToExecutor({ t: "go" });
     const ready = await this.expect("ready", 60_000);
     if (ready.t === "fatal") {
@@ -337,7 +367,18 @@ export class Supervisor {
 
   // ---------------------------------------------------------------- executor messages
 
+  /**
+   * What the executor says is the journey's word too: the journey shares its process and can
+   * write frames to fd 1 itself. A forged `done` frees a concurrency slot early, a forged
+   * `outcome` falsifies results, and a raw `node:http` send that sets its own permit header is
+   * not reported as a bypass. So concurrency, outcomes and the bypass counters are diagnostic
+   * here, not enforced; what does hold against a hostile journey is the total, the rate and
+   * the policy, since every permit is issued here. PR 3's host fence counts concurrency itself.
+   */
   private onExecutorBytes(chunk: Buffer): void {
+    // The clock is sampled before anything the executor says is admitted: a pause that the
+    // timer has not seen yet still fences what is answered now.
+    this.observe();
     let frames: Frame[];
     try {
       frames = this.reader.push(chunk);
@@ -397,14 +438,16 @@ export class Supervisor {
     if (!turn) return;
     this.turns.delete(id);
     this.busy.delete(turn.user);
-    const now = this.clock.nowMs;
+    const now = this.observe();
     const message = typeof frame.message === "string" ? frame.message : undefined;
     const location = typeof frame.location === "string" ? frame.location : null;
     this.emit({ type: "outcome", turn: id, kind, phase: turn.phase, ...(message ? { message, location } : {}) });
     if (turn.phase === "checking") {
+      // Judged against a fresh clock: a success read after its deadline is a timeout.
+      if (kind !== "interrupted" && now >= turn.deadlineAt) kind = "timeout";
       this.checkingAccounting.outcome(id, kind, now - this.phaseStart);
       if (kind === "success") this.checkingResult.success += 1;
-      else if (kind === "timeout") this.checkingResult.timeout += 1;
+      else if (kind === "timeout" || kind === "interrupted") this.checkingResult.timeout += 1;
       else {
         this.checkingResult.failure += 1;
         if (this.checkingResult.failures.length < 10) this.checkingResult.failures.push({ message: message ?? kind, location });
@@ -437,29 +480,57 @@ export class Supervisor {
     this.port
       .renewLease({ seq, sentAtMs })
       .then((answer) => this.onLease(seq, sentAtMs, answer))
-      .catch(() => this.emit({ type: "renewal", seq, accepted: false, wallMs: Date.now() }))
+      .catch(() => this.emit({ type: "renewal", seq, accepted: false, reason: "error", generation: this.lease.generation, wallMs: Date.now() }))
       .finally(() => {
         this.renewalsInFlight -= 1;
       });
   }
 
   private onLease(seq: number, sentAtMs: number, answer: LeaseAnswer): void {
-    this.clock.tick();
-    const age = this.clock.nowMs - sentAtMs;
-    const accepted =
-      answer.seq === seq && seq > this.lastAcceptedSeq && answer.granted && age <= this.maxRenewalAgeMs && !this.leaseLostMarked;
-    this.emit({ type: "renewal", seq, accepted, wallMs: Date.now() });
-    if (answer.stop && answer.seq === seq && seq > this.lastAcceptedSeq) this.stop(answer.stop);
-    if (!accepted) return;
-    this.lastAcceptedSeq = seq;
-    // From the request's send time, never the answer's arrival.
-    this.leaseUntil = Math.max(this.leaseUntil, sentAtMs + this.budgets.leaseMs);
+    const now = this.observe();
+    const verdict = this.lease.answer(seq, sentAtMs, answer, now);
+    this.emit({ type: "renewal", seq, accepted: verdict.accepted, ...(verdict.reason ? { reason: verdict.reason } : {}), generation: this.lease.generation, wallMs: Date.now() });
+    if (verdict.lost) this.loseLease(now);
+    if (answer.stop && answer.seq === seq && !this.lease.lost) this.stop(answer.stop);
+    if (!verdict.accepted) return;
     if (this.clock.fenced) {
       if (this.clock.renewed(sentAtMs)) {
         this.fenceMarked = false;
         this.marker("resume_cleared");
       }
     }
+  }
+
+  /**
+   * Samples the clock (raising a fence on a gap) and checks the lease against it. Called by
+   * the timer and before anything the executor or the port says is admitted.
+   */
+  private observe(): number {
+    if (this.finishing) return this.clock.nowMs;
+    const before = this.clock.fenced;
+    const now = this.clock.tick();
+    if (this.clock.fenced && (!before || !this.fenceMarked)) {
+      this.fenceMarked = true;
+      this.marker("resume_fence", this.clock.fenceReason ?? undefined);
+    }
+    if (this.lease.check(now)) this.loseLease(now);
+    return now;
+  }
+
+  /** Lease lost: no start or permit from its end; drain for the grace, then the kill. */
+  private loseLease(now: number): void {
+    if (this.stopMode === "now" || this.finishing) return;
+    this.stopMode = "lease";
+    this.status = "lease_lost";
+    this.reason = "the lease was not renewed";
+    this.drainUntil = now + this.budgets.stopGraceMs;
+    this.marker("lease_lost");
+    this.marker("starts_fenced");
+  }
+
+  /** An instant on the engine's clock, on the shared monotonic clock the executor reads. */
+  private shared(engineMs: number): number {
+    return sharedNowMs() + (engineMs - this.clock.nowMs);
   }
 
   // ---------------------------------------------------------------- stopping
@@ -502,7 +573,7 @@ export class Supervisor {
   // ---------------------------------------------------------------- the loop
 
   private permitted(now: number): boolean {
-    return !this.clock.fenced && now < this.leaseUntil && this.stopMode !== "now" && this.stopMode !== "lease" && !this.executorExited;
+    return !this.clock.fenced && this.lease.held(now) && this.stopMode !== "now" && this.stopMode !== "lease" && !this.executorExited;
   }
 
   private canStart(now: number): boolean {
@@ -511,18 +582,26 @@ export class Supervisor {
 
   private startTurn(user: number, phase: Phase, now: number): ActiveTurn {
     const gate = this.gate!;
-    const deadlineIn = Math.max(0, Math.min(this.budgets[phase].turnDeadlineMs, gate.phaseEndMs - now));
+    // The gate counts from the phase's start; `now` from the engine's.
+    const deadlineIn = Math.max(0, Math.min(this.budgets[phase].turnDeadlineMs, gate.phaseEndMs - (now - this.phaseStart)));
     const id = `${phase === "checking" ? "c" : "m"}${++this.turnSeq}`;
     const turn: ActiveTurn = { id, user, phase, startAt: now, deadlineAt: now + deadlineIn, sends: 0 };
     this.turns.set(id, turn);
     this.busy.add(user);
-    this.sendToExecutor({ t: "start", turn: id, user, deadlineInMs: deadlineIn });
+    this.sendToExecutor({
+      t: "start",
+      turn: id,
+      user,
+      deadlineAt: this.shared(turn.deadlineAt),
+      leaseEndsAt: this.shared(this.lease.until),
+      generation: this.lease.generation,
+    });
     return turn;
   }
 
   private answerAsks(): void {
     if (this.pending.length === 0) return;
-    const now = this.clock.nowMs;
+    const now = this.observe();
     const still: PendingAsk[] = [];
     for (const ask of this.pending) {
       const deny = (reason: string) => {
@@ -540,7 +619,7 @@ export class Supervisor {
       }
       if (!this.permitted(now)) {
         // Fenced (resume fence, lease, stop now): wait while there is time, refuse after.
-        if (this.clock.fenced && this.stopMode === null && now < this.leaseUntil) still.push(ask);
+        if (this.clock.fenced && this.stopMode === null && this.lease.held(now)) still.push(ask);
         else deny(this.clock.fenced ? "fenced" : "lease");
         continue;
       }
@@ -568,8 +647,10 @@ export class Supervisor {
         const id = `${this.runId}.${turn.phase === "checking" ? "c" : "m"}.${answer.seq}`;
         this.issued.push(id);
         this.permitGates.set(id, gate);
-        this.emit({ type: "permit", id, turn: turn.id, wallMs: Date.now() });
-        this.sendToExecutor({ t: "permit", req: ask.req, id });
+        const generation = this.lease.generation;
+        this.emit({ type: "permit", id, turn: turn.id, method: ask.method, url: ask.url, generation, wallMs: Date.now() });
+        const expiresAt = Math.min(turn.deadlineAt, this.lease.until, now + (this.options.permitTtlMs ?? 1_000));
+        this.sendToExecutor({ t: "permit", req: ask.req, id, expiresAt: this.shared(expiresAt), generation });
       } else if (answer.final) deny(answer.reason);
       else still.push(ask);
     }
@@ -578,37 +659,31 @@ export class Supervisor {
 
   private tick(): void {
     if (this.finishing) return;
-    const before = this.clock.fenced;
-    const now = this.clock.tick();
-    if (this.clock.fenced && (!before || !this.fenceMarked)) {
-      this.fenceMarked = true;
-      this.marker("resume_fence", this.clock.fenceReason ?? undefined);
-    }
+    const now = this.observe();
+    if (this.finishing) return;
 
     // Renew every third of a lease, and at once after a fence (only a fresh one lifts it).
     if (now - this.lastRenewSentAt >= this.budgets.leaseMs / 3 || (this.clock.fenced && this.lastRenewSentAt < (this.clock.fencedAtMs ?? 0))) {
       this.renew();
     }
 
-    // Lease lost: no start or permit from lastRenewal + leaseMs; drain, then the kill.
-    if (this.phase !== "starting" && now >= this.leaseUntil && !this.leaseLostMarked && this.stopMode !== "now") {
-      this.leaseLostMarked = true;
-      this.stopMode = "lease";
-      this.status = "lease_lost";
-      this.reason = "the lease was not renewed";
-      this.drainUntil = now + this.budgets.stopGraceMs;
-      this.marker("lease_lost");
-      this.marker("starts_fenced");
-    }
-
     if (now - this.lastHeartbeat >= this.heartbeatMs) {
       this.lastHeartbeat = now;
-      this.sendToExecutor({ t: "hb" });
+      this.sendToExecutor({ t: "hb", generation: this.lease.generation });
+    }
+
+    // The run's absolute end holds whatever else is going on, a drain included.
+    if (now >= this.budgets.absoluteEndMs) {
+      if (this.stopMode === null) this.status = "stopped";
+      this.reason = "the run reached its absolute end";
+      void this.finish(true);
+      return;
     }
 
     if (this.phase === "starting") {
-      if (now < this.leaseUntil) this.beginChecking(now);
-      else if (now > this.budgets.leaseMs) this.failToStart("no lease");
+      // Nothing customer-run has started: a stop or a lost lease ends the run here.
+      if (this.stopMode !== null) void this.finish(true);
+      else if (this.went && this.playwrightVersion !== null && this.canStart(now)) this.beginChecking(now);
       return;
     }
 
@@ -631,7 +706,7 @@ export class Supervisor {
     const users = this.budgets.checking.users;
     this.phase = "checking";
     this.phaseStart = now;
-    this.gate = new PhaseGate(this.budgets.checking, 0, this.budgets.absoluteEndMs);
+    this.gate = new PhaseGate(this.budgets.checking, 0, this.budgets.absoluteEndMs - now);
     this.checkingResult.users = users;
     this.marker("phase_started", "checking");
     for (let user = 1; user <= users; user++) {
@@ -642,6 +717,15 @@ export class Supervisor {
 
   private tickChecking(now: number): void {
     const elapsed = now - this.phaseStart;
+    // The phase's deadline holds before any drain.
+    if (this.turns.size > 0 && elapsed >= this.budgets.checking.phaseDeadlineMs) {
+      // What is still out at Checking's deadline timed out.
+      for (const turn of [...this.turns.values()]) this.onOutcome(turn.id, "timeout", { t: "outcome" });
+      if (this.stopMode === null) this.status = "didnt_start";
+      this.reason = "checking timed out";
+      void this.finish(true);
+      return;
+    }
     if (this.stopMode !== null) {
       if (this.turns.size === 0 || now >= this.drainUntil) {
         this.status = this.stopMode === "lease" ? "lease_lost" : "stopped";
@@ -693,15 +777,17 @@ export class Supervisor {
     this.publish(planNow, false);
 
     const grace = this.budgets.stopGraceMs;
+    // The phase's end holds before any drain: a stop's grace never runs past it.
+    if (planNow >= this.input.plan.durationMs + grace) {
+      if (this.turns.size > 0) this.reason = "turns still running at the end of the grace";
+      void this.finish(this.turns.size > 0);
+      return;
+    }
     if (this.stopMode !== null) {
       if (this.turns.size === 0 || now >= this.drainUntil) void this.finish(this.turns.size > 0);
       return;
     }
     if (this.scheduler.finished(planNow) && this.turns.size === 0) void this.finish(false);
-    else if (planNow >= this.input.plan.durationMs + grace) {
-      this.reason = "turns still running at the end of the grace";
-      void this.finish(true);
-    }
   }
 
   private publish(planNow: number, force: boolean): void {
@@ -719,12 +805,6 @@ export class Supervisor {
     for (const cohort of this.accounting.sealCohorts(planNow, this.budgets.stopGraceMs, force)) {
       this.port.publishCohort({ ...cohort, phase: "measurement" }).catch(() => undefined);
     }
-  }
-
-  private failToStart(reason: string): void {
-    this.status = "didnt_start";
-    this.reason = reason;
-    void this.finish(true);
   }
 
   // ---------------------------------------------------------------- the end

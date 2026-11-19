@@ -13,6 +13,8 @@ export interface SinkRequest {
   path: string;
   permit: string | null;
   cookie: string | null;
+  /** The Host header: the authority the request was sent to. */
+  host: string | null;
   connection: number;
   arrivalMs: number;
   /** When the response finished, or the connection closed under it. */
@@ -74,6 +76,7 @@ export class LoadSink {
       path: url.pathname + url.search,
       permit: (req.headers["x-peeps-load-permit"] as string | undefined) ?? null,
       cookie: (req.headers.cookie as string | undefined) ?? null,
+      host: req.headers.host ?? null,
       connection: this.sockets.get(req.socket) ?? 0,
       arrivalMs: Date.now(),
       endMs: null,
@@ -152,6 +155,24 @@ export class LoadSink {
       used.add(r.permit);
       return false;
     });
+  }
+
+  /**
+   * Requests whose method, origin, path or query differ from what their permit approved:
+   * a valid permit attached to a send it was never given for.
+   */
+  mismatches(permits: Iterable<{ id: string; method: string; url: string }>): { request: SinkRequest; approved: string | null }[] {
+    const byId = new Map([...permits].map((p) => [p.id, p]));
+    const own = new URL(this.url);
+    const out: { request: SinkRequest; approved: string | null }[] = [];
+    for (const r of this.requests) {
+      const permit = r.permit ? byId.get(r.permit) : undefined;
+      if (!permit) continue;
+      const approved = new URL(permit.url);
+      const ok = permit.method === r.method && approved.host === r.host && approved.origin === own.origin && approved.pathname + approved.search === r.path;
+      if (!ok) out.push({ request: r, approved: `${permit.method} ${permit.url}` });
+    }
+    return out;
   }
 
   /** The most requests the sink held at once (by overlap of arrival and end). */

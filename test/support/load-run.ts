@@ -198,6 +198,26 @@ export function permitIds(events: EngineEventLine[]): string[] {
   return events.filter((e) => e.type === "permit").map((e) => String(e.id));
 }
 
+/** Every permit the engine gave: what it approved, when, and under which generation. */
+export function permits(events: EngineEventLine[]): { id: string; method: string; url: string; generation: number; wallMs: number }[] {
+  return events
+    .filter((e) => e.type === "permit")
+    .map((e) => ({ id: String(e.id), method: String(e.method), url: String(e.url), generation: Number(e.generation), wallMs: Number(e.wallMs) }));
+}
+
+/** When the engine's clock read 0, on the wall clock (from any marker). */
+export function engineZeroWall(events: EngineEventLine[]): number {
+  const marker = events.find((e) => e.type === "marker");
+  if (!marker) throw new Error("no marker yet");
+  return Number(marker.wallMs) - Number((marker.marker as { atMs: number }).atMs);
+}
+
+/** The executor's own pid as the host sees it, whatever the launch shape. */
+export function executorHostPid(events: EngineEventLine[]): number | null {
+  const event = events.find((e) => e.type === "executor");
+  return event ? Number(event.hostPid) : null;
+}
+
 /** Signals a whole process group, through `sudo -n` when it runs as root and we don't. */
 export function signalGroup(pgid: number, signal: "SIGSTOP" | "SIGCONT"): void {
   try {

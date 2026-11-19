@@ -855,6 +855,53 @@ function engineBudgets(input, constants = ENGINE_LIMITS) {
   };
 }
 
+// src/load/lease.ts
+var Lease = class {
+  constructor(bounds) {
+    this.bounds = bounds;
+  }
+  untilMs = Number.NEGATIVE_INFINITY;
+  acceptedSeq = 0;
+  gen = 0;
+  lostFlag = false;
+  /** When permission ends, on the engine's clock. */
+  get until() {
+    return this.untilMs;
+  }
+  get generation() {
+    return this.gen;
+  }
+  get lost() {
+    return this.lostFlag;
+  }
+  /** Whether permission is running at `nowMs`. */
+  held(nowMs) {
+    return !this.lostFlag && nowMs < this.untilMs;
+  }
+  /** Marks the lease lost once permission it had has ended; true the one time it does. */
+  check(nowMs) {
+    if (this.lostFlag || this.acceptedSeq === 0 || nowMs < this.untilMs) return false;
+    this.lostFlag = true;
+    return true;
+  }
+  /** An answer to the request `seq` sent at `sentAtMs`, read at `nowMs`. */
+  answer(seq, sentAtMs, answer, nowMs) {
+    if (this.check(nowMs)) return { accepted: false, reason: "expired", lost: true };
+    if (this.lostFlag) return { accepted: false, reason: "lost", lost: false };
+    if (answer.seq !== seq) return { accepted: false, reason: "wrong_seq", lost: false };
+    if (seq <= this.acceptedSeq) return { accepted: false, reason: "stale_seq", lost: false };
+    if (!answer.granted) return { accepted: false, reason: "not_granted", lost: false };
+    if (nowMs - sentAtMs > this.bounds.maxAgeMs) return { accepted: false, reason: "too_old", lost: false };
+    const validFor = Math.min(this.bounds.leaseMs, answer.validForMs ?? this.bounds.leaseMs);
+    const grant = sentAtMs + validFor;
+    if (grant <= nowMs) return { accepted: false, reason: "expired", lost: false };
+    this.acceptedSeq = seq;
+    this.gen += 1;
+    this.untilMs = Math.max(this.untilMs, grant);
+    return { accepted: true, lost: false };
+  }
+};
+
 // src/load/frames.ts
 var MAX_FRAME_BYTES = 256 * 1024;
 function encodeFrame(message) {
@@ -974,9 +1021,16 @@ function percentile(hist, q) {
   return "overflow";
 }
 
+// src/load/shared-clock.ts
+function sharedNowMs() {
+  return Number(process.hrtime.bigint()) / 1e6;
+}
+
 // src/load/supervisor.ts
 var MAX_RENEWALS_IN_FLIGHT = 3;
 var ALLOWED_ENV = ["PATH", "LANG", "LC_ALL", "TZ"];
+var JOURNEY_ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+var JOURNEY_ENV_FORBIDDEN = /^(?:NODE_|LD_|DYLD_|UV_|PEEPS_LOAD_)/;
 var realSources = { monoMs: () => import_node_perf_hooks.performance.now(), wallMs: () => Date.now() };
 var Supervisor = class {
   constructor(input, port, options) {
@@ -993,6 +1047,7 @@ var Supervisor = class {
     this.heartbeatMs = options.heartbeatMs ?? Math.max(10, Math.min(250, Math.floor((options.deadManMs ?? this.budgets.leaseMs) / 4)));
     this.killGraceMs = options.killGraceMs ?? 2e3;
     this.maxRenewalAgeMs = options.maxRenewalAgeMs ?? Math.floor(this.budgets.leaseMs / 2);
+    this.lease = new Lease({ leaseMs: this.budgets.leaseMs, maxAgeMs: this.maxRenewalAgeMs });
     this.scheduler = new Scheduler(input.plan.cohort, this.budgets.startSlackMs);
     this.accounting = new Accounting(options.intervalMs ?? 1e4);
     this.checkingAccounting = new Accounting(options.intervalMs ?? 1e4);
@@ -1014,15 +1069,15 @@ var Supervisor = class {
   killed = false;
   isolation = { uid: null, level: "limited", limitedBecause: "not started" };
   playwrightVersion = null;
-  leaseUntil = Number.NEGATIVE_INFINITY;
+  lease;
   renewSeq = 0;
-  lastAcceptedSeq = 0;
   /** Renewals asked and not yet answered. A few may overlap, so one lost answer doesn't stall
    * the lease; their answers can then arrive out of order, and only a newer seq counts. */
   renewalsInFlight = 0;
   lastRenewSentAt = Number.NEGATIVE_INFINITY;
-  leaseLostMarked = false;
   fenceMarked = false;
+  /** The executor was told to load the journey. */
+  went = false;
   phase = "starting";
   gate = null;
   accounting;
@@ -1071,16 +1126,31 @@ var Supervisor = class {
   }
   // ---------------------------------------------------------------- start up
   async start() {
+    this.renew();
+    this.timer = setInterval(() => this.tick(), this.tickMs);
     try {
       await this.spawnExecutor(this.options.dropPrivileges ?? true);
     } catch (error) {
-      this.status = "didnt_start";
-      this.reason = error instanceof Error ? error.message : String(error);
-      await this.finish(false);
-      return;
+      if (this.finishing) return;
+      if (this.stopMode === null) {
+        this.status = "didnt_start";
+        this.reason = error instanceof Error ? error.message : String(error);
+      }
+      await this.finish(true);
     }
-    this.renew();
-    this.timer = setInterval(() => this.tick(), this.tickMs);
+  }
+  /** Resolves once the lease is held and nothing stops or fences the run; rejects otherwise. */
+  waitForLease() {
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        if (this.finishing || this.stopMode !== null) return reject(new Error("stopped before the journey was loaded"));
+        const now = this.observe();
+        if (this.lease.held(now) && !this.clock.fenced) return resolve();
+        if (now > this.budgets.leaseMs) return reject(new Error("no lease"));
+        setTimeout(check, this.tickMs);
+      };
+      check();
+    });
   }
   async spawnExecutor(drop) {
     const executor = this.options.executorPath ?? import_node_path2.default.join(__dirname, "load-executor.js");
@@ -1088,8 +1158,10 @@ var Supervisor = class {
     for (const key of ALLOWED_ENV) if (process.env[key]) env[key] = process.env[key];
     env.HOME = (0, import_node_os.tmpdir)();
     const baseURL = this.options.baseURL ?? this.input.limits.allowedOrigins[0];
-    env.BASE_URL = baseURL;
-    Object.assign(env, this.options.executorEnv ?? {});
+    const journeyEnv = { ...this.options.executorEnv ?? {}, BASE_URL: baseURL };
+    for (const key of Object.keys(journeyEnv)) {
+      if (!JOURNEY_ENV_NAME.test(key) || JOURNEY_ENV_FORBIDDEN.test(key)) throw new Error(`the journey's environment may not set ${key}`);
+    }
     this.contained = spawnContained(
       { command: process.execPath, args: [executor], env: { ...env, ...drop ? { PEEPS_LOAD_DROP_UID: "65534" } : {} }, cwd: "/" },
       { prefer: this.options.containment ?? "auto", name: this.runId }
@@ -1117,9 +1189,11 @@ var Supervisor = class {
       journey: this.input.plan.journey,
       baseURL,
       deadManMs: this.options.deadManMs ?? this.budgets.leaseMs,
-      permitTtlMs: this.options.permitTtlMs ?? 1e3
+      env: journeyEnv
     });
     this.contained.enclose();
+    await this.waitForLease();
+    this.went = true;
     this.sendToExecutor({ t: "go" });
     const ready = await this.expect("ready", 6e4);
     if (ready.t === "fatal") {
@@ -1158,7 +1232,16 @@ var Supervisor = class {
   }
   onEarlyExit = null;
   // ---------------------------------------------------------------- executor messages
+  /**
+   * What the executor says is the journey's word too: the journey shares its process and can
+   * write frames to fd 1 itself. A forged `done` frees a concurrency slot early, a forged
+   * `outcome` falsifies results, and a raw `node:http` send that sets its own permit header is
+   * not reported as a bypass. So concurrency, outcomes and the bypass counters are diagnostic
+   * here, not enforced; what does hold against a hostile journey is the total, the rate and
+   * the policy, since every permit is issued here. PR 3's host fence counts concurrency itself.
+   */
   onExecutorBytes(chunk) {
+    this.observe();
     let frames;
     try {
       frames = this.reader.push(chunk);
@@ -1215,14 +1298,15 @@ var Supervisor = class {
     if (!turn) return;
     this.turns.delete(id);
     this.busy.delete(turn.user);
-    const now = this.clock.nowMs;
+    const now = this.observe();
     const message = typeof frame.message === "string" ? frame.message : void 0;
     const location = typeof frame.location === "string" ? frame.location : null;
     this.emit({ type: "outcome", turn: id, kind, phase: turn.phase, ...message ? { message, location } : {} });
     if (turn.phase === "checking") {
+      if (kind !== "interrupted" && now >= turn.deadlineAt) kind = "timeout";
       this.checkingAccounting.outcome(id, kind, now - this.phaseStart);
       if (kind === "success") this.checkingResult.success += 1;
-      else if (kind === "timeout") this.checkingResult.timeout += 1;
+      else if (kind === "timeout" || kind === "interrupted") this.checkingResult.timeout += 1;
       else {
         this.checkingResult.failure += 1;
         if (this.checkingResult.failures.length < 10) this.checkingResult.failures.push({ message: message ?? kind, location });
@@ -1249,25 +1333,52 @@ var Supervisor = class {
     const seq = ++this.renewSeq;
     const sentAtMs = this.clock.nowMs;
     this.lastRenewSentAt = sentAtMs;
-    this.port.renewLease({ seq, sentAtMs }).then((answer) => this.onLease(seq, sentAtMs, answer)).catch(() => this.emit({ type: "renewal", seq, accepted: false, wallMs: Date.now() })).finally(() => {
+    this.port.renewLease({ seq, sentAtMs }).then((answer) => this.onLease(seq, sentAtMs, answer)).catch(() => this.emit({ type: "renewal", seq, accepted: false, reason: "error", generation: this.lease.generation, wallMs: Date.now() })).finally(() => {
       this.renewalsInFlight -= 1;
     });
   }
   onLease(seq, sentAtMs, answer) {
-    this.clock.tick();
-    const age = this.clock.nowMs - sentAtMs;
-    const accepted = answer.seq === seq && seq > this.lastAcceptedSeq && answer.granted && age <= this.maxRenewalAgeMs && !this.leaseLostMarked;
-    this.emit({ type: "renewal", seq, accepted, wallMs: Date.now() });
-    if (answer.stop && answer.seq === seq && seq > this.lastAcceptedSeq) this.stop(answer.stop);
-    if (!accepted) return;
-    this.lastAcceptedSeq = seq;
-    this.leaseUntil = Math.max(this.leaseUntil, sentAtMs + this.budgets.leaseMs);
+    const now = this.observe();
+    const verdict = this.lease.answer(seq, sentAtMs, answer, now);
+    this.emit({ type: "renewal", seq, accepted: verdict.accepted, ...verdict.reason ? { reason: verdict.reason } : {}, generation: this.lease.generation, wallMs: Date.now() });
+    if (verdict.lost) this.loseLease(now);
+    if (answer.stop && answer.seq === seq && !this.lease.lost) this.stop(answer.stop);
+    if (!verdict.accepted) return;
     if (this.clock.fenced) {
       if (this.clock.renewed(sentAtMs)) {
         this.fenceMarked = false;
         this.marker("resume_cleared");
       }
     }
+  }
+  /**
+   * Samples the clock (raising a fence on a gap) and checks the lease against it. Called by
+   * the timer and before anything the executor or the port says is admitted.
+   */
+  observe() {
+    if (this.finishing) return this.clock.nowMs;
+    const before = this.clock.fenced;
+    const now = this.clock.tick();
+    if (this.clock.fenced && (!before || !this.fenceMarked)) {
+      this.fenceMarked = true;
+      this.marker("resume_fence", this.clock.fenceReason ?? void 0);
+    }
+    if (this.lease.check(now)) this.loseLease(now);
+    return now;
+  }
+  /** Lease lost: no start or permit from its end; drain for the grace, then the kill. */
+  loseLease(now) {
+    if (this.stopMode === "now" || this.finishing) return;
+    this.stopMode = "lease";
+    this.status = "lease_lost";
+    this.reason = "the lease was not renewed";
+    this.drainUntil = now + this.budgets.stopGraceMs;
+    this.marker("lease_lost");
+    this.marker("starts_fenced");
+  }
+  /** An instant on the engine's clock, on the shared monotonic clock the executor reads. */
+  shared(engineMs) {
+    return sharedNowMs() + (engineMs - this.clock.nowMs);
   }
   // ---------------------------------------------------------------- stopping
   stop(mode) {
@@ -1304,24 +1415,31 @@ var Supervisor = class {
   }
   // ---------------------------------------------------------------- the loop
   permitted(now) {
-    return !this.clock.fenced && now < this.leaseUntil && this.stopMode !== "now" && this.stopMode !== "lease" && !this.executorExited;
+    return !this.clock.fenced && this.lease.held(now) && this.stopMode !== "now" && this.stopMode !== "lease" && !this.executorExited;
   }
   canStart(now) {
     return this.permitted(now) && this.stopMode === null;
   }
   startTurn(user, phase, now) {
     const gate = this.gate;
-    const deadlineIn = Math.max(0, Math.min(this.budgets[phase].turnDeadlineMs, gate.phaseEndMs - now));
+    const deadlineIn = Math.max(0, Math.min(this.budgets[phase].turnDeadlineMs, gate.phaseEndMs - (now - this.phaseStart)));
     const id = `${phase === "checking" ? "c" : "m"}${++this.turnSeq}`;
     const turn = { id, user, phase, startAt: now, deadlineAt: now + deadlineIn, sends: 0 };
     this.turns.set(id, turn);
     this.busy.add(user);
-    this.sendToExecutor({ t: "start", turn: id, user, deadlineInMs: deadlineIn });
+    this.sendToExecutor({
+      t: "start",
+      turn: id,
+      user,
+      deadlineAt: this.shared(turn.deadlineAt),
+      leaseEndsAt: this.shared(this.lease.until),
+      generation: this.lease.generation
+    });
     return turn;
   }
   answerAsks() {
     if (this.pending.length === 0) return;
-    const now = this.clock.nowMs;
+    const now = this.observe();
     const still = [];
     for (const ask of this.pending) {
       const deny = (reason) => {
@@ -1338,7 +1456,7 @@ var Supervisor = class {
         continue;
       }
       if (!this.permitted(now)) {
-        if (this.clock.fenced && this.stopMode === null && now < this.leaseUntil) still.push(ask);
+        if (this.clock.fenced && this.stopMode === null && this.lease.held(now)) still.push(ask);
         else deny(this.clock.fenced ? "fenced" : "lease");
         continue;
       }
@@ -1366,8 +1484,10 @@ var Supervisor = class {
         const id = `${this.runId}.${turn.phase === "checking" ? "c" : "m"}.${answer.seq}`;
         this.issued.push(id);
         this.permitGates.set(id, gate);
-        this.emit({ type: "permit", id, turn: turn.id, wallMs: Date.now() });
-        this.sendToExecutor({ t: "permit", req: ask.req, id });
+        const generation = this.lease.generation;
+        this.emit({ type: "permit", id, turn: turn.id, method: ask.method, url: ask.url, generation, wallMs: Date.now() });
+        const expiresAt = Math.min(turn.deadlineAt, this.lease.until, now + (this.options.permitTtlMs ?? 1e3));
+        this.sendToExecutor({ t: "permit", req: ask.req, id, expiresAt: this.shared(expiresAt), generation });
       } else if (answer.final) deny(answer.reason);
       else still.push(ask);
     }
@@ -1375,31 +1495,24 @@ var Supervisor = class {
   }
   tick() {
     if (this.finishing) return;
-    const before = this.clock.fenced;
-    const now = this.clock.tick();
-    if (this.clock.fenced && (!before || !this.fenceMarked)) {
-      this.fenceMarked = true;
-      this.marker("resume_fence", this.clock.fenceReason ?? void 0);
-    }
+    const now = this.observe();
+    if (this.finishing) return;
     if (now - this.lastRenewSentAt >= this.budgets.leaseMs / 3 || this.clock.fenced && this.lastRenewSentAt < (this.clock.fencedAtMs ?? 0)) {
       this.renew();
     }
-    if (this.phase !== "starting" && now >= this.leaseUntil && !this.leaseLostMarked && this.stopMode !== "now") {
-      this.leaseLostMarked = true;
-      this.stopMode = "lease";
-      this.status = "lease_lost";
-      this.reason = "the lease was not renewed";
-      this.drainUntil = now + this.budgets.stopGraceMs;
-      this.marker("lease_lost");
-      this.marker("starts_fenced");
-    }
     if (now - this.lastHeartbeat >= this.heartbeatMs) {
       this.lastHeartbeat = now;
-      this.sendToExecutor({ t: "hb" });
+      this.sendToExecutor({ t: "hb", generation: this.lease.generation });
+    }
+    if (now >= this.budgets.absoluteEndMs) {
+      if (this.stopMode === null) this.status = "stopped";
+      this.reason = "the run reached its absolute end";
+      void this.finish(true);
+      return;
     }
     if (this.phase === "starting") {
-      if (now < this.leaseUntil) this.beginChecking(now);
-      else if (now > this.budgets.leaseMs) this.failToStart("no lease");
+      if (this.stopMode !== null) void this.finish(true);
+      else if (this.went && this.playwrightVersion !== null && this.canStart(now)) this.beginChecking(now);
       return;
     }
     for (const turn of this.turns.values()) {
@@ -1418,7 +1531,7 @@ var Supervisor = class {
     const users = this.budgets.checking.users;
     this.phase = "checking";
     this.phaseStart = now;
-    this.gate = new PhaseGate(this.budgets.checking, 0, this.budgets.absoluteEndMs);
+    this.gate = new PhaseGate(this.budgets.checking, 0, this.budgets.absoluteEndMs - now);
     this.checkingResult.users = users;
     this.marker("phase_started", "checking");
     for (let user = 1; user <= users; user++) {
@@ -1428,6 +1541,13 @@ var Supervisor = class {
   }
   tickChecking(now) {
     const elapsed = now - this.phaseStart;
+    if (this.turns.size > 0 && elapsed >= this.budgets.checking.phaseDeadlineMs) {
+      for (const turn of [...this.turns.values()]) this.onOutcome(turn.id, "timeout", { t: "outcome" });
+      if (this.stopMode === null) this.status = "didnt_start";
+      this.reason = "checking timed out";
+      void this.finish(true);
+      return;
+    }
     if (this.stopMode !== null) {
       if (this.turns.size === 0 || now >= this.drainUntil) {
         this.status = this.stopMode === "lease" ? "lease_lost" : "stopped";
@@ -1477,15 +1597,16 @@ var Supervisor = class {
     this.accounting.expire(planNow);
     this.publish(planNow, false);
     const grace = this.budgets.stopGraceMs;
+    if (planNow >= this.input.plan.durationMs + grace) {
+      if (this.turns.size > 0) this.reason = "turns still running at the end of the grace";
+      void this.finish(this.turns.size > 0);
+      return;
+    }
     if (this.stopMode !== null) {
       if (this.turns.size === 0 || now >= this.drainUntil) void this.finish(this.turns.size > 0);
       return;
     }
     if (this.scheduler.finished(planNow) && this.turns.size === 0) void this.finish(false);
-    else if (planNow >= this.input.plan.durationMs + grace) {
-      this.reason = "turns still running at the end of the grace";
-      void this.finish(true);
-    }
   }
   publish(planNow, force) {
     const intervals = this.accounting.closeIntervals(force ? Math.ceil((planNow + 1) / this.accounting.intervalMs) * this.accounting.intervalMs : planNow);
@@ -1501,11 +1622,6 @@ var Supervisor = class {
     for (const cohort of this.accounting.sealCohorts(planNow, this.budgets.stopGraceMs, force)) {
       this.port.publishCohort({ ...cohort, phase: "measurement" }).catch(() => void 0);
     }
-  }
-  failToStart(reason) {
-    this.status = "didnt_start";
-    this.reason = reason;
-    void this.finish(true);
   }
   // ---------------------------------------------------------------- the end
   async finish(kill) {

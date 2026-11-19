@@ -21,7 +21,7 @@ import { performance } from "node:perf_hooks";
 
 import { encodeFrame, FrameError, FrameReader, type Frame } from "./frames";
 import { loadJourney, originalLocation, resolveTsFile } from "./loader";
-import { LoadRefusal, PERMIT_HEADER, TurnDeadline, UserSession, type PlaywrightRequest, type Turn } from "./transport";
+import { LoadRefusal, PERMIT_HEADER, sharedNowMs, TurnDeadline, UserSession, type PermitGrant, type PlaywrightRequest, type Turn } from "./transport";
 
 interface Init {
   runId: string;
@@ -30,7 +30,9 @@ interface Init {
   journey: { module: string; export: string };
   baseURL?: string;
   deadManMs: number;
-  permitTtlMs: number;
+  /** The journey's environment (BASE_URL, PR 3's variables): set only after the uid drop, and
+   * never on a command line. */
+  env?: Record<string, string>;
 }
 
 const MAX_MESSAGE = 2000;
@@ -98,6 +100,22 @@ function resolvePlaywright(dirs: string[]): { request: PlaywrightRequest; versio
   throw new Error("Playwright was not found from the working directory or the journey's folder");
 }
 
+/** A `node_modules` on a lookup path that exists but this uid cannot read, if any. */
+function unreadableNodeModules(dirs: string[]): string | null {
+  for (const start of dirs) {
+    for (let dir = start; ; dir = path.dirname(dir)) {
+      const candidate = path.join(dir, "node_modules");
+      try {
+        accessSync(candidate, fsConstants.R_OK | fsConstants.X_OK);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EACCES") return candidate;
+      }
+      if (path.dirname(dir) === dir) break;
+    }
+  }
+  return null;
+}
+
 function hasPermitHeader(args: unknown[]): boolean {
   for (const arg of args) {
     if (arg && typeof arg === "object" && "headers" in arg) {
@@ -149,7 +167,11 @@ let journey: ((...args: unknown[]) => unknown) | null = null;
 let playwright: PlaywrightRequest | null = null;
 let lastHeard = performance.now();
 let nextAsk = 0;
-const asks = new Map<number, { resolve: (v: { id: string }) => void; reject: (e: Error) => void }>();
+const asks = new Map<number, { resolve: (v: PermitGrant) => void; reject: (e: Error) => void }>();
+/** The newest lease generation the supervisor has named. */
+let generationSeen = 0;
+/** After this process saw itself paused: nothing from an older generation is used. */
+let minGeneration = 0;
 const sessions = new Map<number, UserSession>();
 const turns = new Map<string, Turn>();
 
@@ -158,8 +180,8 @@ function session(user: number): UserSession {
   if (!s) {
     s = new UserSession(playwright!, {
       baseURL: init!.baseURL,
-      permitTtlMs: init!.permitTtlMs,
-      now: () => performance.now(),
+      now: sharedNowMs,
+      usable: (permit) => permit.generation >= minGeneration,
       ask: ({ turn, method, url }) =>
         new Promise((resolve, reject) => {
           const req = ++nextAsk;
@@ -178,54 +200,70 @@ function failureOf(error: unknown): { message: string; location: string | null }
   return { message: e.message.slice(0, MAX_MESSAGE), location: originalLocation(e.stack, init!.repositoryRoot) };
 }
 
-async function runTurn(id: string, user: number, deadlineInMs: number): Promise<void> {
+async function runTurn(id: string, user: number, deadlineAt: number): Promise<void> {
   const startedAt = performance.now();
-  const turn: Turn = { id, deadlineAt: startedAt + deadlineInMs, ended: false };
+  const turn: Turn = { id, deadlineAt, ended: false };
   turns.set(id, turn);
   const s = session(user);
   let settled = false;
-  const finish = (kind: "success" | "failure" | "timeout", extra: Record<string, unknown> = {}) => {
+  const finish = (kind: "success" | "failure" | "timeout", extra: Record<string, unknown> = {}, durationMs = performance.now() - startedAt) => {
     if (settled) return;
     settled = true;
     turn.ended = true;
     turns.delete(id);
-    send({ t: "outcome", turn: id, kind, durationUs: Math.round((performance.now() - startedAt) * 1000), ...extra });
+    send({ t: "outcome", turn: id, kind, durationUs: Math.round(durationMs * 1000), ...extra });
   };
   const timer = setTimeout(() => {
-    finish("timeout");
+    turn.ended = true;
     // Disposing the context cancels whatever it has in flight.
     void s.reset();
-  }, Math.max(0, deadlineInMs));
+    finish("timeout");
+  }, Math.max(0, deadlineAt - sharedNowMs()));
   send({ t: "started", turn: id, user, wallMs: Date.now() });
+  let kind: "success" | "failure" | "timeout" = "success";
+  let extra: Record<string, unknown> = {};
   try {
     await journey!(s.guarded(turn));
-    finish("success");
   } catch (error) {
-    if (error instanceof TurnDeadline) {
-      finish("timeout");
-      void s.reset();
-    } else finish("failure", failureOf(error));
-  } finally {
-    clearTimeout(timer);
-    await s.afterTurn();
+    if (error instanceof TurnDeadline) kind = "timeout";
+    else {
+      kind = "failure";
+      extra = failureOf(error);
+    }
   }
+  const duration = performance.now() - startedAt;
+  turn.ended = true;
+  if (kind === "timeout") void s.reset();
+  // The user is free only once the sends this turn left outstanding have ended (each by the
+  // turn's deadline, when the timer cancels them).
+  await s.afterTurn(turn);
+  clearTimeout(timer);
+  finish(kind, extra, duration);
 }
 
 let lastCheck = performance.now();
 
-function deadMan(): void {
+/**
+ * Whether this process was just paused itself (SIGSTOP, a suspended VM): its timers and its
+ * reads stalled together. Then the supervisor's silence is explained, and nothing it said
+ * before the pause is trusted: every start and permit of the generation seen so far is
+ * void until a newer one arrives. Sampled on every timer tick and before every frame read.
+ */
+function checkPause(): void {
   if (!init) return;
   const now = performance.now();
   const gap = now - lastCheck;
   lastCheck = now;
-  // This process was paused itself (SIGSTOP, a suspended VM): the supervisor's silence is
-  // explained, and it is fenced too, so nothing can be sent until it renews. Start counting
-  // again rather than mistaking our own pause for its death.
   if (gap > Math.max(500, init.deadManMs / 2)) {
     lastHeard = now;
-    return;
+    minGeneration = Math.max(minGeneration, generationSeen + 1);
   }
-  if (now - lastHeard > init.deadManMs) {
+}
+
+function deadMan(): void {
+  if (!init) return;
+  checkPause();
+  if (performance.now() - lastHeard > init.deadManMs) {
     // The supervisor went quiet: end all traffic now. Exiting closes every socket, and as a
     // namespace's init it takes every descendant with it.
     process.stderr.write("load executor: supervisor silent, stopping\n");
@@ -233,11 +271,25 @@ function deadMan(): void {
   }
 }
 
+function noteGeneration(frame: Frame): void {
+  const generation = Number(frame.generation);
+  if (Number.isFinite(generation)) generationSeen = Math.max(generationSeen, generation);
+}
+
+/** Names allowed in the journey's environment: no loader, preload or runtime switches. */
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+const ENV_FORBIDDEN = /^(?:NODE_|LD_|DYLD_|UV_|PEEPS_LOAD_)/;
+
 async function onFrame(frame: Frame): Promise<void> {
   lastHeard = performance.now();
   switch (frame.t) {
     case "init": {
       init = frame as unknown as Init;
+      for (const [key, value] of Object.entries(init.env ?? {})) {
+        if (!ENV_NAME.test(key) || ENV_FORBIDDEN.test(key) || typeof value !== "string") throw new FrameError(`environment variable ${key} refused`);
+        process.env[key] = value;
+      }
+      lastCheck = performance.now();
       setInterval(deadMan, Math.max(10, Math.min(100, Math.floor(init.deadManMs / 4)))).unref();
       return;
     }
@@ -256,7 +308,9 @@ async function onFrame(frame: Frame): Promise<void> {
       try {
         found = resolvePlaywright([init.workingDirectory, path.dirname(module)]);
       } catch (error) {
-        send({ t: "fatal", code: "playwright", message: failureOf(error).message });
+        const closed = unreadableNodeModules([init.workingDirectory, path.dirname(module)]);
+        if (closed) send({ t: "fatal", code: "unreadable", message: `${closed} cannot be read` });
+        else send({ t: "fatal", code: "playwright", message: failureOf(error).message });
         return;
       }
       playwright = found.request;
@@ -267,18 +321,34 @@ async function onFrame(frame: Frame): Promise<void> {
         send({ t: "fatal", code: "journey", ...failureOf(error) });
         return;
       }
+      // Loading blocked this process on purpose; that was not a pause.
+      lastCheck = performance.now();
+      lastHeard = lastCheck;
       send({ t: "ready", playwright: found.version, playwrightFrom: found.from });
       return;
     }
     case "hb":
+      noteGeneration(frame);
       return;
-    case "start":
-      void runTurn(String(frame.turn), Number(frame.user), Number(frame.deadlineInMs));
+    case "start": {
+      noteGeneration(frame);
+      const generation = Number(frame.generation);
+      const deadlineAt = Number(frame.deadlineAt);
+      const leaseEndsAt = Number(frame.leaseEndsAt);
+      // Read late (queued while this process was frozen) or from before its own pause: the
+      // supervisor's permission for it is gone. It never runs.
+      if (!(generation >= minGeneration) || !(sharedNowMs() < Math.min(deadlineAt, leaseEndsAt))) {
+        send({ t: "outcome", turn: String(frame.turn), kind: "interrupted", message: "stale start", durationUs: 0 });
+        return;
+      }
+      void runTurn(String(frame.turn), Number(frame.user), deadlineAt);
       return;
+    }
     case "permit": {
+      noteGeneration(frame);
       const ask = asks.get(Number(frame.req));
       asks.delete(Number(frame.req));
-      ask?.resolve({ id: String(frame.id) });
+      ask?.resolve({ id: String(frame.id), expiresAt: Number(frame.expiresAt), generation: Number(frame.generation) });
       return;
     }
     case "deny": {
@@ -313,6 +383,8 @@ process.stdin.on("data", (chunk: Buffer) => {
     process.stderr.write(`load executor: ${String(error)}\n`);
     process.exit(76);
   }
+  // Sampled before reading anything: a frame read after a pause must meet the pause's fence.
+  checkPause();
   for (const frame of frames) {
     onFrame(frame).catch((error: unknown) => {
       process.stderr.write(`load executor: ${String(error)}\n`);
