@@ -33,8 +33,11 @@ export class PhaseGate {
     readonly phaseStartMs: number,
     /** The run's absolute end, on the same clock. */
     readonly absoluteEndMs: number,
+    /** Tokens (in thousandths) the previous phase left: the rate is the run's, so a new
+     * phase never starts with a fresh burst on top of the last one's sends. */
+    startMilliTokens?: number,
   ) {
-    this.milliTokens = budget.burst * MILLI;
+    this.milliTokens = Math.min(budget.burst * MILLI, startMilliTokens ?? budget.burst * MILLI);
     this.lastRefillMs = phaseStartMs;
   }
 
@@ -48,6 +51,12 @@ export class PhaseGate {
 
   get phaseEndMs(): number {
     return Math.min(this.phaseStartMs + this.budget.phaseDeadlineMs, this.absoluteEndMs);
+  }
+
+  /** The bucket at `nowMs`, in thousandths of a token: what the next phase starts with. */
+  tokensAt(nowMs: number): number {
+    this.refill(nowMs);
+    return this.milliTokens;
   }
 
   private refill(nowMs: number): void {

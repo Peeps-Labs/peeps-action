@@ -93,7 +93,9 @@ function withinRenewals(events: EngineEventLine[], done: Finished, sink: LoadSin
   }
 }
 
-function processesGone(run: EngineRun): void {
+/** Every executor process is gone (given a moment for the kernel to finish a kill under load). */
+async function processesGone(run: EngineRun): Promise<void> {
+  await until(() => run.executorPids().every((pid) => !alive(pid)), 2_000).catch(() => undefined);
   for (const pid of run.executorPids()) assert.equal(alive(pid), false, `executor process ${pid} still running`);
 }
 
@@ -123,7 +125,7 @@ test("Stop: no new start after it, and the work in flight finishes within the gr
   // One request per journey: nothing new reaches the sink once the stop has landed.
   assert.deepEqual(sink.requestsAfter(stopWall + SLOP).map((r) => r.path), []);
   noBypass(run, sink);
-  processesGone(run);
+  await processesGone(run);
 });
 
 test("Stop now: no request reaches the sink after it, and what was in flight is cut off", async (t) => {
@@ -145,8 +147,9 @@ test("Stop now: no request reaches the sink after it, and what was in flight is 
   // The spec's bound is 10 s; the kill is immediate.
   assert.deepEqual(sink.requestsAfter(stopWall + SLOP), []);
   assert.deepEqual(measurementStartsAfter(sink, stopWall + SLOP), []);
+  await settled(sink);
   for (const r of outstanding) assert.equal(r.aborted, true, `${r.path} was answered after Stop now`);
-  processesGone(run);
+  await processesGone(run);
 });
 
 test("a lost lease: starts fenced at the last renewal plus the lease, then drain, then the kill", async (t) => {
@@ -175,7 +178,7 @@ test("a lost lease: starts fenced at the last renewal plus the lease, then drain
   for (const r of sink.requests) assert.ok(r.endMs !== null && r.endMs <= killedBy, `${r.path} outlived the kill by ${r.endMs === null ? "ever" : `${r.endMs - killedBy} ms`}`);
   const kinds = done.markers.map((m) => m.kind);
   assert.ok(kinds.includes("lease_lost") && kinds.includes("executor_killed"), kinds.join(","));
-  processesGone(run);
+  await processesGone(run);
 });
 
 for (const [name, port] of [
@@ -263,7 +266,8 @@ for (const [what, wholeJob, frozenMs, deadManMs] of [
     const born = (await run.waitFor((e) => e.some((x) => x.type === "harness")))[0]!.at;
     await run.waitFor((e) => e.some((x) => x.type === "marker" && (x.marker as { detail?: string }).detail === "measurement"));
     await until(() => Date.now() >= born + 4_000);
-    const groups = wholeJob ? [run.child.pid!, ...run.executorPids().slice(0, 1)] : [run.child.pid!];
+    const watchdog = Number(run.events().find((e) => e.type === "watchdog")?.pid);
+    const groups = wholeJob ? [run.child.pid!, ...run.executorPids().slice(0, 1), watchdog] : [run.child.pid!];
     for (const pid of groups) signalGroup(pid, "SIGSTOP");
     const stoppedAt = Date.now();
     await new Promise((r) => setTimeout(r, frozenMs));
@@ -359,7 +363,7 @@ test("a hung executor (a busy loop) is killed at the turn deadline plus the grac
   const killed = done.markers.find((m) => m.kind === "executor_killed")!;
   assert.ok(killed.wallMs <= startedAt + 2_000 + 1_000 + SLOP * 2, `killed ${killed.wallMs - startedAt} ms after the start`);
   assert.equal(sink.requests.length, 1);
-  processesGone(run);
+  await processesGone(run);
 });
 
 test("a Checking timeout sends no measurement traffic", async (t) => {
@@ -375,6 +379,7 @@ test("a Checking timeout sends no measurement traffic", async (t) => {
   assert.deepEqual(sink.starts.filter((s) => s.phase === "measurement"), []);
   assert.deepEqual(permitIds(run.events()).filter((id) => id.includes(".m.")), []);
   assert.equal(sink.requests.length, 2);
+  await settled(sink);
   for (const r of sink.requests) assert.equal(r.aborted, true, "the timed-out request was not cancelled");
 });
 

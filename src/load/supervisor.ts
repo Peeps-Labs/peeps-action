@@ -27,6 +27,7 @@ import { spawnContained, type ContainedProcess, type ContainmentLevel } from "./
 import type { ControlPort, LeaseAnswer, Marker, MarkerKind, Phase } from "./control-port";
 import { ENGINE_LIMITS, engineBudgets, type EngineBudgets, type EngineConstants } from "./engine-limits";
 import { Lease } from "./lease";
+import { spawnWatchdog, type Watchdog } from "./watchdog";
 import { encodeFrame, FrameError, FrameReader, type Frame } from "./frames";
 import type { PlanInput } from "./plan-input";
 import { checkRequest } from "./policy";
@@ -78,6 +79,7 @@ export type EngineEvent =
   | { type: "renewal"; seq: number; accepted: boolean; reason?: string; generation: number; wallMs: number }
   | { type: "bypass"; kind: string; url: string }
   | { type: "executor"; pid: number | null; hostPid: number; containment: ContainmentLevel }
+  | { type: "watchdog"; pid: number | null }
   | { type: "log"; line: string };
 
 export type EngineStatus = "finished" | "stopped" | "didnt_start" | "lease_lost" | "failed";
@@ -87,6 +89,9 @@ export interface EngineResult {
   reason: string | null;
   runId: string;
   containment: { level: ContainmentLevel; limitedBecause: string | null };
+  /** Whether everything the executor started was seen gone after the run: `unverified` where
+   * the containment cannot tell (a process-group kill), `failed` where something was left. */
+  cleanup: "complete" | "failed" | "unverified" | "not started";
   isolation: { uid: number | null; level: "uid-65534" | "limited"; limitedBecause: string | null };
   playwright: string | null;
   checking: {
@@ -152,6 +157,8 @@ export class Supervisor {
   private readonly maxRenewalAgeMs: number;
 
   private contained: ContainedProcess | null = null;
+  private watchdog: Watchdog | null = null;
+  private cleanup: EngineResult["cleanup"] = "not started";
   private reader = new FrameReader();
   private executorExited = false;
   private killed = false;
@@ -327,6 +334,13 @@ export class Supervisor {
     });
     // Enclosed before any customer code can run, and only once the lease is held.
     this.contained.enclose();
+    // Verified before any customer code runs: the executor is where the kill will reach it.
+    const unverified = this.contained.verify({ nsPid: Number(hello.nsPid) });
+    if (unverified) throw new Error(`containment could not be verified: ${unverified}`);
+    // And an independent watchdog holds the kill should this process fall silent.
+    this.watchdog?.release();
+    this.watchdog = spawnWatchdog({ deadManMs: this.options.deadManMs ?? this.budgets.leaseMs, ...this.contained.watchTargets() });
+    this.emit({ type: "watchdog", pid: this.watchdog.child.pid ?? null });
     await this.waitForLease();
     this.went = true;
     this.sendToExecutor({ t: "go" });
@@ -670,6 +684,7 @@ export class Supervisor {
       this.renew();
     }
 
+    this.watchdog?.beat();
     if (now - this.lastHeartbeat >= this.heartbeatMs) {
       this.lastHeartbeat = now;
       this.sendToExecutor({ t: "hb", generation: this.lease.generation });
@@ -753,9 +768,10 @@ export class Supervisor {
     // The request budget is the run's: what Checking was given comes out of measurement's.
     const left = Math.max(0, this.input.limits.requestBudget - this.gate!.issued);
     const measurement = { ...this.budgets.measurement, totalRequests: Math.min(this.budgets.measurement.totalRequests, left) };
+    const checkingStart = this.phaseStart;
     this.phase = "measurement";
     this.phaseStart = now;
-    this.gate = new PhaseGate(measurement, 0, this.budgets.absoluteEndMs - now);
+    this.gate = new PhaseGate(measurement, 0, this.budgets.absoluteEndMs - now, this.gate!.tokensAt(now - checkingStart));
     this.marker("phase_started", "measurement");
     this.tickMeasurement(now);
   }
@@ -829,8 +845,16 @@ export class Supervisor {
     // Whatever happened, nothing the executor started outlives the run.
     this.kill("end of run");
     if (this.contained && !this.executorExited) await waitFor(() => this.executorExited, 5_000);
+    if (this.contained) {
+      const contained = this.contained;
+      if (contained.remaining() === "some") await waitFor(() => contained.remaining() !== "some", 2_000);
+      const left = contained.remaining();
+      this.cleanup = left === "none" ? "complete" : left === "some" ? "failed" : "unverified";
+    }
+    // Only once the run has seen it all stopped does the watchdog stand down.
+    if (this.cleanup !== "failed") this.watchdog?.release();
     this.contained?.dispose();
-    this.marker("traffic_stopped");
+    this.marker(this.cleanup === "failed" ? "cleanup_failed" : "traffic_stopped");
 
     const now = this.clock.tick();
     if (this.phase === "measurement") {
@@ -848,6 +872,7 @@ export class Supervisor {
       containment: this.contained
         ? { level: this.contained.level, limitedBecause: this.contained.limitedBecause }
         : { level: "limited", limitedBecause: "not started" },
+      cleanup: this.cleanup,
       isolation: this.isolation,
       playwright: this.playwrightVersion,
       checking: this.checkingResult,

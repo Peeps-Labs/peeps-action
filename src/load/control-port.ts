@@ -36,6 +36,7 @@ export type MarkerKind =
   | "resume_cleared"
   | "executor_killed"
   | "traffic_stopped"
+  | "cleanup_failed"
   | "bypass";
 
 export interface Marker {

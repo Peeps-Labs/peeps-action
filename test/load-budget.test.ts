@@ -70,3 +70,12 @@ test("releasing more than was taken never goes negative", () => {
   gate.release();
   assert.equal(gate.inFlight, 0);
 });
+
+test("the next phase starts with the tokens the last one left, not a fresh burst", () => {
+  const checking = new PhaseGate(budget({ concurrency: 100 }), 0, 1_000_000);
+  for (let i = 0; i < 3; i++) assert.equal(checking.permit(500, 500).ok, true);
+  // Measurement begins at once, on its own clock from 0.
+  const measurement = new PhaseGate(budget({ concurrency: 100 }), 0, 1_000_000, checking.tokensAt(500));
+  assert.deepEqual(measurement.permit(0, 0), { ok: false, reason: "rate", final: false, retryInMs: 100 });
+  assert.equal(measurement.permit(100, 0).ok, true);
+});

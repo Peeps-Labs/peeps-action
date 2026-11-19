@@ -31,8 +31,8 @@ const port = new FakeControlPort(config.port);
 const write = (event: unknown) => appendFileSync(config.eventsFile, JSON.stringify(event) + "\n");
 
 const handle = engine.startEngine(config.planInput, port, {
-  ...(config.options as unknown as import("../../src/load/supervisor").EngineOptions),
   executorPath: path.resolve(__dirname, "../../dist/load-executor.js"),
+  ...(config.options as unknown as import("../../src/load/supervisor").EngineOptions),
   observer: (event) => write({ ...event, at: Date.now() }),
 });
 write({ type: "harness", pid: process.pid, at: Date.now() });

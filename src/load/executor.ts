@@ -377,7 +377,7 @@ async function onFrame(frame: Frame): Promise<void> {
 }
 
 const identity = dropPrivileges();
-send({ t: "hello", hostPid: hostPid(), uid: identity.uid, dropped: identity.dropped });
+send({ t: "hello", hostPid: hostPid(), nsPid: process.pid, uid: identity.uid, dropped: identity.dropped });
 const reader = new FrameReader();
 process.stdin.on("data", (chunk: Buffer) => {
   let frames: Frame[];

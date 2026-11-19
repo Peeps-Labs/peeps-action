@@ -521,11 +521,11 @@ var Accounting = class {
 // src/load/budget.ts
 var MILLI = 1e3;
 var PhaseGate = class {
-  constructor(budget, phaseStartMs, absoluteEndMs) {
+  constructor(budget, phaseStartMs, absoluteEndMs, startMilliTokens) {
     this.budget = budget;
     this.phaseStartMs = phaseStartMs;
     this.absoluteEndMs = absoluteEndMs;
-    this.milliTokens = budget.burst * MILLI;
+    this.milliTokens = Math.min(budget.burst * MILLI, startMilliTokens ?? budget.burst * MILLI);
     this.lastRefillMs = phaseStartMs;
   }
   milliTokens;
@@ -540,6 +540,11 @@ var PhaseGate = class {
   }
   get phaseEndMs() {
     return Math.min(this.phaseStartMs + this.budget.phaseDeadlineMs, this.absoluteEndMs);
+  }
+  /** The bucket at `nowMs`, in thousandths of a token: what the next phase starts with. */
+  tokensAt(nowMs) {
+    this.refill(nowMs);
+    return this.milliTokens;
   }
   refill(nowMs) {
     if (nowMs <= this.lastRefillMs) return;
@@ -684,6 +689,13 @@ function makeCgroup(name) {
   }
   return dir;
 }
+function cgroupMembers(dir) {
+  try {
+    return (0, import_node_fs.readFileSync)(import_node_path.default.join(dir, "cgroup.procs"), "utf8").split("\n").filter(Boolean).map(Number);
+  } catch {
+    return [];
+  }
+}
 function killCgroup(dir) {
   if ((0, import_node_fs.existsSync)(import_node_path.default.join(dir, "cgroup.kill"))) {
     try {
@@ -759,6 +771,15 @@ function spawnInPidNamespace(spec, p) {
       }
       if (!p.root && child.pid) (0, import_node_child_process.spawnSync)("sudo", ["-n", "kill", "-KILL", String(child.pid)], { stdio: "ignore", timeout: 5e3 });
     },
+    verify({ nsPid }) {
+      return nsPid === 1 ? null : `the executor is pid ${nsPid} in its namespace, not its init`;
+    },
+    remaining() {
+      return child.exitCode !== null || child.signalCode !== null ? "none" : "some";
+    },
+    watchTargets() {
+      return { cgroupDir: null, pids: [...hostPid !== null ? [hostPid] : [], ...child.pid ? [-child.pid] : []], sudo: !p.root };
+    },
     dispose() {
     }
   };
@@ -777,6 +798,16 @@ function spawnInCgroup(spec, dir, p) {
       enclosed = true;
     },
     setHostPid() {
+    },
+    verify() {
+      return enclosed && cgroupMembers(dir).includes(child.pid) ? null : "the executor is not in its cgroup";
+    },
+    remaining() {
+      if (!(0, import_node_fs.existsSync)(dir)) return "none";
+      return cgroupMembers(dir).length === 0 ? "none" : "some";
+    },
+    watchTargets() {
+      return { cgroupDir: dir, pids: child.pid ? [-child.pid] : [], sudo: false };
     },
     kill() {
       killCgroup(dir);
@@ -808,6 +839,15 @@ function spawnLimited(spec, because, p) {
     enclose() {
     },
     setHostPid() {
+    },
+    verify() {
+      return null;
+    },
+    remaining() {
+      return "unknown";
+    },
+    watchTargets() {
+      return { cgroupDir: null, pids: child.pid ? [-child.pid] : [], sudo: false };
     },
     kill() {
       try {
@@ -930,6 +970,76 @@ var Lease = class {
     return { accepted: true, lost: false };
   }
 };
+
+// src/load/watchdog.ts
+var import_node_child_process2 = require("node:child_process");
+var SOURCE = `
+const fs = require("fs");
+const cp = require("child_process");
+const t = JSON.parse(process.argv[1]);
+const now = () => Number(process.hrtime.bigint()) / 1e6;
+let heard = now();
+let last = now();
+let over = false;
+function kill(why) {
+  if (over) return;
+  over = true;
+  if (t.cgroupDir) {
+    try {
+      fs.writeFileSync(t.cgroupDir + "/cgroup.kill", "1");
+    } catch {
+      try {
+        for (const p of fs.readFileSync(t.cgroupDir + "/cgroup.procs", "utf8").split("\\n").filter(Boolean)) {
+          try { process.kill(Number(p), "SIGKILL"); } catch {}
+        }
+      } catch {}
+    }
+  }
+  for (const pid of t.pids) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch (error) {
+      if (t.sudo && error.code === "EPERM") cp.spawnSync("sudo", ["-n", "kill", "-KILL", "--", String(pid)], { stdio: "ignore", timeout: 5000 });
+    }
+  }
+  try { process.stderr.write("peeps load watchdog: " + why + "\\n"); } catch {}
+  process.exit(0);
+}
+process.stdin.on("data", (chunk) => {
+  heard = now();
+  if (chunk.includes(100)) { over = true; process.exit(0); }
+});
+process.stdin.on("end", () => kill("the supervisor went away"));
+process.stdin.on("error", () => kill("the supervisor went away"));
+setInterval(() => {
+  const at = now();
+  // Paused itself: the supervisor may have been paused with it, so it gets a fresh interval.
+  if (at - last > Math.max(500, t.deadManMs / 2)) heard = at;
+  last = at;
+  if (at - heard > t.deadManMs) kill("the supervisor fell silent");
+}, 100);
+`;
+function spawnWatchdog(targets) {
+  const child = (0, import_node_child_process2.spawn)(process.execPath, ["-e", SOURCE, JSON.stringify(targets)], {
+    env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+    cwd: "/",
+    stdio: ["pipe", "ignore", "ignore"],
+    detached: true
+  });
+  child.unref();
+  child.stdin.on("error", () => void 0);
+  const write = (s) => {
+    if (!child.stdin.destroyed) child.stdin.write(s);
+  };
+  return {
+    child,
+    beat: () => write("h"),
+    release: () => {
+      write("d");
+      child.stdin.end();
+    }
+  };
+}
 
 // src/load/frames.ts
 var MAX_FRAME_BYTES = 256 * 1024;
@@ -1093,6 +1203,8 @@ var Supervisor = class {
   killGraceMs;
   maxRenewalAgeMs;
   contained = null;
+  watchdog = null;
+  cleanup = "not started";
   reader = new FrameReader();
   executorExited = false;
   killed = false;
@@ -1226,6 +1338,11 @@ var Supervisor = class {
       env: journeyEnv
     });
     this.contained.enclose();
+    const unverified = this.contained.verify({ nsPid: Number(hello.nsPid) });
+    if (unverified) throw new Error(`containment could not be verified: ${unverified}`);
+    this.watchdog?.release();
+    this.watchdog = spawnWatchdog({ deadManMs: this.options.deadManMs ?? this.budgets.leaseMs, ...this.contained.watchTargets() });
+    this.emit({ type: "watchdog", pid: this.watchdog.child.pid ?? null });
     await this.waitForLease();
     this.went = true;
     this.sendToExecutor({ t: "go" });
@@ -1530,6 +1647,7 @@ var Supervisor = class {
     if (now - this.lastRenewSentAt >= this.budgets.leaseMs / 3 || this.clock.fenced && this.lastRenewSentAt < (this.clock.fencedAtMs ?? 0)) {
       this.renew();
     }
+    this.watchdog?.beat();
     if (now - this.lastHeartbeat >= this.heartbeatMs) {
       this.lastHeartbeat = now;
       this.sendToExecutor({ t: "hb", generation: this.lease.generation });
@@ -1601,9 +1719,10 @@ var Supervisor = class {
     }
     const left = Math.max(0, this.input.limits.requestBudget - this.gate.issued);
     const measurement = { ...this.budgets.measurement, totalRequests: Math.min(this.budgets.measurement.totalRequests, left) };
+    const checkingStart = this.phaseStart;
     this.phase = "measurement";
     this.phaseStart = now;
-    this.gate = new PhaseGate(measurement, 0, this.budgets.absoluteEndMs - now);
+    this.gate = new PhaseGate(measurement, 0, this.budgets.absoluteEndMs - now, this.gate.tokensAt(now - checkingStart));
     this.marker("phase_started", "measurement");
     this.tickMeasurement(now);
   }
@@ -1669,8 +1788,15 @@ var Supervisor = class {
     }
     this.kill("end of run");
     if (this.contained && !this.executorExited) await waitFor(() => this.executorExited, 5e3);
+    if (this.contained) {
+      const contained = this.contained;
+      if (contained.remaining() === "some") await waitFor(() => contained.remaining() !== "some", 2e3);
+      const left = contained.remaining();
+      this.cleanup = left === "none" ? "complete" : left === "some" ? "failed" : "unverified";
+    }
+    if (this.cleanup !== "failed") this.watchdog?.release();
     this.contained?.dispose();
-    this.marker("traffic_stopped");
+    this.marker(this.cleanup === "failed" ? "cleanup_failed" : "traffic_stopped");
     const now = this.clock.tick();
     if (this.phase === "measurement") {
       for (const id of this.accounting.unresolved()) {
@@ -1685,6 +1811,7 @@ var Supervisor = class {
       reason: this.reason,
       runId: this.runId,
       containment: this.contained ? { level: this.contained.level, limitedBecause: this.contained.limitedBecause } : { level: "limited", limitedBecause: "not started" },
+      cleanup: this.cleanup,
       isolation: this.isolation,
       playwright: this.playwrightVersion,
       checking: this.checkingResult,

@@ -46,6 +46,15 @@ export interface ContainedProcess {
   setHostPid(pid: number): void;
   /** Kills everything inside. Safe to call more than once. */
   kill(): void;
+  /**
+   * Checks the containment holds the executor it started, from what the executor said of
+   * itself: null when it does, else why not. Called before any customer code runs.
+   */
+  verify(executor: { nsPid: number }): string | null;
+  /** After a kill: whether anything is left inside, or that this level cannot tell. */
+  remaining(): "none" | "some" | "unknown";
+  /** What an independent watchdog kills when the supervisor falls silent. */
+  watchTargets(): { cgroupDir: string | null; pids: number[]; sudo: boolean };
   /** Removes what was created for this invocation (the cgroup directory). */
   dispose(): void;
 }
@@ -109,6 +118,14 @@ function makeCgroup(name: string): string | null {
     return null;
   }
   return dir;
+}
+
+function cgroupMembers(dir: string): number[] {
+  try {
+    return readFileSync(path.join(dir, "cgroup.procs"), "utf8").split("\n").filter(Boolean).map(Number);
+  } catch {
+    return [];
+  }
 }
 
 function killCgroup(dir: string): void {
@@ -207,6 +224,17 @@ function spawnInPidNamespace(spec: SpawnSpec, p: Privilege): ContainedProcess {
       }
       if (!p.root && child.pid) spawnSync("sudo", ["-n", "kill", "-KILL", String(child.pid)], { stdio: "ignore", timeout: 5_000 });
     },
+    verify({ nsPid }) {
+      return nsPid === 1 ? null : `the executor is pid ${nsPid} in its namespace, not its init`;
+    },
+    remaining() {
+      // unshare --fork exits only after the namespace's init has; with init gone the kernel
+      // has killed everything in the namespace.
+      return child.exitCode !== null || child.signalCode !== null ? "none" : "some";
+    },
+    watchTargets() {
+      return { cgroupDir: null, pids: [...(hostPid !== null ? [hostPid] : []), ...(child.pid ? [-child.pid] : [])], sudo: !p.root };
+    },
     dispose() {},
   };
 }
@@ -225,6 +253,16 @@ function spawnInCgroup(spec: SpawnSpec, dir: string, p: Privilege): ContainedPro
       enclosed = true;
     },
     setHostPid() {},
+    verify() {
+      return enclosed && cgroupMembers(dir).includes(child.pid!) ? null : "the executor is not in its cgroup";
+    },
+    remaining() {
+      if (!existsSync(dir)) return "none";
+      return cgroupMembers(dir).length === 0 ? "none" : "some";
+    },
+    watchTargets() {
+      return { cgroupDir: dir, pids: child.pid ? [-child.pid] : [], sudo: false };
+    },
     kill() {
       killCgroup(dir);
       try {
@@ -256,6 +294,16 @@ function spawnLimited(spec: SpawnSpec, because: string, p: Privilege): Contained
     startsAsRoot: p.root,
     enclose() {},
     setHostPid() {},
+    verify() {
+      return null;
+    },
+    remaining() {
+      // A process that left the group cannot be seen from here.
+      return "unknown";
+    },
+    watchTargets() {
+      return { cgroupDir: null, pids: child.pid ? [-child.pid] : [], sudo: false };
+    },
     kill() {
       try {
         if (child.pid) process.kill(-child.pid, "SIGKILL");

@@ -24413,7 +24413,7 @@ async function onFrame(frame) {
   }
 }
 var identity = dropPrivileges();
-send({ t: "hello", hostPid: hostPid(), uid: identity.uid, dropped: identity.dropped });
+send({ t: "hello", hostPid: hostPid(), nsPid: process.pid, uid: identity.uid, dropped: identity.dropped });
 var reader = new FrameReader();
 process.stdin.on("data", (chunk) => {
   let frames;
