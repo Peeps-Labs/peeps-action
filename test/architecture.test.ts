@@ -13,7 +13,8 @@ const IMPURE = /from "(?:node:(?:fs|fs\/promises|child_process|net|http|https|os
 
 const adapters = readdirSync(path.join(root, "reach/adapters")).map((file) => `reach/adapters/${file}`);
 const EVIDENCE = ["evidence/port.ts", "evidence/hash.ts", "evidence/browser/rules.ts", "evidence/fingerprint/rules.ts", "evidence/fingerprint/source-map.ts", "evidence/fingerprint/wire.ts", "evidence/recording.ts", "evidence/codec.ts"];
-const PURE = [...EVIDENCE, "footprint/rules.ts", "footprint/test-trace.ts", "reach/preflight.ts", "reach/limits.ts", "reach/checkout.ts", "reach/match.ts", "reach/scan.ts", "reach/graph.ts", "reach/walk.ts", "reach/text-graph.ts", "reach/parse.ts", "reach/syntax.ts", "reach/convention.ts", ...adapters];
+const LOAD = ["load/plan-input.ts", "load/engine-limits.ts", "load/budget.ts", "load/scheduler.ts", "load/accounting.ts", "load/timing.ts", "load/policy.ts", "load/clock.ts"];
+const PURE = [...EVIDENCE, ...LOAD, "footprint/rules.ts", "footprint/test-trace.ts", "reach/preflight.ts", "reach/limits.ts", "reach/checkout.ts", "reach/match.ts", "reach/scan.ts", "reach/graph.ts", "reach/walk.ts", "reach/text-graph.ts", "reach/parse.ts", "reach/syntax.ts", "reach/convention.ts", ...adapters];
 
 for (const file of PURE) {
   test(`${file} touches no file system, git, Playwright or network`, () => {
