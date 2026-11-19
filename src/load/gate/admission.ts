@@ -79,6 +79,7 @@ export type DenyReason =
   | "origin_total"
   | "ceiling"
   | "outstanding"
+  | "users"
   | "rate";
 
 export type Admit =
@@ -99,6 +100,8 @@ interface Turn {
 export class Gate {
   private lease: LeaseGrant = { seq: -1, monoUntil: Number.NEGATIVE_INFINITY, wallUntil: Number.NEGATIVE_INFINITY, ceiling: 0 };
   private lastLeaseSeq = -1;
+  /** A lease was seen run out on either clock: lost for good, as the runner's lease is. */
+  private expired = false;
   private readonly liveSlots = new Map<number, string>();
   private readonly turns = new Map<number, Turn>();
   /** Admitted, delivery not yet known. */
@@ -161,9 +164,11 @@ export class Gate {
    * malformed one revokes.
    */
   applyLease(lease: LeaseGrant): void {
+    if (this.expired) return;
+    if (!Number.isSafeInteger(lease.seq)) return this.revokeLease();
     if (!(lease.seq > this.lastLeaseSeq)) return;
     this.lastLeaseSeq = lease.seq;
-    if (!Number.isSafeInteger(lease.ceiling) || lease.ceiling < 0 || Number.isNaN(lease.monoUntil) || Number.isNaN(lease.wallUntil)) return this.revokeLease();
+    if (!Number.isSafeInteger(lease.ceiling) || lease.ceiling < 0 || !Number.isFinite(lease.monoUntil) || !Number.isFinite(lease.wallUntil)) return this.revokeLease();
     this.lease = { ...lease };
   }
 
@@ -225,7 +230,9 @@ export class Gate {
     if (this.stoppedFlag) return deny("stopped", true);
     if (!(t.monoMs < this.limits.runEndMono)) return deny("run_end", true);
     if (!(t.monoMs < this.lease.monoUntil && t.wallMs < this.lease.wallUntil)) {
-      // Seen expired on either clock: a clock stepping back later must not revive it.
+      // Seen expired on either clock: a clock stepping back later, or a renewal the runner
+      // accepted under that stepped-back clock, must not revive it.
+      if (Number.isFinite(this.lease.monoUntil)) this.expired = true;
       this.revokeLease();
       return deny("lease", false);
     }
@@ -236,10 +243,12 @@ export class Gate {
     if (originTotal === undefined) return deny("origin", true);
     if (!this.methods.has(r.method)) return deny("method", true);
     if (!(this.seq < this.limits.runTotal)) return deny("total", true);
-    if (!(this.phaseCount < this.phase.total)) return deny("phase_total", true);
+    if (!(this.phaseCount < this.phase.total)) return deny("phase_total", false);
     if (!((this.perOrigin.get(r.origin) ?? 0) < originTotal)) return deny("origin_total", true);
     if (!(this.seq < this.lease.ceiling)) return deny("ceiling", false);
     if (!(turn.outstanding < this.limits.maxOutstandingPerTurn)) return deny("outstanding", false);
+    // A phase that lowered the users below those live sends nothing until enough turns close.
+    if (!(this.liveTurns <= this.phase.maxUsers)) return deny("users", false);
     this.refill(t.monoMs);
     if (this.milliTokens < MILLI) {
       const retryInMs = Math.ceil((MILLI - this.milliTokens) / this.phase.ratePerSecond);
@@ -291,11 +300,10 @@ export class Gate {
 }
 
 function checkPhase(caps: PhaseCaps): void {
-  if (!(caps.ratePerSecond > 0 && Number.isFinite(caps.ratePerSecond))) throw new Error("gate: ratePerSecond must be positive");
-  for (const [name, value] of Object.entries(caps)) {
-    if (!Number.isSafeInteger(value) && name !== "ratePerSecond") throw new Error(`gate: ${name} must be an integer`);
-  }
-  if (caps.burst < 1 || caps.maxUsers < 0 || caps.total < 0) throw new Error("gate: burst ≥ 1, maxUsers and total ≥ 0");
+  if (!(caps.ratePerSecond > 0 && Number.isFinite(caps.ratePerSecond))) throw new Error("gate: ratePerSecond must be positive and finite");
+  if (!(Number.isSafeInteger(caps.burst) && caps.burst >= 1)) throw new Error("gate: burst must be a whole number ≥ 1");
+  if (!(Number.isSafeInteger(caps.maxUsers) && caps.maxUsers >= 0)) throw new Error("gate: maxUsers must be a whole number ≥ 0");
+  if (!(Number.isSafeInteger(caps.total) && caps.total >= 0)) throw new Error("gate: total must be a whole number ≥ 0");
 }
 
 function deny(reason: DenyReason, final: boolean): Admit {

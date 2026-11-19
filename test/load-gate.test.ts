@@ -140,7 +140,7 @@ test("each clock alone expires the lease", () => {
   }
 });
 
-test("a lease seen expired stays expired when a clock steps back, and an old grant cannot be replayed", () => {
+test("a lease seen expired stays expired when a clock steps back, and no grant reopens it", () => {
   const { g, req } = gate({}, { burst: 50 });
   const old = grant();
   g.applyLease(old);
@@ -149,7 +149,44 @@ test("a lease seen expired stays expired when a clock steps back, and an old gra
   g.applyLease(old);
   assert.equal(reason(g.admit(req(), at(1, LEASE.wallUntil - 5_000))), "lease", "the same grant again is ignored");
   g.applyLease(grant());
-  assert.ok(g.admit(req(), at(1, LEASE.wallUntil - 5_000)).ok, "a newer grant applies");
+  assert.equal(reason(g.admit(req(), at(1, LEASE.wallUntil - 5_000))), "lease", "a newer grant does not reopen an expired gate");
+});
+
+test("an expired lease is lost for good: a later grant does not reopen the gate", () => {
+  const { g, req } = gate({}, { burst: 50 });
+  assert.equal(reason(g.admit(req(), at(1, LEASE.wallUntil))), "lease");
+  g.applyLease(grant());
+  assert.equal(reason(g.admit(req(), at(1, LEASE.wallUntil - 5_000))), "lease");
+});
+
+test("malformed grants and phases are refused", () => {
+  for (const bad of [{ monoUntil: Number.POSITIVE_INFINITY }, { wallUntil: Number.POSITIVE_INFINITY }]) {
+    const { g, req } = gate({}, { burst: 50 });
+    g.applyLease(grant(bad));
+    assert.equal(reason(g.admit(req(), at(1))), "lease", JSON.stringify(bad));
+  }
+  {
+    const { g, req } = gate({}, { burst: 50 });
+    g.applyLease({ ...LEASE, seq: Number.POSITIVE_INFINITY });
+    assert.equal(reason(g.admit(req(), at(1))), "lease");
+    g.applyLease(grant());
+    assert.ok(g.admit(req(), at(1)).ok, "a valid later grant still applies");
+  }
+  assert.throws(() => new Gate(limits({ phase: { ratePerSecond: 10, maxUsers: 1, total: 10 } as PhaseCaps })), /burst/);
+  const { g } = gate();
+  assert.throws(() => g.setPhase({ ratePerSecond: 1, burst: 1, maxUsers: 1 } as PhaseCaps, at(1)), /total/);
+});
+
+test("a phase with fewer users holds the live turns until enough close", () => {
+  const { g, turn, req } = gate({}, { burst: 50, maxUsers: 2 });
+  const second = g.openTurn("other", at(1));
+  assert.ok(second.ok);
+  g.setPhase(phase({ burst: 50, maxUsers: 1 }), at(1));
+  assert.equal(reason(g.admit(req(), at(1))), "users");
+  g.closeTurn(second.turn);
+  assert.ok(g.admit(req(), at(1)).ok);
+  g.setPhase(phase({ burst: 50, maxUsers: 0 }), at(1));
+  assert.equal(reason(g.admit({ turn, origin: ORIGIN, method: "GET" }, at(1))), "users");
 });
 
 test("a slot has one live turn", () => {
@@ -257,7 +294,7 @@ test("a phase change never adds tokens, and each phase has its own total and use
   assert.equal(ok, 2, "clamped to the new burst");
   assert.equal(reason(g.admit(req(), at(1_500))), "rate");
   assert.ok(sendOk(g, req(), at(2_000)).ok, "one per second");
-  assert.deepEqual(g.admit(req(), at(9_000)), { ok: false, reason: "phase_total", final: true });
+  assert.deepEqual(g.admit(req(), at(9_000)), { ok: false, reason: "phase_total", final: false }, "the next phase may admit it");
   assert.deepEqual(g.openTurn(`s${++slotN}`, at(9_000)), { ok: false, reason: "users" }, "one turn is already live");
 });
 
