@@ -29,11 +29,12 @@ row 10_vsock_modules "$(lsmod | grep -E 'vsock|hv_sock' | awk '{print $1}' | tr 
 
 # Sink, supervisor-side forwarder, socket staging.
 python3 "$SPIKE/sink.py" $PORT "$OUT/sink.log" & SINKPID=$!
-mkdir -p /tmp/e0; rm -f /tmp/e0/proxy.sock
-node "$SPIKE/fwd.js" /tmp/e0/proxy.sock "$IP" $PORT & FWDPID=$!
+# Bind in place, then lock the directory down: a socket moved across filesystems is
+# recreated by mv with no listener (ECONNREFUSED; seen in E0 run 3).
+sudo -n mkdir -p /run/e0sock && sudo -n chown "$(id -u)" /run/e0sock
+node "$SPIKE/fwd.js" /run/e0sock/proxy.sock "$IP" $PORT & FWDPID=$!
 sleep 1
-sudo -n mkdir -p /run/e0sock && sudo -n mv /tmp/e0/proxy.sock /run/e0sock/ \
-  && sudo -n chown root:65533 /run/e0sock /run/e0sock/proxy.sock && sudo -n chmod 0710 /run/e0sock && sudo -n chmod 0660 /run/e0sock/proxy.sock \
+sudo -n chown root:65533 /run/e0sock /run/e0sock/proxy.sock && sudo -n chmod 0710 /run/e0sock && sudo -n chmod 0660 /run/e0sock/proxy.sock \
   && row sock_staged pass || row sock_staged FAIL
 echo "$SINK" > "$SPIKE/fixture/sink.txt"
 
