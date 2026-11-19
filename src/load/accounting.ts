@@ -55,15 +55,34 @@ interface StartState {
   outcomeAtMs: number | null;
 }
 
+interface CohortState {
+  interval: number;
+  stage: number;
+  starts: number;
+  success: number;
+  failure: number;
+  timeout: number;
+  interrupted: number;
+  lastDeadlineMs: number;
+}
+
 type Counters = Omit<IntervalRecord, "interval" | "fromMs" | "untilMs" | "inFlight" | "oldestInFlightMs">;
 
 const emptyCounters = (): Counters => ({ due: 0, started: 0, missed: 0, success: 0, failure: 0, timeout: 0, interrupted: 0 });
 
+/**
+ * Kept incrementally: cohorts are aggregated as starts and outcomes arrive, and a start is let
+ * go once it is settled (it has an outcome, every interval it ran in is published, and its
+ * cohort is sealed), so a tick costs what is still in flight, not everything ever started.
+ */
 export class Accounting {
   private readonly starts = new Map<string, StartState>();
   private readonly counters = new Map<number, Counters>();
+  private readonly cohorts = new Map<string, CohortState>();
   private readonly sealed = new Set<string>();
   private nextToClose = 0;
+  /** Every outcome recorded, once each: the run's totals. */
+  readonly totals: Record<Outcome, number> = { success: 0, failure: 0, timeout: 0, interrupted: 0 };
 
   constructor(readonly intervalMs = 10_000) {}
 
@@ -88,20 +107,37 @@ export class Accounting {
 
   start(id: string, atMs: number, stage: number, deadlineMs: number): void {
     if (this.starts.has(id)) throw new Error(`start ${id} recorded twice`);
-    this.starts.set(id, { atMs, deadlineMs, interval: this.intervalOf(atMs), stage, outcome: null, outcomeAtMs: null });
+    const interval = this.intervalOf(atMs);
+    this.starts.set(id, { atMs, deadlineMs, interval, stage, outcome: null, outcomeAtMs: null });
+    const key = `${interval}/${stage}`;
+    if (!this.sealed.has(key)) {
+      const cohort = this.cohorts.get(key) ?? { interval, stage, starts: 0, success: 0, failure: 0, timeout: 0, interrupted: 0, lastDeadlineMs: deadlineMs };
+      cohort.starts += 1;
+      cohort.lastDeadlineMs = Math.max(cohort.lastDeadlineMs, deadlineMs);
+      this.cohorts.set(key, cohort);
+    }
     this.bump(atMs, "started");
   }
 
   /** Records the start's one outcome; false when it had one already or is unknown. */
   outcome(id: string, kind: Outcome, atMs: number): boolean {
+    return this.record(id, kind, atMs) !== null;
+  }
+
+  /** Records the start's one outcome and returns it as counted (late is a timeout); null when
+   * it had one already or is unknown. */
+  record(id: string, kind: Outcome, atMs: number): Outcome | null {
     const start = this.starts.get(id);
-    if (!start || start.outcome) return false;
+    if (!start || start.outcome) return null;
     const late = atMs >= start.deadlineMs;
     const final: Outcome = late && kind !== "interrupted" ? "timeout" : kind;
     start.outcome = final;
     start.outcomeAtMs = final === "timeout" ? start.deadlineMs : atMs;
     this.bump(start.outcomeAtMs, final);
-    return true;
+    this.totals[final] += 1;
+    const cohort = this.cohorts.get(`${start.interval}/${start.stage}`);
+    if (cohort) cohort[final] += 1;
+    return final;
   }
 
   /** Starts with no outcome whose deadline has passed: they are timeouts now. */
@@ -109,7 +145,7 @@ export class Accounting {
     const expired: string[] = [];
     for (const [id, start] of this.starts) {
       if (!start.outcome && nowMs >= start.deadlineMs) {
-        this.outcome(id, "timeout", start.deadlineMs);
+        this.record(id, "timeout", start.deadlineMs);
         expired.push(id);
       }
     }
@@ -120,6 +156,7 @@ export class Accounting {
   closeIntervals(nowMs: number): IntervalRecord[] {
     const out: IntervalRecord[] = [];
     while ((this.nextToClose + 1) * this.intervalMs <= nowMs) out.push(this.close(this.nextToClose++));
+    this.prune();
     return out;
   }
 
@@ -140,33 +177,41 @@ export class Accounting {
 
   /** Cohorts that can seal by `nowMs`: every start resolved, or past its deadline plus grace. */
   sealCohorts(nowMs: number, graceMs: number, force = false): CohortRecord[] {
-    const groups = new Map<string, StartState[]>();
-    for (const start of this.starts.values()) {
-      const key = `${start.interval}/${start.stage}`;
-      if (this.sealed.has(key)) continue;
-      groups.set(key, [...(groups.get(key) ?? []), start]);
-    }
     const out: CohortRecord[] = [];
-    for (const [key, starts] of groups) {
+    for (const [key, c] of this.cohorts) {
       // A cohort's interval must be over before it can hold every start it will ever hold.
-      const intervalOver = (starts[0]!.interval + 1) * this.intervalMs <= nowMs;
-      const resolved = starts.every((s) => s.outcome);
-      const lastDeadline = Math.max(...starts.map((s) => s.deadlineMs));
-      if (!force && !(intervalOver && (resolved || nowMs >= lastDeadline + graceMs))) continue;
+      const intervalOver = (c.interval + 1) * this.intervalMs <= nowMs;
+      const settled = c.success + c.failure + c.timeout + c.interrupted;
+      const resolved = settled === c.starts;
+      if (!force && !(intervalOver && (resolved || nowMs >= c.lastDeadlineMs + graceMs))) continue;
       this.sealed.add(key);
-      const count = (o: Outcome) => starts.filter((s) => s.outcome === o).length;
+      this.cohorts.delete(key);
       out.push({
-        interval: starts[0]!.interval,
-        stage: starts[0]!.stage,
-        starts: starts.length,
-        success: count("success"),
-        failure: count("failure"),
-        timeout: count("timeout"),
-        interrupted: count("interrupted"),
-        unresolved: starts.filter((s) => !s.outcome).length,
+        interval: c.interval,
+        stage: c.stage,
+        starts: c.starts,
+        success: c.success,
+        failure: c.failure,
+        timeout: c.timeout,
+        interrupted: c.interrupted,
+        unresolved: c.starts - settled,
       });
     }
+    this.prune();
     return out.sort((a, b) => a.interval - b.interval || a.stage - b.stage);
+  }
+
+  /** Lets go of starts no published record can still need. */
+  private prune(): void {
+    const publishedUntil = this.nextToClose * this.intervalMs;
+    for (const [id, s] of this.starts) {
+      if (s.outcomeAtMs !== null && s.outcomeAtMs < publishedUntil && this.sealed.has(`${s.interval}/${s.stage}`)) this.starts.delete(id);
+    }
+  }
+
+  /** How many starts are still held (in flight, or not yet published and sealed). */
+  retained(): number {
+    return this.starts.size;
   }
 
   /** Starts with no outcome yet. */

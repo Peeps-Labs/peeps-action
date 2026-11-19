@@ -16,6 +16,7 @@ import {
   alive,
   engineZeroWall,
   executorHostPid,
+  makePlan,
   newSink,
   permitIds,
   permits,
@@ -37,6 +38,11 @@ async function until(condition: () => boolean, timeoutMs = 20_000): Promise<void
     if (Date.now() - started > timeoutMs) throw new Error("condition not met in time");
     await new Promise((r) => setTimeout(r, 10));
   }
+}
+
+/** Lets the sink hear every connection the run's kill closed (the test process may be busy). */
+async function settled(sink: LoadSink): Promise<void> {
+  await until(() => sink.requests.every((r) => r.endMs !== null), 2_000).catch(() => undefined);
 }
 
 /** Waits until measurement traffic is flowing and a request is outstanding at the sink. */
@@ -165,6 +171,7 @@ test("a lost lease: starts fenced at the last renewal plus the lease, then drain
   assert.deepEqual(sink.requestsAfter(fencedAt + SLOP).map((r) => r.path), [], "a send after the lease ended");
   // After the drain the containment kill: nothing outstanding survives it.
   const killedBy = fencedAt + 1_000 + SLOP * 2;
+  await settled(sink);
   for (const r of sink.requests) assert.ok(r.endMs !== null && r.endMs <= killedBy, `${r.path} outlived the kill by ${r.endMs === null ? "ever" : `${r.endMs - killedBy} ms`}`);
   const kinds = done.markers.map((m) => m.kind);
   assert.ok(kinds.includes("lease_lost") && kinds.includes("executor_killed"), kinds.join(","));
@@ -273,14 +280,21 @@ for (const [what, wholeJob, frozenMs, deadManMs] of [
     assert.ok(fresh.length > 0, "no renewal accepted after the resume");
     const firstFresh = Math.min(...fresh.map((e) => Number(e.at)));
     assert.ok(firstFresh - resumedAt >= 1_500, `the fresh renewal came back too soon to prove anything: ${firstFresh - resumedAt} ms`);
+    const given = new Map(permits(events).map((p) => [p.id, p.wallMs]));
     assert.deepEqual(
-      sink
-        .requestsAfter(resumedAt)
-        .filter((r) => r.arrivalMs < firstFresh)
-        .map((r) => r.path),
+      permits(events).filter((p) => p.wallMs >= resumedAt && p.wallMs < firstFresh).map((p) => p.url),
+      [],
+      "a permit given after the resume before a fresh renewal",
+    );
+    // The one send the stop can catch is one already checked and on its way into Playwright
+    // when the process stopped: it reaches the socket on resume. Nothing else may.
+    const late = sink.requestsAfter(resumedAt).filter((r) => r.arrivalMs < firstFresh);
+    assert.deepEqual(
+      late.filter((r) => (given.get(r.permit ?? "") ?? Infinity) >= stoppedAt).map((r) => r.path),
       [],
       "sent after the resume before a fresh renewal",
     );
+    assert.ok(late.length <= 4, `${late.length} sends caught by the stop, more than one per user`);
     assert.deepEqual(
       measurementStartsAfter(sink, resumedAt).filter((s) => s.wallMs < firstFresh),
       [],
@@ -644,7 +658,43 @@ test("the run's absolute end holds over a stop's drain and the phase's own end",
     [],
     "a send after the absolute end",
   );
+  await settled(sink);
   for (const r of sink.requests)
     assert.ok(r.endMs !== null && r.endMs <= absoluteEnd + SLOP * 2, `${r.path} outlived the absolute end by ${(r.endMs ?? Infinity) - absoluteEnd} ms`);
+  noBypass(run, sink);
+});
+
+test("every timeout is counted once in the result, as in the published intervals and cohorts", async (t) => {
+  const sink = await newSink(t);
+  const run = await startRun(t, sink, {
+    plan: { module: "basic.ts", export: "readValue", users: 3, holdMs: 5_000 },
+    constants: { turnDeadlineMs: 1_200 },
+  });
+  await run.waitFor((e) => e.some((x) => x.type === "marker" && (x.marker as { detail?: string }).detail === "measurement"));
+  // From now on every response outlives its turn's deadline: each turn ends as a timeout,
+  // whichever of the supervisor's expiry and the executor's own outcome comes first.
+  sink.holdMs = 3_000;
+  const done = await run.finished();
+  const m = done.result.measurement;
+  assert.ok(m.timeout >= 3, `${m.timeout} timeouts`);
+  const sum = (records: unknown[], key: string) => records.reduce<number>((n, r) => n + Number((r as Record<string, number>)[key] ?? 0), 0);
+  for (const key of ["success", "failure", "timeout", "interrupted"] as const) {
+    assert.equal(sum(done.intervals, key), m[key], `${key}: intervals ${sum(done.intervals, key)}, result ${m[key]}`);
+    assert.equal(sum(done.cohorts, key), m[key], `${key}: cohorts ${sum(done.cohorts, key)}, result ${m[key]}`);
+  }
+  assert.equal(m.success + m.failure + m.timeout + m.interrupted, m.started);
+});
+
+test("the request budget holds across Checking and measurement together", async (t) => {
+  const sink = await newSink(t);
+  // The plan's ceiling is exactly the budget, so Checking's sends must come out of it.
+  const spec = { module: "basic.ts", export: "readValue", users: 2, holdMs: 4_000, perJourneyMax: 1 };
+  const budget = makePlan(spec, sink.url).limits.requestBudget;
+  const run = await startRun(t, sink, { plan: spec });
+  const done = await run.finished();
+  const checkingPermits = new Set(run.events().filter((e) => e.type === "permit" && String(e.turn).startsWith("c")).map((e) => String(e.id)));
+  assert.equal(sink.requests.filter((r) => checkingPermits.has(r.permit ?? "")).length, 2, "Checking did not send");
+  assert.ok(sink.requests.length <= budget, `${sink.requests.length} requests against a budget of ${budget}`);
+  assert.ok((done.result.permits.denied.total ?? 0) >= 1, "the budget never refused a permit");
   noBypass(run, sink);
 });

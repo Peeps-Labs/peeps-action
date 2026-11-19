@@ -184,7 +184,8 @@ export class Supervisor {
   private bypassCount = 0;
   private readonly successMicros: number[] = [];
   private checkingResult: EngineResult["checking"] = { users: 0, success: 0, failure: 0, timeout: 0, failures: [] };
-  private measured = { started: 0, missed: 0, success: 0, failure: 0, timeout: 0, interrupted: 0 };
+  /** Starts and misses; outcomes are the accounting's own totals, so every path counts once. */
+  private measured = { started: 0, missed: 0 };
   private intervalsPublished = 0;
 
   private stopMode: "graceful" | "now" | "lease" | null = null;
@@ -295,11 +296,17 @@ export class Supervisor {
     const child = this.contained.child;
     this.executorExited = false;
     this.reader = new FrameReader();
-    child.stdout!.on("data", (chunk: Buffer) => this.onExecutorBytes(chunk));
+    // An executor replaced by the fallback below is no longer heard: its last bytes and its
+    // exit belong to nothing now.
+    const current = () => this.contained?.child === child;
+    child.stdout!.on("data", (chunk: Buffer) => {
+      if (current()) this.onExecutorBytes(chunk);
+    });
     child.stderr!.on("data", (chunk: Buffer) => {
       for (const line of chunk.toString("utf8").split("\n").filter(Boolean)) this.emit({ type: "log", line: line.slice(0, 2000) });
     });
     child.on("exit", () => {
+      if (!current()) return;
       this.executorExited = true;
       this.onExecutorExit();
     });
@@ -454,11 +461,7 @@ export class Supervisor {
       }
       return;
     }
-    const recorded = this.accounting.outcome(id, kind, now - this.phaseStart);
-    if (!recorded) return;
-    const late = now >= turn.deadlineAt;
-    const final: Outcome = late && kind !== "interrupted" ? "timeout" : kind;
-    this.measured[final] += 1;
+    const final = this.accounting.record(id, kind, now - this.phaseStart);
     if (final === "success" && typeof frame.durationUs === "number") this.successMicros.push(Math.max(0, Math.round(frame.durationUs)));
   }
 
@@ -747,9 +750,12 @@ export class Supervisor {
       void this.finish(false);
       return;
     }
+    // The request budget is the run's: what Checking was given comes out of measurement's.
+    const left = Math.max(0, this.input.limits.requestBudget - this.gate!.issued);
+    const measurement = { ...this.budgets.measurement, totalRequests: Math.min(this.budgets.measurement.totalRequests, left) };
     this.phase = "measurement";
     this.phaseStart = now;
-    this.gate = new PhaseGate(this.budgets.measurement, 0, this.budgets.absoluteEndMs - now);
+    this.gate = new PhaseGate(measurement, 0, this.budgets.absoluteEndMs - now);
     this.marker("phase_started", "measurement");
     this.tickMeasurement(now);
   }
@@ -829,7 +835,7 @@ export class Supervisor {
     const now = this.clock.tick();
     if (this.phase === "measurement") {
       for (const id of this.accounting.unresolved()) {
-        if (this.accounting.outcome(id, "interrupted", now - this.phaseStart)) this.measured.interrupted += 1;
+        this.accounting.record(id, "interrupted", now - this.phaseStart);
       }
       this.publish(now - this.phaseStart, true);
     }
@@ -845,7 +851,7 @@ export class Supervisor {
       isolation: this.isolation,
       playwright: this.playwrightVersion,
       checking: this.checkingResult,
-      measurement: { ...this.measured, successTime, p95Micros: percentile(successTime, 0.95) },
+      measurement: { ...this.measured, ...this.accounting.totals, successTime, p95Micros: percentile(successTime, 0.95) },
       permits: { issued: this.issued.length, ids: this.issued, denied: this.denied },
       bypasses: { count: this.bypassCount, samples: this.bypasses },
       intervalsPublished: this.intervalsPublished,

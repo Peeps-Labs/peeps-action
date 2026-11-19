@@ -63,6 +63,10 @@ async function engineVerdict(t: TestContext, variant: Variant): Promise<Verdict>
     options: { repositoryRoot: V2 },
   });
   const done = await run.finished();
+  // The verdict must come from real Checking traffic: a Checking user whose sends reached the sink.
+  assert.ok(done.result.checking.users >= 1, `Checking ran ${done.result.checking.users} users`);
+  const checkingPermits = new Set(run.events().filter((e) => e.type === "permit" && String(e.turn).startsWith("c")).map((e) => String(e.id)));
+  assert.ok(sink.requests.some((r) => checkingPermits.has(r.permit ?? "")), "no Checking send reached the sink");
   const failure = done.result.checking.failures[0];
   if (!failure) {
     assert.equal(done.result.checking.success, done.result.checking.users, run.stderr);

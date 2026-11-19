@@ -82,6 +82,8 @@ export function engineBudgets(input: PlanInput, constants: EngineConstants = ENG
   const users = Math.min(plan.peakUsers, limits.maxUsers);
   const measurement: PhaseBudget = {
     users,
+    // The request budget is per run: the supervisor takes Checking's issued permits off this
+    // when measurement begins.
     totalRequests: Math.min(plan.requests.ceiling, limits.requestBudget),
     ratePerSecond: rateFor(users, perJourney, pacing, constants),
     burst: Math.min(constants.maxBurst, users * perJourney),

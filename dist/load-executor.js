@@ -24242,7 +24242,11 @@ function session(user) {
     s = new UserSession(playwright, {
       baseURL: init.baseURL,
       now: sharedNowMs,
-      usable: (permit) => permit.generation >= minGeneration,
+      // Sampled at the send itself: a pause since the last tick voids the permit here too.
+      usable: (permit) => {
+        checkPause();
+        return permit.generation >= minGeneration;
+      },
       ask: ({ turn, method, url }) => new Promise((resolve, reject) => {
         const req = ++nextAsk;
         asks.set(req, { resolve, reject });

@@ -393,8 +393,11 @@ var Accounting = class {
   }
   starts = /* @__PURE__ */ new Map();
   counters = /* @__PURE__ */ new Map();
+  cohorts = /* @__PURE__ */ new Map();
   sealed = /* @__PURE__ */ new Set();
   nextToClose = 0;
+  /** Every outcome recorded, once each: the run's totals. */
+  totals = { success: 0, failure: 0, timeout: 0, interrupted: 0 };
   intervalOf(atMs) {
     return Math.floor(atMs / this.intervalMs);
   }
@@ -412,26 +415,42 @@ var Accounting = class {
   }
   start(id, atMs, stage, deadlineMs) {
     if (this.starts.has(id)) throw new Error(`start ${id} recorded twice`);
-    this.starts.set(id, { atMs, deadlineMs, interval: this.intervalOf(atMs), stage, outcome: null, outcomeAtMs: null });
+    const interval = this.intervalOf(atMs);
+    this.starts.set(id, { atMs, deadlineMs, interval, stage, outcome: null, outcomeAtMs: null });
+    const key = `${interval}/${stage}`;
+    if (!this.sealed.has(key)) {
+      const cohort = this.cohorts.get(key) ?? { interval, stage, starts: 0, success: 0, failure: 0, timeout: 0, interrupted: 0, lastDeadlineMs: deadlineMs };
+      cohort.starts += 1;
+      cohort.lastDeadlineMs = Math.max(cohort.lastDeadlineMs, deadlineMs);
+      this.cohorts.set(key, cohort);
+    }
     this.bump(atMs, "started");
   }
   /** Records the start's one outcome; false when it had one already or is unknown. */
   outcome(id, kind, atMs) {
+    return this.record(id, kind, atMs) !== null;
+  }
+  /** Records the start's one outcome and returns it as counted (late is a timeout); null when
+   * it had one already or is unknown. */
+  record(id, kind, atMs) {
     const start = this.starts.get(id);
-    if (!start || start.outcome) return false;
+    if (!start || start.outcome) return null;
     const late = atMs >= start.deadlineMs;
     const final = late && kind !== "interrupted" ? "timeout" : kind;
     start.outcome = final;
     start.outcomeAtMs = final === "timeout" ? start.deadlineMs : atMs;
     this.bump(start.outcomeAtMs, final);
-    return true;
+    this.totals[final] += 1;
+    const cohort = this.cohorts.get(`${start.interval}/${start.stage}`);
+    if (cohort) cohort[final] += 1;
+    return final;
   }
   /** Starts with no outcome whose deadline has passed: they are timeouts now. */
   expire(nowMs) {
     const expired = [];
     for (const [id, start] of this.starts) {
       if (!start.outcome && nowMs >= start.deadlineMs) {
-        this.outcome(id, "timeout", start.deadlineMs);
+        this.record(id, "timeout", start.deadlineMs);
         expired.push(id);
       }
     }
@@ -441,6 +460,7 @@ var Accounting = class {
   closeIntervals(nowMs) {
     const out = [];
     while ((this.nextToClose + 1) * this.intervalMs <= nowMs) out.push(this.close(this.nextToClose++));
+    this.prune();
     return out;
   }
   close(interval) {
@@ -459,32 +479,38 @@ var Accounting = class {
   }
   /** Cohorts that can seal by `nowMs`: every start resolved, or past its deadline plus grace. */
   sealCohorts(nowMs, graceMs, force = false) {
-    const groups = /* @__PURE__ */ new Map();
-    for (const start of this.starts.values()) {
-      const key = `${start.interval}/${start.stage}`;
-      if (this.sealed.has(key)) continue;
-      groups.set(key, [...groups.get(key) ?? [], start]);
-    }
     const out = [];
-    for (const [key, starts] of groups) {
-      const intervalOver = (starts[0].interval + 1) * this.intervalMs <= nowMs;
-      const resolved = starts.every((s) => s.outcome);
-      const lastDeadline = Math.max(...starts.map((s) => s.deadlineMs));
-      if (!force && !(intervalOver && (resolved || nowMs >= lastDeadline + graceMs))) continue;
+    for (const [key, c] of this.cohorts) {
+      const intervalOver = (c.interval + 1) * this.intervalMs <= nowMs;
+      const settled = c.success + c.failure + c.timeout + c.interrupted;
+      const resolved = settled === c.starts;
+      if (!force && !(intervalOver && (resolved || nowMs >= c.lastDeadlineMs + graceMs))) continue;
       this.sealed.add(key);
-      const count = (o) => starts.filter((s) => s.outcome === o).length;
+      this.cohorts.delete(key);
       out.push({
-        interval: starts[0].interval,
-        stage: starts[0].stage,
-        starts: starts.length,
-        success: count("success"),
-        failure: count("failure"),
-        timeout: count("timeout"),
-        interrupted: count("interrupted"),
-        unresolved: starts.filter((s) => !s.outcome).length
+        interval: c.interval,
+        stage: c.stage,
+        starts: c.starts,
+        success: c.success,
+        failure: c.failure,
+        timeout: c.timeout,
+        interrupted: c.interrupted,
+        unresolved: c.starts - settled
       });
     }
+    this.prune();
     return out.sort((a, b) => a.interval - b.interval || a.stage - b.stage);
+  }
+  /** Lets go of starts no published record can still need. */
+  prune() {
+    const publishedUntil = this.nextToClose * this.intervalMs;
+    for (const [id, s] of this.starts) {
+      if (s.outcomeAtMs !== null && s.outcomeAtMs < publishedUntil && this.sealed.has(`${s.interval}/${s.stage}`)) this.starts.delete(id);
+    }
+  }
+  /** How many starts are still held (in flight, or not yet published and sealed). */
+  retained() {
+    return this.starts.size;
   }
   /** Starts with no outcome yet. */
   unresolved() {
@@ -716,6 +742,7 @@ function spawnInPidNamespace(spec, p) {
     kill() {
       if (killed) return;
       killed = true;
+      if (child.exitCode !== null || child.signalCode !== null) return;
       if (hostPid !== null) {
         if (p.root) {
           try {
@@ -838,6 +865,8 @@ function engineBudgets(input, constants = ENGINE_LIMITS) {
   const users = Math.min(plan.peakUsers, limits.maxUsers);
   const measurement = {
     users,
+    // The request budget is per run: the supervisor takes Checking's issued permits off this
+    // when measurement begins.
     totalRequests: Math.min(plan.requests.ceiling, limits.requestBudget),
     ratePerSecond: rateFor(users, perJourney, pacing, constants),
     burst: Math.min(constants.maxBurst, users * perJourney),
@@ -1094,7 +1123,8 @@ var Supervisor = class {
   bypassCount = 0;
   successMicros = [];
   checkingResult = { users: 0, success: 0, failure: 0, timeout: 0, failures: [] };
-  measured = { started: 0, missed: 0, success: 0, failure: 0, timeout: 0, interrupted: 0 };
+  /** Starts and misses; outcomes are the accounting's own totals, so every path counts once. */
+  measured = { started: 0, missed: 0 };
   intervalsPublished = 0;
   stopMode = null;
   drainUntil = Number.POSITIVE_INFINITY;
@@ -1169,11 +1199,15 @@ var Supervisor = class {
     const child = this.contained.child;
     this.executorExited = false;
     this.reader = new FrameReader();
-    child.stdout.on("data", (chunk) => this.onExecutorBytes(chunk));
+    const current = () => this.contained?.child === child;
+    child.stdout.on("data", (chunk) => {
+      if (current()) this.onExecutorBytes(chunk);
+    });
     child.stderr.on("data", (chunk) => {
       for (const line of chunk.toString("utf8").split("\n").filter(Boolean)) this.emit({ type: "log", line: line.slice(0, 2e3) });
     });
     child.on("exit", () => {
+      if (!current()) return;
       this.executorExited = true;
       this.onExecutorExit();
     });
@@ -1313,11 +1347,7 @@ var Supervisor = class {
       }
       return;
     }
-    const recorded = this.accounting.outcome(id, kind, now - this.phaseStart);
-    if (!recorded) return;
-    const late = now >= turn.deadlineAt;
-    const final = late && kind !== "interrupted" ? "timeout" : kind;
-    this.measured[final] += 1;
+    const final = this.accounting.record(id, kind, now - this.phaseStart);
     if (final === "success" && typeof frame.durationUs === "number") this.successMicros.push(Math.max(0, Math.round(frame.durationUs)));
   }
   onExecutorExit() {
@@ -1569,9 +1599,11 @@ var Supervisor = class {
       void this.finish(false);
       return;
     }
+    const left = Math.max(0, this.input.limits.requestBudget - this.gate.issued);
+    const measurement = { ...this.budgets.measurement, totalRequests: Math.min(this.budgets.measurement.totalRequests, left) };
     this.phase = "measurement";
     this.phaseStart = now;
-    this.gate = new PhaseGate(this.budgets.measurement, 0, this.budgets.absoluteEndMs - now);
+    this.gate = new PhaseGate(measurement, 0, this.budgets.absoluteEndMs - now);
     this.marker("phase_started", "measurement");
     this.tickMeasurement(now);
   }
@@ -1642,7 +1674,7 @@ var Supervisor = class {
     const now = this.clock.tick();
     if (this.phase === "measurement") {
       for (const id of this.accounting.unresolved()) {
-        if (this.accounting.outcome(id, "interrupted", now - this.phaseStart)) this.measured.interrupted += 1;
+        this.accounting.record(id, "interrupted", now - this.phaseStart);
       }
       this.publish(now - this.phaseStart, true);
     }
@@ -1656,7 +1688,7 @@ var Supervisor = class {
       isolation: this.isolation,
       playwright: this.playwrightVersion,
       checking: this.checkingResult,
-      measurement: { ...this.measured, successTime, p95Micros: percentile(successTime, 0.95) },
+      measurement: { ...this.measured, ...this.accounting.totals, successTime, p95Micros: percentile(successTime, 0.95) },
       permits: { issued: this.issued.length, ids: this.issued, denied: this.denied },
       bypasses: { count: this.bypassCount, samples: this.bypasses },
       intervalsPublished: this.intervalsPublished,

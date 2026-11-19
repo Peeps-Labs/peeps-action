@@ -108,3 +108,30 @@ test("due and missed turns are counted in their interval", () => {
   a.missed(5_000);
   assert.equal(a.closeIntervals(30_000)[0]!.missed, 1);
 });
+
+test("totals count every outcome once, an expiry included, and a later outcome for it is ignored", () => {
+  const a = new Accounting(10_000);
+  a.start("s1", 0, 0, 5_000);
+  a.start("s2", 0, 0, 5_000);
+  assert.equal(a.record("s1", "success", 1_000), "success");
+  assert.deepEqual(a.expire(6_000), ["s2"]);
+  assert.equal(a.record("s2", "success", 6_100), null, "an expired start took a second outcome");
+  assert.deepEqual(a.totals, { success: 1, failure: 0, timeout: 1, interrupted: 0 });
+  const [record] = a.closeIntervals(10_000);
+  assert.deepEqual([record!.success, record!.timeout], [a.totals.success, a.totals.timeout]);
+});
+
+test("settled starts are let go once their intervals are published and their cohort sealed", () => {
+  const a = new Accounting(1_000);
+  for (let i = 0; i < 5_000; i++) {
+    const at = i * 20;
+    a.start(`s${i}`, at, 0, at + 500);
+    a.outcome(`s${i}`, "success", at + 10);
+    if (i % 50 === 0) {
+      a.closeIntervals(at);
+      a.sealCohorts(at, 100);
+    }
+  }
+  assert.ok(a.retained() <= 200, `retained ${a.retained()} starts`);
+  assert.equal(a.totals.success, 5_000);
+});

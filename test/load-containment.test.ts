@@ -7,7 +7,7 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 
-import { cgroupV2Dir, privilege } from "../src/load/containment";
+import { cgroupV2Dir, privilege, spawnContained } from "../src/load/containment";
 import { alive, newSink, startRun } from "./support/load-run";
 import type { LoadSink } from "./support/load-sink";
 
@@ -52,8 +52,10 @@ async function runEscape(t: TestContext, containment: string) {
 }
 
 const canContain = privilege().root || privilege().sudo;
+// The escape fixture needs `setsid` and /proc, and every level but `limited` is Linux's own.
+const linux = process.platform === "linux";
 
-test("pid namespace: a setsid grandchild is gone after the run, a bystander is not", { skip: !canContain && "needs root or sudo -n" }, async (t) => {
+test("pid namespace: a setsid grandchild is gone after the run, a bystander is not", { skip: (!linux && "Linux only") || (!canContain && "needs root or sudo -n") }, async (t) => {
   const { done, pids, bystander } = await runEscape(t, "pid-namespace");
   assert.equal(done.result.containment.level, "pid-namespace");
   assert.equal(done.result.containment.limitedBecause, null);
@@ -62,7 +64,7 @@ test("pid namespace: a setsid grandchild is gone after the run, a bystander is n
   assert.equal(alive(bystander), true, "a process the engine did not start was killed");
 });
 
-test("cgroup: a setsid grandchild is gone after the run, a bystander is not", { skip: !cgroupV2Dir() && "no cgroup v2" }, async (t) => {
+test("cgroup: a setsid grandchild is gone after the run, a bystander is not", { skip: (!linux && "Linux only") || (!cgroupV2Dir() && "no cgroup v2") }, async (t) => {
   const { done, pids, bystander } = await runEscape(t, "cgroup");
   if (done.result.containment.level !== "cgroup") {
     t.skip(`cgroup containment unavailable here: ${done.result.containment.limitedBecause}`);
@@ -73,7 +75,7 @@ test("cgroup: a setsid grandchild is gone after the run, a bystander is not", { 
   assert.equal(alive(bystander), true, "a process the engine did not start was killed");
 });
 
-test("limited containment says so, and a setsid grandchild is expected to escape it", async (t) => {
+test("limited containment says so, and a setsid grandchild is expected to escape it", { skip: !linux && "the escape fixture needs setsid and /proc" }, async (t) => {
   const { done, pids, bystander } = await runEscape(t, "limited");
   assert.equal(done.result.containment.level, "limited");
   assert.ok(done.result.containment.limitedBecause, "limited without a reason");
@@ -81,4 +83,16 @@ test("limited containment says so, and a setsid grandchild is expected to escape
   // Expected-limited: a process-group kill cannot reach a process that left the group.
   assert.ok(pids.some((pid) => alive(pid)), "the escape was expected to survive limited containment");
   assert.equal(alive(bystander), true);
+});
+
+test("pid namespace: a kill after the executor has exited never signals its old host pid", { skip: (!linux && "Linux only") || (!canContain && "needs root or sudo -n") }, async (t) => {
+  const contained = spawnContained({ command: "true", args: [], env: { PATH: process.env.PATH }, cwd: process.cwd() }, { prefer: "pid-namespace", name: `reuse-${process.pid}` });
+  assert.equal(contained.level, "pid-namespace");
+  await new Promise((resolve) => contained.child.on("exit", resolve));
+  // Stands in for a process that took the dead executor's pid.
+  const reused = unrelatedSleeper(t);
+  contained.setHostPid(reused);
+  contained.kill();
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(alive(reused), true, "the kill signalled a pid the executor no longer held");
 });

@@ -184,6 +184,9 @@ function spawnInPidNamespace(spec: SpawnSpec, p: Privilege): ContainedProcess {
     kill() {
       if (killed) return;
       killed = true;
+      // Once unshare has been reaped, its namespace's init is long gone (--kill-child) and the
+      // pids it had may belong to someone else now: signal nothing.
+      if (child.exitCode !== null || child.signalCode !== null) return;
       // The namespace's init dies, so the kernel kills everything in the namespace.
       if (hostPid !== null) {
         if (p.root) {
