@@ -167,7 +167,7 @@ test("vsock (64- and 32-bit), io_uring, bpf, setns and keyrings are refused by t
     "c('keyctl', 250, 0, -3, 0)",
     "c('bpf', 321, 0, 0, 0)",
   ].join("\n");
-  const { out } = await runToExit(["/bin/sh", "-c", '/usr/bin/python3 -c "$0"; /run/peeps/ws/vsock32', script]);
+  const { out } = await runToExit(["/bin/sh", "-c", '/usr/bin/python3 -c "$0"; /run/peeps/ws/vsock32; echo "VSOCK32-EXIT $?"', script]);
   const rows = Object.fromEntries(out.split("\n").filter((l) => l.startsWith("ESCAPE ")).map((l) => [l.split(" ")[1], l.split(" ").slice(2).join(" ")]));
   assert.match(rows.vsock ?? "", /EAFNOSUPPORT|EPERM/, out);
   assert.equal(rows.io_uring, "-1 EPERM");
@@ -175,6 +175,8 @@ test("vsock (64- and 32-bit), io_uring, bpf, setns and keyrings are refused by t
   assert.equal(rows.keyctl, "-1 EPERM", "unfiltered: a keyring id");
   assert.equal(rows.bpf, "-1 EPERM");
   assert.doesNotMatch(out, /VSOCK32 allowed/, out);
+  // A foreign-ABI system call is not refused but fatal: SIGSYS, 128 + 31.
+  assert.match(out, /VSOCK32-EXIT 159/, out);
 });
 
 test("the jail's output reaches the job log with workflow commands neutralized", options, async () => {
