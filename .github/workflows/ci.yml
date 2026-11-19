@@ -69,6 +69,10 @@ jobs:
       image: mcr.microsoft.com/playwright:v1.59.1-jammy
     steps:
       - uses: actions/checkout@v7
+      # The action runs on Node 24; the image's own Node is older.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
       - run: npm ci
       - run: node --version
       - run: node --test --import tsx test/load-loader.test.ts test/load-v2.test.ts test/load-isolation.test.ts

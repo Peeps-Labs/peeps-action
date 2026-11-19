@@ -36,6 +36,26 @@ workspace, on the host (Node 22 and 24) and in `mcr.microsoft.com/playwright:v1.
 | extensionless imports | `./read`, `./helpers` (an `index.ts`), `./expected.js` naming a `.ts` | passes, line kept |
 | monorepo | journey in `tools/e2e`, `tsconfig` `extends` a root base with `paths` into `packages/` | passes, line kept |
 
+**The two options the plan named fail the fixtures.** Trialled on 2026-11-19 (Node 24.22.1,
+tsx 4.23.13), importing each fixture's journey and calling it with a fake request that returns
+a wrong value, so a working load ends in the fixture's own failed `expect`:
+
+| Fixture | Node 24 type stripping | tsx (`node --import tsx`) | tsx CLI, cwd = the journey's tsconfig folder | tsx CLI, cwd = the monorepo root |
+|---|---|---|---|---|
+| plain | passes, line 10 | passes, line 10 | — | — |
+| paths alias | `ERR_MODULE_NOT_FOUND` `@lib/expected` | `MODULE_NOT_FOUND` | passes, line 7 | — |
+| enum | `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` (enum in strip-only mode) | passes, line 15 | — | — |
+| extensionless imports | `ERR_UNSUPPORTED_DIR_IMPORT` (`./helpers`) | passes, line 7 | — | — |
+| monorepo | `ERR_MODULE_NOT_FOUND` `@shop/api-client` | `MODULE_NOT_FOUND` | passes, line 7 | `MODULE_NOT_FOUND` |
+
+Node's stripping resolves no `paths`, no extensionless or directory import, and refuses
+`enum`. tsx reads one `tsconfig.json`, from the process's working directory (or
+`TSX_TSCONFIG_PATH` with its CLI), not the journey's nearest one, so the monorepo journey loads
+only when the job's working directory happens to be `tools/e2e`; from the repository root, the
+usual `working-directory`, it fails. tsx is also the customer's dependency, absent from most
+repositories. The coordinator approved the Sucrase dependency on these results (review finding
+Sol C12).
+
 **`esbuild-wasm`, the alternative, was not needed.** Measured with esbuild's own transform (the
 same compiler): the plain fixture's assertion moves from line 10 to line 27, and the enum
 fixture's from 15 to 37, so it would need source maps and `--enable-source-maps` to report the
