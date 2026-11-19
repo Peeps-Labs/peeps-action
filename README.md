@@ -1015,6 +1015,10 @@ a version with no README section, or older than the newest release, fails the
 workflow instead. If a run fails part-way, rerun it (or run the workflow by
 hand on `main`): each step checks before it acts.
 
+**Third-party code.** `package.json`'s one runtime dependency is
+[Sucrase](https://github.com/alangpierce/sucrase) (MIT licence), bundled into `dist/load-executor.js` to compile TypeScript load
+journeys without the customer's toolchain (`docs/load-loader.md`).
+
 ## License
 
 [MIT](LICENSE).

@@ -1,0 +1,10 @@
+{
+  // Comments and trailing commas, as tsconfig allows.
+  "compilerOptions": {
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@lib/*": ["src/lib/*"],
+    },
+  },
+}
