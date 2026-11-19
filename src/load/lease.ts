@@ -91,7 +91,7 @@ export class RunnerLease {
     this.rttMs = Math.max(0, received.monoMs - sent.monoMs);
     this.renewEveryMs = claim.renewEveryMs;
     this.lastServerNowMs = claim.serverNowMs;
-    this.remainingMs = wellFormed(claim) ? remaining(claim) : 0;
+    this.remainingMs = wellFormed(claim) && Number.isFinite(claim.renewEveryMs) && claim.renewEveryMs > 0 ? remaining(claim) : 0;
     this.current = this.grant(claim, 0, sent, this.remainingMs);
     if (!(this.remainingMs > 0) || !live(this.current, received)) this.lose();
   }
@@ -150,7 +150,7 @@ export class RunnerLease {
     if (this.lostFlag) return { kind: "lost", stop: reply.stop };
     if (!this.held(t)) return this.lose(reply.stop);
     if (reply.lease !== "held" || reply.stop?.mode === "now") return this.lose(reply.stop);
-    if (!wellFormed(reply)) return rejected("malformed", reply.stop);
+    if (!wellFormed(reply)) return reply.stop ? this.lose(reply.stop) : rejected("malformed", undefined);
     // A matching answer that cannot be used is a lost lease, not a kept one: the server may
     // have shortened it (a drain), and the old, longer grant must not outlive that.
     if (reply.serverNowMs < this.lastServerNowMs) return this.lose(reply.stop);
@@ -176,7 +176,8 @@ export class RunnerLease {
 
   private lose(stop?: RenewReply["stop"]): Decision {
     this.lostFlag = true;
-    this.current = { ...this.current, monoUntil: Number.NEGATIVE_INFINITY, wallUntil: Number.NEGATIVE_INFINITY };
+    // A newer seq, so a gate fed from `grantNow` applies the revocation instead of ignoring it.
+    this.current = { ...this.current, seq: this.current.seq + 1, monoUntil: Number.NEGATIVE_INFINITY, wallUntil: Number.NEGATIVE_INFINITY };
     return { kind: "lost", stop };
   }
 }

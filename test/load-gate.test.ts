@@ -94,6 +94,8 @@ test("a malformed limit admits nothing", () => {
     assert.equal(reason(g.admit(req(), at(1))), "lease");
   }
   assert.throws(() => new Gate(limits({ runTotal: Number.NaN })));
+  assert.throws(() => new Gate(limits({ runTotal: 2.5 })));
+  assert.throws(() => new Gate(limits({ runEndMono: Number.POSITIVE_INFINITY })));
   assert.throws(() => new Gate(limits({ origins: { [ORIGIN]: Number.NaN } })));
   assert.throws(() => new Gate(limits({}, { burst: 0 })));
   assert.throws(() => new Gate(limits({}, { total: 1.5 })));

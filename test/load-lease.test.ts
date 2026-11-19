@@ -197,6 +197,27 @@ test("the wall deadline is capped at remaining from the first send too", () => {
   assert.equal(l.grantNow.wallUntil, at(1000).wallMs + MAX_REMAINING_MS);
 });
 
+test("a lost lease is a newer grant, so a gate fed from grantNow revokes", async () => {
+  const { Gate } = await import("../src/load/gate/admission");
+  const g = new Gate({ origins: { o: 10 }, methods: ["GET"], maxOutstandingPerTurn: 5, runTotal: 10, turnDeadlineMs: 60_000, runEndMono: 1e9, phase: { ratePerSecond: 10, burst: 5, maxUsers: 1, total: 10 } });
+  const l = lease();
+  g.applyLease(l.grantNow);
+  const turn = g.openTurn("s", at(1));
+  assert.ok(turn.ok);
+  assert.ok(g.admit({ turn: turn.turn, origin: "o", method: "GET" }, at(1)).ok);
+  l.abandon();
+  g.applyLease(l.grantNow);
+  assert.equal(g.admit({ turn: turn.turn, origin: "o", method: "GET" }, at(2)).ok, false);
+});
+
+test("a malformed reply that carries a stop loses the lease", () => {
+  const l = lease();
+  l.begin(at(1000), "n1", "h1");
+  const drain = { mode: "graceful" as const, reason: "drain" };
+  assert.deepEqual(l.apply(reply(1, "n1", SERVER0 + 1100, { ceiling: Number.NaN, stop: drain }), at(1200)), { kind: "lost", stop: drain });
+  assert.equal(lease({ renewEveryMs: 0 }).lost, true, "a claim with no renewal interval is lost");
+});
+
 test("the lease reads no clock and holds no timer", () => {
   const src = readFileSync(path.resolve(__dirname, "../src/load/lease.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(src, /Date\.now|performance\.now|setTimeout|setInterval|process\.hrtime/);

@@ -119,7 +119,10 @@ export class Gate {
   private readonly methods: ReadonlySet<string>;
 
   constructor(private readonly limits: GateLimits) {
-    for (const [name, value] of [["maxOutstandingPerTurn", limits.maxOutstandingPerTurn], ["runTotal", limits.runTotal], ["turnDeadlineMs", limits.turnDeadlineMs], ["runEndMono", limits.runEndMono], ...Object.entries(limits.origins)] as const) {
+    for (const [name, value] of [["maxOutstandingPerTurn", limits.maxOutstandingPerTurn], ["runTotal", limits.runTotal], ...Object.entries(limits.origins)] as const) {
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error(`gate: ${name} must be a whole number ≥ 0`);
+    }
+    for (const [name, value] of [["turnDeadlineMs", limits.turnDeadlineMs], ["runEndMono", limits.runEndMono]] as const) {
       if (!Number.isFinite(value) || value < 0) throw new Error(`gate: ${name} must be a finite number ≥ 0`);
     }
     checkPhase(limits.phase);
