@@ -55,3 +55,22 @@ jobs:
         run: |
           status="$(git status --porcelain -- dist/)"
           if [ -n "$status" ]; then echo "$status"; exit 1; fi
+
+  # The load jail on the runners customers use (plan v3 §9): real sudo, systemd
+  # and cgroup v2. Other jobs skip load-jail.test.ts.
+  load-jail:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: npm ci
+      - run: node --test --import tsx test/load-jail.test.ts
+        env:
+          LOAD_JAIL_TESTS: "1"
