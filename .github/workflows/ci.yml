@@ -15,9 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # No setup-node step: the runner's own Node is recent enough for esbuild,
-      # tsc and tsx, and pinning a version here would say nothing useful about
-      # the Node the action itself runs on, which `action.yml` decides.
+      # The Node the action runs on (`action.yml`: node24), so the tests run on
+      # that Node, not whatever the runner image happens to ship.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
       - run: npm ci
 
       # Capture regressions execute the committed action with real Chromium.
@@ -45,3 +48,10 @@ jobs:
 
       - name: dist/ matches src/
         run: git diff --exit-code -- dist/
+
+      # `git diff` sees only tracked files: a new bundle the build writes but
+      # nobody committed would pass it.
+      - name: dist/ has no uncommitted bundle
+        run: |
+          status="$(git status --porcelain -- dist/)"
+          if [ -n "$status" ]; then echo "$status"; exit 1; fi

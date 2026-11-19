@@ -580,6 +580,7 @@ new test never gets them; the run that checks a fix does.
 | `agent` | a tool server for a Peeps agent session; every call is echoed to the job log. `run_tests` runs Playwright, pytest (or your `.peeps/run-tests` hook) in a pytest suite, or WebdriverIO in an Appium suite, where `device-tools: true` also has Appium and a device session serve the `device_*` tools |
 | `attach-start` | nothing: writes a config beside yours that adds the Peeps reporter to your reporters, and exports its path as `PEEPS_ATTACH_CONFIG` |
 | `attach-finish` | nothing: uploads your run's HTML report and closes the run's batches |
+| `load` | nothing: refuses with "Load testing isn't available for this repository yet." and exits 1, before any of your code, a network call, an OIDC request or a process |
 
 `ci` is the default and means `report`. Peeps names the mode explicitly on every
 dispatch it makes.
@@ -790,6 +791,23 @@ action detects GitLab from `GITLAB_CI` and reads:
 Peeps starts pipelines with variables, so the project's **minimum role to use
 pipeline variables** (Settings → CI/CD → Variables) must allow the role of the
 access token Peeps was given (Maintainer).
+
+## 1.17.0
+
+- `mode: load` is recognised and refuses: the job exits 1 with "Load testing
+  isn't available for this repository yet." before it loads your code, calls
+  the network, asks for an OIDC token or starts a process. Every other mode is
+  unchanged.
+- The refusal reads the mode the way each platform's dispatch does: on GitHub
+  the `mode` input, then `PEEPS_MODE`; on GitLab only `PEEPS_MODE`. The attach
+  steps keep their own selection, so a GitLab attach step whose job also sets
+  `PEEPS_MODE` stays an attach step.
+- The action's CI runs on Node 24, the Node the action runs on, and fails when
+  a build writes a `dist/` file nobody committed.
+- Targeted runs widen for a while: each evidence footprint records the action's
+  version, and Peeps uses a footprint only from the same version. Footprints
+  recorded by 1.16.x stop narrowing runs until a 1.17.0 run records new ones, so
+  runs select more tests until then, never fewer.
 
 ## 1.16.0
 
@@ -1014,6 +1032,16 @@ is tagged by hand. A merge that leaves the version alone releases nothing, and
 a version with no README section, or older than the newest release, fails the
 workflow instead. If a run fails part-way, rerun it (or run the workflow by
 hand on `main`): each step checks before it acts.
+
+**Rolling back a release.** Once a version is tagged, every later push to `main`
+moves `v1` back to it, so stop the workflow first:
+
+1. `gh workflow disable release.yml -R Peeps-Labs/peeps-action`.
+2. Cancel queued and in-progress Release runs, and wait until none is running.
+3. `git tag -f -a v1 <previous release's commit> -m rollback && git push --force origin refs/tags/v1`.
+4. Check that `git ls-remote origin 'refs/tags/v1^{}'` names that commit.
+5. Fix forward as the next patch version (`release.sh` refuses an older one),
+   then re-enable the workflow.
 
 ## License
 

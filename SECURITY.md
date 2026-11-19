@@ -242,6 +242,14 @@ observes the runs your own CI starts, and reporting, inventory and failure
 analysis all keep working. That is a supported configuration, not a degraded
 one.
 
+## Load testing
+
+**`mode: load` refuses in this release.** It exits 1 with "Load testing isn't
+available for this repository yet." before it reads your workspace, loads any of
+your code, makes a network call, asks GitHub for an OIDC token or starts a
+process. No load engine ships in this release. When load testing is turned on,
+this section will say what it sends and what it runs.
+
 ## Self-hosted runners
 
 On a GitHub-hosted runner each job gets a fresh, disposable VM. On a self-hosted

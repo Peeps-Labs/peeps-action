@@ -226,6 +226,36 @@ test("attach-finish without attach-start does nothing", async (t) => {
   assert.match(result.output, /attach-start did not run/);
 });
 
+// Before the shared mode resolver, the attach steps read INPUT_MODE first on GitLab too;
+// a GitLab attach step whose job also sets PEEPS_MODE=ci must stay an attach step.
+test("a GitLab attach step with PEEPS_MODE=ci is still an attach step", async (t) => {
+  const f = await fixture(t);
+  const result = await spawnNode([action], f.root, {
+    ...jobEnv(f.root, "https://peeps.test"),
+    GITLAB_CI: "true",
+    PEEPS_MODE: "ci",
+    INPUT_MODE: "attach-finish",
+  });
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /attach-start did not run/);
+  assert.doesNotMatch(result.output, /\[peeps\] mode=/);
+});
+
+// A GitLab job that sets PEEPS_MODE=load for its own reasons must not fail the
+// attach steps around its test step: they never fail the job (review on #43).
+test("a GitLab attach step with PEEPS_MODE=load is still an attach step", async (t) => {
+  const f = await fixture(t);
+  const result = await spawnNode([action], f.root, {
+    ...jobEnv(f.root, "https://peeps.test"),
+    GITLAB_CI: "true",
+    PEEPS_MODE: "load",
+    INPUT_MODE: "attach-finish",
+  });
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /attach-start did not run/);
+  assert.doesNotMatch(result.output, /Load testing isn't available/);
+});
+
 test("the wrapper keeps every reporter the customer configured and adds Peeps last", () => {
   const source = attachConfigSource({ original: "/repo/playwright.config.ts", esm: false, reporterPath: "/action/reporter.js", stateDir: "/tmp/state" });
   assert.match(source, /require\("\/repo\/playwright\.config\.ts"\)/);

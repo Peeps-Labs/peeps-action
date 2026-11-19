@@ -87,6 +87,10 @@ function variable(env, name) {
   const value = env[name];
   return value && value.trim() !== "" ? value.trim() : null;
 }
+function resolveMode(env) {
+  if (env.GITLAB_CI === "true") return variable(env, "PEEPS_MODE") ?? "ci";
+  return input(env, "mode") ?? env.PEEPS_MODE ?? "ci";
+}
 function readGitLabRunnerEnv(env) {
   const workspace = env.CI_PROJECT_DIR ?? process.cwd();
   const workingDirectory = variable(env, "PEEPS_WORKING_DIRECTORY");
@@ -94,7 +98,7 @@ function readGitLabRunnerEnv(env) {
   const ref = branch ? `refs/heads/${branch}` : env.CI_COMMIT_TAG ? `refs/tags/${env.CI_COMMIT_TAG}` : null;
   return {
     platform: "gitlab",
-    mode: variable(env, "PEEPS_MODE") ?? "ci",
+    mode: resolveMode(env),
     sessionId: variable(env, "PEEPS_SESSION_ID"),
     configPath: variable(env, "PEEPS_PLAYWRIGHT_CONFIG"),
     framework: variable(env, "PEEPS_FRAMEWORK"),
@@ -126,7 +130,7 @@ function readRunnerEnv(env = process.env) {
   const runId = env.GITHUB_RUN_ID ?? null;
   return {
     platform: "github",
-    mode: input(env, "mode") ?? env.PEEPS_MODE ?? "ci",
+    mode: resolveMode(env),
     sessionId: input(env, "session-id") ?? env.PEEPS_SESSION_ID ?? null,
     configPath: input(env, "config") ?? env.PEEPS_PLAYWRIGHT_CONFIG ?? null,
     framework: input(env, "framework") ?? env.PEEPS_FRAMEWORK ?? null,
@@ -747,7 +751,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path7 = __toESM(require("node:path"));
 
 // src/version.ts
-var ACTION_VERSION = "1.16.0";
+var ACTION_VERSION = "1.17.0";
 
 // src/evidence/codec.ts
 var RECORDING_CODEC_VERSION = 2;
@@ -6388,15 +6392,20 @@ function onDefaultBranch(env) {
 }
 async function main() {
   const githubToken = takeGithubToken(process.env);
-  const requested = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
-  if (requested === "attach-start" || requested === "attach-finish") {
-    const deadline = Number(process.env.PEEPS_ATTACH_DEADLINE_MS) || (requested === "attach-start" ? ATTACH_START_DEADLINE_MS : ATTACH_FINISH_DEADLINE_MS);
+  const requested = resolveMode(process.env).trim();
+  const attach = (process.env["INPUT_MODE"] ?? process.env.PEEPS_MODE ?? "").trim();
+  if (attach === "attach-start" || attach === "attach-finish") {
+    const deadline = Number(process.env.PEEPS_ATTACH_DEADLINE_MS) || (attach === "attach-start" ? ATTACH_START_DEADLINE_MS : ATTACH_FINISH_DEADLINE_MS);
     await runAttachStep(async () => {
       const env2 = readRunnerEnv();
-      if (requested === "attach-start") await runAttachStart(env2);
+      if (attach === "attach-start") await runAttachStart(env2);
       else await runAttachFinish(env2, new PeepsClient(env2));
     }, deadline);
     process.exit(0);
+  }
+  if (requested === "load") {
+    console.error("::error::Load testing isn't available for this repository yet.");
+    process.exit(1);
   }
   const env = readRunnerEnv();
   const peeps = new PeepsClient(env);
