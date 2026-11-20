@@ -33,7 +33,7 @@ export interface PhaseCaps {
 }
 
 export interface GateLimits {
-  /** Canonical origins (`https://host:port`), each with its request total for the run. */
+  /** Canonical origins (as `normalize.canonicalOrigin` writes them), each with its request total for the run. */
   origins: Readonly<Record<string, number>>;
   /** Upper-case methods the plan may send. */
   methods: readonly string[];
@@ -82,10 +82,28 @@ export type DenyReason =
   | "users"
   | "rate";
 
-export type Admit =
-  | { ok: true; seq: number }
-  /** `final`: waiting cannot change the answer for this turn. `retryInMs` only for `rate`. */
-  | { ok: false; reason: DenyReason; final: boolean; retryInMs?: number };
+/** `final`: waiting cannot change the answer for this turn. `retryInMs` only for `rate`. */
+export type Denied = { ok: false; reason: DenyReason; final: boolean; retryInMs?: number };
+
+export type Admit = { ok: true; seq: number } | Denied;
+
+/** A dial's paid rate token (`reserve`). */
+export interface DialTicket {
+  readonly id: number;
+}
+
+export type Reserved = { ok: true; ticket: DialTicket } | Denied;
+
+/** Requests already on their way to `admit` (dials in progress): for the run, this turn and this origin. */
+export interface Ahead {
+  run: number;
+  turn: number;
+  origin: number;
+}
+
+const NONE_AHEAD: Ahead = { run: 0, turn: 0, origin: 0 };
+const RATE_BOUNDARIES = ["reserve", "tcp", "tls", "handoff"] as const;
+type RateBoundary = typeof RATE_BOUNDARIES[number];
 
 export type OpenTurn = { ok: true; turn: number } | { ok: false; reason: "stopped" | "draining" | "run_end" | "users" | "slot_busy" };
 
@@ -117,9 +135,13 @@ export class Gate {
   private stoppedFlag = false;
   private drainingFlag = false;
   private phase: PhaseCaps;
-  private milliTokens: number;
+  // A reservation bounds pending work. Actual traffic is also paced at each boundary,
+  // since time spent waiting in a dial can bunch work from different reservations.
+  private readonly milliTokens: Record<RateBoundary, number>;
   private lastRefillMono: number | undefined;
   private readonly methods: ReadonlySet<string>;
+  private readonly tickets = new Set<number>();
+  private ticketSeq = 0;
 
   constructor(private readonly limits: GateLimits) {
     for (const [name, value] of [["maxOutstandingPerTurn", limits.maxOutstandingPerTurn], ["runTotal", limits.runTotal], ...Object.entries(limits.origins)] as const) {
@@ -130,7 +152,8 @@ export class Gate {
     }
     checkPhase(limits.phase);
     this.phase = { ...limits.phase };
-    this.milliTokens = this.phase.burst * MILLI;
+    const burst = this.phase.burst * MILLI;
+    this.milliTokens = { reserve: burst, tcp: burst, tls: burst, handoff: burst };
     this.methods = new Set(limits.methods);
   }
 
@@ -185,7 +208,7 @@ export class Gate {
     checkPhase(caps);
     this.refill(t.monoMs);
     this.phase = { ...caps };
-    this.milliTokens = Math.min(this.milliTokens, caps.burst * MILLI);
+    this.refillBuckets(0);
     this.phaseCount = 0;
   }
 
@@ -226,7 +249,61 @@ export class Gate {
     if (state.outstanding === 0) this.turns.delete(turn);
   }
 
-  admit(r: PreparedRequest, t: Clocks): Admit {
+  /**
+   * Before a dial: every check `admit` makes, with the `ahead` requests already on their way to
+   * `admit` (dials in progress) counted against the totals, the ceiling and the outstanding cap.
+   * Reservation credit is spent even if the dial fails. The ticket records that debit so
+   * `admit` only takes handoff credit. `drop` the ticket if the dial ends without `admit`.
+   */
+  reserve(r: PreparedRequest, t: Clocks, ahead: Ahead): Reserved {
+    const d = this.check(r, t, ahead);
+    if (!("turn" in d)) return d;
+    const denied = this.rateDenial(this.milliTokens.reserve);
+    if (denied) return denied;
+    this.milliTokens.reserve -= MILLI;
+    const ticket: DialTicket = { id: ++this.ticketSeq };
+    this.tickets.add(ticket.id);
+    return { ok: true, ticket };
+  }
+
+  /** Check the live grant. When starting TCP or TLS, also spend credit at that boundary. */
+  checkDial(r: PreparedRequest, t: Clocks, ahead: Ahead, boundary?: "tcp" | "tls"): Denied | undefined {
+    const d = this.check(r, t, ahead);
+    if (!("turn" in d)) return d;
+    if (!boundary) return;
+    const denied = this.rateDenial(this.milliTokens[boundary]);
+    if (denied) return denied;
+    this.milliTokens[boundary] -= MILLI;
+  }
+
+  /** A dial that ended without `admit`: its ticket goes, its token stays spent. */
+  drop(ticket: DialTicket): void {
+    this.tickets.delete(ticket.id);
+  }
+
+  /** Every admit spends handoff credit. A valid ticket covers the reservation credit once. */
+  admit(r: PreparedRequest, t: Clocks, ticket?: DialTicket): Admit {
+    const paid = ticket !== undefined && this.tickets.has(ticket.id);
+    const d = this.check(r, t, NONE_AHEAD);
+    if (!("turn" in d)) return d;
+    const tokens = paid ? this.milliTokens.handoff : Math.min(this.milliTokens.handoff, this.milliTokens.reserve);
+    const denied = this.rateDenial(tokens);
+    if (denied) return denied;
+    const turn = d.turn;
+    this.milliTokens.handoff -= MILLI;
+    if (paid) this.tickets.delete(ticket.id);
+    else this.milliTokens.reserve -= MILLI;
+    const seq = ++this.seq;
+    this.phaseCount += 1;
+    this.perOrigin.set(r.origin, (this.perOrigin.get(r.origin) ?? 0) + 1);
+    this.undelivered.add(seq);
+    this.exchanges.set(seq, r.turn);
+    turn.outstanding += 1;
+    return { ok: true, seq };
+  }
+
+  /** Shared limits before the rate check at the caller's boundary. */
+  private check(r: PreparedRequest, t: Clocks, ahead: Ahead): { turn: Turn } | Denied {
     if (this.stoppedFlag) return deny("stopped", true);
     if (!(t.monoMs < this.limits.runEndMono)) return deny("run_end", true);
     if (!(t.monoMs < this.lease.monoUntil && t.wallMs < this.lease.wallUntil)) {
@@ -242,26 +319,22 @@ export class Gate {
     const originTotal = Object.hasOwn(this.limits.origins, r.origin) ? this.limits.origins[r.origin] : undefined;
     if (originTotal === undefined) return deny("origin", true);
     if (!this.methods.has(r.method)) return deny("method", true);
-    if (!(this.seq < this.limits.runTotal)) return deny("total", true);
-    if (!(this.phaseCount < this.phase.total)) return deny("phase_total", false);
-    if (!((this.perOrigin.get(r.origin) ?? 0) < originTotal)) return deny("origin_total", true);
-    if (!(this.seq < this.lease.ceiling)) return deny("ceiling", false);
-    if (!(turn.outstanding < this.limits.maxOutstandingPerTurn)) return deny("outstanding", false);
+    const seq = this.seq + ahead.run;
+    if (!(seq < this.limits.runTotal)) return deny("total", true);
+    if (!(this.phaseCount + ahead.run < this.phase.total)) return deny("phase_total", false);
+    if (!((this.perOrigin.get(r.origin) ?? 0) + ahead.origin < originTotal)) return deny("origin_total", true);
+    if (!(seq < this.lease.ceiling)) return deny("ceiling", false);
+    if (!(turn.outstanding + ahead.turn < this.limits.maxOutstandingPerTurn)) return deny("outstanding", false);
     // A phase that lowered the users below those live sends nothing until enough turns close.
     if (!(this.liveTurns <= this.phase.maxUsers)) return deny("users", false);
     this.refill(t.monoMs);
-    if (this.milliTokens < MILLI) {
-      const retryInMs = Math.ceil((MILLI - this.milliTokens) / this.phase.ratePerSecond);
-      return { ok: false, reason: "rate", final: false, retryInMs };
-    }
-    this.milliTokens -= MILLI;
-    const seq = ++this.seq;
-    this.phaseCount += 1;
-    this.perOrigin.set(r.origin, (this.perOrigin.get(r.origin) ?? 0) + 1);
-    this.undelivered.add(seq);
-    this.exchanges.set(seq, r.turn);
-    turn.outstanding += 1;
-    return { ok: true, seq };
+    return { turn };
+  }
+
+  private rateDenial(tokens: number): Denied | undefined {
+    if (tokens >= MILLI) return;
+    const retryInMs = Math.ceil((MILLI - tokens) / this.phase.ratePerSecond);
+    return { ok: false, reason: "rate", final: false, retryInMs };
   }
 
   /**
@@ -286,7 +359,7 @@ export class Gate {
     if (!turn.open && turn.outstanding === 0) this.turns.delete(turnId);
   }
 
-  /** The bucket never holds more than `burst`, whatever the gap; a clock that runs back adds nothing. */
+  /** Refill each bucket to at most `burst`. A clock that runs back adds nothing. */
   private refill(monoMs: number): void {
     if (this.lastRefillMono === undefined) {
       this.lastRefillMono = monoMs;
@@ -294,8 +367,14 @@ export class Gate {
     }
     if (!(monoMs > this.lastRefillMono)) return;
     const added = (monoMs - this.lastRefillMono) * this.phase.ratePerSecond;
-    this.milliTokens = Math.min(this.phase.burst * MILLI, this.milliTokens + added);
+    this.refillBuckets(added);
     this.lastRefillMono = monoMs;
+  }
+
+  private refillBuckets(added: number): void {
+    for (const boundary of RATE_BOUNDARIES) {
+      this.milliTokens[boundary] = Math.min(this.phase.burst * MILLI, this.milliTokens[boundary] + added);
+    }
   }
 }
 
@@ -306,6 +385,6 @@ function checkPhase(caps: PhaseCaps): void {
   if (!(Number.isSafeInteger(caps.total) && caps.total >= 0)) throw new Error("gate: total must be a whole number ≥ 0");
 }
 
-function deny(reason: DenyReason, final: boolean): Admit {
+function deny(reason: DenyReason, final: boolean): Denied {
   return { ok: false, reason, final };
 }

@@ -1,0 +1,209 @@
+/**
+ * Reads one HTTP/1.1 response off an upstream socket, to know when the exchange is over and to
+ * hand the journey a decoded body. Strict and small: a status line, headers, then a body framed
+ * by chunked coding, Content-Length, or the end of the connection. Interim 1xx responses are
+ * skipped; 101 is an error (the gate never asks to upgrade).
+ */
+
+const MAX_HEAD_BYTES = 64 * 1024;
+const CRLF = Buffer.from("\r\n");
+const HEAD_END = Buffer.from("\r\n\r\n");
+
+export interface ResponseHead {
+  status: number;
+  statusText: string;
+  /** Raw name/value pairs, in order. */
+  headers: [string, string][];
+}
+
+export interface ResponseEvents {
+  head(head: ResponseHead): void;
+  data(chunk: Buffer): boolean | void;
+  end(): void;
+  error(error: Error): void;
+}
+
+type Mode = { kind: "head" } | { kind: "fixed"; left: number } | { kind: "chunk-size" } | { kind: "chunk-data"; left: number } | { kind: "chunk-crlf" } | { kind: "trailers" } | { kind: "close" } | { kind: "done" };
+
+export class ResponseTooLarge extends Error {}
+
+export class ResponseReader {
+  private buf: Buffer = Buffer.alloc(0);
+  private mode: Mode = { kind: "head" };
+  private paused = false;
+  private eof = false;
+  private bytes = 0;
+
+  constructor(
+    private readonly requestMethod: string,
+    private readonly on: ResponseEvents,
+    private readonly maxBodyBytes = Infinity,
+  ) {}
+
+  get done(): boolean {
+    return this.mode.kind === "done";
+  }
+
+  push(chunk: Buffer): void {
+    if (this.done) return;
+    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+    this.process();
+  }
+
+  resume(): void {
+    this.paused = false;
+    this.process();
+  }
+
+  /** Only the upstream's clean readable end is an EOF. */
+  end(): void {
+    this.eof = true;
+    this.process();
+  }
+
+  stop(): void {
+    this.mode = { kind: "done" };
+    this.buf = Buffer.alloc(0);
+  }
+
+  private complete(): void {
+    this.stop();
+    this.on.end();
+  }
+
+  private process(): void {
+    try {
+      this.drain();
+      if (this.eof && !this.paused && !this.done) {
+        if (this.mode.kind !== "close") throw new Error("upstream closed before the response ended");
+        this.complete();
+      }
+    } catch (error) {
+      this.stop();
+      this.on.error(error as Error);
+    }
+  }
+
+  private drain(): void {
+    while (!this.done && !this.paused) {
+      const m = this.mode;
+      if (m.kind === "head") {
+        const at = this.buf.indexOf(HEAD_END);
+        if (at > MAX_HEAD_BYTES || (at < 0 && this.buf.length > MAX_HEAD_BYTES)) throw new Error("response head too large");
+        if (at < 0) return;
+        const head = parseHead(this.buf.subarray(0, at).toString("latin1"));
+        this.buf = this.buf.subarray(at + 4);
+        if (head.status === 101) throw new Error("upstream switched protocols");
+        if (head.status < 200) continue; // interim response: the real one follows
+        // The relay sees the final head only after framing and declared size are checked.
+        const mode = bodyMode(this.requestMethod, head);
+        if (mode.kind === "fixed" && mode.left > this.maxBodyBytes) throw new ResponseTooLarge();
+        this.mode = mode;
+        this.on.head(head);
+        if (mode.kind === "done") return this.complete();
+        continue;
+      }
+      if (m.kind === "close") {
+        if (this.buf.length) this.data(this.buf.length);
+        return;
+      }
+      if (m.kind === "fixed") {
+        if (m.left === 0) return this.complete();
+        if (!this.buf.length) return;
+        const n = Math.min(m.left, this.buf.length);
+        m.left -= n;
+        this.data(n);
+        continue;
+      }
+      if (m.kind === "chunk-size") {
+        const at = this.buf.indexOf(CRLF);
+        if (at < 0) {
+          if (this.buf.length > 1024) throw new Error("chunk size line too long");
+          return;
+        }
+        const line = this.buf.subarray(0, at).toString("latin1");
+        this.buf = this.buf.subarray(at + 2);
+        const hex = line.split(";")[0]!.trim();
+        if (!/^[0-9a-fA-F]{1,12}$/.test(hex)) throw new Error("bad chunk size");
+        const size = parseInt(hex, 16);
+        this.mode = size === 0 ? { kind: "trailers" } : { kind: "chunk-data", left: size };
+        continue;
+      }
+      if (m.kind === "chunk-data") {
+        if (!this.buf.length) return;
+        const n = Math.min(m.left, this.buf.length);
+        m.left -= n;
+        if (m.left === 0) this.mode = { kind: "chunk-crlf" };
+        this.data(n);
+        continue;
+      }
+      if (m.kind === "chunk-crlf") {
+        if (this.buf.length < 2) return;
+        if (this.buf[0] !== 0x0d || this.buf[1] !== 0x0a) throw new Error("chunk not followed by CRLF");
+        this.buf = this.buf.subarray(2);
+        this.mode = { kind: "chunk-size" };
+        continue;
+      }
+      if (m.kind === "trailers") {
+        const at = this.buf.indexOf(CRLF);
+        if (at < 0) {
+          if (this.buf.length > MAX_HEAD_BYTES) throw new Error("trailers too large");
+          return;
+        }
+        this.buf = this.buf.subarray(at + 2);
+        if (at === 0) return this.complete();
+        continue;
+      }
+      return;
+    }
+  }
+
+  private data(n: number): void {
+    this.bytes += n;
+    if (this.bytes > this.maxBodyBytes) throw new ResponseTooLarge();
+    this.paused = this.on.data(this.take(n)) === false;
+  }
+
+  private take(n: number): Buffer {
+    const out = this.buf.subarray(0, n);
+    this.buf = this.buf.subarray(n);
+    return Buffer.from(out);
+  }
+}
+
+/** What Node will write back to the journey: `writeHead` throws on anything else. */
+const TEXT = /^[\t\x20-\x7e\x80-\xff]*$/;
+const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+function parseHead(text: string): ResponseHead {
+  const lines = text.split("\r\n");
+  const m = /^HTTP\/1\.[01] ([1-9][0-9]{2})(?: (.*))?$/.exec(lines[0]!);
+  if (!m || !TEXT.test(m[2] ?? "")) throw new Error("bad status line");
+  const headers: [string, string][] = [];
+  for (const line of lines.slice(1)) {
+    const c = line.indexOf(":");
+    const value = line.slice(c + 1).trim();
+    if (c <= 0 || !TOKEN.test(line.slice(0, c)) || !TEXT.test(value)) throw new Error("bad response header");
+    headers.push([line.slice(0, c), value]);
+  }
+  return { status: Number(m[1]), statusText: m[2] ?? "", headers };
+}
+
+function bodyMode(method: string, head: ResponseHead): Mode {
+  const bodyless = method === "HEAD" || head.status === 204 || head.status === 304;
+  const values = (name: string) => head.headers.filter(([n]) => n.toLowerCase() === name).map(([, v]) => v);
+  const te = values("transfer-encoding");
+  const cl = values("content-length");
+  if (te.length && cl.length) throw new Error("ambiguous framing: both transfer-encoding and content-length");
+  if (te.length) {
+    const codings = te.join(",").split(",").map((s) => s.trim().toLowerCase());
+    if (codings.length !== 1 || codings[0] !== "chunked") throw new Error("unsupported transfer-coding");
+    return { kind: bodyless ? "done" : "chunk-size" };
+  }
+  if (cl.length) {
+    if (new Set(cl).size !== 1 || !/^[0-9]{1,15}$/.test(cl[0]!)) throw new Error("bad content-length");
+    const n = Number(cl[0]);
+    return bodyless || n === 0 ? { kind: "done" } : { kind: "fixed", left: n };
+  }
+  return { kind: bodyless ? "done" : "close" };
+}
