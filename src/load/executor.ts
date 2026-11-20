@@ -48,6 +48,12 @@ function safeInspect(value: unknown): string {
   }
 }
 
+// A request the journey did not await, and that then fails, is the journey's own loose end: it
+// is reported, and it ends no other user's turn. Node's default would end the whole executor.
+process.on("unhandledRejection", (reason) => {
+  toStderr(`load: a journey left a rejected promise unhandled: ${reason instanceof Error ? (reason.stack ?? reason.message) : safeInspect(reason)}\n`);
+});
+
 const root = process.cwd();
 let sessions: Sessions | null = null;
 let journey: Journey | null = null;
@@ -128,12 +134,16 @@ function onTurn(frame: Extract<CtlFrame, { type: "turn" }>): void {
   if (!sessions || !journey) return protocol("turn before loaded");
   if (stopping) return;
   if (sessions.busy(frame.slot)) return protocol(`slot ${frame.slot} is busy`);
-  const work = sessions.run(frame, journey).then((result) => {
-    const extra = result.kind === "failure" ? failureOf(result.error) : {};
-    send({ type: "outcome", turn: frame.turn, kind: result.kind, ...extra });
-  });
+  const work = sessions
+    .run(frame, journey)
+    .then((result) => {
+      const extra = result.kind === "failure" ? failureOf(result.error) : {};
+      send({ type: "outcome", turn: frame.turn, kind: result.kind, ...extra });
+    })
+    // What the journey threw could not be read (no prototype, a getter that throws): the turn still gets its outcome.
+    .catch(() => void send({ type: "outcome", turn: frame.turn, kind: "failure", message: "the journey threw a value that could not be read" }))
+    .finally(() => pending.delete(work));
   pending.add(work);
-  void work.finally(() => pending.delete(work));
 }
 
 function protocol(why: string): void {

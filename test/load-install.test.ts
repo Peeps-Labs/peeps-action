@@ -123,6 +123,25 @@ test("lockfile problems are refused: v1, none, shrinkwrap, foreign hosts, http, 
   assert.match(mutate((p) => (p["node_modules/linked"] = { resolved: "packages/missing", link: true })), /linked/);
 });
 
+test("a lock entry is read as npm reads it: inBundle, hasShrinkwrap, a truthy link and a URL for a version open no other host", (t) => {
+  const mutate = (fn: (p: Record<string, Record<string, unknown>>) => void) => {
+    const lock = baseLock();
+    fn(lock.packages as Record<string, Record<string, unknown>>);
+    return problems(workspace(t, { lock })).join("; ");
+  };
+  // npm does not read inBundle from a v2 or v3 lock: it fetches `resolved`.
+  assert.match(mutate((p) => (p["node_modules/left-pad"] = { version: "1.3.0", resolved: "https://target.example/a.tgz", integrity: INTEGRITY, inBundle: true })), /left-pad.*registry/);
+  assert.match(mutate((p) => (p["node_modules/left-pad/node_modules/x"] = { version: "1.0.0", resolved: "http://target.example/a.tgz", inBundle: true })), /\bx\b.*registry/);
+  // With no `resolved`, npm fetches name@version: a URL there is fetched as one.
+  assert.match(mutate((p) => (p["node_modules/left-pad/node_modules/x"] = { version: "https://target.example/a.tgz", inBundle: true })), /\bx\b.*bundled/);
+  assert.match(mutate((p) => (p["node_modules/left-pad/node_modules/x"] = { name: "x@https://target.example/a.tgz", version: "1.0.0", inBundle: true })), /\bx\b.*bundled/);
+  // The package's own shrinkwrap names URLs this check never sees.
+  assert.match(mutate((p) => (p["node_modules/left-pad"]!.hasShrinkwrap = true)), /left-pad.*shrinkwrap/);
+  // Any truthy `link` is a link to npm.
+  assert.match(mutate((p) => Object.assign(p["node_modules/left-pad"]!, { link: 1, resolved: "https://registry.npmjs.org/../../../outside/x" })), /left-pad links to/);
+  assert.match(mutate((p) => (p["somewhere/else"] = { link: true, resolved: "../outside" })), /somewhere\/else links to/);
+});
+
 test("a project .npmrc and a symlink that leaves the checkout are refused", (t) => {
   assert.match(problems(workspace(t, { files: { ".npmrc": "registry=https://evil.example/\n" } })).join("; "), /\.npmrc/);
   const dir = workspace(t);
@@ -274,6 +293,15 @@ test("installEnv alone keeps a project .npmrc's git from running, even for a loc
     // It fails: what matters is what it ran.
   }
   assert.equal(existsSync(marker), false, "the project's git ran");
+});
+
+test("a lock entry marked inBundle does not send npm to another host", { skip: hasLocalNpm ? false : "no npm beside this Node" }, async (t) => {
+  const server = await markerServer(t);
+  const manifest = { name: "app", version: "1.0.0", dependencies: { x: "1.0.0" } };
+  const packages = { "": { name: "app", version: "1.0.0", dependencies: { x: "1.0.0" } }, "node_modules/x": { version: "1.0.0", resolved: `${server.url}/x-1.0.0.tgz`, inBundle: true } };
+  const ws = workspace(t, { manifest, lock: { name: "app", version: "1.0.0", lockfileVersion: 3, requires: true, packages } });
+  await assert.rejects(preinstall(ws, localToolchain(), tmp(t)), /install_unsupported/);
+  assert.deepEqual(server.hits, [], "npm asked another host for a package");
 });
 
 test("preinstall runs npm ci with no lifecycle script, and returns the digests", { skip: hasLocalNpm ? false : "no npm beside this Node" }, async (t) => {

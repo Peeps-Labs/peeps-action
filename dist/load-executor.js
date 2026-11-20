@@ -24256,17 +24256,20 @@ var Sessions = class {
     await this.acquire(state);
     try {
       let answer = await this.sendOnce(state, verb, p);
-      if (answer.waitMs !== void 0) {
-        answer = await this.pacer.run(async () => {
-          let a = answer;
-          while (a.waitMs !== void 0) {
-            const left = this.remaining(state);
-            if (left <= 0 || state.closed) throw new TurnDeadline();
-            await sleep(Math.min(a.waitMs, left));
-            a = await this.sendOnce(state, verb, p);
-          }
-          return a;
+      while (answer.waitMs !== void 0) {
+        const waitMs = answer.waitMs;
+        const started = this.pacer.run(async () => {
+          const left = this.remaining(state);
+          if (left <= 0 || state.closed) throw new TurnDeadline();
+          await Promise.race([sleep(Math.min(waitMs, left)), state.onCancel]);
+          const sent = this.sendOnce(state, verb, p);
+          sent.catch(() => void 0);
+          return { sent };
         });
+        const cancelled = state.onCancel.then(() => {
+          throw new LoadRefusal("this turn has ended");
+        });
+        answer = await (await Promise.race([started, cancelled])).sent;
       }
       const response = answer.response;
       if (p.failOnStatusCode && !(response.status() >= 200 && response.status() < 300)) {
@@ -24330,6 +24333,10 @@ function safeInspect(value) {
     return String(value);
   }
 }
+process.on("unhandledRejection", (reason) => {
+  toStderr(`load: a journey left a rejected promise unhandled: ${reason instanceof Error ? reason.stack ?? reason.message : safeInspect(reason)}
+`);
+});
 var root = process.cwd();
 var sessions = null;
 var journey = null;
@@ -24406,9 +24413,8 @@ function onTurn(frame) {
   const work = sessions.run(frame, journey).then((result) => {
     const extra = result.kind === "failure" ? failureOf(result.error) : {};
     send({ type: "outcome", turn: frame.turn, kind: result.kind, ...extra });
-  });
+  }).catch(() => void send({ type: "outcome", turn: frame.turn, kind: "failure", message: "the journey threw a value that could not be read" })).finally(() => pending.delete(work));
   pending.add(work);
-  void work.finally(() => pending.delete(work));
 }
 function protocol(why) {
   send({ type: "fatal", code: "protocol", message: why.slice(0, MAX_MESSAGE) });

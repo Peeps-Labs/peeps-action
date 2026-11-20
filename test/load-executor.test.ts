@@ -130,6 +130,38 @@ test("rate, ceiling and a header-less dials denial are waited out and re-sent wi
   assert.ok((dials.journal.snapshot().denied.dials ?? 0) >= 1, "the gate did refuse on dials");
 });
 
+test("waiting on the gate paces the starts, not the exchanges: a slow target holds no other user back", async (t) => {
+  let inFlight = 0;
+  let most = 0;
+  const slow = (_a: unknown, res: import("node:http").ServerResponse): void => {
+    most = Math.max(most, ++inFlight);
+    setTimeout(() => {
+      inFlight -= 1;
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("ok");
+    }, 600);
+  };
+  // 20 a second with no burst: seven of the eight users are refused on rate at first.
+  const m = await mini(t, "get", { phase: { ratePerSecond: 20, burst: 1 }, respond: slow });
+  const outcomes = await Promise.all(Array.from({ length: 8 }, (_, i) => m.turn(i + 1, { deadlineMs: 20_000 })));
+  for (const o of outcomes) assert.equal(o.kind, "success", o.message);
+  assert.equal(m.sink.arrivals.length, 8);
+  assert.ok((m.journal.snapshot().denied.rate ?? 0) >= 1, "the gate did refuse on rate");
+  assert.ok(most >= 4, `re-sends overlapped at the target (${most} at once): the queue was not held for a whole exchange`);
+});
+
+test("a cancelled turn's waiting send leaves the queue at once", async (t) => {
+  // One request allowed, and a 5 s wait after a ceiling denial: user 1's second send holds the head.
+  const m = await mini(t, "three", { lease: { ceiling: 1 }, renewEveryMs: 5_000 });
+  m.open(1, { deadlineMs: 20_000 });
+  await sleep(500);
+  assert.equal(m.sink.arrivals.length, 1);
+  const started = performance.now();
+  const o = await m.turn(2, { deadlineMs: 600 });
+  assert.equal(o.kind, "cancelled");
+  assert.ok(performance.now() - started < 3000, `the cancelled outcome took ${Math.round(performance.now() - started)} ms`);
+});
+
 test("a redirect is returned, not followed; a cut is not re-sent", async (t) => {
   const r = await mini(t, "redirect");
   assert.equal((await r.turn(1)).kind, "success");
@@ -187,6 +219,24 @@ test("fatal: no Playwright, Playwright below 1.46, a journey that throws as it l
   assert.equal(f3.type, "fatal");
   assert.equal((f3 as { code: string }).code, "journey");
   assert.match((f3 as { message: string }).message, /fails as it loads/);
+});
+
+test("a request the journey did not await, and that fails, ends no other turn", async (t) => {
+  const m = await mini(t, "floating");
+  const gone = m.link.exited.then((e) => ({ kind: `the executor exited (${e.code})`, message: m.link.stderr().slice(0, 300) }));
+  const first = await Promise.race([m.turn(1), gone]);
+  assert.equal(first.kind, "success", first.message);
+  const second = await Promise.race([m.turn(2), gone]);
+  assert.equal(second.kind, "success", second.message);
+  assert.match(m.link.stderr(), /left a rejected promise unhandled: Error: 503/);
+});
+
+test("a journey that throws a value nothing can read still gets its one outcome", async (t) => {
+  const m = await mini(t, "throwsUnreadable");
+  const gone = m.link.exited.then((e) => ({ kind: `the executor exited (${e.code})`, message: m.link.stderr().slice(0, 300) }));
+  const o = await Promise.race([m.turn(1), gone]);
+  assert.equal(o.kind, "failure", o.message);
+  assert.match(o.message ?? "", /could not be read/);
 });
 
 test("a turn for a busy slot is fatal (protocol)", async (t) => {

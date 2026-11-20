@@ -64,6 +64,17 @@ export async function optDispose(request: APIRequestContext): Promise<void> {
   await request.dispose();
 }
 
+/** One request it does not wait for, which fails; and one it does. */
+export async function floating(request: APIRequestContext): Promise<void> {
+  void request.get("/busy", { failOnStatusCode: true });
+  assert.equal((await request.get("/value")).status(), 200);
+}
+
+/** Throws something that cannot be turned into a message. */
+export async function throwsUnreadable(): Promise<void> {
+  throw Object.create(null);
+}
+
 /** Never ends by itself. */
 export async function hang(): Promise<void> {
   await new Promise(() => undefined);

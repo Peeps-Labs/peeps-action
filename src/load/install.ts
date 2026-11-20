@@ -402,20 +402,38 @@ function lockProblems(ws: WorkspaceFiles): string[] {
   const out: string[] = [];
   const packages = lock.packages as Record<string, Record<string, unknown> | null>;
   const workspaceFolders = new Set(ws.workspaces.filter((w) => !w.problem).map((w) => w.rel));
+  // npm decides what to fetch by its own reading of an entry, so each rule here follows npm's
+  // (arborist), not the flag's name: any truthy `link` is a link; `inBundle` is not read from a
+  // v2 or v3 lock, so an entry with a `resolved` is fetched from it whatever else it says, and
+  // one without is asked of the registry as name@version; `hasShrinkwrap` makes npm install the
+  // package's dependencies from the URLs in the package's own shrinkwrap, which nothing here sees.
   for (const [key, entry] of Object.entries(packages)) {
-    if (!key.includes("node_modules/")) continue;
-    const name = key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length);
+    if (key === "") continue;
+    const inModules = key.includes("node_modules/");
+    const name = inModules ? key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length) : key;
     if (typeof entry !== "object" || entry === null) {
-      out.push(`package-lock.json: ${name} is not an object`);
+      if (inModules) out.push(`package-lock.json: ${name} is not an object`);
       continue;
     }
-    if (entry.link === true) {
-      const target = typeof entry.resolved === "string" ? path.posix.normalize(entry.resolved) : "";
+    if (entry.hasShrinkwrap) {
+      out.push(`package-lock.json: ${name} carries its own shrinkwrap, which is not supported`);
+      continue;
+    }
+    if (entry.link) {
+      const target = inModules && entry.link === true && typeof entry.resolved === "string" ? path.posix.normalize(entry.resolved) : "";
       const ok = target !== "" && !target.startsWith("..") && !path.posix.isAbsolute(target) && workspaceFolders.has(target) && packages[target] !== undefined;
       if (!ok) out.push(`package-lock.json: ${name} links to ${String(entry.resolved)}, not a workspace folder in the checkout`);
       continue;
     }
-    if (entry.inBundle === true) continue;
+    if (!inModules) continue;
+    if (entry.resolved === undefined && entry.inBundle === true) {
+      // Shipped inside its parent's tarball. Should npm fetch it after all, it asks the registry for name@version.
+      const plainName = entry.name === undefined || (typeof entry.name === "string" && NAME.test(entry.name));
+      if (!plainName || typeof entry.version !== "string" || parseVersion(entry.version) === null) {
+        out.push(`package-lock.json: ${name} is bundled but is not a plain name and version (${String(entry.name ?? name)}@${String(entry.version)})`);
+      }
+      continue;
+    }
     if (typeof entry.resolved !== "string" || !entry.resolved.startsWith(REGISTRY) || typeof entry.integrity !== "string") {
       out.push(`package-lock.json: ${name} is not resolved from ${REGISTRY} with an integrity hash (${String(entry.resolved)})`);
     }

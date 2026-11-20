@@ -133,7 +133,7 @@ interface Slot {
   turn?: TurnState;
 }
 
-/** One process-wide FIFO: only the head of the queue re-sends after a waitable denial. */
+/** One process-wide FIFO: only its head waits out a denial and starts its re-send. */
 class Pacer {
   private tail: Promise<void> = Promise.resolve();
 
@@ -367,18 +367,24 @@ export class Sessions {
     await this.acquire(state);
     try {
       let answer = await this.sendOnce(state, verb, p);
-      if (answer.waitMs !== undefined) {
-        // Only the head of the process-wide queue re-sends.
-        answer = await this.pacer.run(async () => {
-          let a = answer;
-          while (a.waitMs !== undefined) {
-            const left = this.remaining(state);
-            if (left <= 0 || state.closed) throw new TurnDeadline();
-            await sleep(Math.min(a.waitMs, left));
-            a = await this.sendOnce(state, verb, p);
-          }
-          return a;
+      while (answer.waitMs !== undefined) {
+        const waitMs = answer.waitMs;
+        // Only the head of the process-wide queue waits and starts its re-send. The exchange
+        // itself is awaited outside the queue: a slow target holds no other send back, and a
+        // send the gate refuses again goes to the back.
+        const started = this.pacer.run(async () => {
+          const left = this.remaining(state);
+          if (left <= 0 || state.closed) throw new TurnDeadline();
+          await Promise.race([sleep(Math.min(waitMs, left)), state.onCancel]);
+          const sent = this.sendOnce(state, verb, p);
+          sent.catch(() => undefined);
+          return { sent };
         });
+        // A cancelled turn leaves the queue at once: its outcome does not wait for the turns ahead.
+        const cancelled = state.onCancel.then(() => {
+          throw new LoadRefusal("this turn has ended");
+        });
+        answer = await (await Promise.race([started, cancelled])).sent;
       }
       const response = answer.response!;
       if (p.failOnStatusCode && !(response.status() >= 200 && response.status() < 300)) {
