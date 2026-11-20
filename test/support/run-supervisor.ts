@@ -4,7 +4,8 @@
  * The clock seam shifts the supervisor's monotonic and wall clocks on their own, so a test can
  * step one without the other.
  */
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, cpSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { preinstall, trustedToolchain } from "../../src/load/install";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -22,7 +23,7 @@ import { bindingOf, runLoad, type LoadEvent, type LoadResult, type LoadSeams } f
 import { FakeControlPort, type FakeSetup, type PortScript } from "./fake-control-port";
 import { fakeJail, type FakeJailOptions } from "./fake-jail";
 import { FIXTURES, respond as fixtureRespond } from "./e4-fixtures";
-import { startSink, type Sink, type SinkOptions } from "./load-sink";
+import { SEQ_HEADER, startSink, type Sink, type SinkOptions } from "./load-sink";
 
 export const SINK_HOST = "sink.test";
 const FLOOR_DIR = process.env.PEEPS_LOAD_PLAYWRIGHT_DIR;
@@ -73,6 +74,25 @@ export function checkoutBits(dir: string): void {
   writeFileSync(path.join(dir, WORKLOAD_PATH), "journey: journeys.ts\n");
 }
 
+/**
+ * A checkout as the real jail needs it: under the runner's home (0755), the journeys, the
+ * pinned Playwright installed as the pre-claim step would, and the checkout bits.
+ */
+export async function installedWorkspace(): Promise<string> {
+  const ws = mkdtempSync(path.join(os.homedir(), "peeps-jail-ws-"));
+  chmodSync(ws, 0o755);
+  cpSync(FIXTURES, ws, { recursive: true });
+  cpSync(path.join(REPO, "test/fixtures/load-engine/slice"), ws, { recursive: true });
+  const scratch = mkdtempSync(path.join(os.tmpdir(), "peeps-slice-npm-"));
+  try {
+    await preinstall(ws, trustedToolchain(path.dirname(path.dirname(process.execPath)), ws), scratch);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  checkoutBits(ws);
+  return ws;
+}
+
 /** The supervisor's clocks, with each shiftable on its own. */
 export class ClockSeam {
   monoShift = 0;
@@ -99,6 +119,7 @@ export interface RigOptions {
   /** Changes the grant's limits. */
   limits?: Partial<FakeSetup["limits"]>;
   respond?: SinkOptions["respond"];
+  stall?: SinkOptions["stall"];
   jail?: FakeJailOptions;
   /** Starts the jail some other way (the real jail in load-jail). */
   launch?: (spec: JailSpec, options: StartJailOptions, signal?: AbortSignal) => Promise<JailHandle>;
@@ -136,7 +157,7 @@ export const FAST = {
 };
 
 export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
-  const sink = o.sink ?? (await startSink({ host: SINK_HOST, respond: o.respond ?? fixtureRespond }));
+  const sink = o.sink ?? (await startSink({ host: SINK_HOST, respond: o.respond ?? fixtureRespond, stall: o.stall }));
   if (!o.sink) t.after(() => sink.close());
   const ws = o.ws ?? workspace(t);
   const origin = canonicalOrigin(SINK_HOST, sink.port);
@@ -145,7 +166,7 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
   o.afterBinding?.(ws);
   const setup: FakeSetup = {
     plan,
-    limits: { allowedOrigins: [origin], privateOrigins: { [origin]: ["127.0.0.0/8"] }, maxUsers: 10, requestBudget: 1000, policyRevision: 1, phases: {}, ...o.limits },
+    limits: { allowedOrigins: [origin], privateOrigins: { [origin]: ["127.0.0.0/8"] }, maxUsers: 10, requestBudget: 100_000, policyRevision: 1, phases: {}, ...o.limits },
     workload: { path: WORKLOAD_PATH, digest: binding.workload.digest, module: plan.journey.module, export: plan.journey.export },
     baseURL: origin,
     binding,
@@ -170,6 +191,7 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
       preinstall: async (w: string) => ({ lock: "", hiddenLock: "", tree: (await bindingOf(w, WORKLOAD_PATH)).treeDigest }),
       ...(o.real ? {} : { launch: o.launch ?? jails.launch, probe: async () => ({ passed: true, failures: [], seen: null }) }),
       dial: o.dial ? o.dial(real) : real,
+      seqHeader: SEQ_HEADER,
       constants: FAST,
       ...o.seams,
     },

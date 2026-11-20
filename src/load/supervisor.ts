@@ -93,6 +93,8 @@ export interface LoadSeams {
   constants?: Partial<SupervisorConstants> & Partial<EngineConstants>;
   /** The executor's command and install, as the jail sees them (tests: the fake jail's own). */
   command?: string[];
+  /** Hands the run's journal to a test once it exists (load-freeze snapshots it at its boundary). */
+  onJournal?: (journal: Journal) => void;
 }
 
 export type LoadStatus = "completed" | "stopped" | "cancelled" | "lease_lost" | "didnt_start" | "failed";
@@ -511,6 +513,7 @@ class LoadRun {
       seqHeader: this.s.seqHeader,
     });
     this.lastSnapshot = journal.snapshot();
+    this.s.onJournal?.(journal);
 
     const node = "/run/peeps/node/bin/node";
     const spec: JailSpec = {
