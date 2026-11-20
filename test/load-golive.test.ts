@@ -44,7 +44,7 @@ test("it runs only in the fixture repository, on a first attempt, with read acce
 
 test("Peeps' origin and the sink are written in the file; only the grant comes from an input, and only through the environment", () => {
   const env = code.slice(code.indexOf("        env:\n"));
-  assert.match(env, /^ {10}PEEPS_URL: https:\/\/peeps-dev\.fly\.dev$/m);
+  assert.match(env, /^ {10}PEEPS_URL: https:\/\/dev\.peepsai\.com$/m);
   assert.match(env, /^ {10}PEEPS_LOAD_SINK_HOSTS: [a-z0-9.-]+$/m);
   assert.match(env, /^ {10}PEEPS_LOAD_GRANT: \$\{\{ inputs\.peeps-load-grant \}\}$/m);
   for (const line of lines) {

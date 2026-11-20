@@ -38,6 +38,7 @@ permissions:
 
 jobs:
   load:
+    # PLACEHOLDER: the fixture repository's name, to confirm before the fixture copy is registered.
     if: github.repository == 'Peeps-Labs/peeps-load-fixture' && github.run_attempt == 1
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 120
@@ -62,11 +63,13 @@ jobs:
       - name: Load run
         run: node "$GITHUB_WORKSPACE/action/dist/load.js"
         env:
-          PEEPS_URL: https://peeps-dev.fly.dev
+          PEEPS_URL: https://dev.peepsai.com
+          # PLACEHOLDER: the harness sink host, to confirm before the fixture copy is registered.
           PEEPS_LOAD_SINK_HOSTS: sink.load-harness.peeps.dev
           PEEPS_LOAD_GRANT: ${{ inputs.peeps-load-grant }}
           PEEPS_LOAD_WORKSPACE: ${{ github.workspace }}/app
           PEEPS_LOAD_WORKLOAD: peeps/load/golive.workload.yaml
+          # PLACEHOLDER: where the fixture keeps the recipe's npm cache, to confirm.
           PEEPS_LOAD_NPM_CACHE: ${{ github.workspace }}/app/.peeps-load/npm-cache
           PEEPS_LOAD_CHECK_RUN_ID: ${{ job.check_run_id }}
           PEEPS_LOAD_RESULT_FILE: ${{ runner.temp }}/peeps-load-result.json
