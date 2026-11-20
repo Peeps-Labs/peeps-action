@@ -126,3 +126,12 @@ export async function script(request: APIRequestContext): Promise<void> {
 export async function bigPost(request: APIRequestContext): Promise<void> {
   await request.post("/upload", { data: Buffer.alloc(1024 * 1024 - 4096, 0x61), headers: { "content-type": "application/octet-stream" } });
 }
+
+/** Raw `fetch` and `node:https` to the target named in `target.txt`, around the gate (load-isolation). */
+export async function rawFetch(): Promise<void> {
+  const { readFileSync } = await import("node:fs");
+  const https = await import("node:https");
+  const url = readFileSync("target.txt", "utf8").trim();
+  await fetch(url).catch(() => undefined);
+  await new Promise<void>((resolve) => https.get(url, { rejectUnauthorized: false }, () => resolve()).on("error", () => resolve()));
+}

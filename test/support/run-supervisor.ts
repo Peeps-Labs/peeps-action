@@ -129,6 +129,8 @@ export interface RigOptions {
   signal?: AbortSignal;
   /** Runs with every event, in order. */
   observer?: (e: LoadEvent, rig: Rig) => void;
+  /** Shifts the supervisor's clocks before the run starts. */
+  monoShift?: number;
   /** Rewrites the checkout before the run (after the binding the fake expects is read). */
   afterBinding?: (ws: string) => void;
 }
@@ -176,6 +178,7 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
   };
   const port = new FakeControlPort(setup, o.script);
   const seam = new ClockSeam();
+  seam.monoShift = o.monoShift ?? 0;
   const jails = fakeJail(o.jail);
   const real: Dial = (orig, signal, _pin, ready) => connectVerified("127.0.0.1", orig, { ca: [sink.caPem], signal, ready });
   const events: LoadEvent[] = [];
