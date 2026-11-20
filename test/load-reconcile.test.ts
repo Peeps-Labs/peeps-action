@@ -48,6 +48,7 @@ test("the journal keeps entries only while open, and bounds what it keeps", () =
   assert.equal(j.openCount, 0);
   assert.deepEqual(j.snapshot(), { debited: 10_000, attempted: 10_000, accepted: 10_000, responded: 10_000, received: 0, unresolved: 0, denied: {}, cut: {} });
   j.begin(10_001, { ...META, path: "/" + "y".repeat(1000) });
+  j.attempt(10_001);
   j.finish(10_001);
   assert.equal(j.openCount, 1, "an unresolved write stays open after its exchange ends");
   assert.equal(j.entry(10_001)!.meta.path.length, MAX_JOURNAL_PATH);
