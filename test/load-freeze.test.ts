@@ -62,7 +62,9 @@ const attemptedIn = (snap: { debited: number; unattempted: number[] }) => {
 /** No debit after the boundary; every seq the sink saw was attempted by then, once. */
 function boundaryHolds(r: Rig, res: LoadResult, snap: { debited: number; unattempted: number[] }): void {
   assert.equal(res.handoffs!.debited, snap.debited, "no debit after the boundary");
+  assert.deepEqual(res.handoffs!.unattempted, snap.unattempted, "no handoff after the boundary");
   const seqs = arrivedSeqs(r.sink);
+  assert.equal(seqs.length, r.sink.arrivals.length, "every arrival has a seq");
   const attempted = attemptedIn(snap);
   assert.ok(seqs.every((s) => attempted.has(s)), `sink seqs ${JSON.stringify(seqs)} ⊆ attempted at the boundary`);
   assert.equal(new Set(seqs).size, seqs.length, "no seq arrived twice");
@@ -74,55 +76,55 @@ const TRAFFIC: RigOptions = { plan: smallPlan({ exportName: "getTen", users: 2, 
 const MEASURED = 23;
 
 for (const jail of JAILS) {
-  test(`F1a (${jail.name}): frozen past expiry with demand outstanding; on resume, lease lost and nothing new`, jail.options, async (t) => {
-    let journal!: Journal;
-    let snap: { debited: number; unattempted: number[] } | undefined;
-    let arrivalsAtFreeze = 0;
-    const r = await start(t, jail.real, {
-      ...TRAFFIC,
-      seams: { onJournal: (j) => (journal = j) },
-      observer: (e, x) => {
-        if (e.type !== "phase" || e.phase !== "measurement") return;
-        void until("3 arrivals in measurement", () => x.sink.arrivals.length >= MEASURED).then(() => {
-          snap = encodeHandoffs(journal.handoffs());
-          arrivalsAtFreeze = x.sink.arrivals.length;
-          const t0 = Date.now();
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, TTL_MS * 2);
-          t.diagnostic(`frozen ${Date.now() - t0} ms at debited ${snap.debited}`);
-        });
-      },
+  for (const kind of ["freeze", "SIGSTOP"] as const) {
+    test(`F1${kind === "freeze" ? "a" : "b"} (${jail.name}, ${kind}): resume past lease expiry with a dial waiting to start`, jail.options, async (t) => {
+      let journal!: Journal;
+      let waiting = false;
+      let resumed = false;
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let snap: ReturnType<typeof encodeHandoffs> | undefined;
+      let boundary!: Promise<void>;
+      const r = await start(t, jail.real, {
+        ...TRAFFIC,
+        seams: { onJournal: (j) => (journal = j) },
+        dial: (inner) => async (...args) => {
+          if (!waiting && r.sink.arrivals.length >= MEASURED) {
+            waiting = true;
+            await held;
+            resumed = true;
+          }
+          return inner(...args);
+        },
+        observer: (e) => {
+          if (e.type !== "phase" || e.phase !== "measurement") return;
+          boundary = until("a measured dial is debited and waiting before TCP", () => waiting).then(() => {
+            snap = encodeHandoffs(journal.handoffs());
+            try {
+              if (kind === "freeze") {
+                Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, TTL_MS * 2);
+              } else {
+                const waker = spawn("/bin/sh", ["-c", `sleep ${(TTL_MS * 2) / 1000}; kill -CONT ${process.pid}`], { detached: true, stdio: "ignore" });
+                waker.unref();
+                process.kill(process.pid, "SIGSTOP");
+              }
+            } finally {
+              release();
+            }
+          });
+          void boundary.catch(() => release());
+        },
+      });
+      const res = await r.result;
+      await boundary;
+      assert.ok(snap?.unattempted.length, "a paid dial was outstanding at the boundary");
+      assert.ok(resumed, "the waiting dial resumed and attempted to start TCP");
+      assert.equal(res.status, "lease_lost", why(r, res));
+      boundaryHolds(r, res, snap);
+      if (jail.real) assert.equal(res.cleanup, "clean");
+      invariants(r, res);
     });
-    const res = await r.result;
-    assert.ok(snap, "the freeze happened");
-    assert.equal(res.status, "lease_lost", why(r, res));
-    boundaryHolds(r, res, snap);
-    t.diagnostic(`arrivals at freeze ${arrivalsAtFreeze}, after ${r.sink.arrivals.length}; denied ${JSON.stringify(res.journal!.denied)}`);
-    if (jail.real) assert.equal(res.cleanup, "clean");
-    invariants(r, res);
-  });
-
-  test(`F1b (${jail.name}): SIGSTOP past expiry, then SIGCONT: lease lost and nothing new`, jail.options, async (t) => {
-    let journal!: Journal;
-    let snap: { debited: number; unattempted: number[] } | undefined;
-    const r = await start(t, jail.real, {
-      ...TRAFFIC,
-      seams: { onJournal: (j) => (journal = j) },
-      observer: (e, x) => {
-        if (e.type !== "phase" || e.phase !== "measurement") return;
-        void until("3 arrivals in measurement", () => x.sink.arrivals.length >= MEASURED).then(() => {
-          snap = encodeHandoffs(journal.handoffs());
-          const waker = spawn("/bin/sh", ["-c", `sleep ${(TTL_MS * 2) / 1000}; kill -CONT ${process.pid}`], { detached: true, stdio: "ignore" });
-          waker.unref();
-          process.kill(process.pid, "SIGSTOP");
-        });
-      },
-    });
-    const res = await r.result;
-    assert.ok(snap, "the stop happened");
-    assert.equal(res.status, "lease_lost", why(r, res));
-    boundaryHolds(r, res, snap);
-    invariants(r, res);
-  });
+  }
 
   test(`F2 (${jail.name}): a verified upstream parked before the handoff while the lease runs out: zero HTTP bytes, its debit unattempted`, jail.options, async (t) => {
     let parking = false;

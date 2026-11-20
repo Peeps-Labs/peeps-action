@@ -209,7 +209,7 @@ export function invariants(r: Rig, res: LoadResult): void {
   const snap = r.events.find((e): e is Extract<LoadEvent, { type: "snapshot" }> => e.type === "snapshot");
   if (snap && res.handoffs) {
     assert.equal(res.handoffs.debited, snap.handoffs.debited, "no debit after terminate");
-    assert.ok(res.handoffs.unattempted.every((s) => snap.handoffs.unattempted.includes(s)), "no attempt after terminate");
+    assert.deepEqual(res.handoffs.unattempted, snap.handoffs.unattempted, "no attempt after terminate");
     assert.ok(r.sink.arrivals.length <= res.handoffs.debited - res.handoffs.unattempted.length, "arrivals ≤ attempted");
   }
   for (const rec of r.port.renewals) assert.notEqual(rec.fields.state, "closed", "no closed renewal");
