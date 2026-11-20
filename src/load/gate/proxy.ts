@@ -8,8 +8,8 @@
  *
  *     admit → journal.begin → socket.write(head + body)
  *
- * so no time passes between the gate's decision and the bytes leaving, and no TCP or TLS
- * reaches a target for a request the gate would refuse.
+ * TCP, TLS and HTTP each check the gate before starting. The HTTP handoff may still be
+ * queued by the socket, so revocation resets the underlying TCP connection.
  *
  * Every refusal on a tunnel is terminal for it: a second request, Upgrade, Expect or a nested
  * CONNECT revokes the tunnel, its dial and its upstream. Redirects are passed back, never
@@ -19,15 +19,15 @@
  * once (RST: bytes still in the kernel are dropped, not sent).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { Socket } from "node:net";
+import { isIP, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import { TLSSocket, createSecureContext, type SecureContext } from "node:tls";
 import type { Ahead, Clocks, Denied, DialTicket, Gate } from "./admission";
 import type { RunCa } from "./ca";
 import type { Journal } from "./journal";
 import { MAX_BODY_BYTES, MAX_HEADERS, normalize, parseAuthority, validatePolicy, type Authority, type RequestPolicy } from "./normalize";
-import { canonical, checkedAddresses, connectVerified, DialRefused, reachable, type ApprovedOrigin, type DialOptions, type Upstream } from "./resolve";
-import { ResponseReader } from "./response";
+import { boundedLookup, canonical, checkedAddresses, connectVerified, DialRefused, reachable, untilAbort, type ApprovedOrigin, type DialOptions, type Upstream } from "./resolve";
+import { ResponseReader, ResponseTooLarge } from "./response";
 
 /** The header that names why the gate answered instead of the target. */
 export const DENIED_HEADER = "x-peeps-load-denied";
@@ -109,8 +109,9 @@ interface TunnelState {
   used: boolean;
   revoked: boolean;
   setupTimer?: NodeJS.Timeout;
+  dispatching?: boolean;
   dial?: AbortController;
-  upstream?: Upstream;
+  finish?: (reason: string) => void;
   /** Request body bytes this tunnel holds, counted in the run-wide budget. */
   bodyBytes: number;
 }
@@ -120,69 +121,26 @@ const systemClocks = (): Clocks => ({ monoMs: performance.now(), wallMs: Date.no
 export interface DialSeams {
   /** Tests only: a resolver for fixture names. */
   lookup?: DialOptions["lookup"];
+  maxLookups?: number;
   /** Tests only: the fixture CA. */
   ca?: readonly string[];
   /** Tests only: where an address is actually connected (the fixture sink). */
   connect?: typeof connectVerified;
 }
 
-/**
- * The production dial. A pinned origin goes to its pinned address with no lookup. Before the
- * pin, dials share one lookup per origin until a connect on it settles, so the customer's DNS cannot spread
- * a run's first dials across addresses; the shared answer is dropped once it settles.
- */
+/** The production dial. One checked IPv4 literal and one TCP attempt per paid ticket. */
 export function makeDial(seams: DialSeams = {}): Dial {
   const connect = seams.connect ?? connectVerified;
-  const resolving = new Map<string, Promise<string[]>>();
-  const drops = new WeakMap<Promise<string[]>, () => void>();
+  const lookup = boundedLookup(seams.maxLookups ?? DEFAULT_PROXY_LIMITS.maxPendingDials, seams.lookup);
   return async (origin, signal, pinned, ready) => {
-    let address: string;
-    if (pinned) {
-      // The pin is checked again on every dial: the runner's own addresses can change.
-      if (!reachable(pinned, origin)) throw new DialRefused("address", `${origin.host}: its pinned address is no longer reachable`);
-      address = pinned;
-    } else {
-      const key = `${origin.host}:${origin.port}`;
-      let addresses = resolving.get(key);
-      if (!addresses) {
-        // Not tied to one dial's signal: another dial may be waiting on the same answer. One
-        // lookup at a time per approved origin, so lookups are bounded by the origins.
-        const answer = checkedAddresses(origin, { lookup: seams.lookup });
-        addresses = answer;
-        resolving.set(key, answer);
-        // Kept until a connect on it settles (by then the origin is usually pinned); a failed
-        // lookup is dropped at once.
-        drops.set(answer, () => {
-          if (resolving.get(key) === answer) resolving.delete(key);
-        });
-        answer.catch(() => drops.get(answer)!());
-      }
-      const answer = addresses;
-      const drop = drops.get(answer)!;
-      try {
-        // One address per dial: a dial spends one rate token and makes at most one TCP attempt.
-        address = (await Promise.race([answer, abortedSignal(signal, origin.host)]))[0]!;
-        // The lease and the turn are checked again just before the SYN: DNS may have taken a while.
-        if (signal.aborted || (ready && !ready())) throw new DialRefused("aborted", origin.host);
-      } catch (error) {
-        drop();
-        throw error;
-      }
-      const connecting = connect(address, origin, { ca: seams.ca, signal });
-      connecting.then(drop, drop);
-      return connecting;
+    const address = pinned ?? (await checkedAddresses(origin, { lookup, signal }))[0]!;
+    // Check pins and fresh answers at the boundary: the runner's own addresses can change.
+    if (isIP(address) !== 4 || !reachable(address, origin)) {
+      throw new DialRefused("address", `${origin.host}: its selected address is no longer reachable`);
     }
     if (signal.aborted || (ready && !ready())) throw new DialRefused("aborted", origin.host);
-    return connect(address, origin, { ca: seams.ca, signal });
+    return connect(address, origin, { ca: seams.ca, signal, ready });
   };
-}
-
-function abortedSignal(signal: AbortSignal, host: string): Promise<never> {
-  return new Promise((_resolve, reject) => {
-    const fail = () => reject(new DialRefused("aborted", host));
-    if (signal.aborted) fail();
-    else signal.addEventListener("abort", fail, { once: true });
-  });
 }
 
 export class GateProxy {
@@ -193,9 +151,10 @@ export class GateProxy {
   private readonly tunnels = new Set<TunnelState>();
   private readonly tunnelsPerTurn = new Map<number, number>();
   private readonly byTls = new WeakMap<object, TunnelState>();
-  private readonly upstreams = new Map<Upstream, number>();
+  private readonly work = new Set<Promise<unknown>>();
   private readonly pending = { run: 0, turn: new Map<number, number>(), origin: new Map<string, number>() };
   private readonly pins = new Map<string, string>();
+  private readonly firstDials = new Map<string, Promise<void>>();
   private readonly closedTurns = new Set<number>();
   private readonly contexts = new Map<string, SecureContext>();
   private readonly clocks: () => Clocks;
@@ -208,7 +167,7 @@ export class GateProxy {
     validatePolicy(o.policy);
     this.limits = { ...DEFAULT_PROXY_LIMITS, ...o.limits };
     this.clocks = o.clocks ?? systemClocks;
-    this.dial = o.dial ?? makeDial();
+    this.dial = o.dial ?? makeDial({ maxLookups: this.limits.maxPendingDials });
     // maxHeadersCount 0: Node keeps every header, so nothing is hidden from the checks here
     // (with a count cap it drops the excess from rawHeaders yet still acts on their framing).
     this.server = createServer({ maxHeaderSize: 8192, insecureHTTPParser: false });
@@ -267,7 +226,7 @@ export class GateProxy {
     return this.tunnels.size;
   }
 
-  /** The address each origin was pinned to on its first successful dial. */
+  /** The verified address each origin was pinned to on its first admitted request. */
   get pinned(): ReadonlyMap<string, string> {
     return this.pins;
   }
@@ -277,26 +236,33 @@ export class GateProxy {
     this.closedTurns.add(turn);
     this.o.gate.closeTurn(turn);
     for (const t of [...this.tunnels]) if (t.turn === turn) this.revoke(t);
-    for (const [u, owner] of this.upstreams) if (owner === turn) u.reset();
   }
 
-  /** Stop the gate and reset every socket, tunnel and dial; resolves once the server is closed. */
+  /** Stop the gate and reset every socket, tunnel and dial; await the listener and owned work. */
   close(): Promise<void> {
     // Every caller waits on the same close.
     this.closing ??= this.shutDown();
     return this.closing;
   }
 
-  private shutDown(): Promise<void> {
+  private async shutDown(): Promise<void> {
     this.closed = true;
     this.o.gate.stop();
     for (const t of [...this.tunnels]) this.revoke(t);
-    for (const u of this.upstreams.keys()) u.reset();
     for (const s of this.connections) s.destroy();
-    return new Promise((resolve) => {
+    await new Promise<void>((resolve) => {
       if (!this.server.listening) return resolve();
       this.server.close(() => resolve());
     });
+    // A settling dial can hand over a TCP handle after cancellation. Its closure is
+    // tracked before the dispatch promise settles and included in the next iteration.
+    while (this.work.size > 0) await Promise.allSettled(this.work);
+  }
+
+  private trackWork(work: Promise<unknown>): void {
+    this.work.add(work);
+    const done = () => this.work.delete(work);
+    void work.then(done, done);
   }
 
   private track(s: Duplex): void {
@@ -388,8 +354,10 @@ export class GateProxy {
       if (tunnel.revoked || size > MAX_BODY_BYTES) return;
       clearTimeout(tunnel.setupTimer);
       const tls = req.socket as TLSSocket;
+      const body = Buffer.concat(chunks);
+      chunks.length = 0;
       const n = normalize(
-        { method: req.method ?? "", target: req.url ?? "", httpVersion: req.httpVersion, rawHeaders: req.rawHeaders, body: Buffer.concat(chunks) },
+        { method: req.method ?? "", target: req.url ?? "", httpVersion: req.httpVersion, rawHeaders: req.rawHeaders, body },
         { authority: tunnel.authority, servername: typeof tls.servername === "string" ? tls.servername : undefined },
         this.o.policy,
       );
@@ -397,7 +365,18 @@ export class GateProxy {
         this.release(tunnel);
         return this.refuse(res, n.status, n.reason);
       }
-      void this.dispatch(tunnel, n, res).finally(() => this.release(tunnel));
+      tunnel.dispatching = true;
+      this.trackWork(this.dispatch(tunnel, n, res).then(
+        (writing) => {
+          tunnel.dispatching = false;
+          if (!writing) this.release(tunnel);
+        },
+        () => {
+          tunnel.dispatching = false;
+          if (!tunnel.finish) this.release(tunnel);
+          this.revoke(tunnel);
+        },
+      ));
     });
   }
 
@@ -405,7 +384,7 @@ export class GateProxy {
     return { run: this.pending.run, turn: this.pending.turn.get(turn) ?? 0, origin: this.pending.origin.get(origin) ?? 0 };
   }
 
-  private async dispatch(tunnel: TunnelState, n: Prepared, res: ServerResponse): Promise<void> {
+  private async dispatch(tunnel: TunnelState, n: Prepared, res: ServerResponse): Promise<boolean | void> {
     const { turn } = tunnel;
     const { gate } = this.o;
     const turnDials = this.pending.turn.get(turn) ?? 0;
@@ -415,6 +394,7 @@ export class GateProxy {
     const reserved = gate.reserve({ turn, origin: n.origin, method: n.method }, this.clocks(), this.ahead(turn, n.origin));
     if (!reserved.ok) return this.denied(res, reserved);
     const { ticket } = reserved;
+    let releaseFirstDial: (() => void) | undefined;
     try {
       const origin = this.o.origins.get(n.origin)!;
       const controller = new AbortController();
@@ -437,7 +417,22 @@ export class GateProxy {
           lapsed = gate.whyNot(request, this.clocks());
           return lapsed === undefined;
         };
+        while (!this.pins.has(n.origin)) {
+          const first = this.firstDials.get(n.origin);
+          if (first === undefined) {
+            let release!: () => void;
+            this.firstDials.set(n.origin, new Promise<void>((resolve) => { release = resolve; }));
+            releaseFirstDial = () => {
+              this.firstDials.delete(n.origin);
+              release();
+            };
+            break;
+          }
+          await untilAbort(first, controller.signal, origin.host);
+        }
+        if (controller.signal.aborted || !ready()) throw new DialRefused("aborted", origin.host);
         upstream = await this.dial(origin, controller.signal, this.pins.get(n.origin), ready);
+        this.trackWork(upstream.closed);
       } catch {
         // The gate refused just before the connect: say why, as admit would have.
         if (lapsed && !this.closed && !tunnel.revoked) return this.denied(res, lapsed);
@@ -453,124 +448,125 @@ export class GateProxy {
         upstream.reset();
         return this.refuse(res, 503, this.closed ? "stopped" : "revoked");
       }
-      // Only a live, verified dial pins its origin; every later one must reach the same address.
+      const address = canonical(upstream.address);
       const pin = this.pins.get(n.origin);
-      if (pin === undefined) this.pins.set(n.origin, canonical(upstream.address));
-      else if (canonical(upstream.address) !== pin) {
+      if (pin !== undefined && address !== pin) {
         upstream.reset();
         return this.refuse(res, 502, "pin");
       }
-      this.send(tunnel, n, upstream, res, ticket);
+      try {
+        return this.send(tunnel, n, upstream, res, ticket, address);
+      } catch (error) {
+        upstream.reset();
+        throw error;
+      }
     } finally {
+      releaseFirstDial?.();
       // Spent by admit, or the dial ended without it: either way the ticket is gone, the token spent.
       gate.drop(ticket);
     }
   }
 
   /** admit → journal.begin → write, in one synchronous function: nothing may be awaited or deferred here. */
-  private send(tunnel: TunnelState, n: Prepared, upstream: Upstream, res: ServerResponse, ticket: DialTicket): void {
+  private send(tunnel: TunnelState, n: Prepared, upstream: Upstream, res: ServerResponse, ticket: DialTicket, address: string): boolean | void {
     const { gate, journal } = this.o;
     if (this.closed || tunnel.revoked || !upstream.socket.writable) {
       upstream.reset();
       return this.refuse(res, 503, this.closed ? "stopped" : "revoked");
     }
     const head = Buffer.from(n.head, "latin1");
+    const payload = n.body.length && !this.o.seqHeader ? Buffer.concat([head, n.body]) : head;
     const decision = gate.admit({ turn: tunnel.turn, origin: n.origin, method: n.method }, this.clocks(), ticket);
     if (!decision.ok) {
       upstream.reset();
       return this.denied(res, decision);
     }
     const seq = decision.seq;
-    journal.begin(seq, { turn: tunnel.turn, origin: n.origin, method: n.method, path: n.path, address: upstream.address });
-    const wire = this.o.seqHeader ? Buffer.from(n.head.replace(/\r\n\r\n$/, `\r\n${this.o.seqHeader}: ${seq}\r\n\r\n`), "latin1") : head;
-    const write = { accepted: false };
-    const finish = this.relay(tunnel, seq, n.method, upstream, res, write);
+    this.pins.set(n.origin, address);
+    journal.begin(seq, { turn: tunnel.turn, origin: n.origin, method: n.method, path: n.path, address });
+    const finish = this.relay(tunnel, seq, n.method, upstream, res);
     try {
-      upstream.socket.write(n.body.length ? Buffer.concat([wire, n.body]) : wire, (error) => {
-        if (error) return;
-        write.accepted = true;
+      const wire = this.o.seqHeader
+        ? Buffer.concat([Buffer.from(n.head.replace(/\r\n\r\n$/, `\r\n${this.o.seqHeader}: ${seq}\r\n\r\n`), "latin1"), n.body])
+        : payload;
+      journal.attempt(seq);
+      upstream.socket.write(wire, (error) => {
+        this.release(tunnel);
+        if (error) return finish("write");
         journal.accept(seq);
         gate.resolve(seq, true);
       });
     } catch {
-      upstream.reset();
-      finish();
+      finish("write");
     }
+    return true;
   }
 
   /** Relays the response back; returns the exchange's once-only finalizer, installed before the write. */
-  private relay(tunnel: TunnelState, seq: number, method: string, upstream: Upstream, res: ServerResponse, write: { readonly accepted: boolean }): () => void {
+  private relay(tunnel: TunnelState, seq: number, method: string, upstream: Upstream, res: ServerResponse): (reason?: string) => void {
     const { gate, journal } = this.o;
     const { socket } = upstream;
-    tunnel.upstream = upstream;
-    this.upstreams.set(upstream, tunnel.turn);
     let finished = false;
-    let bytes = 0;
-    const timer = setTimeout(() => {
-      journal.cut(seq, "exchange_timeout");
-      reader.abort(new Error("exchange deadline"));
-      upstream.reset();
-    }, this.limits.exchangeMs);
+    let eof = false;
+    let paused = false;
+    const timer = setTimeout(() => finish("exchange_timeout"), this.limits.exchangeMs);
     timer.unref();
-    const finish = () => {
+    const finish = (reason?: string) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      this.upstreams.delete(upstream);
+      res.off("drain", drain);
+      res.off("close", downstreamClosed);
+      socket.off("data", push);
+      reader.stop();
+      // Even a successful write callback only confirms handoff. Keep reset ownership
+      // through termination so an early target response cannot leave queued TCP bytes.
+      upstream.reset();
+      if (reason) journal.cut(seq, reason);
       gate.finish(seq);
       journal.finish(seq);
-      if (!reader.done) upstream.reset();
-      if (!res.writableEnded) res.destroy();
+      if (!reason) res.end();
+      else if (reason !== "revoked" && !res.headersSent) this.answer(res, 502, reason);
+      else if (!res.writableEnded) res.destroy();
     };
     const reader = new ResponseReader(method, {
       head: (h) => {
-        journal.receive(seq);
         res.writeHead(h.status, h.statusText, h.headers.filter(([name]) => !HOP_HEADERS.has(name.toLowerCase())).flat());
+        journal.respond(seq);
       },
       data: (chunk) => {
-        if (finished) return;
-        bytes += chunk.length;
-        if (bytes > this.limits.maxResponseBytes) {
-          journal.cut(seq, "response_too_large");
-          return finish();
-        }
-        // Backpressure: a journey that stops reading stops the upstream, not the supervisor's memory.
-        if (!res.write(chunk)) {
-          socket.pause();
-          res.once("drain", () => socket.resume());
-        }
+        if (res.write(chunk)) return true;
+        paused = true;
+        socket.pause();
+        res.once("drain", drain);
+        return false;
       },
-      end: () => {
-        if (finished) return;
-        res.end();
-        finish();
-        // An early response with the request's write still pending: reset, so unsent bytes
-        // are dropped rather than flushed after the exchange is over.
-        if (write.accepted) socket.destroy();
-        else upstream.reset();
-      },
-      error: () => {
-        if (finished) return;
-        journal.cut(seq, "upstream");
-        if (!res.headersSent) this.answer(res, 502, "upstream");
-        finish();
-      },
+      end: () => finish(),
+      error: (error) => finish(error instanceof ResponseTooLarge ? "response_too_large" : "upstream"),
+    }, this.limits.maxResponseBytes);
+    const drain = () => {
+      paused = false;
+      reader.resume();
+      if (!paused && !finished) socket.resume();
+    };
+    const push = (chunk: Buffer) => reader.push(chunk);
+    const downstreamClosed = () => finish("revoked");
+    tunnel.finish = finish;
+    void upstream.closed.then(() => this.release(tunnel));
+    socket.on("data", push);
+    socket.on("error", () => finish("upstream"));
+    socket.on("end", () => {
+      eof = true;
+      reader.end();
     });
-    socket.on("data", (chunk: Buffer) => reader.push(chunk));
-    socket.on("end", () => reader.end());
     socket.on("close", (hadError: boolean) => {
-      // Only a clean EOF ends a close-delimited body; an error or a reset is a failure.
-      if (!reader.done) {
-        if (hadError) reader.abort(new Error("upstream reset"));
-        else reader.end();
-      }
-      finish();
+      if (hadError || !eof) finish("upstream");
     });
-    res.on("close", finish);
+    res.on("close", downstreamClosed);
     return finish;
   }
 
-  /** Its body was written or refused: it no longer counts against the budget. */
+  /** Release a body after write completion, TCP close, or a refusal before writing. */
   private release(t: TunnelState): void {
     this.buffered -= t.bodyBytes;
     t.bodyBytes = 0;
@@ -583,14 +579,14 @@ export class GateProxy {
 
   /** Revoke one tunnel: abort its dial, reset its upstream, close it. Idempotent. */
   private revoke(t: TunnelState): void {
-    this.release(t);
     if (t.revoked) return;
     t.revoked = true;
     clearTimeout(t.setupTimer);
     this.tunnels.delete(t);
     decrement(this.tunnelsPerTurn, t.turn);
     t.dial?.abort();
-    t.upstream?.reset();
+    if (t.finish) t.finish("revoked");
+    else if (!t.dispatching) this.release(t);
     t.tls?.destroy();
     t.client.destroy();
   }

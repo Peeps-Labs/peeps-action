@@ -10,7 +10,19 @@
  */
 import { isApprovedHostName } from "./ca";
 
-const METHOD_IN_BODY = /(?:_|%5f|\\u005f)method/i;
+/**
+ * Whether a body names the method override, however a framework would decode the name: percent
+ * escapes of any of its letters, JSON `\u` escapes and backslash escapes are undone first. PHP
+ * also reads a leading `.` in a name as `_`.
+ */
+function namesMethodOverride(body: string): boolean {
+  const char = (_m: string, hex: string) => String.fromCharCode(parseInt(hex, 16));
+  const decoded = body.replace(/%([0-9a-f]{2})/gi, char).replace(/\\u([0-9a-f]{4})/gi, char).replaceAll("\\", "");
+  return /(?:_|(?<![a-z0-9])\.)method/i.test(decoded);
+}
+
+/** A query name as PHP registers it: leading spaces dropped, spaces and dots read as `_`, up to any `[`. */
+const phpName = (name: string): string => name.replace(/^ +/, "").split("[")[0]!.replace(/[ .]/g, "_");
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 export const MAX_TARGET_BYTES = 2048;
@@ -176,12 +188,12 @@ export function normalize(req: ArrivedRequest, tunnel: Tunnel, policy: RequestPo
 
   if (!READ_METHODS.has(req.method)) {
     if (!policy.allowedRequests.some((r) => r.method === req.method && r.path === path)) return refuse("not_allowed", 403);
-    // Rails, Laravel and Symfony read a method override from the query.
-    if (q >= 0 && [...new URLSearchParams(req.target.slice(q + 1)).keys()].some((k) => k.toLowerCase() === "_method")) return refuse("not_allowed", 403);
+    // Laravel and Symfony read a method override from the query, under PHP's spelling of the name.
+    if (q >= 0 && [...new URLSearchParams(req.target.slice(q + 1)).keys()].some((k) => phpName(k).toLowerCase() === "_method")) return refuse("not_allowed", 403);
     // Rack, Symfony and Laravel also read it from a form, multipart or JSON body. Matched in any
     // encoding those decode, whatever the Content-Type says: a plan whose bodies really carry
     // the text `_method` is refused.
-    if (METHOD_IN_BODY.test(req.body.toString("latin1"))) return refuse("not_allowed", 403);
+    if (namesMethodOverride(req.body.toString("latin1"))) return refuse("not_allowed", 403);
   }
 
   const hostLine = authority.port === 443 ? authority.host : `${authority.host}:${authority.port}`;

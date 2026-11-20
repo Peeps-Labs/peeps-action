@@ -18,60 +18,74 @@ export interface ResponseHead {
 
 export interface ResponseEvents {
   head(head: ResponseHead): void;
-  data(chunk: Buffer): void;
+  data(chunk: Buffer): boolean | void;
   end(): void;
   error(error: Error): void;
 }
 
 type Mode = { kind: "head" } | { kind: "fixed"; left: number } | { kind: "chunk-size" } | { kind: "chunk-data"; left: number } | { kind: "chunk-crlf" } | { kind: "trailers" } | { kind: "close" } | { kind: "done" };
 
+export class ResponseTooLarge extends Error {}
+
 export class ResponseReader {
   private buf: Buffer = Buffer.alloc(0);
   private mode: Mode = { kind: "head" };
-  private failed = false;
+  private paused = false;
+  private eof = false;
+  private bytes = 0;
 
   constructor(
     private readonly requestMethod: string,
     private readonly on: ResponseEvents,
+    private readonly maxBodyBytes = Infinity,
   ) {}
 
   get done(): boolean {
-    return this.mode.kind === "done" || this.failed;
+    return this.mode.kind === "done";
   }
 
   push(chunk: Buffer): void {
     if (this.done) return;
     this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+    this.process();
+  }
+
+  resume(): void {
+    this.paused = false;
+    this.process();
+  }
+
+  /** Only the upstream's clean readable end is an EOF. */
+  end(): void {
+    this.eof = true;
+    this.process();
+  }
+
+  stop(): void {
+    this.mode = { kind: "done" };
+    this.buf = Buffer.alloc(0);
+  }
+
+  private complete(): void {
+    this.stop();
+    this.on.end();
+  }
+
+  private process(): void {
     try {
       this.drain();
+      if (this.eof && !this.paused && !this.done) {
+        if (this.mode.kind !== "close") throw new Error("upstream closed before the response ended");
+        this.complete();
+      }
     } catch (error) {
-      this.fail(error as Error);
+      this.stop();
+      this.on.error(error as Error);
     }
   }
 
-  /** The upstream closed its side. */
-  end(): void {
-    if (this.done) return;
-    if (this.mode.kind === "close") {
-      this.mode = { kind: "done" };
-      this.on.end();
-    } else this.fail(new Error("upstream closed before the response ended"));
-  }
-
-  /** The exchange was ended from outside (a reset, a deadline): never a clean end. */
-  abort(error: Error): void {
-    if (this.done) return;
-    this.fail(error);
-  }
-
-  private fail(error: Error): void {
-    if (this.failed) return;
-    this.failed = true;
-    this.on.error(error);
-  }
-
   private drain(): void {
-    for (;;) {
+    while (!this.done && !this.paused) {
       const m = this.mode;
       if (m.kind === "head") {
         const at = this.buf.indexOf(HEAD_END);
@@ -81,27 +95,24 @@ export class ResponseReader {
         this.buf = this.buf.subarray(at + 4);
         if (head.status === 101) throw new Error("upstream switched protocols");
         if (head.status < 200) continue; // interim response: the real one follows
-        // Framing is validated before the head is passed on: a malformed response is never
-        // reported as received.
+        // The relay sees the final head only after framing and declared size are checked.
         const mode = bodyMode(this.requestMethod, head);
-        this.on.head(head);
+        if (mode.kind === "fixed" && mode.left > this.maxBodyBytes) throw new ResponseTooLarge();
         this.mode = mode;
-        if (this.mode.kind === "done") return this.on.end();
+        this.on.head(head);
+        if (mode.kind === "done") return this.complete();
         continue;
       }
       if (m.kind === "close") {
-        if (this.buf.length) this.on.data(this.take(this.buf.length));
+        if (this.buf.length) this.data(this.buf.length);
         return;
       }
       if (m.kind === "fixed") {
+        if (m.left === 0) return this.complete();
         if (!this.buf.length) return;
         const n = Math.min(m.left, this.buf.length);
-        this.on.data(this.take(n));
         m.left -= n;
-        if (m.left === 0) {
-          this.mode = { kind: "done" };
-          return this.on.end();
-        }
+        this.data(n);
         continue;
       }
       if (m.kind === "chunk-size") {
@@ -121,9 +132,9 @@ export class ResponseReader {
       if (m.kind === "chunk-data") {
         if (!this.buf.length) return;
         const n = Math.min(m.left, this.buf.length);
-        this.on.data(this.take(n));
         m.left -= n;
         if (m.left === 0) this.mode = { kind: "chunk-crlf" };
+        this.data(n);
         continue;
       }
       if (m.kind === "chunk-crlf") {
@@ -140,14 +151,17 @@ export class ResponseReader {
           return;
         }
         this.buf = this.buf.subarray(at + 2);
-        if (at === 0) {
-          this.mode = { kind: "done" };
-          return this.on.end();
-        }
+        if (at === 0) return this.complete();
         continue;
       }
       return;
     }
+  }
+
+  private data(n: number): void {
+    this.bytes += n;
+    if (this.bytes > this.maxBodyBytes) throw new ResponseTooLarge();
+    this.paused = this.on.data(this.take(n)) === false;
   }
 
   private take(n: number): Buffer {
@@ -157,21 +171,26 @@ export class ResponseReader {
   }
 }
 
+/** What Node will write back to the journey: `writeHead` throws on anything else. */
+const TEXT = /^[\t\x20-\x7e\x80-\xff]*$/;
+const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
 function parseHead(text: string): ResponseHead {
   const lines = text.split("\r\n");
   const m = /^HTTP\/1\.[01] ([1-9][0-9]{2})(?: (.*))?$/.exec(lines[0]!);
-  if (!m) throw new Error("bad status line");
+  if (!m || !TEXT.test(m[2] ?? "")) throw new Error("bad status line");
   const headers: [string, string][] = [];
   for (const line of lines.slice(1)) {
     const c = line.indexOf(":");
-    if (c <= 0 || /\s/.test(line.slice(0, c))) throw new Error("bad response header");
-    headers.push([line.slice(0, c), line.slice(c + 1).trim()]);
+    const value = line.slice(c + 1).trim();
+    if (c <= 0 || !TOKEN.test(line.slice(0, c)) || !TEXT.test(value)) throw new Error("bad response header");
+    headers.push([line.slice(0, c), value]);
   }
   return { status: Number(m[1]), statusText: m[2] ?? "", headers };
 }
 
 function bodyMode(method: string, head: ResponseHead): Mode {
-  if (method === "HEAD" || head.status === 204 || head.status === 304) return { kind: "done" };
+  const bodyless = method === "HEAD" || head.status === 204 || head.status === 304;
   const values = (name: string) => head.headers.filter(([n]) => n.toLowerCase() === name).map(([, v]) => v);
   const te = values("transfer-encoding");
   const cl = values("content-length");
@@ -179,12 +198,12 @@ function bodyMode(method: string, head: ResponseHead): Mode {
   if (te.length) {
     const codings = te.join(",").split(",").map((s) => s.trim().toLowerCase());
     if (codings.length !== 1 || codings[0] !== "chunked") throw new Error("unsupported transfer-coding");
-    return { kind: "chunk-size" };
+    return { kind: bodyless ? "done" : "chunk-size" };
   }
   if (cl.length) {
     if (new Set(cl).size !== 1 || !/^[0-9]{1,15}$/.test(cl[0]!)) throw new Error("bad content-length");
     const n = Number(cl[0]);
-    return n === 0 ? { kind: "done" } : { kind: "fixed", left: n };
+    return bodyless || n === 0 ? { kind: "done" } : { kind: "fixed", left: n };
   }
-  return { kind: "close" };
+  return { kind: bodyless ? "done" : "close" };
 }

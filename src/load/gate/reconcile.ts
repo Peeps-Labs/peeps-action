@@ -13,6 +13,7 @@
  * Pure: no clock, no I/O.
  */
 import { createHash } from "node:crypto";
+import { wasAttempted, type Handoffs } from "./journal";
 
 export interface Arrivals {
   /** Seqs the target recorded that the gate never handed off. */
@@ -21,13 +22,13 @@ export interface Arrivals {
   repeated: number[];
 }
 
-/** The target's per-request receipts (seqs) against the gate's handoffs, which are 1…debited. */
-export function receivedOutsideGate(debited: number, receipts: Iterable<number>): Arrivals {
+/** Compare the target's complete receipts with this run's socket-write attempts. */
+export function receivedOutsideGate(handoffs: Handoffs, receipts: Iterable<number>): Arrivals {
   const seen = new Map<number, number>();
   for (const seq of receipts) seen.set(seq, (seen.get(seq) ?? 0) + 1);
   const sorted = [...seen.keys()].sort((a, b) => a - b);
   return {
-    unknown: sorted.filter((seq) => !(Number.isSafeInteger(seq) && seq >= 1 && seq <= debited)),
+    unknown: sorted.filter((seq) => !wasAttempted(handoffs, seq)),
     repeated: sorted.filter((seq) => seen.get(seq)! > 1),
   };
 }
@@ -39,11 +40,11 @@ export interface CrashRange {
   arrivals: { atLeast: number; atMost: number };
 }
 
-export function crashRange(lastAckDebited: number, lastAckReceived: number, highestCeiling: number): CrashRange {
-  for (const n of [lastAckDebited, lastAckReceived, highestCeiling]) if (!Number.isSafeInteger(n) || n < 0) throw new Error("reconcile: counts must be whole numbers ≥ 0");
-  if (lastAckReceived > lastAckDebited) throw new Error("reconcile: more received than debited");
+export function crashRange(lastAckDebited: number, lastAckSinkReceipts: number, highestCeiling: number): CrashRange {
+  for (const n of [lastAckDebited, lastAckSinkReceipts, highestCeiling]) if (!Number.isSafeInteger(n) || n < 0) throw new Error("reconcile: counts must be whole numbers ≥ 0");
+  if (lastAckSinkReceipts > lastAckDebited) throw new Error("reconcile: more received than debited");
   const atMost = Math.max(lastAckDebited, highestCeiling);
-  return { debited: { atLeast: lastAckDebited, atMost }, arrivals: { atLeast: lastAckReceived, atMost } };
+  return { debited: { atLeast: lastAckDebited, atMost }, arrivals: { atLeast: lastAckSinkReceipts, atMost } };
 }
 
 export interface EventBatch {

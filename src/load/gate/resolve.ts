@@ -15,7 +15,7 @@
  */
 import { X509Certificate } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { BlockList, connect as netConnect, isIP, type Socket } from "node:net";
+import { BlockList, isIP, Socket } from "node:net";
 import { networkInterfaces } from "node:os";
 import { connect, createSecureContext, rootCertificates, type PeerCertificate, type SecureContext, type TLSSocket } from "node:tls";
 
@@ -151,7 +151,8 @@ export function reachable(address: string, origin: Pick<ApprovedOrigin, "private
   return list.check(a, isIP(a) === 6 ? "ipv6" : "ipv4");
 }
 
-export type Lookup = (name: string) => Promise<readonly { address: string; family: number }[]>;
+type Addresses = readonly { address: string; family: number }[];
+export type Lookup = (name: string, signal?: AbortSignal) => Promise<Addresses>;
 
 export interface DialOptions {
   signal?: AbortSignal;
@@ -173,13 +174,57 @@ export class DialRefused extends Error {
 
 const systemLookup: Lookup = (name) => dnsLookup(name, { all: true, verbatim: true });
 
-function aborted(signal: AbortSignal | undefined, host: string): Promise<never> {
-  return new Promise((_resolve, reject) => {
-    if (!signal) return;
-    const fail = () => reject(new DialRefused("aborted", host));
-    if (signal.aborted) fail();
-    else signal.addEventListener("abort", fail, { once: true });
+/**
+ * Bound actual system work, including lookups without any remaining callers. Each caller
+ * unregisters on abort so a stuck resolver does not retain a trail of canceled waiters.
+ */
+export function boundedLookup(limit: number, lookup: Lookup = systemLookup): Lookup {
+  type Result = { addresses: Addresses } | { error: unknown };
+  type Waiter = (result: Result) => void;
+  const pending = new Map<string, Set<Waiter>>();
+  return (name, signal) => new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DialRefused("aborted", name));
+    let waiters = pending.get(name);
+    if (!waiters) {
+      if (pending.size >= limit) return reject(new DialRefused("resolve", "system lookup capacity reached"));
+      const group = new Set<Waiter>();
+      pending.set(name, group);
+      waiters = group;
+      const settle = (result: Result) => {
+        pending.delete(name);
+        for (const waiter of group) waiter(result);
+      };
+      void Promise.resolve().then(() => lookup(name)).then(
+        (addresses) => settle({ addresses }),
+        (error: unknown) => settle({ error }),
+      );
+    }
+    const group = waiters;
+    const finish: Waiter = (result) => {
+      signal?.removeEventListener("abort", abort);
+      group.delete(finish);
+      if ("addresses" in result) resolve(result.addresses);
+      else reject(result.error);
+    };
+    const abort = () => finish({ error: new DialRefused("aborted", name) });
+    group.add(finish);
+    signal?.addEventListener("abort", abort, { once: true });
   });
+}
+
+export async function untilAbort<T>(work: Promise<T>, signal: AbortSignal | undefined, host: string): Promise<T> {
+  if (!signal) return work;
+  let abort!: () => void;
+  const canceled = new Promise<never>((_resolve, reject) => {
+    abort = () => reject(new DialRefused("aborted", host));
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    return await Promise.race([work, canceled]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
 }
 
 /**
@@ -193,7 +238,7 @@ export async function checkedAddresses(origin: ApprovedOrigin, options: Pick<Dia
   let addresses: readonly { address: string }[];
   try {
     // An abort frees the caller at once; getaddrinfo itself cannot be cancelled.
-    addresses = await Promise.race([(options.lookup ?? systemLookup)(`${origin.host}.`), aborted(signal, origin.host)]);
+    addresses = await untilAbort((options.lookup ?? systemLookup)(`${origin.host}.`, signal), signal, origin.host);
   } catch (error) {
     if (error instanceof DialRefused) throw error;
     throw new DialRefused("resolve", `${origin.host}: ${(error as Error).message}`);
@@ -213,6 +258,8 @@ export async function checkedAddresses(origin: ApprovedOrigin, options: Pick<Dia
 /** A verified upstream connection, and the TCP socket under it so it can be reset. */
 export interface Upstream {
   socket: TLSSocket;
+  /** Resolves after the underlying TCP handle has closed. */
+  closed: Promise<void>;
   /** The literal address it is connected to. */
   address: string;
   /**
@@ -261,63 +308,87 @@ export async function connectFirst(
 }
 
 /**
- * TLS to a literal, already-checked address, verified as `origin.host`. Exported for tests,
- * which reach a fixture on loopback; production goes through `dial`.
+ * TLS to a literal, already-checked address, verified as `origin.host`.
+ * The same grant must be live immediately before both TCP and TLS start.
  */
-export function connectVerified(address: string, origin: ApprovedOrigin, options: Pick<DialOptions, "ca" | "signal"> = {}): Promise<Upstream> {
-  const { signal } = options;
+export function connectVerified(
+  address: string,
+  origin: ApprovedOrigin,
+  options: Pick<DialOptions, "ca" | "signal"> & { ready?: () => boolean } = {},
+): Promise<Upstream> {
+  const { signal, ready } = options;
   if (signal?.aborted) return Promise.reject(new DialRefused("aborted", origin.host));
-  const tcp: Socket = netConnect({ host: address, port: origin.port });
-  let socket: TLSSocket | undefined;
+  const family = isIP(address);
+  if (!family || isIP(origin.host)) return Promise.reject(new DialRefused("address", origin.host));
+  const secureContext = options.ca ? createSecureContext({ ca: [...options.ca], minVersion: "TLSv1.2" }) : bundledRoots();
+  const live = () => !signal?.aborted && (ready?.() ?? true);
+  const tcp = new Socket();
+  const closed = new Promise<void>((resolve) => tcp.once("close", () => resolve()));
+  let connected = false;
   const reset = () => {
     if (tcp.destroyed) return;
-    if (tcp.connecting) {
-      // resetAndDestroy() would wait for the connection and let TLS send its hello first.
-      tcp.destroy();
-      socket?.destroy();
-    } else tcp.resetAndDestroy();
+    if (connected) tcp.resetAndDestroy();
+    else tcp.destroy();
   };
-  const secureContext = options.ca ? createSecureContext({ ca: [...options.ca], minVersion: "TLSv1.2" }) : bundledRoots();
-  socket = connect({
-    socket: tcp,
-    servername: origin.host,
-    ALPNProtocols: ["http/1.1"],
-    rejectUnauthorized: true,
-    secureContext,
-    checkServerIdentity: (_host, cert) => checkIdentity(origin.host, cert),
-  });
-  const tls = socket;
+
   return new Promise((resolve, reject) => {
-    const abort = () => {
-      // Reject first: destroying the sockets can report an error of its own on the way.
-      reject(new DialRefused("aborted", origin.host));
+    let settled = false;
+    const fail = (error: DialRefused) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
       reset();
+      void closed.then(() => reject(error));
     };
+    const abort = () => fail(new DialRefused("aborted", origin.host));
+    const transportError = (error: Error) => fail(new DialRefused("tls", `${origin.host}: ${error.message}`));
     signal?.addEventListener("abort", abort, { once: true });
-    const fail = (error: Error) => {
-      signal?.removeEventListener("abort", abort);
-      reset();
-      reject(new DialRefused("tls", `${origin.host}: ${error.message}`));
-    };
-    tcp.once("error", fail);
-    tls.once("error", fail);
-    const closed = () => fail(new Error("closed during the handshake"));
-    tls.once("close", closed);
-    tls.once("secureConnect", () => {
-      signal?.removeEventListener("abort", abort);
-      tcp.off("error", fail);
-      tls.off("error", fail);
-      tls.off("close", closed);
-      // Errors after the handshake surface as "close" to whoever holds the socket.
-      tcp.on("error", () => undefined);
-      tls.on("error", () => undefined);
-      const alpn = tls.alpnProtocol;
-      if (typeof alpn === "string" && alpn !== "http/1.1") {
-        reset();
-        reject(new DialRefused("alpn", `${origin.host} chose ${alpn}`));
-        return;
+    tcp.on("error", transportError);
+    tcp.once("close", () => transportError(new Error("TCP closed during dial")));
+    tcp.once("connect", () => {
+      connected = true;
+      let tls: TLSSocket;
+      try {
+        if (!live()) return abort();
+        tls = connect({
+          socket: tcp,
+          servername: origin.host,
+          ALPNProtocols: ["http/1.1"],
+          rejectUnauthorized: true,
+          secureContext,
+          checkServerIdentity: (_host, cert) => checkIdentity(origin.host, cert),
+        });
+      } catch (error) {
+        return transportError(error as Error);
       }
-      resolve({ socket: tls, address, reset });
+      tls.on("error", transportError);
+      tls.once("close", () => transportError(new Error("closed during the handshake")));
+      tls.once("secureConnect", () => {
+        if (settled) return;
+        const alpn = tls.alpnProtocol;
+        if (typeof alpn === "string" && alpn !== "http/1.1") {
+          return fail(new DialRefused("alpn", `${origin.host} chose ${alpn}`));
+        }
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        resolve({ socket: tls, address, reset, closed });
+      });
     });
+    try {
+      tcp.connect({
+        host: origin.host,
+        port: origin.port,
+        family,
+        autoSelectFamily: false,
+        // Node defers the literal-host form to nextTick. This resolver returns only
+        // the checked literal and enters Node's single-address connect synchronously.
+        lookup: (_name, _options, resolved) => {
+          if (!live()) return abort();
+          resolved(null, address, family);
+        },
+      });
+    } catch (error) {
+      transportError(error as Error);
+    }
   });
 }

@@ -8,28 +8,31 @@ import { crashRange, EventLedger, receivedOutsideGate } from "../src/load/gate/r
 
 const META = { turn: 1, origin: "https://shop.test", method: "GET", path: "/", address: "93.184.216.34" };
 
-test("the journal keeps accepted, received, unresolved, denied and cut apart; debited is accepted + unresolved", () => {
+test("the journal keeps attempted, accepted, responded, received, unresolved, denied and cut apart; debited is accepted + unresolved", () => {
   const j = new Journal();
   for (const seq of [1, 2, 3, 4]) j.begin(seq, META);
+  for (const seq of [1, 2, 3]) j.attempt(seq);
   j.accept(1);
-  j.receive(1);
+  j.respond(1);
+  j.confirmReceipt(1);
   j.accept(2);
-  j.receive(3); // an early response: the target saw the head, not necessarily the body
+  j.respond(3); // an early response: the target saw the head, not necessarily the body
   j.deny("rate");
   j.deny("rate");
   j.deny("not_allowed");
   j.cut(3, "exchange_timeout");
   j.cut(3, "upstream"); // only the first reason counts
   j.cut(99, "upstream"); // an unknown seq is never cut
-  assert.deepEqual(j.snapshot(), { debited: 4, accepted: 2, received: 2, unresolved: 2, denied: { rate: 2, not_allowed: 1 }, cut: { exchange_timeout: 1 } });
+  assert.deepEqual(j.snapshot(), { debited: 4, attempted: 3, accepted: 2, responded: 2, received: 1, unresolved: 2, denied: { rate: 2, not_allowed: 1 }, cut: { exchange_timeout: 1 } });
   assert.equal(j.entry(3)?.written, "unresolved", "a response does not prove the whole write");
   j.accept(1);
-  j.receive(1);
-  assert.deepEqual(j.snapshot(), { debited: 4, accepted: 2, received: 2, unresolved: 2, denied: { rate: 2, not_allowed: 1 }, cut: { exchange_timeout: 1 } }, "repeats change nothing");
+  j.respond(1);
+  j.confirmReceipt(1);
+  assert.deepEqual(j.snapshot(), { debited: 4, attempted: 3, accepted: 2, responded: 2, received: 1, unresolved: 2, denied: { rate: 2, not_allowed: 1 }, cut: { exchange_timeout: 1 } }, "repeats change nothing");
   assert.throws(() => j.begin(2, META), /out of order/);
   assert.throws(() => j.begin(6, META), /out of order/);
   j.accept(99);
-  j.receive(99);
+  j.respond(99);
   assert.equal(j.snapshot().debited, 4, "an unknown seq is never counted");
 });
 
@@ -37,12 +40,13 @@ test("the journal keeps entries only while open, and bounds what it keeps", () =
   const j = new Journal();
   for (let seq = 1; seq <= 10_000; seq++) {
     j.begin(seq, { ...META, path: "/" + "x".repeat(1000) });
+    j.attempt(seq);
     j.accept(seq);
-    j.receive(seq);
+    j.respond(seq);
     j.finish(seq);
   }
   assert.equal(j.openCount, 0);
-  assert.deepEqual(j.snapshot(), { debited: 10_000, accepted: 10_000, received: 10_000, unresolved: 0, denied: {}, cut: {} });
+  assert.deepEqual(j.snapshot(), { debited: 10_000, attempted: 10_000, accepted: 10_000, responded: 10_000, received: 0, unresolved: 0, denied: {}, cut: {} });
   j.begin(10_001, { ...META, path: "/" + "y".repeat(1000) });
   j.finish(10_001);
   assert.equal(j.openCount, 1, "an unresolved write stays open after its exchange ends");
@@ -50,8 +54,9 @@ test("the journal keeps entries only while open, and bounds what it keeps", () =
 });
 
 test("receipts: every arrival must be a handed-off seq, once", () => {
-  assert.deepEqual(receivedOutsideGate(3, [1, 3]), { unknown: [], repeated: [] });
-  assert.deepEqual(receivedOutsideGate(3, [3, 7, 5, 7, 0, 1, 1]), { unknown: [0, 5, 7], repeated: [1, 7] });
+  const handoffs = { debited: 3, unattempted: new Set<number>() };
+  assert.deepEqual(receivedOutsideGate(handoffs, [1, 3]), { unknown: [], repeated: [] });
+  assert.deepEqual(receivedOutsideGate(handoffs, [3, 7, 5, 7, 0, 1, 1]), { unknown: [0, 5, 7], repeated: [1, 7] });
 });
 
 test("a crash range: debits from the last acknowledged debit, arrivals only from receipts", () => {
@@ -77,4 +82,19 @@ test("events: in order, an exact replay is a no-op, any change on replay is refu
   assert.deepEqual(l.accept({ streamId: "s1", seq: 3, payload: "c" }), { ok: false, reason: "after_final" });
   assert.deepEqual(l.accept({ streamId: "s1", seq: 2, payload: "b", final: { watermark: 42 } }), { ok: true, replay: true });
   assert.deepEqual(l.accept({ streamId: "s1", seq: 2, payload: "b", final: { watermark: 43 } }), { ok: false, reason: "conflict" }, "a changed watermark");
+});
+
+test("a debit without a write attempt cannot explain a sink receipt", () => {
+  const j = new Journal();
+  j.begin(1, META);
+  j.begin(2, META);
+  j.attempt(2);
+  j.respond(2);
+  assert.equal(j.snapshot().responded, 1);
+  assert.equal(j.snapshot().received, 0);
+  assert.deepEqual(receivedOutsideGate(j.handoffs(), [1, 2, 2]), { unknown: [1], repeated: [2] });
+  assert.equal(j.confirmReceipt(1), false);
+  assert.equal(j.confirmReceipt(2), true);
+  assert.equal(j.confirmReceipt(2), false);
+  assert.deepEqual(crashRange(j.snapshot().debited, j.snapshot().received, 4).arrivals, { atLeast: 1, atMost: 4 });
 });

@@ -80,6 +80,17 @@ test("normalize refuses every request it cannot rebuild one way only", () => {
     ["an escaped method override in a JSON body", { method: "POST", target: "/cart", rawHeaders: ["Host", "shop.test", "Content-Type", "application/json", "Content-Length", "25"], body: Buffer.from("{\"\\u005fmethod\":\"DELETE\"}") }, "not_allowed"],
     ["a method override in a multipart body", { method: "POST", target: "/cart", rawHeaders: ["Host", "shop.test", "Content-Type", "multipart/form-data; boundary=b", "Content-Length", "70"], body: Buffer.from("--b\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nDELETE\r\n--b--\r\n") }, "not_allowed"],
     ["a method override under a lying Content-Type", { method: "POST", target: "/cart", rawHeaders: ["Host", "shop.test", "Content-Type", "text/plain", "Content-Length", "14"], body: Buffer.from("_method=DELETE") }, "not_allowed"],
+    ...(
+      [
+        ["a percent-encoded letter of the override's name", "application/x-www-form-urlencoded", "_%6Dethod=DELETE"],
+        ["the override's name percent-encoded throughout", "application/x-www-form-urlencoded", "%5F%6D%65%74%68%6F%64=DELETE"],
+        ["a JSON escape of a letter of the override's name", "application/json", '{"_\\u006dethod":"DELETE"}'],
+        ["a backslash escape in a multipart name", "multipart/form-data; boundary=b", '--b\r\nContent-Disposition: form-data; name="_\\method"\r\n\r\nDELETE\r\n--b--\r\n'],
+        ["PHP's spelling of the override in a form body", "application/x-www-form-urlencoded", "a=1&.method=DELETE"],
+        ["PHP's spelling, percent-encoded", "application/x-www-form-urlencoded", "%2Emethod=DELETE"],
+      ] as const
+    ).map(([label, type, body]): [string, Partial<ArrivedRequest>, string] => [label, { method: "POST", target: "/cart", rawHeaders: ["Host", "shop.test", "Content-Type", type, "Content-Length", String(body.length)], body: Buffer.from(body) }, "not_allowed"]),
+    ...["/cart?.method=DELETE", "/cart?%2Emethod=DELETE", "/cart?+.method=DELETE", "/cart?_method[]=DELETE"].map((target): [string, Partial<ArrivedRequest>, string] => [`a method override in the query as PHP reads it: ${target}`, { method: "POST", target, rawHeaders: ["Host", "shop.test", "Content-Length", "0"] }, "not_allowed"]),
     ["a target over 2 KiB", { target: "/" + "a".repeat(2048) }, "too_long"],
     ["more than 100 headers", { rawHeaders: ["Host", "shop.test", ...Array.from({ length: 100 }, (_, i) => [`X-${i}`, "v"]).flat()] }, "header"],
   ];
@@ -88,6 +99,9 @@ test("normalize refuses every request it cannot rebuild one way only", () => {
   assert.equal(why(norm({ method: "POST", target: "/cart", rawHeaders: ["Host", "shop.test", "Content-Type", "application/json", "Content-Length", String(plain.length)], body: Buffer.from(plain) })), "ok", "a body without the override passes");
   for (const p of ["/cart;jsessionid=1", "//cart", "/a//b", "/a/./b", "/a/../cart", "/..", "/%2e%2e/cart", "/a%2Fb", "/a%5cb", "/a\\b", "/a%00", "/a%zz", "/a b", "/a#f"]) {
     assert.equal(why(norm({ target: p })), "path", p);
+  }
+  for (const ok of ['{"shipping.method":"post","note":"50%25 off"}', "shipping.method=post&x=%zz"]) {
+    assert.equal(why(norm({ method: "POST", target: "/cart?shipping.method=post", rawHeaders: ["Host", "shop.test", "Content-Length", String(ok.length)], body: Buffer.from(ok) })), "ok", ok);
   }
   assert.equal(why(norm({ target: "/a/b/?q=1&r=/x" })), "ok", "a query may hold slashes");
   assert.equal(why(norm({ method: "POST", target: "/cart?x=1", rawHeaders: ["Host", "shop.test", "Content-Length", "0"] })), "ok", "policy checks the path without its query");
@@ -474,7 +488,7 @@ test("a GET is rebuilt, admitted, sent once and answered; the journal and gate a
   assert.equal(a.headers["x-secret"], undefined, "a header the policy does not name is dropped");
   assert.equal(r.gate.admitted, 1);
   assert.equal(r.gate.inFlight, 0, "the exchange finished");
-  assert.deepEqual(r.journal.snapshot(), { debited: 1, accepted: 1, received: 1, unresolved: 0, denied: {}, cut: {} });
+  assert.deepEqual(r.journal.snapshot(), { debited: 1, attempted: 1, accepted: 1, responded: 1, received: 0, unresolved: 0, denied: {}, cut: {} });
   assert.equal(r.journal.openCount, 0);
   assert.equal(r.proxy.pinned.get(canonicalOrigin("sink.test", r.sink.port)), "127.0.0.1", "the origin's address is pinned");
   await exchange(r, get(r));
@@ -589,7 +603,8 @@ test("a dial that completes after the lease ran out sends no request bytes", asy
   assert.equal(deniedOf(response), "lease");
   assert.equal(r.sink.arrivals.length, 0);
   assert.equal(r.gate.admitted, 0);
-  assert.deepEqual(r.journal.snapshot(), { debited: 0, accepted: 0, received: 0, unresolved: 0, denied: { lease: 1 }, cut: {} });
+  assert.equal(r.proxy.pinned.size, 0);
+  assert.deepEqual(r.journal.snapshot(), { debited: 0, attempted: 0, accepted: 0, responded: 0, received: 0, unresolved: 0, denied: { lease: 1 }, cut: {} });
 });
 
 const stuckDial: () => Dial = () => (_o, signal) =>
@@ -725,7 +740,7 @@ test("a response larger than the limit is cut off", async (t) => {
     },
   });
   const { response } = await exchange(r, get(r));
-  assert.ok(response.length < 4096);
+  assert.equal(statusOf(response), 502, "a declared oversize body is refused before its 200 head");
   assert.deepEqual(r.journal.snapshot().cut, { response_too_large: 1 }, "an admitted request is cut, not denied");
   assert.deepEqual(r.journal.snapshot().denied, {});
   assert.equal(r.gate.inFlight, 0);
@@ -739,7 +754,9 @@ test("a response larger than the limit is cut off", async (t) => {
       res.end();
     },
   });
-  await exchange(c, get(c));
+  const cut = await exchange(c, get(c));
+  assert.equal(cut.response.endsWith("0\r\n\r\n"), false);
+  assert.equal(c.dials.resets, 1);
   assert.deepEqual(c.journal.snapshot().cut, { response_too_large: 1 });
   assert.equal(c.gate.inFlight, 0);
 });
@@ -851,7 +868,7 @@ test("request bodies held in memory share one run-wide budget", async (t) => {
   const b = await open(CREDENTIAL_2);
   b.tls.write(head + "b".repeat(800 * 1024));
   await sleep(200);
-  assert.equal(deniedOf(b.got()), "memory");
+  assert.deepEqual(r.journal.snapshot().denied, { memory: 1 });
   a.tls.write("a".repeat(100 * 1024));
   for (let k = 0; k < 100 && !a.got(); k++) await sleep(10);
   assert.equal(statusOf(a.got()), 200, "the first still completes");
@@ -940,7 +957,7 @@ test("a write the target does not take stays unresolved, and stays debited", asy
   void exchange(r, get(r, "/stuck")).catch(() => undefined);
   await sleep(300);
   assert.equal(wrote, false, "write() returned false");
-  assert.deepEqual({ ...r.journal.snapshot(), denied: undefined, cut: undefined }, { debited: 1, accepted: 0, received: 0, unresolved: 1, denied: undefined, cut: undefined });
+  assert.deepEqual({ ...r.journal.snapshot(), denied: undefined, cut: undefined }, { debited: 1, attempted: 1, accepted: 0, responded: 0, received: 0, unresolved: 1, denied: undefined, cut: undefined });
   assert.equal(r.gate.unresolved, 1);
   await r.proxy.close();
   const after = r.journal.snapshot();
@@ -954,8 +971,11 @@ test("receipts join the journal: everything the target saw was handed off, once"
   for (let i = 0; i < 5; i++) await exchange(r, get(r, `/r${i}`));
   const receipts = r.sink.arrivals.map((a) => Number(a.headers["x-peeps-load-seq"]));
   assert.deepEqual(receipts, [1, 2, 3, 4, 5]);
-  assert.deepEqual(receivedOutsideGate(r.journal.snapshot().debited, receipts), { unknown: [], repeated: [] });
-  assert.deepEqual(receivedOutsideGate(r.journal.snapshot().debited, [...receipts, 9]).unknown, [9], "an arrival the gate never wrote");
+  assert.equal(r.journal.snapshot().received, 0);
+  for (const seq of receipts) assert.equal(r.journal.confirmReceipt(seq), true);
+  assert.equal(r.journal.snapshot().received, 5);
+  assert.deepEqual(receivedOutsideGate(r.journal.handoffs(), receipts), { unknown: [], repeated: [] });
+  assert.deepEqual(receivedOutsideGate(r.journal.handoffs(), [...receipts, 9]).unknown, [9], "an arrival the gate never wrote");
 });
 
 test("architecture: nothing is awaited or deferred between admit( and .write(", () => {
@@ -981,7 +1001,7 @@ function read(method: string, ...chunks: string[]) {
   const out = { status: 0, body: "", ended: false, error: "" };
   const r = new ResponseReader(method, {
     head: (h) => (out.status = h.status),
-    data: (c) => (out.body += c.toString()),
+    data: (c) => { out.body += c.toString(); },
     end: () => (out.ended = true),
     error: (e) => (out.error = e.message),
   });
@@ -1088,7 +1108,8 @@ test("an early response while the request's write is still pending resets the up
   assert.equal(liveResets, 1, "reset while the socket was still open, not ended");
   const snap = r.journal.snapshot();
   assert.equal(snap.unresolved, 1, "its delivery stays unknown");
-  assert.equal(snap.received, 1);
+  assert.equal(snap.responded, 1);
+  assert.equal(snap.received, 0);
   assert.equal(r.gate.inFlight, 0);
 });
 
@@ -1109,7 +1130,7 @@ test("a close-delimited response cut by the exchange deadline is a failure, not 
   assert.equal(r.dials.resets >= 1, true);
 });
 
-test("a response with ambiguous framing is refused before it counts as received", async (t) => {
+test("a response with ambiguous framing is refused before it counts as a response", async (t) => {
   const r = await rig(t, {
     respond: (_a, res) => {
       res.socket!.write("HTTP/1.1 200 OK\r\ncontent-length: 5\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n");
@@ -1118,8 +1139,35 @@ test("a response with ambiguous framing is refused before it counts as received"
   });
   const { response } = await exchange(r, get(r));
   assert.equal(statusOf(response), 502);
-  assert.equal(r.journal.snapshot().received, 0);
+  assert.equal(r.journal.snapshot().responded, 0);
   assert.deepEqual(r.journal.snapshot().cut, { upstream: 1 });
+});
+
+test("a response head Node would refuse to write back is a failed exchange, not a crash", async (t) => {
+  const heads = ["HTTP/1.1 200 O\x01K\r\ncontent-length: 0\r\n\r\n", "HTTP/1.1 200 OK\r\nx: a\x00b\r\ncontent-length: 0\r\n\r\n", "HTTP/1.1 200 OK\r\nx(y: 1\r\ncontent-length: 0\r\n\r\n"];
+  for (const raw of heads) {
+    const seen: string[] = [];
+    const reader = new ResponseReader("GET", { head: () => seen.push("head"), data: () => undefined, end: () => seen.push("end"), error: () => seen.push("error") });
+    reader.push(Buffer.from(raw, "latin1"));
+    assert.deepEqual(seen, ["error"], JSON.stringify(raw));
+  }
+  const latin: string[] = [];
+  new ResponseReader("GET", { head: (h) => latin.push(h.statusText, h.headers[0]![1]), data: () => undefined, end: () => undefined, error: () => latin.push("error") }).push(Buffer.from("HTTP/1.1 200 caf\xe9\r\nx: \ta\xff\r\ncontent-length: 0\r\n\r\n", "latin1"));
+  assert.deepEqual(latin, ["caf\xe9", "a\xff"], "tabs and Latin-1 text pass, as Node writes them");
+
+  // End to end: before this was checked, the control character in the reason phrase threw out
+  // of the upstream socket's data handler, twice (the 502 reused the bad phrase), and took the process down.
+  let n = 0;
+  const r = await rig(t, { respond: (_a, res) => void res.socket!.end(Buffer.from(heads[n++]!, "latin1")) });
+  for (const _ of heads) {
+    const { response } = await exchange(r, get(r));
+    assert.equal(statusOf(response), 502);
+    assert.equal(deniedOf(response), "upstream");
+  }
+  const snap = r.journal.snapshot();
+  assert.equal(snap.received, 0, "never reported as received");
+  assert.deepEqual(snap.cut, { upstream: heads.length });
+  assert.equal(r.gate.inFlight, 0);
 });
 
 test("a dial that lands on another address than the pin is reset and refused; a revoked dial pins nothing", async (t) => {
@@ -1160,26 +1208,178 @@ test("an address with a zone id is never reachable", async () => {
   assert.equal(await refusal(checkedAddresses(ORIGIN, { lookup: lookupOf("93.184.216.34", "fe80::1%eth0") })), "address");
 });
 
-test("the shared lookup lasts until a connect on it settles", async () => {
-  const origin: ApprovedOrigin = { host: "shop.test", port: 443, privateCidrs: [] };
-  let lookups = 0;
-  const connected: string[] = [];
-  const dial = makeDial({
-    lookup: async () => {
-      lookups += 1;
-      await sleep(5);
-      return [{ address: lookups === 1 ? "93.184.216.34" : "151.101.1.1", family: 4 }];
-    },
-    connect: async (address) => {
-      connected.push(address);
-      await sleep(100);
-      throw new DialRefused("tls", "test: connect ECONNREFUSED");
+test("a second request uses the address established by the first live dial", async (t) => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let connected!: () => void;
+  const firstConnected = new Promise<void>((resolve) => { connected = resolve; });
+  let started = 0;
+  const r = await rig(t, {
+    dial: (inner) => async (o, signal, pin, ready) => {
+      const address = pin ?? (++started === 1 ? "93.184.216.34" : "151.101.1.1");
+      const upstream = await inner(o, signal, pin, ready);
+      if (address === "93.184.216.34" && pin === undefined) {
+        connected();
+        await held;
+      }
+      return { ...upstream, address };
     },
   });
-  const first = dial(origin, new AbortController().signal, undefined);
-  await sleep(20);
-  const second = dial(origin, new AbortController().signal, undefined);
-  await Promise.allSettled([first, second]);
-  assert.equal(lookups, 1);
-  assert.deepEqual(connected, ["93.184.216.34", "93.184.216.34"]);
+  const first = exchange(r, get(r, "/first"));
+  await firstConnected;
+  const second = exchange(r, get(r, "/second"), { credential: CREDENTIAL_2 });
+  try {
+    for (let i = 0; i < 100 && r.proxy.pendingDials < 2; i++) await sleep(5);
+    assert.equal(r.proxy.pendingDials, 2);
+    assert.equal(r.dials.count, 1, "the second request is queued before TCP starts");
+  } finally {
+    release();
+  }
+  assert.deepEqual((await Promise.all([first, second])).map((x) => statusOf(x.response)), [200, 200]);
+  assert.deepEqual(r.dials.pinned, [undefined, "93.184.216.34"]);
+});
+
+test("a canceled DNS waiter leaves the underlying lookup charged until it settles", async () => {
+  let answer!: (a: { address: string; family: number }[]) => void;
+  const held = new Promise<{ address: string; family: number }[]>((resolve) => { answer = resolve; });
+  const calls: string[] = [];
+  const dialOptions = {
+    maxLookups: 1,
+    lookup: (name: string) => {
+      calls.push(name);
+      return name === "shop.test." ? held : Promise.resolve([{ address: "93.184.216.34", family: 4 }]);
+    },
+    connect: async () => { throw new DialRefused("tls", "fixture connect"); },
+  };
+  const dial = makeDial(dialOptions);
+  const shop: ApprovedOrigin = { host: "shop.test", port: 443, privateCidrs: [] };
+  const other = { ...shop, host: "other.test" };
+  for (let i = 0; i < 4; i++) {
+    const controller = new AbortController();
+    const waiting = dial(shop, controller.signal, undefined);
+    await Promise.resolve();
+    controller.abort();
+    assert.equal(await refusal(waiting), "aborted");
+  }
+  assert.deepEqual(calls, ["shop.test."]);
+  assert.equal(await refusal(dial(other, new AbortController().signal, undefined)), "resolve");
+  assert.deepEqual(calls, ["shop.test."]);
+  const joined = refusal(dial(shop, new AbortController().signal, undefined));
+  answer([{ address: "93.184.216.34", family: 4 }]);
+  assert.equal(await joined, "tls");
+  assert.equal(await refusal(dial(other, new AbortController().signal, undefined)), "tls");
+  assert.deepEqual(calls, ["shop.test.", "other.test."]);
+});
+
+test("the verified connector checks the grant again before starting TLS", { timeout: 3000 }, async (t) => {
+  let bytes = 0;
+  let peerClosed!: () => void;
+  const closed = new Promise<void>((resolve) => { peerClosed = resolve; });
+  const server = createNetServer((socket) => {
+    socket.on("error", () => undefined);
+    socket.on("data", (data: Buffer) => { bytes += data.length; });
+    socket.once("close", peerClosed);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const port = (server.address() as AddressInfo).port;
+  const origin = { host: "sink.test", port, privateCidrs: [] };
+  let checks = 0;
+  const ready = () => ++checks === 1;
+  const controller = new AbortController();
+  const pending = connectVerified("127.0.0.1", origin, { signal: controller.signal, ready });
+  const timeout = setTimeout(() => controller.abort(), 250);
+  try {
+    assert.equal(await refusal(pending), "aborted");
+    assert.equal(checks, 2, "TCP start and TLS start each check the grant");
+    await closed;
+    assert.equal(bytes, 0);
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
+test("close waits for a returned transport to be reset and closed", async (t) => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let connected!: (upstream: Upstream) => void;
+  const firstConnected = new Promise<Upstream>((resolve) => { connected = resolve; });
+  const r = await rig(t, {
+    dial: (inner) => async (o, signal, pin, ready) => {
+      const upstream = await inner(o, signal, pin, ready);
+      connected(upstream);
+      await held;
+      return upstream;
+    },
+  });
+  const pending = exchange(r, get(r));
+  const upstream = await firstConnected;
+  let transportClosed = false;
+  void upstream.closed.then(() => { transportClosed = true; });
+  const closing = r.proxy.close();
+  let closed = false;
+  void closing.then(() => { closed = true; });
+  try {
+    await pending;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(closed, false);
+  } finally {
+    release();
+  }
+  await closing;
+  assert.equal(r.proxy.pendingDials, 0);
+  assert.equal(r.dials.resets, 1);
+  assert.equal(transportClosed, true);
+  assert.equal(r.gate.admitted, 0);
+  assert.equal(r.sink.arrivals.length, 0);
+});
+
+test("an admitted queued body retains its budget until reset", async (t) => {
+  let wrote!: () => void;
+  const writeStarted = new Promise<void>((resolve) => { wrote = resolve; });
+  const r = await rig(t, {
+    limits: { maxBufferedBodyBytes: 24 },
+    dial: (inner) => async (...args) => {
+      const upstream = await inner(...args);
+      upstream.socket.write = (() => {
+        wrote();
+        return false;
+      }) as typeof upstream.socket.write;
+      return upstream;
+    },
+  });
+  const post = `POST /cart HTTP/1.1\r\nHost: ${r.authority}\r\nContent-Length: 16\r\n\r\n${"a".repeat(16)}`;
+  const first = exchange(r, post);
+  await writeStarted;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(r.proxy.bufferedBodyBytes, 16);
+  await exchange(r, post, { credential: CREDENTIAL_2 });
+  assert.deepEqual(r.journal.snapshot().denied, { memory: 1 });
+  assert.equal(r.gate.admitted, 1);
+  r.proxy.closeTurn(r.turn);
+  assert.equal(r.gate.inFlight, 0, "turn revocation finalizes synchronously");
+  await r.proxy.close();
+  await first;
+  assert.equal(r.proxy.bufferedBodyBytes, 0);
+  assert.equal(r.dials.resets, 1);
+});
+
+test("one response input yields on backpressure and resumes without dropping decoded bytes", () => {
+  const writes: string[] = [];
+  let ends = 0;
+  const reader = new ResponseReader("GET", {
+    head: () => {},
+    data: (chunk) => {
+      writes.push(chunk.toString());
+      return writes.length !== 1;
+    },
+    end: () => { ends += 1; },
+    error: (error) => assert.fail(error.message),
+  });
+  reader.push(Buffer.from("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n"));
+  assert.deepEqual(writes, ["a"]);
+  assert.equal(ends, 0);
+  reader.resume();
+  assert.deepEqual(writes, ["a", "b", "c"]);
+  assert.equal(ends, 1);
 });

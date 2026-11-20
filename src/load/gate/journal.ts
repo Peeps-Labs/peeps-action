@@ -2,18 +2,16 @@
  * What the gate did with each request it admitted (plan v3 §5, §7 property 6). Every admitted
  * request is debited for good; the journal says what is known about each:
  *
- *   - **unresolved**: admitted and handed to its socket, the write not confirmed (a write that
- *     failed part-way, or was reset with bytes still queued, stays here: delivery unknown);
- *   - **accepted**: the write's callback confirmed the kernel took every byte;
- *   - **received**: a response arrived. That proves the target saw the request's head, not its
- *     whole body, so it never moves a request from unresolved to accepted;
- *   - **denied**: never written, counted by reason, and never debited;
- *   - **cut**: admitted, then ended early by the gate or the target (a timeout, the response
- *     cap, an upstream error), counted by its first reason, once per request. Still debited.
+ *   - **attempted**: the proxy invoked the socket write;
+ *   - **accepted**: the write callback confirmed handoff;
+ *   - **responded**: a valid final response head was observed;
+ *   - **received**: a trusted sink confirmed the complete request;
+ *   - **denied**: a refusal before admission;
+ *   - **cut**: an admitted exchange ended early, counted once by its first reason.
  *
- * `debited` = accepted + unresolved, the number each renewal reports, equal to the gate's
- * `admitted`. Seqs are dense (1…debited), so the set handed off is that range. Entries are kept
- * only while open: once a request's write is settled and its exchange over, only counts remain.
+ * The gate debits dense seqs, 1…debited. The sparse set of unattempted seqs preserves
+ * the difference between a debit and a write attempt after the exchange is pruned.
+ * Unresolved debits are those without a successful write callback.
  *
  * It does not survive a crash: Peeps draws the crash range from the last acknowledged debit and
  * the highest ceiling it granted (`reconcile.ts`).
@@ -36,14 +34,25 @@ export const MAX_JOURNAL_PATH = 256;
 interface Entry {
   meta: EntryMeta;
   written: "unresolved" | "accepted";
-  received: boolean;
+  responded: boolean;
   finished: boolean;
   cut?: string;
 }
 
+export interface Handoffs {
+  debited: number;
+  unattempted: ReadonlySet<number>;
+}
+
+export function wasAttempted(handoffs: Handoffs, seq: number): boolean {
+  return Number.isSafeInteger(seq) && seq >= 1 && seq <= handoffs.debited && !handoffs.unattempted.has(seq);
+}
+
 export interface JournalSnapshot {
   debited: number;
+  attempted: number;
   accepted: number;
+  responded: number;
   received: number;
   unresolved: number;
   denied: Readonly<Record<string, number>>;
@@ -54,30 +63,50 @@ export class Journal {
   private readonly open = new Map<number, Entry>();
   private readonly deniedBy = new Map<string, number>();
   private readonly cutBy = new Map<string, number>();
-  private counts = { debited: 0, accepted: 0, received: 0 };
+  private readonly unattempted = new Set<number>();
+  private readonly receipts = new Set<number>();
+  private counts = { debited: 0, accepted: 0, responded: 0 };
 
   /** Admitted and about to be written. Seqs come from the gate, in order, each once. */
   begin(seq: number, meta: EntryMeta): void {
     if (seq !== this.counts.debited + 1) throw new Error(`journal: seq ${seq} out of order (expected ${this.counts.debited + 1})`);
     this.counts.debited = seq;
-    this.open.set(seq, { meta: { ...meta, path: meta.path.slice(0, MAX_JOURNAL_PATH) }, written: "unresolved", received: false, finished: false });
+    this.unattempted.add(seq);
+    this.open.set(seq, { meta: { ...meta, path: meta.path.slice(0, MAX_JOURNAL_PATH) }, written: "unresolved", responded: false, finished: false });
+  }
+
+  /** Called at the write boundary. An error after invocation can mean partial delivery. */
+  attempt(seq: number): void {
+    this.unattempted.delete(seq);
+  }
+
+  handoffs(): Handoffs {
+    return { debited: this.counts.debited, unattempted: new Set(this.unattempted) };
+  }
+
+  /** Record a complete receipt verified by the caller against this run's sink evidence. */
+  confirmReceipt(seq: number): boolean {
+    const handoffs = { debited: this.counts.debited, unattempted: this.unattempted };
+    if (!wasAttempted(handoffs, seq) || this.receipts.has(seq)) return false;
+    this.receipts.add(seq);
+    return true;
   }
 
   /** The write's callback reported every byte taken. */
   accept(seq: number): void {
     const e = this.open.get(seq);
-    if (!e || e.written === "accepted") return;
+    if (!e || e.written === "accepted" || this.unattempted.has(seq)) return;
     e.written = "accepted";
     this.counts.accepted += 1;
     this.prune(seq, e);
   }
 
-  /** A response arrived for it. */
-  receive(seq: number): void {
+  /** A valid response head arrived for it. */
+  respond(seq: number): void {
     const e = this.open.get(seq);
-    if (!e || e.received) return;
-    e.received = true;
-    this.counts.received += 1;
+    if (!e || e.responded || this.unattempted.has(seq)) return;
+    e.responded = true;
+    this.counts.responded += 1;
   }
 
   /** Its exchange is over, however it ended. */
@@ -112,8 +141,17 @@ export class Journal {
   }
 
   snapshot(): JournalSnapshot {
-    const { debited, accepted, received } = this.counts;
-    return { debited, accepted, received, unresolved: debited - accepted, denied: Object.fromEntries(this.deniedBy), cut: Object.fromEntries(this.cutBy) };
+    const { debited, accepted, responded } = this.counts;
+    return {
+      debited,
+      attempted: debited - this.unattempted.size,
+      accepted,
+      responded,
+      received: this.receipts.size,
+      unresolved: debited - accepted,
+      denied: Object.fromEntries(this.deniedBy),
+      cut: Object.fromEntries(this.cutBy),
+    };
   }
 
   /** An unresolved write stays open: its delivery is the one thing the counts cannot say. */
