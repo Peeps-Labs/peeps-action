@@ -261,3 +261,11 @@ test("Stop now survives apply when the grant was live on receipt, and not when i
     assert.deepEqual(d, { kind: "lost", stop: undefined }, "read after the lease ran out: a loss, not a stop");
   }
 });
+
+test("an unreadable server clock cannot hide a shorter readable TTL", () => {
+  const l = lease();
+  assert.ok(l.begin(at(1000), "n1", build("h1")));
+  const shortened = reply(1, "n1", SERVER0 + 1100, { serverNowMs: NaN, ttlMs: 100 });
+  assert.equal(l.apply(shortened, at(1050)).kind, "lost");
+  assert.equal(l.held(at(1050)), false);
+});

@@ -182,8 +182,9 @@ export class RunnerLease {
 
   /** Whether the readable part of a malformed reply would end the lease earlier than the grant held. */
   private shortens(reply: ServerLease, tx: Outstanding): boolean {
-    const rem = Math.min(reply.ttlMs, reply.leaseUntilServerMs - reply.serverNowMs, MAX_REMAINING_MS);
-    if (Number.isFinite(rem) && tx.firstSendMono + rem < this.current.monoUntil) return true;
+    const bounds = [reply.ttlMs, reply.leaseUntilServerMs - reply.serverNowMs].filter(Number.isFinite);
+    const rem = Math.min(MAX_REMAINING_MS, ...bounds);
+    if (tx.firstSendMono + rem < this.current.monoUntil || tx.firstSendWall + rem < this.current.wallUntil) return true;
     const wall = reply.leaseUntilServerMs - this.offsetMs - this.rttMs / 2;
     return Number.isFinite(wall) && wall < this.current.wallUntil;
   }
