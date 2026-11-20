@@ -138,5 +138,10 @@ export async function rawFetch(): Promise<void> {
 
 /** The journey's whole environment, sorted, as its failure message (load-jail: exactly the allowlist). */
 export async function envDump(): Promise<void> {
-  throw new Error(`ENV ${JSON.stringify(Object.entries(process.env).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))}`);
+  const allowed = ["HOME", "NODE_EXTRA_CA_CERTS", "PATH"];
+  // An unexpected job variable should fail the test without logging its value.
+  throw new Error(`ENV ${JSON.stringify({
+    keys: Object.keys(process.env).sort(),
+    values: allowed.map((key) => process.env[key]),
+  })}`);
 }
