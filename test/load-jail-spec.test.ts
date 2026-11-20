@@ -104,7 +104,7 @@ test("a spec is refused when it could escape its own shape", () => {
 
 test("control frames round-trip, and anything else is not a frame", () => {
   const nonce = "a".repeat(64);
-  for (const frame of [{ type: "hello", nonce }, { type: "ready" }, { type: "start" }, { type: "exit", code: 3, signal: null }, { type: "exit", code: null, signal: "SIGKILL" }] as const) {
+  for (const frame of [{ type: "hello", nonce }, { type: "ready" }, { type: "launched" }, { type: "exit", code: 3, signal: null }, { type: "exit", code: null, signal: "SIGKILL" }] as const) {
     assert.deepEqual(decode(encode(frame).trim()), frame);
   }
   for (const line of ["", "{", "null", '{"type":"hello","nonce":"short"}', '{"type":"exit","code":1.5,"signal":null}', '{"type":"other"}']) assert.equal(decode(line), null, line);
