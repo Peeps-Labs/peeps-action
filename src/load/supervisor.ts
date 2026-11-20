@@ -147,13 +147,14 @@ export async function runLoad(o: LoadRunOptions, s: LoadSeams = {}): Promise<Loa
 const sha256Of = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 
 /** The binding a claim is made for and prepare checks again: checkout, lock digests, tree, workload. */
-export async function bindingOf(workspace: string, workloadPath: string, tree?: string): Promise<Binding> {
+export async function bindingOf(workspace: string, workloadPath: string, tree?: string, signal?: AbortSignal): Promise<Binding> {
+  signal?.throwIfAborted();
   const lock = path.join(workspace, "package-lock.json");
   const hidden = path.join(workspace, "node_modules/.package-lock.json");
   return {
     checkoutSha: checkoutHead(workspace),
     lockDigests: { "package-lock.json": existsSync(lock) ? sha256Of(lock) : "", "node_modules/.package-lock.json": existsSync(hidden) ? sha256Of(hidden) : "" },
-    treeDigest: tree ?? (await treeDigest(workspace)),
+    treeDigest: tree ?? (await treeDigest(workspace, signal)),
     workload: { path: workloadPath, digest: sha256Of(path.resolve(workspace, workloadPath)) },
   };
 }
@@ -268,15 +269,19 @@ class LoadRun {
 
   async run(): Promise<LoadResult> {
     const onAbort = () => this.terminate("cancelled");
-    this.signal.addEventListener("abort", onAbort, { once: true });
+    // An abort that came before the run never fires the listener.
+    if (this.signal.aborted) onAbort();
+    else this.signal.addEventListener("abort", onAbort, { once: true });
     const onHard = () => this.hardCancel();
     if (this.o.hardSignal?.aborted) onHard();
     else this.o.hardSignal?.addEventListener("abort", onHard, { once: true });
     try {
+      this.throwIfDone();
       const report = await (this.s.probe ? this.s.probe() : this.realProbe());
+      this.throwIfDone();
       if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures.join("; "));
       const digests = await (this.s.preinstall ? this.s.preinstall(this.o.workspace) : this.realPreinstall());
-      const binding = await bindingOf(this.o.workspace, this.o.workloadPath, digests.tree);
+      const binding = await bindingOf(this.o.workspace, this.o.workloadPath, digests.tree, this.signal);
       this.throwIfDone();
       await this.claim(binding, report);
       await this.prepare(binding);
@@ -313,9 +318,10 @@ class LoadRun {
   }
 
   private async realPreinstall(): Promise<InstallDigests> {
+    this.signal.throwIfAborted();
     const scratch = mkdtempSync(path.join(os.tmpdir(), "peeps-load-install-"));
     try {
-      return await realPreinstall(this.o.workspace, trustedToolchain(this.o.nodeDir, this.o.workspace), scratch);
+      return await realPreinstall(this.o.workspace, trustedToolchain(this.o.nodeDir, this.o.workspace), scratch, undefined, this.signal);
     } catch (error) {
       throw new Refused("didnt_start", "install_unsupported", (error as Error).message);
     } finally {
@@ -506,7 +512,7 @@ class LoadRun {
     const plan = input.value.plan;
     this.plan = plan;
     if (g.workload.module !== plan.journey.module || g.workload.export !== plan.journey.export || g.workload.path !== this.o.workloadPath) throw new Refused("didnt_start", "workload_mismatch");
-    const now = await bindingOf(this.o.workspace, this.o.workloadPath);
+    const now = await bindingOf(this.o.workspace, this.o.workloadPath, undefined, this.signal);
     if (!sameBinding(now, claimed) || !sameBinding(now, g.binding)) throw new Refused("didnt_start", "checkout_changed");
     const limits = runLimits(input.value, g.limits, { parallel: OUTSTANDING_PER_TURN, constants: this.engine });
     if (!limits.ok) throw new Refused("didnt_start", limits.reason, limits.detail);
@@ -573,7 +579,8 @@ class LoadRun {
     const handle = await launch(spec, { listenProxy: (p) => proxy.listen(p).then(() => proxy.server) }, this.signal);
     this.jail = handle;
     if (this.reason !== undefined) {
-      void handle.end();
+      this.jailEnded = handle.end();
+      this.jailEnded.catch(() => undefined);
       this.throwIfDone();
     }
     handle.onFrame((f) => this.onFrame(f));
@@ -867,9 +874,10 @@ class LoadRun {
     }
     await Promise.race([this.flushEvidence(), deadline]);
     this.evidenceStopped = true;
-    const jailWait = delayResolve(10_000);
-    const jailEnd = await Promise.race([this.jailEnded ?? Promise.resolve(null), jailWait.then(() => null)]).catch(() => null);
-    jailWait.cancel();
+    const jailEnd = await Promise.race([
+      this.jailEnded ?? Promise.resolve(null),
+      deadline.then(() => null),
+    ]).catch(() => null);
     if (this.caDir) rmSync(this.caDir, { recursive: true, force: true });
     deadline.cancel();
     short?.cancel();

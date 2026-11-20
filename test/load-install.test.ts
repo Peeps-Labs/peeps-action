@@ -406,3 +406,23 @@ test("checkoutHead reads loose and packed refs as files, and runs nothing from t
   assert.throws(() => checkoutHead(ws));
   assert.equal(existsSync(marker), false);
 });
+
+test("cancelling a running preinstall kills npm and waits for it to close", async (t) => {
+  const ws = workspace(t);
+  const scratch = tmp(t);
+  const marker = path.join(scratch, "started");
+  const script = path.join(scratch, "npm.cjs");
+  writeFileSync(script, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000);`);
+  const ac = new AbortController();
+  const running = preinstall(ws, {
+    node: process.execPath, nodeDir: path.dirname(path.dirname(process.execPath)), npmCli: script,
+    nodeVersion: process.version, npmVersion: "11.0.0",
+  }, scratch, 2000, ac.signal);
+  const cancelled = assert.rejects(running, { name: "AbortError" });
+  for (let i = 0; i < 100 && !existsSync(marker); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(existsSync(marker), "the install child was running before cancellation");
+  const pid = Number(readFileSync(marker, "utf8"));
+  ac.abort();
+  await cancelled;
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+});

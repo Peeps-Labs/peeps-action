@@ -10,6 +10,7 @@ import type { Dial } from "../src/load/gate/proxy";
 import type { LoadEvent, LoadResult } from "../src/load/supervisor";
 import { respond as fixtureRespond } from "./support/e4-fixtures";
 import type { PortScript } from "./support/fake-control-port";
+import { fakeJail } from "./support/fake-jail";
 import { FAST, invariants, rig, smallPlan, WORKLOAD_PATH, type Rig, type RigOptions } from "./support/run-supervisor";
 
 const SCRIPTED = path.resolve(__dirname, "fixtures/load-engine/e4/scripted-executor.js");
@@ -287,6 +288,24 @@ describe("load supervisor", { concurrency: 4 }, () => {
 
   // ---------------------------------------------------------------- startup
 
+  test("a run cancelled before it starts: cancelled, nothing probed, installed or claimed", async (t) => {
+    let probes = 0;
+    let installs = 0;
+    const r = await rig(t, {
+      signal: AbortSignal.abort(),
+      seams: {
+        probe: async () => { probes++; return { passed: true, failures: [], seen: null }; },
+        preinstall: async () => { installs++; throw new Error("unexpected install"); },
+      },
+    });
+    const res = await r.result;
+    assert.equal(res.status, "cancelled", why(r, res));
+    assert.equal(probes, 0);
+    assert.equal(installs, 0);
+    assert.equal(r.port.claims.length, 0);
+    assert.equal(res.cleanup, "not_started");
+  });
+
   test("a failed fence probe: nothing is claimed", async (t) => {
     const r = await rig(t, { seams: { probe: async () => ({ passed: false, failures: ["egress"], seen: null }) } });
     const res = await r.result;
@@ -550,6 +569,40 @@ describe("load supervisor", { concurrency: 4 }, () => {
     assert.equal(r.port.renewals.filter((x) => x.fields.state === "draining").length, 0);
     assert.equal(res.gateClosed, false);
     invariants(r, res);
+  });
+
+  test("a hard cancel bounds the result even when jail cleanup is still pending", async (t) => {
+    const hard = new AbortController();
+    let release!: () => void;
+    const cleanup = new Promise<void>((resolve) => { release = resolve; });
+    let cleanupStarted = false;
+    let fallback: NodeJS.Timeout | undefined;
+    const r = await rig(t, {
+      hardSignal: hard.signal,
+      seams: {
+        constants: { ...FAST, hardReportingMs: 100 },
+        launch: async (spec, options, signal) => {
+          const handle = await fakeJail().launch(spec, options, signal);
+          return { ...handle, end: async () => {
+            const result = handle.end();
+            cleanupStarted = true;
+            fallback ??= setTimeout(release, 1000);
+            await cleanup;
+            return result;
+          } };
+        },
+      },
+      observer: onPhase("measurement", () => hard.abort()),
+    });
+    try {
+      const res = await r.result;
+      assert.equal(res.status, "cancelled", why(r, res));
+      assert.ok(cleanupStarted, "termination requested jail cleanup");
+      assert.equal(res.cleanup, "dirty", "the run reported before the held cleanup completed");
+    } finally {
+      clearTimeout(fallback);
+      release();
+    }
   });
 
   test("a hard cancel during a soft cancel's reporting cuts the reporting short", async (t) => {
