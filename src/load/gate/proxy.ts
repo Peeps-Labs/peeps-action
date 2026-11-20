@@ -23,6 +23,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isIP, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
+import { setTimeout as sleep } from "node:timers/promises";
 import { TLSSocket, createSecureContext, type SecureContext } from "node:tls";
 import type { Clocks, Denied, Gate, Permit } from "./admission";
 import type { RunCa } from "./ca";
@@ -453,19 +454,21 @@ export class GateProxy {
       this.trackWork(upstream.closed);
     } catch {
       releaseFirstDial?.();
+      tunnel.dial = undefined;
       const reason = this.closed ? "stopped" : this.closedTurns.has(turn) ? "turn_closed" : tunnel.revoked ? "revoked" : dialDenial ? dialDenial.reason : timedOut ? "dial_timeout" : "dial";
       return this.cutUnsent(res, permit, reason, dialDenial || this.closed || tunnel.revoked || timedOut ? 503 : 502);
     } finally {
       clearTimeout(timer);
-      tunnel.dial = undefined;
       this.pending.run -= 1;
       decrement(this.pending.turn, turn);
       decrement(this.pending.origin, n.origin);
     }
+    const reset = () => upstream.reset();
+    controller.signal.addEventListener("abort", reset, { once: true });
     try {
       if (this.closed || tunnel.revoked || controller.signal.aborted || res.destroyed) {
         upstream.reset();
-        return this.cutUnsent(res, permit, this.closed ? "stopped" : this.closedTurns.has(turn) ? "turn_closed" : "revoked");
+        return this.cutUnsent(res, permit, this.closed ? "stopped" : this.closedTurns.has(turn) ? "turn_closed" : timedOut ? "dial_timeout" : "revoked");
       }
       const address = canonical(upstream.address);
       const pin = this.pins.get(n.origin);
@@ -476,10 +479,20 @@ export class GateProxy {
       // The write waits for the handoff's rate token (the target never sees more than the
       // burst at once); liveness is checked again by `handoff` itself, on a fresh sample.
       for (let wait = gate.handoffWait(this.clocks()); wait > 0; wait = gate.handoffWait(this.clocks())) {
-        await new Promise((resolve) => setTimeout(resolve, Math.min(wait, 50)).unref());
-        if (this.closed || tunnel.revoked || res.destroyed || this.closedTurns.has(turn)) {
-          upstream.reset();
+        const denial = gate.checkDial(permit, this.clocks());
+        if (denial) {
+          reset();
+          this.cutUnsent(res, permit, denial.reason);
+          return this.expiredIf(denial);
+        }
+        await sleep(Math.min(wait, 50), undefined, { signal: controller.signal, ref: false }).catch(() => undefined);
+        if (controller.signal.aborted || res.destroyed) {
+          if (!controller.signal.aborted) reset();
           return this.cutUnsent(res, permit, this.closed ? "stopped" : this.closedTurns.has(turn) ? "turn_closed" : "revoked");
+        }
+        if (!upstream.socket.writable) {
+          reset();
+          return this.cutUnsent(res, permit, "dial", 502);
         }
       }
       try {
@@ -489,6 +502,8 @@ export class GateProxy {
         throw error;
       }
     } finally {
+      controller.signal.removeEventListener("abort", reset);
+      tunnel.dial = undefined;
       releaseFirstDial?.();
     }
   }

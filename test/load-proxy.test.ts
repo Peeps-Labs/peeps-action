@@ -1317,6 +1317,60 @@ for (const holdAt of ["before TCP", "after TLS"] as const) {
   });
 }
 
+for (const cutoff of ["close", "closeTurn", "lease"] as const) {
+  test(`a verified upstream waiting for a rate token is reset at ${cutoff}`, { timeout: 3000 }, async (t) => {
+    let release!: () => void;
+    const parked = new Promise<void>((resolve) => { release = resolve; });
+    let connected!: () => void;
+    const firstReady = new Promise<void>((resolve) => { connected = resolve; });
+    let secondConnected!: () => void;
+    const secondReady = new Promise<void>((resolve) => { secondConnected = resolve; });
+    const r = await rig(t, {
+      phase: { ratePerSecond: 1, burst: 1 },
+      dial: (inner) => async (...args) => {
+        const upstream = await inner(...args);
+        if (args[2] === undefined) {
+          connected();
+          await parked;
+        } else {
+          secondConnected();
+        }
+        return upstream;
+      },
+    });
+    const pendingDials = () => r.proxy.pendingDials;
+    const first = exchange(r, get(r, "/first"));
+    await firstReady;
+    r.clock.monoMs = 1000;
+    const second = exchange(r, get(r, "/second"));
+    try {
+      for (let i = 0; i < 100 && pendingDials() < 2; i++) await sleep(5);
+      assert.equal(pendingDials(), 2);
+    } finally {
+      release();
+    }
+    await secondReady;
+    assert.equal(statusOf((await first).response), 200);
+    for (let i = 0; i < 100 && pendingDials() !== 0; i++) await sleep(5);
+    assert.equal(pendingDials(), 0);
+    assert.deepEqual([...r.journal.handoffs().unattempted], [2]);
+    const resets = r.dials.resets;
+    if (cutoff === "lease") {
+      r.clock.wallMs += 60_000;
+      assert.equal(cutOf((await second).response), "lease");
+      assert.equal(r.expiries.count, 1, "expiry is observed with the rate clock frozen");
+    } else {
+      if (cutoff === "close") void r.proxy.close();
+      else r.proxy.closeTurn(r.turn);
+      assert.equal(r.dials.resets, resets + 1, "the cutoff owns and resets the parked socket synchronously");
+      await second;
+    }
+    assert.equal(r.dials.resets, resets + 1);
+    assert.deepEqual(r.sink.arrivals.map((a) => a.url), ["/first"]);
+    assert.deepEqual([...r.journal.handoffs().unattempted], [2]);
+  });
+}
+
 test("a lower lease ceiling stops new permits; permits already debited go on", { timeout: 3000 }, async (t) => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
