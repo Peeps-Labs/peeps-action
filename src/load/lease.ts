@@ -161,7 +161,12 @@ export class RunnerLease {
     if (this.lostFlag) return { kind: "lost", stop: undefined };
     if (!this.held(t)) return this.lose(undefined);
     if (reply.lease !== "held" || reply.stop?.mode === "now") return this.lose(reply.stop);
-    if (!wellFormed(reply)) return reply.stop ? this.lose(reply.stop) : rejected("malformed", undefined);
+    if (!wellFormed(reply)) {
+      // A matching answer whose effect cannot be read fails closed when it stops the run or
+      // shortens the lease; otherwise the old grant stays and runs out on its own.
+      if (reply.stop || this.shortens(reply, tx)) return this.lose(reply.stop);
+      return rejected("malformed", undefined);
+    }
     // A matching answer that cannot be used is a lost lease, not a kept one: the server may
     // have shortened it (a drain), and the old, longer grant must not outlive that.
     if (reply.serverNowMs < this.lastServerNowMs) return this.lose(reply.stop);
@@ -173,6 +178,14 @@ export class RunnerLease {
     this.remainingMs = rem;
     this.current = grant;
     return { kind: "lease", grant: { ...grant }, stop: reply.stop };
+  }
+
+  /** Whether the readable part of a malformed reply would end the lease earlier than the grant held. */
+  private shortens(reply: ServerLease, tx: Outstanding): boolean {
+    const rem = Math.min(reply.ttlMs, reply.leaseUntilServerMs - reply.serverNowMs, MAX_REMAINING_MS);
+    if (Number.isFinite(rem) && tx.firstSendMono + rem < this.current.monoUntil) return true;
+    const wall = reply.leaseUntilServerMs - this.offsetMs - this.rttMs / 2;
+    return Number.isFinite(wall) && wall < this.current.wallUntil;
   }
 
   /** Both deadlines run at most `rem` from the first send, so the wall clock backstops the monotonic one. */
