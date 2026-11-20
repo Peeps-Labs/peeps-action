@@ -1,0 +1,230 @@
+{
+  "constants": "src/load/engine-limits.ts ENGINE_LIMITS",
+  "plans": "paths are relative to test/fixtures/",
+  "cases": [
+    {
+      "name": "the §5.3 example with the golden limits",
+      "plan": "load-plans/v1/common/spec-example.plan.json",
+      "limits": {
+        "allowedOrigins": [
+          "https://staging.example.com",
+          "https://auth.staging.example.com"
+        ],
+        "maxUsers": 50,
+        "requestBudget": 1200,
+        "policyRevision": 2
+      },
+      "budgets": {
+        "checking": {
+          "users": 4,
+          "totalRequests": 80,
+          "ratePerSecond": 16,
+          "burst": 50,
+          "concurrency": 4,
+          "phaseDeadlineMs": 120000,
+          "turnDeadlineMs": 30000
+        },
+        "measurement": {
+          "users": 4,
+          "totalRequests": 1200,
+          "ratePerSecond": 16,
+          "burst": 50,
+          "concurrency": 4,
+          "phaseDeadlineMs": 130000,
+          "turnDeadlineMs": 30000
+        },
+        "stopGraceMs": 30000,
+        "startSlackMs": 1000,
+        "leaseMs": 45000,
+        "absoluteEndMs": 250000
+      }
+    },
+    {
+      "name": "the starter with the golden limits",
+      "plan": "load-plans/v1/common/starter.plan.json",
+      "limits": {
+        "allowedOrigins": [
+          "https://staging.example.com",
+          "https://auth.staging.example.com"
+        ],
+        "maxUsers": 50,
+        "requestBudget": 1200,
+        "policyRevision": 2
+      },
+      "budgets": {
+        "checking": {
+          "users": 2,
+          "totalRequests": 40,
+          "ratePerSecond": 8,
+          "burst": 40,
+          "concurrency": 2,
+          "phaseDeadlineMs": 120000,
+          "turnDeadlineMs": 30000
+        },
+        "measurement": {
+          "users": 2,
+          "totalRequests": 560,
+          "ratePerSecond": 8,
+          "burst": 40,
+          "concurrency": 2,
+          "phaseDeadlineMs": 130000,
+          "turnDeadlineMs": 30000
+        },
+        "stopGraceMs": 30000,
+        "startSlackMs": 1000,
+        "leaseMs": 45000,
+        "absoluteEndMs": 250000
+      }
+    },
+    {
+      "name": "the monorepo case with the golden limits",
+      "plan": "load-plans/v1/common/monorepo.plan.json",
+      "limits": {
+        "allowedOrigins": [
+          "https://staging.example.com",
+          "https://auth.staging.example.com"
+        ],
+        "maxUsers": 50,
+        "requestBudget": 1200,
+        "policyRevision": 2
+      },
+      "budgets": {
+        "checking": {
+          "users": 5,
+          "totalRequests": 30,
+          "ratePerSecond": 8,
+          "burst": 30,
+          "concurrency": 5,
+          "phaseDeadlineMs": 120000,
+          "turnDeadlineMs": 30000
+        },
+        "measurement": {
+          "users": 5,
+          "totalRequests": 1140,
+          "ratePerSecond": 8,
+          "burst": 30,
+          "concurrency": 5,
+          "phaseDeadlineMs": 265000,
+          "turnDeadlineMs": 30000
+        },
+        "stopGraceMs": 30000,
+        "startSlackMs": 1000,
+        "leaseMs": 45000,
+        "absoluteEndMs": 385000
+      }
+    },
+    {
+      "name": "300 users at 1 s pacing: rate, burst and Checking users at their caps",
+      "plan": {
+        "protocolVersion": 1,
+        "journey": {
+          "module": "e2e/api/browse.ts",
+          "export": "browse"
+        },
+        "cohort": {
+          "kind": "protocol",
+          "demand": "users",
+          "pacingEveryMs": 1000,
+          "stages": [
+            {
+              "name": "Up",
+              "kind": "ramp",
+              "startMs": 0,
+              "durationMs": 60000,
+              "fromUsers": 0,
+              "toUsers": 300,
+              "plannedStarts": 9090
+            },
+            {
+              "name": "Hold",
+              "kind": "hold",
+              "startMs": 60000,
+              "durationMs": 120000,
+              "fromUsers": 300,
+              "toUsers": 300,
+              "plannedStarts": 36000
+            }
+          ]
+        },
+        "durationMs": 180000,
+        "peakUsers": 300,
+        "plannedStarts": 45090,
+        "requests": {
+          "perJourneyMax": 10,
+          "ceiling": 450900
+        },
+        "allowedRequests": [],
+        "onReduced": "refuse"
+      },
+      "limits": {
+        "allowedOrigins": [
+          "https://load.example.com"
+        ],
+        "maxUsers": 500,
+        "requestBudget": 455900,
+        "policyRevision": 7
+      },
+      "budgets": {
+        "checking": {
+          "users": 5,
+          "totalRequests": 50,
+          "ratePerSecond": 50,
+          "burst": 50,
+          "concurrency": 5,
+          "phaseDeadlineMs": 120000,
+          "turnDeadlineMs": 30000
+        },
+        "measurement": {
+          "users": 300,
+          "totalRequests": 450900,
+          "ratePerSecond": 200,
+          "burst": 50,
+          "concurrency": 300,
+          "phaseDeadlineMs": 210000,
+          "turnDeadlineMs": 30000
+        },
+        "stopGraceMs": 30000,
+        "startSlackMs": 1000,
+        "leaseMs": 45000,
+        "absoluteEndMs": 330000
+      }
+    },
+    {
+      "name": "a budget above the ceiling: the ceiling is the measurement total",
+      "plan": "load-plans/v1/common/spec-example.plan.json",
+      "limits": {
+        "allowedOrigins": [
+          "https://staging.example.com",
+          "https://auth.staging.example.com"
+        ],
+        "maxUsers": 50,
+        "requestBudget": 5000,
+        "policyRevision": 2
+      },
+      "budgets": {
+        "checking": {
+          "users": 4,
+          "totalRequests": 80,
+          "ratePerSecond": 16,
+          "burst": 50,
+          "concurrency": 4,
+          "phaseDeadlineMs": 120000,
+          "turnDeadlineMs": 30000
+        },
+        "measurement": {
+          "users": 4,
+          "totalRequests": 1200,
+          "ratePerSecond": 16,
+          "burst": 50,
+          "concurrency": 4,
+          "phaseDeadlineMs": 130000,
+          "turnDeadlineMs": 30000
+        },
+        "stopGraceMs": 30000,
+        "startSlackMs": 1000,
+        "leaseMs": 45000,
+        "absoluteEndMs": 250000
+      }
+    }
+  ]
+}

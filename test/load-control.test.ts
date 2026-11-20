@@ -13,7 +13,7 @@ const PLAN = { protocolVersion: 1, journey: { module: "j.ts", export: "go" }, z:
 const BINDING = { checkoutSha: "a".repeat(40), lockDigests: { "package-lock.json": "d1" }, treeDigest: "t".repeat(64), workload: { path: "peeps/load/x.workload.yaml", digest: "w1" } };
 const SETUP: FakeSetup = {
   plan: PLAN,
-  limits: { allowedOrigins: ["https://shop.test"], privateOrigins: [], maxUsers: 5, requestBudget: 1000, policyRevision: 1, phases: {} },
+  limits: { allowedOrigins: ["https://shop.test"], privateOrigins: {}, maxUsers: 5, requestBudget: 1000, policyRevision: 1, phases: {} },
   workload: { ...BINDING.workload, module: "j.ts", export: "go" },
   baseURL: "https://shop.test",
   binding: BINDING,

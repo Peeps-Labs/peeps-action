@@ -44,7 +44,8 @@ export interface GrantPhaseCaps {
 
 export interface GrantLimits {
   allowedOrigins: string[];
-  privateOrigins: string[];
+  /** Origin → the private ranges (CIDR) the Owner approved for it. */
+  privateOrigins: Record<string, string[]>;
   maxUsers: number;
   requestBudget: number;
   policyRevision: number;
@@ -183,7 +184,7 @@ export function decodeClaimReply(raw: unknown): ClaimReply {
   if (!text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.runToken, 4096) || !text(raw.eventsToken, 4096) || !text(raw.planHash, 64) || !SHA.test(raw.planHash)) return bad;
   if (!isObj(raw.plan) || !text(raw.baseURL, 2048)) return bad;
   if (!isObj(w) || !text(w.path, 1024) || !text(w.digest, 128) || !text(w.module, 1024) || !text(w.export, 256)) return bad;
-  if (!isObj(l) || !texts(l.allowedOrigins, 20) || !texts(l.privateOrigins, 20) || !whole(l.maxUsers) || !whole(l.requestBudget) || !whole(l.policyRevision) || !isObj(l.phases)) return bad;
+  if (!isObj(l) || !texts(l.allowedOrigins, 20) || !isObj(l.privateOrigins) || !Object.values(l.privateOrigins).every((v) => texts(v, 20)) || Object.keys(l.privateOrigins).length > 20 || !whole(l.maxUsers) || !whole(l.requestBudget) || !whole(l.policyRevision) || !isObj(l.phases)) return bad;
   const checking = decodePhase(l.phases.checking);
   const measurement = decodePhase(l.phases.measurement);
   if (checking === false || measurement === false) return bad;
@@ -212,7 +213,7 @@ export function decodeClaimReply(raw: unknown): ClaimReply {
       workload: { path: w.path, digest: w.digest, module: w.module, export: w.export },
       limits: {
         allowedOrigins: [...l.allowedOrigins],
-        privateOrigins: [...l.privateOrigins],
+        privateOrigins: Object.fromEntries(Object.entries(l.privateOrigins as Record<string, string[]>).map(([k, v]) => [k, [...v]])),
         maxUsers: l.maxUsers,
         requestBudget: l.requestBudget,
         policyRevision: l.policyRevision,
