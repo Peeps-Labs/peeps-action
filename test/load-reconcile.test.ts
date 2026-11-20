@@ -3,10 +3,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Journal, MAX_JOURNAL_PATH } from "../src/load/gate/journal";
+import { encodeHandoffs, Journal, MAX_JOURNAL_PATH } from "../src/load/gate/journal";
 import { crashRange, EventLedger, receivedOutsideGate } from "../src/load/gate/reconcile";
 
-const META = { turn: 1, origin: "https://shop.test", method: "GET", path: "/", address: "93.184.216.34" };
+const META = { turn: 1, origin: "https://shop.test", method: "GET", path: "/", monoMs: 5 };
 
 test("the journal keeps attempted, accepted, responded, received, unresolved, denied and cut apart; debited is accepted + unresolved", () => {
   const j = new Journal();
@@ -97,4 +97,38 @@ test("a debit without a write attempt cannot explain a sink receipt", () => {
   assert.equal(j.confirmReceipt(2), true);
   assert.equal(j.confirmReceipt(2), false);
   assert.deepEqual(crashRange(j.snapshot().debited, j.snapshot().received, 4).arrivals, { atLeast: 1, atMost: 4 });
+});
+
+test("respondedForTurn counts responses for the turns marked as Checking, and only those", () => {
+  const j = new Journal();
+  j.trackTurn(1);
+  j.trackTurn(2);
+  j.begin(1, { ...META, turn: 1 });
+  j.begin(2, { ...META, turn: 1 });
+  j.begin(3, { ...META, turn: 2 });
+  j.begin(4, { ...META, turn: 7 });
+  for (const seq of [1, 2, 3, 4]) j.attempt(seq, "127.0.0.1");
+  j.respond(1);
+  j.respond(2);
+  j.respond(4);
+  assert.equal(j.respondedForTurn(1), 2);
+  assert.equal(j.respondedForTurn(2), 0, "a turn with no response");
+  assert.equal(j.respondedForTurn(7), 0, "an untracked turn is not counted");
+  j.respond(3);
+  j.respond(3);
+  assert.equal(j.respondedForTurn(2), 1, "a seq responds once");
+  j.begin(5, { ...META, turn: 2 });
+  j.respond(5);
+  assert.equal(j.respondedForTurn(2), 1, "an unattempted seq has no response");
+  assert.equal(j.entry(1)?.meta.address, "127.0.0.1", "the address is recorded at the attempt");
+  assert.equal(j.entry(1)?.meta.monoMs, 5, "the debit's sample");
+});
+
+test("handoffs serialize as {debited, unattempted[]}, sorted, and keep every unattempted seq", () => {
+  const j = new Journal();
+  for (const seq of [1, 2, 3, 4, 5]) j.begin(seq, META);
+  j.attempt(2);
+  j.attempt(4);
+  assert.deepEqual(encodeHandoffs(j.handoffs()), { debited: 5, unattempted: [1, 3, 5] });
+  assert.deepEqual(encodeHandoffs(new Journal().handoffs()), { debited: 0, unattempted: [] });
 });

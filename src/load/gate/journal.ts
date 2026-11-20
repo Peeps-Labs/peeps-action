@@ -3,6 +3,7 @@
  * request is debited for good; the journal says what is known about each:
  *
  *   - **attempted**: the proxy invoked the socket write;
+ *   - **debited**: the gate permitted it, before any dial (`begin`);
  *   - **accepted**: the write callback confirmed handoff;
  *   - **responded**: a valid final response head was observed;
  *   - **received**: a trusted sink confirmed the complete request;
@@ -25,8 +26,10 @@ export interface EntryMeta {
   method: string;
   /** At most `MAX_JOURNAL_PATH` characters. */
   path: string;
-  /** The literal address the request went to. */
-  address: string;
+  /** The debit's monotonic sample: when the gate permitted it. */
+  monoMs: number;
+  /** The literal address the request went to, once its write was attempted. */
+  address?: string;
 }
 
 export const MAX_JOURNAL_PATH = 256;
@@ -42,6 +45,11 @@ interface Entry {
 export interface Handoffs {
   debited: number;
   unattempted: ReadonlySet<number>;
+}
+
+/** `handoffs()` as evidence: the unattempted seqs, sorted. */
+export function encodeHandoffs(h: Handoffs): { debited: number; unattempted: number[] } {
+  return { debited: h.debited, unattempted: [...h.unattempted].sort((a, b) => a - b) };
 }
 
 export function wasAttempted(handoffs: Handoffs, seq: number): boolean {
@@ -66,8 +74,20 @@ export class Journal {
   private readonly unattempted = new Set<number>();
   private readonly receipts = new Set<number>();
   private counts = { debited: 0, accepted: 0, responded: 0 };
+  /** Responses per turn, kept only for the turns marked with `trackTurn` (Checking's). */
+  private readonly respondedBy = new Map<number, number>();
 
-  /** Admitted and about to be written. Seqs come from the gate, in order, each once. */
+  /** Count this turn's responses (`respondedForTurn`). Bounded: only Checking's turns are marked. */
+  trackTurn(turn: number): void {
+    if (!this.respondedBy.has(turn)) this.respondedBy.set(turn, 0);
+  }
+
+  /** Valid response heads seen for a tracked turn's requests. */
+  respondedForTurn(turn: number): number {
+    return this.respondedBy.get(turn) ?? 0;
+  }
+
+  /** Debited, before any dial. Seqs come from the gate, in order, each once. */
   begin(seq: number, meta: EntryMeta): void {
     if (seq !== this.counts.debited + 1) throw new Error(`journal: seq ${seq} out of order (expected ${this.counts.debited + 1})`);
     this.counts.debited = seq;
@@ -76,8 +96,10 @@ export class Journal {
   }
 
   /** Called at the write boundary. An error after invocation can mean partial delivery. */
-  attempt(seq: number): void {
+  attempt(seq: number, address?: string): void {
     this.unattempted.delete(seq);
+    const e = this.open.get(seq);
+    if (e && address !== undefined) e.meta.address = address;
   }
 
   handoffs(): Handoffs {
@@ -107,6 +129,8 @@ export class Journal {
     if (!e || e.responded || this.unattempted.has(seq)) return;
     e.responded = true;
     this.counts.responded += 1;
+    const n = this.respondedBy.get(e.meta.turn);
+    if (n !== undefined) this.respondedBy.set(e.meta.turn, n + 1);
   }
 
   /** Its exchange is over, however it ended. */

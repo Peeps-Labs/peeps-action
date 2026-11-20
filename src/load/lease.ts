@@ -44,14 +44,19 @@ export interface RenewReply extends ServerLease {
   stop?: { mode: "graceful" | "now"; reason: string };
 }
 
-/** One renewal in flight. */
+/** One renewal in flight: its seq, hash and bytes are fixed once, and every retry sends those bytes. */
 export interface Outstanding {
-  seq: number;
-  nonce: string;
-  requestHash: string;
-  firstSendMono: number;
-  firstSendWall: number;
+  readonly seq: number;
+  readonly nonce: string;
+  readonly requestHash: string;
+  /** The exact body sent (UTF-8 JSON): a string, so it cannot change after `begin`. */
+  readonly body: string;
+  readonly firstSendMono: number;
+  readonly firstSendWall: number;
 }
+
+/** Builds a renewal's body for the seq `begin` allocates. */
+export type BuildRenewal = (seq: number, nonce: string) => { requestHash: string; body: string };
 
 export type Ignored = "binding" | "seq" | "nonce";
 export type Rejected = "malformed";
@@ -61,7 +66,7 @@ export type Decision =
   | { kind: "ignored"; reason: Ignored }
   /** This renewal's answer, malformed: the gate keeps the lease it has, which runs out on its own. */
   | { kind: "rejected"; reason: Rejected; stop?: RenewReply["stop"] }
-  /** The lease is gone: revoke the gate now. */
+  /** The lease is gone: revoke the gate now. `stop` is kept only when the grant was live on receipt. */
   | { kind: "lost"; stop?: RenewReply["stop"] }
   | { kind: "lease"; grant: LeaseGrant; stop?: RenewReply["stop"] };
 
@@ -105,7 +110,7 @@ export class RunnerLease {
   }
 
   get outstanding(): Outstanding | undefined {
-    return this.inFlight && { ...this.inFlight };
+    return this.inFlight;
   }
 
   /** Whether the lease is still running at `t`. Once either clock passes its deadline it is lost for good. */
@@ -116,11 +121,16 @@ export class RunnerLease {
     return false;
   }
 
-  /** Starts the next renewal. One at a time: refused while one is in flight or the lease is lost. */
-  begin(t: Clocks, nonce: string, requestHash: string): Outstanding | null {
+  /**
+   * Starts the next renewal. One at a time: refused while one is in flight or the lease is lost.
+   * The seq, the hash and the body are allocated together and stored once (frozen).
+   */
+  begin(t: Clocks, nonce: string, build: BuildRenewal): Outstanding | null {
     if (this.lostFlag || this.inFlight || !this.held(t)) return null;
-    this.inFlight = { seq: this.lastSeq + 1, nonce, requestHash, firstSendMono: t.monoMs, firstSendWall: t.wallMs };
-    return { ...this.inFlight };
+    const seq = this.lastSeq + 1;
+    const { requestHash, body } = build(seq, nonce);
+    this.inFlight = Object.freeze({ seq, nonce, requestHash, body: String(body), firstSendMono: t.monoMs, firstSendWall: t.wallMs });
+    return this.inFlight;
   }
 
   /** Whether the in-flight renewal may be sent again (identical bytes): only inside the lease it was first sent under. */
@@ -147,8 +157,9 @@ export class RunnerLease {
     if (reply.nonce !== tx.nonce) return { kind: "ignored", reason: "nonce" };
     this.inFlight = undefined;
     this.lastSeq = tx.seq;
-    if (this.lostFlag) return { kind: "lost", stop: reply.stop };
-    if (!this.held(t)) return this.lose(reply.stop);
+    // A reply read after the grant ran out is a loss whatever it says: its stop is not kept.
+    if (this.lostFlag) return { kind: "lost", stop: undefined };
+    if (!this.held(t)) return this.lose(undefined);
     if (reply.lease !== "held" || reply.stop?.mode === "now") return this.lose(reply.stop);
     if (!wellFormed(reply)) return reply.stop ? this.lose(reply.stop) : rejected("malformed", undefined);
     // A matching answer that cannot be used is a lost lease, not a kept one: the server may
