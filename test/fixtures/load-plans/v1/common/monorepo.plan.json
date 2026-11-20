@@ -1,0 +1,77 @@
+{
+  "protocolVersion": 1,
+  "journey": {
+    "module": "tools/e2e/src/journeys/checkout-quote.ts",
+    "export": "quoteCheckout"
+  },
+  "cohort": {
+    "kind": "protocol",
+    "demand": "users",
+    "pacingEveryMs": 4000,
+    "stages": [
+      {
+        "name": "Ramp",
+        "kind": "ramp",
+        "startMs": 0,
+        "durationMs": 30000,
+        "fromUsers": 0,
+        "toUsers": 3,
+        "plannedStarts": 8
+      },
+      {
+        "name": "Hold",
+        "kind": "hold",
+        "startMs": 30000,
+        "durationMs": 120000,
+        "fromUsers": 3,
+        "toUsers": 3,
+        "plannedStarts": 90
+      },
+      {
+        "name": "Step up",
+        "kind": "ramp",
+        "startMs": 150000,
+        "durationMs": 10000,
+        "fromUsers": 3,
+        "toUsers": 5,
+        "plannedStarts": 10
+      },
+      {
+        "name": "Peak",
+        "kind": "hold",
+        "startMs": 160000,
+        "durationMs": 60000,
+        "fromUsers": 5,
+        "toUsers": 5,
+        "plannedStarts": 75
+      },
+      {
+        "name": "Stage 5",
+        "kind": "ramp",
+        "startMs": 220000,
+        "durationMs": 15000,
+        "fromUsers": 5,
+        "toUsers": 0,
+        "plannedStarts": 7
+      }
+    ]
+  },
+  "durationMs": 235000,
+  "peakUsers": 5,
+  "plannedStarts": 190,
+  "requests": {
+    "perJourneyMax": 6,
+    "ceiling": 1140
+  },
+  "allowedRequests": [
+    {
+      "method": "POST",
+      "path": "/auth/token"
+    },
+    {
+      "method": "POST",
+      "path": "/api/quotes"
+    }
+  ],
+  "onReduced": "refuse"
+}
