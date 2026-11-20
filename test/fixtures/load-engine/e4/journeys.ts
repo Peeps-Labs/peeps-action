@@ -135,3 +135,8 @@ export async function rawFetch(): Promise<void> {
   await fetch(url).catch(() => undefined);
   await new Promise<void>((resolve) => https.get(url, { rejectUnauthorized: false }, () => resolve()).on("error", () => resolve()));
 }
+
+/** The journey's whole environment, sorted, as its failure message (load-jail: exactly the allowlist). */
+export async function envDump(): Promise<void> {
+  throw new Error(`ENV ${JSON.stringify(Object.entries(process.env).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))}`);
+}

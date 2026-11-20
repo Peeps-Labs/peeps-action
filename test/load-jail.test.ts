@@ -14,7 +14,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { sharedClocks } from "../src/load/clocks";
 import { probe, startJail, TicketRefused, type JailHandle } from "../src/load/jail";
 import { encode, type Ticket } from "../src/load/jail/ctl";
-import type { JailSpec } from "../src/load/jail/spec";
+import { executorEnv, initConfig, type JailSpec } from "../src/load/jail/spec";
 import { preinstall, trustedToolchain } from "../src/load/install";
 import { MiniSupervisor, type ExecutorLink } from "./support/mini-supervisor";
 import { FIXTURES, respond } from "./support/e4-fixtures";
@@ -578,4 +578,32 @@ test("runLoad on the real jail: 20 s, 5 users, then Stop now at 5 s into measure
   assert.ok(r.sink.stats.connections <= res.journal!.debited, `accepts ${r.sink.stats.connections} ≤ debited ${res.journal!.debited}`);
   assert.equal(res.cleanup, "clean");
   invariants(r, res);
+});
+
+test("the journey's environment is exactly the allowlist: PATH, HOME, the CA, and nothing from the job", { ...options, timeout: 600_000 }, async (t) => {
+  const ws = await sliceWorkspace(true);
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  checkoutBits(ws);
+  let spec: JailSpec | undefined;
+  const r = await rig(t, {
+    ws,
+    real: true,
+    plan: smallPlan({ exportName: "envDump", users: 1, durationMs: 5_000 }),
+    seams: {
+      constants: { ...FAST, loadedMs: 120_000, checkingDeadlineMs: 60_000 },
+      launch: (s, o, signal) => {
+        spec = s;
+        return startJail(s, o, signal);
+      },
+    },
+  });
+  const res = await r.result;
+  assert.ok(spec, "the jail was launched");
+  const dumped = res.failures.map((f) => f.message).find((m) => m.startsWith("ENV "));
+  assert.ok(dumped, JSON.stringify({ reason: res.reason, failures: res.failures }));
+  const expected = executorEnv(initConfig(spec))
+    .map((kv) => [kv.slice(0, kv.indexOf("=")), kv.slice(kv.indexOf("=") + 1)])
+    .sort(([a], [b]) => (a! < b! ? -1 : a! > b! ? 1 : 0));
+  assert.deepEqual(JSON.parse(dumped.slice(4)), expected);
+  assert.equal(res.cleanup, "clean");
 });
