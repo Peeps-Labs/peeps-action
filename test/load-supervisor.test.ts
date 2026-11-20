@@ -10,25 +10,13 @@ import type { Dial } from "../src/load/gate/proxy";
 import type { LoadEvent, LoadResult } from "../src/load/supervisor";
 import { respond as fixtureRespond } from "./support/e4-fixtures";
 import type { PortScript } from "./support/fake-control-port";
-import { rig, smallPlan, WORKLOAD_PATH, type Rig, type RigOptions } from "./support/run-supervisor";
+import { invariants, rig, smallPlan, WORKLOAD_PATH, type Rig, type RigOptions } from "./support/run-supervisor";
 
 const SCRIPTED = path.resolve(__dirname, "fixtures/load-engine/e4/scripted-executor.js");
 const scripted = (env: Record<string, string>): RigOptions["jail"] => ({ command: [process.execPath, SCRIPTED], env });
 
 function why(r: Rig, res: LoadResult): string {
   return JSON.stringify({ status: res.status, reason: res.reason, failures: res.failures.slice(0, 3), checking: res.checking, stderr: r.jails.made[0]?.stderr().slice(-2000) });
-}
-
-/** I1/I2 as counts: nothing was debited after terminate, and nothing unattempted reached the target. */
-function invariants(r: Rig, res: LoadResult): void {
-  const snap = r.events.find((e): e is Extract<LoadEvent, { type: "snapshot" }> => e.type === "snapshot");
-  if (snap && res.handoffs) {
-    assert.equal(res.handoffs.debited, snap.handoffs.debited, "no debit after terminate");
-    assert.ok(res.handoffs.unattempted.every((s) => snap.handoffs.unattempted.includes(s)), "no attempt after terminate");
-    assert.ok(r.sink.arrivals.length <= res.handoffs.debited - res.handoffs.unattempted.length, "arrivals ≤ attempted");
-  }
-  for (const rec of r.port.renewals) assert.notEqual(rec.fields.state, "closed", "no closed renewal");
-  assert.equal(r.events.filter((e) => e.type === "terminate").length, 1, "one terminal reason");
 }
 
 const onPhase = (phase: "checking" | "measurement", act: (r: Rig) => void) => (e: LoadEvent, r: Rig) => {

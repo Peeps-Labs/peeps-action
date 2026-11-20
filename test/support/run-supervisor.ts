@@ -7,6 +7,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, cpSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import assert from "node:assert/strict";
 import type { TestContext } from "node:test";
 import { sharedClocks } from "../../src/load/clocks";
 import type { Binding } from "../../src/load/control-port";
@@ -55,16 +56,21 @@ export function workspace(t: TestContext): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "peeps-sup-ws-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   cpSync(FIXTURES, dir, { recursive: true });
-  mkdirSync(path.join(dir, ".git"));
-  writeFileSync(path.join(dir, ".git/HEAD"), "a".repeat(40) + "\n");
   writeFileSync(path.join(dir, "package-lock.json"), '{"lockfileVersion":3}\n');
-  mkdirSync(path.join(dir, "peeps/load"), { recursive: true });
-  writeFileSync(path.join(dir, WORKLOAD_PATH), "journey: journeys.ts\n");
+  checkoutBits(dir);
   if (FLOOR_DIR) {
     mkdirSync(path.join(dir, "node_modules"));
     symlinkSync(path.join(FLOOR_DIR, "node_modules/playwright-core"), path.join(dir, "node_modules/playwright-core"));
   } else symlinkSync(path.join(REPO, "node_modules"), path.join(dir, "node_modules"));
   return dir;
+}
+
+/** What a checkout needs besides the journeys: `.git/HEAD` and the workload file. */
+export function checkoutBits(dir: string): void {
+  mkdirSync(path.join(dir, ".git"), { recursive: true });
+  writeFileSync(path.join(dir, ".git/HEAD"), "a".repeat(40) + "\n");
+  mkdirSync(path.join(dir, "peeps/load"), { recursive: true });
+  writeFileSync(path.join(dir, WORKLOAD_PATH), "journey: journeys.ts\n");
 }
 
 /** The supervisor's clocks, with each shiftable on its own. */
@@ -80,6 +86,12 @@ export class ClockSeam {
 }
 
 export interface RigOptions {
+  /** The checkout; a fresh one with the fixtures by default. */
+  ws?: string;
+  /** The real jail and probe (load-jail, load-freeze on Linux); the checkout is installed beforehand. */
+  real?: boolean;
+  /** An external sink (a sink in another process). */
+  sink?: Sink;
   plan?: ReturnType<typeof smallPlan>;
   exportName?: string;
   script?: PortScript;
@@ -124,9 +136,9 @@ export const FAST = {
 };
 
 export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
-  const sink = await startSink({ host: SINK_HOST, respond: o.respond ?? fixtureRespond });
-  t.after(() => sink.close());
-  const ws = workspace(t);
+  const sink = o.sink ?? (await startSink({ host: SINK_HOST, respond: o.respond ?? fixtureRespond }));
+  if (!o.sink) t.after(() => sink.close());
+  const ws = o.ws ?? workspace(t);
   const origin = canonicalOrigin(SINK_HOST, sink.port);
   const plan = o.plan ?? smallPlan({ exportName: o.exportName ?? "get" });
   const binding: Binding = await bindingOf(ws, WORKLOAD_PATH);
@@ -154,9 +166,9 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
     } },
     {
       clocks: seam.clocks,
-      launch: o.launch ?? jails.launch,
-      probe: async () => ({ passed: true, failures: [], seen: null }),
-      preinstall: async (w) => ({ lock: "", hiddenLock: "", tree: (await bindingOf(w, WORKLOAD_PATH)).treeDigest }),
+      // The real jail's callers install before the run (as the action's pre-claim step would); the digest is read here.
+      preinstall: async (w: string) => ({ lock: "", hiddenLock: "", tree: (await bindingOf(w, WORKLOAD_PATH)).treeDigest }),
+      ...(o.real ? {} : { launch: o.launch ?? jails.launch, probe: async () => ({ passed: true, failures: [], seen: null }) }),
       dial: o.dial ? o.dial(real) : real,
       constants: FAST,
       ...o.seams,
@@ -164,3 +176,16 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
   );
   return self;
 }
+
+/** I1/I2 as counts: nothing was debited after terminate, and nothing unattempted reached the target. */
+export function invariants(r: Rig, res: LoadResult): void {
+  const snap = r.events.find((e): e is Extract<LoadEvent, { type: "snapshot" }> => e.type === "snapshot");
+  if (snap && res.handoffs) {
+    assert.equal(res.handoffs.debited, snap.handoffs.debited, "no debit after terminate");
+    assert.ok(res.handoffs.unattempted.every((s) => snap.handoffs.unattempted.includes(s)), "no attempt after terminate");
+    assert.ok(r.sink.arrivals.length <= res.handoffs.debited - res.handoffs.unattempted.length, "arrivals ≤ attempted");
+  }
+  for (const rec of r.port.renewals) assert.notEqual(rec.fields.state, "closed", "no closed renewal");
+  assert.equal(r.events.filter((e) => e.type === "terminate").length, 1, "one terminal reason");
+}
+
