@@ -40,3 +40,14 @@ test("the action's own process never loads the parser: a fingerprint is the scan
     assert.deepEqual(values.filter((line) => /"typescript"|fingerprint\/(?:rules|read-build)"/.test(line)), [], file);
   }
 });
+
+test("the load supervisor sends no closed renewal, loads no customer code, and nothing outside it names its seams", () => {
+  const code = read("load/supervisor.ts").replace(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(code, /["']closed["']/, "no `closed` renewal state (E5's)");
+  assert.doesNotMatch(code, /\bimport\(|\brequire\(/, "no dynamic import: customer code runs only in the jail");
+  assert.match(code, /from "\.\/control-port"/);
+  const named = (dir: string): string[] =>
+    readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? named(path.join(dir, e.name)) : /\.ts$/.test(e.name) && /\bLoadSeams\b/.test(read(path.join(dir, e.name))) ? [path.join(dir, e.name)] : []));
+  assert.deepEqual(named("."), ["load/supervisor.ts"]);
+  assert.doesNotMatch(read("main.ts"), /load\/supervisor|runLoad/, "mode: load is not wired into main");
+});

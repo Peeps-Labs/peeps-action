@@ -2,14 +2,16 @@
  * The gate's proxy (plan v3 §5). The journey's only exit is the relay to this proxy's Unix
  * socket. Each request arrives as an HTTP CONNECT carrying the turn's credential, for one
  * approved origin; the proxy terminates the journey's TLS with the run CA's leaf for that host,
- * reads exactly one request, rebuilds it (`normalize`), asks the gate whether it could be
- * admitted (`reserve`, which debits nothing but spends a rate token), dials the origin itself, and then, in one
- * synchronous step with nothing awaited between them:
+ * reads exactly one request, rebuilds it (`normalize`), and has the gate debit it (`permit`,
+ * then `journal.begin`) before anything reaches the target, not even a TCP SYN (e4 plan v3
+ * §2.6). It then dials the origin itself, checking the permit at TCP and at TLS start
+ * (`checkDial`), and in one synchronous step with nothing awaited between them:
  *
- *     admit → journal.begin → socket.write(head + body)
+ *     clocks() → handoff → journal.attempt → socket.write(head + body)
  *
- * TCP, TLS and HTTP each check the gate before starting. The HTTP handoff may still be
- * queued by the socket, so revocation resets the underlying TCP connection.
+ * A dial or handoff that fails keeps its debit, unattempted, and is answered as a cut. The
+ * HTTP handoff may still be queued by the socket, so revocation resets the underlying TCP
+ * connection. Whenever the gate answers `lease`, `onLeaseExpired` is called.
  *
  * Every refusal on a tunnel is terminal for it: a second request, Upgrade, Expect or a nested
  * CONNECT revokes the tunnel, its dial and its upstream. Redirects are passed back, never
@@ -21,8 +23,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isIP, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
+import { setTimeout as sleep } from "node:timers/promises";
 import { TLSSocket, createSecureContext, type SecureContext } from "node:tls";
-import type { Ahead, Clocks, Denied, DialTicket, Gate } from "./admission";
+import type { Clocks, Denied, Gate, Permit } from "./admission";
 import type { RunCa } from "./ca";
 import type { Journal } from "./journal";
 import { MAX_BODY_BYTES, MAX_HEADERS, normalize, parseAuthority, validatePolicy, type Authority, type RequestPolicy } from "./normalize";
@@ -38,6 +41,8 @@ export const RETRY_HEADER = "x-peeps-load-retry-after-ms";
 
 /** Response headers never passed back: the proxy frames its own answer, and only the gate speaks for the gate. */
 const HOP_HEADERS = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade", "content-length", DENIED_HEADER, CUT_HEADER, RETRY_HEADER]);
+/** A HEAD response's length is what it asked for: kept. */
+const HEAD_HOP_HEADERS = new Set([...HOP_HEADERS].filter((h) => h !== "content-length"));
 
 /** Dial `origin`; `pinned`, when set, is the only address to use. */
 /** TCP and TLS must each call `ready` at their start boundary. */
@@ -56,6 +61,8 @@ export interface ProxyLimits {
   setupMs: number;
   /** From the start of a dial to a verified connection. */
   dialMs: number;
+  /** How long a request may wait behind its origin's first dial, before its own dial starts. */
+  queueMs: number;
   /** From the write to the end of the response. */
   exchangeMs: number;
   /** A response body larger than this is cut off. */
@@ -72,6 +79,7 @@ export const DEFAULT_PROXY_LIMITS: ProxyLimits = {
   maxPendingDials: 64,
   setupMs: 10_000,
   dialMs: 10_000,
+  queueMs: 10_000,
   exchangeMs: 60_000,
   maxResponseBytes: 64 * 1024 * 1024,
   maxBufferedBodyBytes: 32 * 1024 * 1024,
@@ -89,6 +97,15 @@ export interface ProxyOptions {
   limits?: Partial<ProxyLimits>;
   /** Read at each check: `sharedClocks` in production, a seam in tests. */
   clocks: () => Clocks;
+  /**
+   * Called whenever the gate answers `lease` (at a permit, a dial boundary or a handoff): the
+   * supervisor's terminate. It may close this proxy re-entrantly.
+   */
+  onLeaseExpired(): void;
+  /** Closes the run when a request observes the hard or drain cutoff. */
+  onRunEnded?(): void;
+  /** Cancels the executor's turn when a request observes its deadline. */
+  onTurnExpired?(turn: number): void;
   /** Defaults to resolving and dialling through `resolve.ts`; tests inject fixture trust. */
   dial?: Dial;
   /** Tests only: a header carrying each request's seq, so a sink's receipts can be joined to the journal. */
@@ -203,6 +220,7 @@ export class GateProxy {
 
   /** Listen on the proxy's Unix socket. */
   listen(path: string): Promise<void> {
+    if (this.closed) return Promise.reject(new Error("load gate: proxy is closed"));
     return new Promise((resolve, reject) => {
       this.server.once("error", reject);
       this.server.listen(path, () => {
@@ -380,118 +398,167 @@ export class GateProxy {
     });
   }
 
-  private ahead(turn: number, origin: string): Ahead {
-    return { run: this.pending.run, turn: this.pending.turn.get(turn) ?? 0, origin: this.pending.origin.get(origin) ?? 0 };
-  }
-
   private async dispatch(tunnel: TunnelState, n: Prepared, res: ServerResponse): Promise<boolean | void> {
     const { turn } = tunnel;
-    const { gate } = this.o;
+    const { gate, journal } = this.o;
     const turnDials = this.pending.turn.get(turn) ?? 0;
     if (turnDials >= this.limits.maxPendingDialsPerTurn || this.pending.run >= this.limits.maxPendingDials) return this.refuse(res, 503, "dials");
-    // Nothing reaches the target, not even a TCP SYN, for a request the gate would refuse now;
-    // and each dial spends a rate token for good, however it ends.
-    const reserved = gate.reserve({ turn, origin: n.origin, method: n.method }, this.clocks(), this.ahead(turn, n.origin));
-    if (!reserved.ok) return this.denied(res, reserved);
-    const { ticket } = reserved;
+    // The debit, before anything reaches the target, not even a TCP SYN (I2).
+    const t = this.clocks();
+    const permitted = gate.permit({ turn, origin: n.origin, method: n.method }, t);
+    if (!permitted.ok) {
+      this.denied(res, permitted);
+      return this.handleCutoff(turn, permitted);
+    }
+    const { permit } = permitted;
+    journal.begin(permit.seq, { turn, origin: n.origin, method: n.method, path: n.path, monoMs: t.monoMs });
     let releaseFirstDial: (() => void) | undefined;
-    try {
-      const origin = this.o.origins.get(n.origin)!;
-      const controller = new AbortController();
-      tunnel.dial = controller;
-      let timedOut = false;
+    const origin = this.o.origins.get(n.origin)!;
+    const controller = new AbortController();
+    tunnel.dial = controller;
+    let timedOut = false;
+    const deadline = (ms: number) => {
       const timer = setTimeout(() => {
         timedOut = true;
         controller.abort();
-      }, this.limits.dialMs);
+      }, ms);
       timer.unref();
-      this.pending.run += 1;
-      this.pending.turn.set(turn, turnDials + 1);
-      this.pending.origin.set(n.origin, (this.pending.origin.get(n.origin) ?? 0) + 1);
-      let upstream: Upstream;
-      let dialDenial: Denied | undefined;
-      try {
-        const request = { turn, origin: n.origin, method: n.method };
-        const ready: DialReady = (boundary) => {
-          if (this.closed || tunnel.revoked || res.destroyed) return false;
-          const { run, turn: pendingForTurn, origin: pendingForOrigin } = this.ahead(turn, n.origin);
-          // Exclude this dial from the pending totals used to recheck its grant.
-          dialDenial = gate.checkDial(request, this.clocks(), { run: run - 1, turn: pendingForTurn - 1, origin: pendingForOrigin - 1 }, boundary);
-          return dialDenial === undefined;
-        };
-        while (!this.pins.has(n.origin)) {
-          const first = this.firstDials.get(n.origin);
-          if (first === undefined) {
-            let release!: () => void;
-            this.firstDials.set(n.origin, new Promise<void>((resolve) => { release = resolve; }));
-            releaseFirstDial = () => {
-              this.firstDials.delete(n.origin);
-              release();
-            };
-            break;
-          }
-          await untilAbort(first, controller.signal, origin.host);
+      return timer;
+    };
+    // Waiting behind the origin's first dial has its own deadline, and the dial its own after it.
+    let timer = deadline(this.limits.queueMs);
+    this.pending.run += 1;
+    this.pending.turn.set(turn, turnDials + 1);
+    this.pending.origin.set(n.origin, (this.pending.origin.get(n.origin) ?? 0) + 1);
+    let upstream: Upstream;
+    let dialDenial: Denied | undefined;
+    try {
+      const ready: DialReady = (boundary) => {
+        if (this.closed || tunnel.revoked || res.destroyed) return false;
+        dialDenial = gate.checkDial(permit, this.clocks(), boundary);
+        if (dialDenial) this.handleCutoff(turn, dialDenial);
+        return dialDenial === undefined;
+      };
+      while (!this.pins.has(n.origin)) {
+        const first = this.firstDials.get(n.origin);
+        if (first === undefined) {
+          let release!: () => void;
+          this.firstDials.set(n.origin, new Promise<void>((resolve) => { release = resolve; }));
+          releaseFirstDial = () => {
+            this.firstDials.delete(n.origin);
+            release();
+          };
+          break;
         }
-        if (controller.signal.aborted || !ready()) throw new DialRefused("aborted", origin.host);
-        upstream = await this.dial(origin, controller.signal, this.pins.get(n.origin), ready);
-        this.trackWork(upstream.closed);
-      } catch {
-        // The gate refused just before the connect: say why, as admit would have.
-        if (dialDenial && !this.closed && !tunnel.revoked) return this.denied(res, dialDenial);
-        return this.refuse(res, controller.signal.aborted ? 503 : 502, this.closed ? "stopped" : tunnel.revoked ? "revoked" : timedOut ? "dial_timeout" : "dial");
-      } finally {
-        clearTimeout(timer);
-        tunnel.dial = undefined;
-        this.pending.run -= 1;
-        decrement(this.pending.turn, turn);
-        decrement(this.pending.origin, n.origin);
+        await untilAbort(first, controller.signal, origin.host);
       }
+      clearTimeout(timer);
+      timer = deadline(this.limits.dialMs);
+      if (controller.signal.aborted || !ready()) throw new DialRefused("aborted", origin.host);
+      upstream = await this.dial(origin, controller.signal, this.pins.get(n.origin), ready);
+      this.trackWork(upstream.closed);
+    } catch {
+      releaseFirstDial?.();
+      tunnel.dial = undefined;
+      // A boundary that refused the dial is the reason, even when its lease callback closed the proxy.
+      const reason = dialDenial ? dialDenial.reason : this.closed ? "stopped" : this.closedTurns.has(turn) ? "turn_closed" : tunnel.revoked ? "revoked" : timedOut ? "dial_timeout" : "dial";
+      return this.cutUnsent(res, permit, reason, dialDenial || this.closed || tunnel.revoked || timedOut ? 503 : 502);
+    } finally {
+      clearTimeout(timer);
+      this.pending.run -= 1;
+      decrement(this.pending.turn, turn);
+      decrement(this.pending.origin, n.origin);
+    }
+    const reset = () => upstream.reset();
+    controller.signal.addEventListener("abort", reset, { once: true });
+    try {
       if (this.closed || tunnel.revoked || controller.signal.aborted || res.destroyed) {
         upstream.reset();
-        return this.refuse(res, 503, this.closed ? "stopped" : "revoked");
+        return this.cutUnsent(res, permit, this.closed ? "stopped" : this.closedTurns.has(turn) ? "turn_closed" : timedOut ? "dial_timeout" : "revoked");
       }
       const address = canonical(upstream.address);
       const pin = this.pins.get(n.origin);
       if (pin !== undefined && address !== pin) {
         upstream.reset();
-        return this.refuse(res, 502, "pin");
+        return this.cutUnsent(res, permit, "pin", 502);
+      }
+      // The write waits for the handoff's rate token (the target never sees more than the
+      // burst at once); liveness is checked again by `handoff` itself, on a fresh sample.
+      for (let wait = gate.handoffWait(this.clocks()); wait > 0; wait = gate.handoffWait(this.clocks())) {
+        const denial = gate.checkDial(permit, this.clocks());
+        if (denial) {
+          reset();
+          this.cutUnsent(res, permit, denial.reason);
+          return this.handleCutoff(turn, denial);
+        }
+        await sleep(Math.min(wait, 50), undefined, { signal: controller.signal, ref: false }).catch(() => undefined);
+        if (controller.signal.aborted || res.destroyed) {
+          if (!controller.signal.aborted) reset();
+          return this.cutUnsent(res, permit, this.closed ? "stopped" : this.closedTurns.has(turn) ? "turn_closed" : "revoked");
+        }
+        if (!upstream.socket.writable) {
+          reset();
+          return this.cutUnsent(res, permit, "dial", 502);
+        }
       }
       try {
-        return this.send(tunnel, n, upstream, res, ticket, address);
+        return this.send(tunnel, n, upstream, res, permit, address);
       } catch (error) {
         upstream.reset();
         throw error;
       }
     } finally {
+      controller.signal.removeEventListener("abort", reset);
+      tunnel.dial = undefined;
       releaseFirstDial?.();
-      // Spent by admit, or the dial ended without it: either way the ticket is gone, the token spent.
-      gate.drop(ticket);
     }
   }
 
-  /** admit → journal.begin → write, in one synchronous function: nothing may be awaited or deferred here. */
-  private send(tunnel: TunnelState, n: Prepared, upstream: Upstream, res: ServerResponse, ticket: DialTicket, address: string): boolean | void {
+  /** A debited request whose bytes never left: its debit stays, unattempted, and the gate answers a cut. */
+  private cutUnsent(res: ServerResponse, permit: Permit, reason: string, status = 503): void {
+    const { gate, journal } = this.o;
+    gate.abandon(permit);
+    journal.cut(permit.seq, reason);
+    journal.finish(permit.seq);
+    this.answer(res, status, CUT_HEADER, reason);
+  }
+
+  /** A cutoff also resets exchanges that were already handed off. */
+  private handleCutoff(turn: number, d: Denied): void {
+    if (d.reason === "lease") this.o.onLeaseExpired();
+    else if (d.reason === "run_end") {
+      if (this.o.onRunEnded) this.o.onRunEnded();
+      else void this.close();
+    } else if (d.reason === "turn_deadline") {
+      this.closeTurn(turn);
+      this.o.onTurnExpired?.(turn);
+    }
+  }
+
+  /**
+   * A fresh sample → handoff → journal.attempt → write, in one synchronous function: nothing
+   * may be awaited or deferred here.
+   */
+  private send(tunnel: TunnelState, n: Prepared, upstream: Upstream, res: ServerResponse, permit: Permit, address: string): boolean | void {
     const { gate, journal } = this.o;
     if (this.closed || tunnel.revoked || !upstream.socket.writable) {
       upstream.reset();
-      return this.refuse(res, 503, this.closed ? "stopped" : "revoked");
+      return this.cutUnsent(res, permit, this.closed ? "stopped" : "revoked");
     }
-    const head = Buffer.from(n.head, "latin1");
-    const payload = n.body.length && !this.o.seqHeader ? Buffer.concat([head, n.body]) : head;
-    const decision = gate.admit({ turn: tunnel.turn, origin: n.origin, method: n.method }, this.clocks(), ticket);
-    if (!decision.ok) {
+    const seq = permit.seq;
+    const wire = this.o.seqHeader
+      ? Buffer.concat([Buffer.from(n.head.replace(/\r\n\r\n$/, `\r\n${this.o.seqHeader}: ${seq}\r\n\r\n`), "latin1"), n.body])
+      : n.body.length ? Buffer.concat([Buffer.from(n.head, "latin1"), n.body]) : Buffer.from(n.head, "latin1");
+    const denial = gate.handoff(permit, this.clocks());
+    if (denial) {
       upstream.reset();
-      return this.denied(res, decision);
+      this.cutUnsent(res, permit, denial.reason);
+      return this.handleCutoff(permit.turn, denial);
     }
-    const seq = decision.seq;
     this.pins.set(n.origin, address);
-    journal.begin(seq, { turn: tunnel.turn, origin: n.origin, method: n.method, path: n.path, address });
     const finish = this.relay(tunnel, seq, n.method, upstream, res);
     try {
-      const wire = this.o.seqHeader
-        ? Buffer.concat([Buffer.from(n.head.replace(/\r\n\r\n$/, `\r\n${this.o.seqHeader}: ${seq}\r\n\r\n`), "latin1"), n.body])
-        : payload;
-      journal.attempt(seq);
+      journal.attempt(seq, address);
       upstream.socket.write(wire, (error) => {
         this.release(tunnel);
         if (error) return finish("write");
@@ -533,7 +600,10 @@ export class GateProxy {
     };
     const reader = new ResponseReader(method, {
       head: (h) => {
-        res.writeHead(h.status, h.statusText, h.headers.filter(([name]) => !HOP_HEADERS.has(name.toLowerCase())).flat());
+        const hop = method === "HEAD" ? HEAD_HOP_HEADERS : HOP_HEADERS;
+        res.writeHead(h.status, h.statusText, h.headers.filter(([name]) => !hop.has(name.toLowerCase())).flat());
+        // Sent now: a close-delimited response cut before its first body byte still shows its head.
+        res.flushHeaders();
         journal.respond(seq);
       },
       data: (chunk) => {

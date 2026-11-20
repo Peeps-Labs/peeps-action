@@ -357,6 +357,8 @@ interface Rig {
   authority: string;
   clock: Clocks;
   dials: { count: number; pinned: (string | undefined)[]; signals: AbortSignal[]; resets: number };
+  /** Times the proxy called `onLeaseExpired`. */
+  expiries: { count: number };
 }
 
 interface RigOptions {
@@ -365,6 +367,10 @@ interface RigOptions {
   respond?: SinkOptions["respond"];
   phase?: { ratePerSecond: number; burst: number };
   seqHeader?: string;
+  /** Replaces the rig's clock: called at every check the proxy makes. */
+  clocks?: (clock: Clocks) => Clocks;
+  onLeaseExpired?: (r: { proxy: GateProxy }) => void;
+  gate?: Partial<import("../src/load/gate/admission").GateLimits>;
 }
 
 async function rig(t: import("node:test").TestContext, opts: RigOptions = {}): Promise<Rig> {
@@ -379,6 +385,7 @@ async function rig(t: import("node:test").TestContext, opts: RigOptions = {}): P
     turnDeadlineMs: 60_000,
     runEndMono: 1_000_000,
     phase: { ratePerSecond: opts.phase?.ratePerSecond ?? 100, burst: opts.phase?.burst ?? 50, maxUsers: 4, total: 1000 },
+    ...opts.gate,
   });
   gate.applyLease({ seq: 1, monoUntil: 10_000, wallUntil: clock.wallMs + 10_000, ceiling: 1000 });
   const opened = gate.openTurn("s1", clock);
@@ -387,6 +394,7 @@ async function rig(t: import("node:test").TestContext, opts: RigOptions = {}): P
   const journal = new Journal();
   const ca = createRunCa({ hosts: ["sink.test"], nowMs: Date.now(), validForMs: 60 * 60 * 1000 });
   const dials: Rig["dials"] = { count: 0, pinned: [], signals: [], resets: 0 };
+  const expiries = { count: 0 };
   const real: Dial = (o, signal, _pin, ready) => connectVerified("127.0.0.1", o, { ca: [sink.caPem], signal, ready });
   const record = (inner: Dial): Dial => (o, signal, pinned, ready) => {
     dials.count += 1;
@@ -408,7 +416,11 @@ async function rig(t: import("node:test").TestContext, opts: RigOptions = {}): P
     origins: new Map([[origin, { host: "sink.test", port: sink.port, privateCidrs: [] }]]),
     authorize: (c) => (c === CREDENTIAL ? opened.turn : c === CREDENTIAL_2 ? opened2.turn : undefined),
     limits: opts.limits,
-    clocks: () => ({ ...clock }),
+    clocks: () => (opts.clocks ? opts.clocks(clock) : { ...clock }),
+    onLeaseExpired: () => {
+      expiries.count += 1;
+      opts.onLeaseExpired?.({ proxy });
+    },
     dial: record(opts.dial ? opts.dial(real) : real),
     seqHeader: opts.seqHeader,
   });
@@ -418,7 +430,7 @@ async function rig(t: import("node:test").TestContext, opts: RigOptions = {}): P
     await proxy.close();
     await sink.close();
   });
-  return { proxy, gate, journal, sink, socketPath, runCaPem: ca.certPem, turn: opened.turn, turn2: opened2.turn, authority: `sink.test:${sink.port}`, clock, dials };
+  return { proxy, gate, journal, sink, socketPath, runCaPem: ca.certPem, turn: opened.turn, turn2: opened2.turn, authority: `sink.test:${sink.port}`, clock, dials, expiries };
 }
 
 interface ExchangeOptions {
@@ -601,11 +613,14 @@ test("a dial that completes after the lease ran out sends no request bytes", asy
   r.clock.monoMs = 10_000;
   release();
   const { response } = await pending;
-  assert.equal(deniedOf(response), "lease");
+  assert.equal(cutOf(response), "lease", "debited before the dial: a cut, not a denial");
   assert.equal(r.sink.arrivals.length, 0);
-  assert.equal(r.gate.admitted, 0);
+  assert.equal(r.gate.admitted, 1, "the debit stays");
+  assert.equal(r.gate.unresolved, 0);
   assert.equal(r.proxy.pinned.size, 0);
-  assert.deepEqual(r.journal.snapshot(), { debited: 0, attempted: 0, accepted: 0, responded: 0, received: 0, unresolved: 0, denied: { lease: 1 }, cut: {} });
+  assert.equal(r.expiries.count, 1, "the handoff saw the lease gone");
+  assert.deepEqual(r.journal.snapshot(), { debited: 1, attempted: 0, accepted: 0, responded: 0, received: 0, unresolved: 1, denied: {}, cut: { lease: 1 } });
+  assert.deepEqual([...r.journal.handoffs().unattempted], [1]);
 });
 
 const stuckDial: () => Dial = () => (_o, signal) =>
@@ -625,13 +640,16 @@ test("pending dials are bounded per turn and for the run; closing the turn abort
   assert.equal(r.proxy.pendingDials, 0);
   assert.match((await exchange(r, get(r, "/after"))).connect, /^HTTP\/1\.1 403/, "a closed turn opens no tunnel");
   assert.equal(r.sink.arrivals.length, 0);
-  assert.equal(r.gate.admitted, 0);
+  assert.equal(r.gate.admitted, 1, "the abandoned dial keeps its debit");
+  assert.deepEqual(r.journal.snapshot().cut, { turn_closed: 1 }, "a dial abandoned by closeTurn is cut turn_closed");
 });
 
 test("a dial has a deadline, and a journey that leaves abandons its dial", async (t) => {
   const r = await rig(t, { limits: { dialMs: 150 }, dial: stuckDial });
-  assert.equal(deniedOf((await exchange(r, get(r))).response), "dial_timeout");
+  assert.equal(cutOf((await exchange(r, get(r))).response), "dial_timeout");
   assert.equal(r.proxy.pendingDials, 0);
+  assert.equal(r.gate.admitted, 1, "a dial_timeout keeps its debit");
+  assert.deepEqual([...r.journal.handoffs().unattempted], [1]);
 
   const s = await rig(t, { dial: stuckDial });
   const raw = netConnect(s.socketPath);
@@ -794,16 +812,21 @@ test("an abandoned dial still spends its rate token: TCP and TLS reach the targe
   await sleep(100);
   assert.equal(r.sink.stats.connections <= 1, true, `connections at the target: ${r.sink.stats.connections}`);
   assert.equal(r.dials.count <= 1, true, `dials: ${r.dials.count}`);
-  assert.equal(r.gate.admitted, 0);
+  assert.equal(r.gate.admitted, 1, "the one dial carried a debit, kept when it was abandoned");
+  assert.equal(r.sink.stats.connections <= r.gate.admitted, true, "no target connection without a debit");
   assert.equal(answers.filter((a) => a === "rate").length >= 28, true, `answers: ${answers.join(",")}`);
 });
 
 test("dials that time out spend their tokens too", async (t) => {
   const r = await rig(t, { phase: { ratePerSecond: 1, burst: 1 }, limits: { dialMs: 50 }, dial: stuckDial });
   const answers: (string | undefined)[] = [];
-  for (let i = 0; i < 10; i++) answers.push(deniedOf((await exchange(r, get(r))).response));
+  for (let i = 0; i < 10; i++) {
+    const { response } = await exchange(r, get(r));
+    answers.push(cutOf(response) ?? deniedOf(response));
+  }
   assert.equal(r.dials.count, 1);
   assert.deepEqual(answers, ["dial_timeout", ...Array(9).fill("rate")]);
+  assert.equal(r.gate.admitted, 1, "the timed-out dial keeps its debit");
 });
 
 test("a method override in a write's body never reaches the target", async (t) => {
@@ -981,21 +1004,26 @@ test("receipts join the journal: everything the target saw was handed off, once"
   assert.deepEqual(receivedOutsideGate(r.journal.handoffs(), [...receipts, 9]).unknown, [9], "an arrival the gate never wrote");
 });
 
-test("architecture: nothing is awaited or deferred between admit( and .write(", () => {
+test("architecture: a fresh sample, handoff, attempt and write in one synchronous function; the debit before any dial", () => {
   const source = readFileSync(path.join(__dirname, "..", "src", "load", "gate", "proxy.ts"), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
   const start = source.indexOf("private send(");
   assert.ok(start > 0, "send() exists");
   const end = source.indexOf("\n  private ", start + 1);
   const body = source.slice(start, end);
-  const admit = body.indexOf(".admit(");
-  const begin = body.indexOf("journal.begin(");
+  const handoff = body.indexOf(".handoff(permit, this.clocks())");
+  const attempt = body.indexOf("journal.attempt(");
   const write = body.indexOf(".write(");
-  assert.ok(admit > 0 && begin > admit && write > begin, "admit, then journal.begin, then write");
+  assert.ok(handoff > 0 && attempt > handoff && write > attempt, "handoff on a fresh sample, then journal.attempt, then write");
+  assert.match(body.slice(attempt, write), /^journal\.attempt\([^;]*\);\s*upstream\.socket$/, "nothing between attempt and write");
   assert.doesNotMatch(body, /\bawait\b|\.then\(|\basync\b|nextTick|setImmediate|queueMicrotask|setTimeout/, "send() is synchronous");
-  assert.equal((source.match(/\.admit\(/g) ?? []).length, 1, "admit is called in one place");
+  assert.equal((source.match(/\.handoff\(/g) ?? []).length, 1, "handoff is called in one place");
+  assert.equal((source.match(/journal\.attempt\(/g) ?? []).length, 1, "attempt is recorded in one place");
   assert.equal((source.match(/socket\.write\(/g) ?? []).length, 1, "the request is written in one place");
   const dispatch = source.slice(source.indexOf("private async dispatch("), start);
-  assert.ok(dispatch.indexOf(".reserve(") > 0 && dispatch.indexOf(".reserve(") < dispatch.indexOf("this.dial("), "the gate is asked, and a token spent, before any dial");
+  const permit = dispatch.indexOf(".permit(");
+  const begin = dispatch.indexOf("journal.begin(");
+  assert.ok(permit > 0 && begin > permit && begin < dispatch.indexOf("this.dial("), "the gate debits, and the journal begins, before any dial");
+  assert.equal((source.match(/\.permit\(/g) ?? []).length, 1, "permit is called in one place");
 });
 
 // ---------------------------------------------------------------- the upstream response reader
@@ -1082,10 +1110,35 @@ test("a lease that runs out while the dial is resolving sends nothing at all to 
   r.clock.wallMs += 3_600_000; // the lease runs out on the wall clock while DNS answers
   const { response } = await pending;
   assert.equal(statusOf(response), 503);
-  assert.equal(deniedOf(response), "lease", "the gate's reason, not a failed dial");
-  assert.deepEqual(r.journal.snapshot().denied, { lease: 1 });
+  assert.equal(cutOf(response), "lease", "the gate's reason, not a failed dial; a cut, since it was debited");
+  assert.deepEqual(r.journal.snapshot().cut, { lease: 1 });
   assert.equal(r.sink.stats.connections, 0, "no SYN after the lease ran out");
-  assert.equal(r.gate.admitted, 0);
+  assert.equal(r.gate.admitted, 1, "the debit stays, unattempted");
+  assert.equal(r.expiries.count, 1, "checkDial saw the lease gone");
+});
+
+test("a dial cut for the lease is journalled lease even when the expiry closes the proxy at once", async (t) => {
+  const r = await rig(t, {
+    // The supervisor closes the proxy inside onLeaseExpired, before the dial's reason is chosen.
+    onLeaseExpired: ({ proxy }) => void proxy.close(),
+    dial: () =>
+      makeDial({
+        lookup: async () => {
+          await sleep(300);
+          return [{ address: "93.184.216.34", family: 4 }];
+        },
+        connect: (_address, o, opts) => connectVerified("127.0.0.1", o, { ...opts, ca: [r.sink.caPem] }),
+      }),
+  });
+  const pending = exchange(r, get(r));
+  for (let k = 0; k < 100 && r.dials.count === 0; k++) await sleep(5);
+  assert.equal(r.dials.count, 1, "the dial started under a live lease");
+  r.clock.wallMs += 3_600_000; // the lease runs out on the wall clock while DNS answers
+  await pending.catch(() => undefined); // the close may take the client's answer with it
+  assert.deepEqual(r.journal.snapshot().cut, { lease: 1 });
+  assert.equal(r.sink.stats.connections, 0, "no SYN after the lease ran out");
+  assert.equal(r.gate.admitted, 1, "the debit stays, unattempted");
+  assert.equal(r.expiries.count, 1, "checkDial saw the lease gone");
 });
 
 test("an early response while the request's write is still pending resets the upstream", async (t) => {
@@ -1178,9 +1231,9 @@ test("a dial that lands on another address than the pin is reset and refused; a 
   let n = 0;
   const r = await rig(t, { dial: (inner) => async (o, signal, pinned, ready) => ({ ...(await inner(o, signal, pinned, ready)), address: ++n === 1 ? "93.184.216.34" : "151.101.1.1" }) });
   assert.equal(statusOf((await exchange(r, get(r))).response), 200);
-  assert.equal(deniedOf((await exchange(r, get(r))).response), "pin");
+  assert.equal(cutOf((await exchange(r, get(r))).response), "pin");
   assert.equal(r.sink.arrivals.length, 1);
-  assert.equal(r.gate.admitted, 1);
+  assert.equal(r.gate.admitted, 2, "the refused dial keeps its debit");
   assert.deepEqual([...r.proxy.pinned.values()], ["93.184.216.34"]);
 
   let release!: () => void;
@@ -1272,19 +1325,112 @@ for (const holdAt of ["before TCP", "after TLS"] as const) {
     } finally {
       release();
     }
-    const [firstResult, secondResult] = await Promise.all([first, second]);
+    const firstResult = await first;
     assert.equal(statusOf(firstResult.response), 200);
-    assert.equal(r.sink.stats.connections, holdAt === "before TCP" ? 1 : 2);
-    assert.deepEqual(r.sink.arrivals.map((arrival) => arrival.url), ["/first"]);
-    assert.equal(deniedOf(secondResult.response), "rate");
-    assert.equal(r.gate.admitted, 1);
+    // The clock is frozen: the second write waits for the handoff's token, its debit kept.
+    for (let i = 0; i < 20 && r.sink.stats.connections < 2; i++) await sleep(10);
+    await sleep(100);
+    assert.deepEqual(r.sink.arrivals.map((arrival) => arrival.url), ["/first"], "one write per token: burst 1 at the target");
+    assert.equal(r.gate.admitted, 2);
+    r.clock.monoMs += 1000;
+    assert.equal(statusOf((await second).response), 200, "paced, not cut");
+    assert.deepEqual(r.sink.arrivals.map((arrival) => arrival.url), ["/first", "/second"]);
 
     r.clock.monoMs += 1000;
     assert.equal(statusOf((await exchange(r, get(r, "/after-refill"))).response), 200);
   });
 }
 
-test("queued dials recheck the number of places left under a lower lease ceiling", { timeout: 3000 }, async (t) => {
+for (const cutoff of ["close", "closeTurn", "lease"] as const) {
+  test(`a verified upstream waiting for a rate token is reset at ${cutoff}`, { timeout: 3000 }, async (t) => {
+    let release!: () => void;
+    const parked = new Promise<void>((resolve) => { release = resolve; });
+    let connected!: () => void;
+    const firstReady = new Promise<void>((resolve) => { connected = resolve; });
+    let secondConnected!: () => void;
+    const secondReady = new Promise<void>((resolve) => { secondConnected = resolve; });
+    const r = await rig(t, {
+      phase: { ratePerSecond: 1, burst: 1 },
+      dial: (inner) => async (...args) => {
+        const upstream = await inner(...args);
+        if (args[2] === undefined) {
+          connected();
+          await parked;
+        } else {
+          secondConnected();
+        }
+        return upstream;
+      },
+    });
+    const pendingDials = () => r.proxy.pendingDials;
+    const first = exchange(r, get(r, "/first"));
+    await firstReady;
+    r.clock.monoMs = 1000;
+    const second = exchange(r, get(r, "/second"));
+    try {
+      for (let i = 0; i < 100 && pendingDials() < 2; i++) await sleep(5);
+      assert.equal(pendingDials(), 2);
+    } finally {
+      release();
+    }
+    await secondReady;
+    assert.equal(statusOf((await first).response), 200);
+    for (let i = 0; i < 100 && pendingDials() !== 0; i++) await sleep(5);
+    assert.equal(pendingDials(), 0);
+    assert.deepEqual([...r.journal.handoffs().unattempted], [2]);
+    const resets = r.dials.resets;
+    if (cutoff === "lease") {
+      r.clock.wallMs += 60_000;
+      assert.equal(cutOf((await second).response), "lease");
+      assert.equal(r.expiries.count, 1, "expiry is observed with the rate clock frozen");
+    } else {
+      if (cutoff === "close") void r.proxy.close();
+      else r.proxy.closeTurn(r.turn);
+      assert.equal(r.dials.resets, resets + 1, "the cutoff owns and resets the parked socket synchronously");
+      await second;
+    }
+    assert.equal(r.dials.resets, resets + 1);
+    assert.deepEqual(r.sink.arrivals.map((a) => a.url), ["/first"]);
+    assert.deepEqual([...r.journal.handoffs().unattempted], [2]);
+  });
+}
+
+for (const cutoff of ["turn", "run", "drain"] as const) {
+  test(`observing the wall-clock ${cutoff} cutoff resets an already queued write`, { timeout: 3000 }, async (t) => {
+    let upstream: Upstream | undefined;
+    const r = await rig(t, {
+      gate: { turnDeadlineMs: cutoff === "turn" ? 100 : 1000, runEndWall: 1_700_000_000_000 + (cutoff === "run" ? 100 : 1000) },
+      dial: (inner) => async (...args) => {
+        const u = await inner(...args);
+        if (upstream === undefined) {
+          upstream = u;
+          u.socket.cork();
+        }
+        return u;
+      },
+    });
+    const first = exchange(r, get(r, "/queued")).catch(() => undefined);
+    try {
+      for (let i = 0; i < 100 && !upstream?.socket.writableLength; i++) await sleep(5);
+      assert.ok(upstream?.socket.writableLength, "the first write is queued");
+      if (cutoff === "drain") r.gate.drain({ monoMs: 100, wallMs: r.clock.wallMs + 100 });
+      r.clock.wallMs += 100;
+      await exchange(r, get(r, "/at-cutoff")).catch(() => undefined);
+      assert.deepEqual(r.journal.snapshot().denied, { [cutoff === "turn" ? "turn_deadline" : "run_end"]: 1 });
+      assert.equal(r.dials.resets, 1, "the denial reset the existing exchange");
+      r.clock.wallMs -= 100;
+      upstream.socket.uncork();
+      await first;
+      assert.equal(r.sink.stats.requestBytes, 0);
+      assert.equal(r.gate.admitted, 1);
+    } finally {
+      await r.proxy.close();
+      await first;
+    }
+  });
+}
+
+test("a lower lease ceiling stops new permits; permits already debited go on", { timeout: 3000 }, async (t) => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
   let entered!: () => void;
@@ -1306,16 +1452,15 @@ test("queued dials recheck the number of places left under a lower lease ceiling
     for (let i = 0; i < 100 && r.proxy.pendingDials < 3; i++) await sleep(5);
     assert.equal(r.proxy.pendingDials, 3);
     r.gate.applyLease({ seq: 2, monoUntil: 10_000, wallUntil: r.clock.wallMs + 10_000, ceiling: 2 });
+    assert.equal(deniedOf((await exchange(r, get(r, "/fourth"))).response), "ceiling", "three debits are over the new ceiling");
   } finally {
     release();
   }
   assert.equal(statusOf((await first).response), 200);
   const results = await Promise.all(later);
-  assert.equal(r.sink.stats.connections, 2);
-  assert.equal(r.sink.stats.handshakes, 2);
-  assert.deepEqual(results.map(({ response }) => statusOf(response)).sort(), [200, 503]);
-  assert.equal(results.filter(({ response }) => deniedOf(response) === "ceiling").length, 1);
-  assert.equal(r.gate.admitted, 2);
+  assert.deepEqual(results.map(({ response }) => statusOf(response)), [200, 200], "already counted: not checked against the ceiling again");
+  assert.equal(r.gate.admitted, 3);
+  assert.equal(r.sink.stats.connections, 3);
 });
 
 test("a canceled DNS waiter leaves the underlying lookup charged until it settles", async () => {
@@ -1412,7 +1557,8 @@ test("close waits for a returned transport to be reset and closed", async (t) =>
   assert.equal(r.proxy.pendingDials, 0);
   assert.equal(r.dials.resets, 1);
   assert.equal(transportClosed, true);
-  assert.equal(r.gate.admitted, 0);
+  assert.equal(r.gate.admitted, 1, "debited before its dial, never attempted");
+  assert.deepEqual([...r.journal.handoffs().unattempted], [1]);
   assert.equal(r.sink.arrivals.length, 0);
 });
 
@@ -1478,4 +1624,121 @@ test("the target cannot speak for the gate: its denied, cut and retry headers ar
   assert.match(response, /x-kept: 1/i);
   assert.doesNotMatch(response, /x-peeps-load-/i, "no gate header the target sent reaches the journey");
   assert.deepEqual(r.journal.snapshot().denied, {});
+});
+
+// ---------------------------------------------------------------- debit before dial (e4 plan v3 §2.6)
+
+test("a client that closes right after sending its request: target connections never outnumber debits", async (t) => {
+  const r = await rig(t, {
+    gate: { runTotal: 10 },
+    phase: { ratePerSecond: 10_000, burst: 1000 },
+    limits: { maxPendingDialsPerTurn: 1000, maxPendingDials: 1000, maxTunnelsPerTurn: 1000, maxTunnels: 1000 },
+  });
+  for (let i = 0; i < 250; i++) {
+    const raw = netConnect(r.socketPath);
+    raw.on("error", () => undefined);
+    raw.write(`CONNECT ${r.authority} HTTP/1.1\r\nHost: ${r.authority}\r\nProxy-Authorization: ${CREDENTIAL}\r\n\r\n`);
+    await new Promise((resolve) => raw.once("data", resolve));
+    const tls = tlsConnect({ socket: raw, servername: "sink.test", ca: [r.runCaPem], ALPNProtocols: ["http/1.1"] });
+    tls.on("error", () => undefined);
+    await new Promise((resolve) => tls.once("secureConnect", resolve));
+    // Closed once the request is handed to the kernel: a destroy straight after `end` drops whatever
+    // is still queued, and on a slower machine that was the request itself (no debit at all, CI).
+    await new Promise<void>((resolve) => tls.end(get(r, `/hit${i}`), resolve));
+    tls.destroy();
+    r.clock.monoMs += 20;
+  }
+  for (let k = 0; k < 200 && r.proxy.pendingDials > 0; k++) await sleep(5);
+  await sleep(100);
+  assert.equal(r.gate.admitted, 10, "the run total");
+  assert.ok(r.sink.stats.connections <= 10, `TCP accepts at the target: ${r.sink.stats.connections}`);
+  assert.ok(r.sink.stats.connections <= r.gate.admitted, "each accept carries a debit");
+});
+
+test("clock seam: live at the permit, expired at the handoff: reset, zero HTTP bytes, the debit unattempted, a cut", async (t) => {
+  let expired = false;
+  const r = await rig(t, {
+    clocks: (clock) => (expired ? { monoMs: 10_000, wallMs: clock.wallMs } : { ...clock }),
+    dial: (inner) => async (...args) => {
+      const upstream = await inner(...args);
+      expired = true;
+      return upstream;
+    },
+  });
+  const { response } = await exchange(r, get(r));
+  await sleep(50);
+  assert.equal(cutOf(response), "lease");
+  assert.equal(r.sink.stats.connections, 1, "the dial reached the target");
+  assert.equal(r.sink.stats.requestBytes, 0, "zero HTTP bytes");
+  assert.equal(r.sink.arrivals.length, 0);
+  assert.equal(r.dials.resets, 1, "the upstream is reset");
+  assert.equal(r.gate.admitted, 1);
+  assert.deepEqual([...r.journal.handoffs().unattempted], [1]);
+  assert.equal(r.journal.snapshot().attempted, 0);
+  assert.equal(r.expiries.count, 1);
+});
+
+test("a dial refused by the target keeps its debit, cut dial", async (t) => {
+  const r = await rig(t, { dial: () => () => Promise.reject(new Error("connect ECONNREFUSED")) });
+  const { response } = await exchange(r, get(r));
+  assert.equal(statusOf(response), 502);
+  assert.equal(cutOf(response), "dial");
+  assert.equal(r.gate.admitted, 1);
+  assert.equal(r.gate.inFlight, 0, "its exchange is over");
+  assert.deepEqual(r.journal.snapshot().cut, { dial: 1 });
+  assert.deepEqual([...r.journal.handoffs().unattempted], [1]);
+});
+
+for (const site of ["permit", "checkDial", "handoff"] as const) {
+  test(`onLeaseExpired may close the proxy re-entrantly at ${site}`, async (t) => {
+    let expired = site === "permit";
+    let closing: Promise<void> | undefined;
+    const r = await rig(t, {
+      clocks: (clock) => (expired ? { monoMs: 10_000, wallMs: clock.wallMs } : { ...clock }),
+      onLeaseExpired: ({ proxy }) => {
+        closing = proxy.close();
+      },
+      dial: (inner) => async (origin, signal, pinned, ready) => {
+        if (site === "checkDial") expired = true;
+        const upstream = await inner(origin, signal, pinned, ready);
+        if (site === "handoff") expired = true;
+        return upstream;
+      },
+    });
+    const { response } = await exchange(r, get(r));
+    assert.ok(closing, "the hook ran");
+    await closing;
+    assert.equal(r.expiries.count, 1, "called once");
+    assert.equal(r.gate.stopped, true);
+    assert.equal(r.sink.arrivals.length, 0);
+    assert.equal(r.sink.stats.requestBytes, 0);
+    assert.equal(r.proxy.pendingDials, 0);
+    if (site === "permit") {
+      assert.equal(r.gate.admitted, 0);
+      assert.equal(deniedOf(response), "lease");
+    } else {
+      assert.equal(r.gate.admitted, 1);
+      assert.deepEqual([...r.journal.handoffs().unattempted], [1]);
+      assert.equal(r.gate.unresolved, 0, "abandoned, not left open");
+    }
+  });
+}
+
+test("a HEAD response keeps its content-length; a head is flushed before its first body byte", async (t) => {
+  const r = await rig(t, {
+    gate: { methods: ["GET", "HEAD"] },
+    limits: { exchangeMs: 300 },
+    respond: (arrival, res) => {
+      if (arrival.method === "HEAD") {
+        res.writeHead(200, { "content-length": "1234" });
+        return res.end();
+      }
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.flushHeaders();
+    },
+  });
+  const head = await exchange(r, `HEAD / HTTP/1.1\r\nHost: ${r.authority}\r\n\r\n`);
+  assert.match(head.response, /content-length: 1234/i);
+  const stalled = await exchange(r, get(r, "/stall"));
+  assert.match(stalled.response, /^HTTP\/1\.1 200/, "the journey sees the head the target sent");
 });

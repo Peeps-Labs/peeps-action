@@ -14,10 +14,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { sharedClocks } from "../src/load/clocks";
 import { probe, startJail, TicketRefused, type JailHandle } from "../src/load/jail";
 import { encode, type Ticket } from "../src/load/jail/ctl";
-import type { JailSpec } from "../src/load/jail/spec";
+import { type JailSpec } from "../src/load/jail/spec";
 import { preinstall, trustedToolchain } from "../src/load/install";
 import { MiniSupervisor, type ExecutorLink } from "./support/mini-supervisor";
 import { FIXTURES, respond } from "./support/e4-fixtures";
+import type { PortScript } from "./support/fake-control-port";
+import { checkoutBits, FAST, invariants, rig, smallPlan } from "./support/run-supervisor";
 
 const enabled = process.env.LOAD_JAIL_TESTS === "1";
 
@@ -546,4 +548,57 @@ test("hosted slice: with no CA in the jail, or no Playwright in the checkout, no
   assert.equal(f.type, "fatal");
   assert.equal((f as { code: string }).code, "playwright");
   assert.equal(noPw.sink.arrivals.length, 0, "no Playwright: 0 arrivals");
+});
+
+// ---- runLoad on the real jail (e4 plan v3 §3.2 `load-jail`) ----
+
+test("runLoad on the real jail: 20 s, 5 users, then Stop now at 5 s into measurement; sink accepts ≤ debited", { ...options, timeout: 600_000 }, async (t) => {
+  const ws = await sliceWorkspace(true);
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  checkoutBits(ws);
+  const script: PortScript = {};
+  let claimedAt = 0;
+  const r = await rig(t, {
+    ws,
+    real: true,
+    script,
+    plan: smallPlan({ exportName: "three", users: 5, durationMs: 20_000, perJourneyMax: 4 }),
+    seams: { constants: { ...FAST, loadedMs: 120_000, checkingDeadlineMs: 60_000 } },
+    observer: (e) => {
+      if (e.type === "claimed") claimedAt = Date.now();
+      if (e.type === "phase" && e.phase === "measurement") {
+        script.stopAfterMs = Date.now() - claimedAt + 5_000;
+        script.stopMode = "now";
+      }
+    },
+  });
+  const res = await r.result;
+  assert.equal(res.status, "stopped", JSON.stringify({ reason: res.reason, failures: res.failures, checking: res.checking }));
+  assert.ok(res.checking.success === 5 && res.measurement.success > 0, JSON.stringify(res.measurement));
+  assert.ok(r.sink.stats.connections <= res.journal!.debited, `accepts ${r.sink.stats.connections} ≤ debited ${res.journal!.debited}`);
+  assert.equal(res.cleanup, "clean");
+  invariants(r, res);
+});
+
+test("the journey's environment is exactly the allowlist: PATH, HOME, the CA, and nothing from the job", { ...options, timeout: 600_000 }, async (t) => {
+  const ws = await sliceWorkspace(true);
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  checkoutBits(ws);
+  const r = await rig(t, {
+    ws,
+    real: true,
+    plan: smallPlan({ exportName: "envDump", users: 1, durationMs: 5_000 }),
+    seams: {
+      constants: { ...FAST, loadedMs: 120_000, checkingDeadlineMs: 60_000 },
+    },
+  });
+  const res = await r.result;
+  const dumped = res.failures.map((f) => f.message).find((m) => m.startsWith("ENV "));
+  assert.ok(dumped, JSON.stringify({ reason: res.reason, failures: res.failures }));
+  const report = JSON.parse(dumped.slice(4));
+  assert.deepEqual(report, {
+    keys: ["HOME", "NODE_EXTRA_CA_CERTS", "PATH"],
+    values: ["/run/peeps/home", "/run/peeps/ca.pem", "/run/peeps/node/bin:/usr/bin:/bin"],
+  });
+  assert.equal(res.cleanup, "clean");
 });

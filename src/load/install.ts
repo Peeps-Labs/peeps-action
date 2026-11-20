@@ -624,9 +624,9 @@ export function trustedToolchain(
   return { nodeDir: dir, node, npmCli, nodeVersion, npmVersion };
 }
 
-async function sha256File(file: string): Promise<string> {
+async function sha256File(file: string, signal?: AbortSignal): Promise<string> {
   const hash = createHash("sha256");
-  for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer);
+  for await (const chunk of createReadStream(file, { signal })) hash.update(chunk as Buffer);
   return hash.digest("hex");
 }
 
@@ -634,12 +634,13 @@ async function sha256File(file: string): Promise<string> {
  * Validate, then `npm ci --ignore-scripts` with the trusted toolchain and config only, then
  * record the digests. Refuses with `install_unsupported` before npm runs.
  */
-export async function preinstall(ws: string, tc: Toolchain, scratch: string, timeoutMs = INSTALL_MS): Promise<InstallDigests> {
+export async function preinstall(ws: string, tc: Toolchain, scratch: string, timeoutMs = INSTALL_MS, signal?: AbortSignal): Promise<InstallDigests> {
+  signal?.throwIfAborted();
   const problems = installProblems(readWorkspace(ws));
   if (problems.length > 0) throw new InstallRefused(problems);
   const env = installEnv(tc, scratch);
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(tc.node, [tc.npmCli, "ci", "--ignore-scripts"], { cwd: ws, env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL" });
+    const child = spawn(tc.node, [tc.npmCli, "ci", "--ignore-scripts"], { cwd: ws, env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL", signal });
     for (const stream of [child.stdout!, child.stderr!]) {
       stream.setEncoding("utf8");
       let pending = "";
@@ -650,16 +651,20 @@ export async function preinstall(ws: string, tc: Toolchain, scratch: string, tim
         for (const line of lines) process.stderr.write(`${neutralize(line.slice(0, 4096))}\n`);
       });
     }
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (code === 0) resolve();
-      else reject(new Error(`install_failed: npm ci exited ${code ?? signal}`));
+    let spawnError: Error | undefined;
+    child.once("error", (error) => { spawnError = error; });
+    child.once("close", (code, exitSignal) => {
+      if (signal?.aborted) reject(signal.reason);
+      else if (spawnError) reject(spawnError);
+      else if (code === 0) resolve();
+      else reject(new Error(`install_failed: npm ci exited ${code ?? exitSignal}`));
     });
   });
+  signal?.throwIfAborted();
   return {
-    lock: await sha256File(path.join(ws, "package-lock.json")),
-    hiddenLock: existsSync(path.join(ws, "node_modules/.package-lock.json")) ? await sha256File(path.join(ws, "node_modules/.package-lock.json")) : "",
-    tree: await treeDigest(ws),
+    lock: await sha256File(path.join(ws, "package-lock.json"), signal),
+    hiddenLock: existsSync(path.join(ws, "node_modules/.package-lock.json")) ? await sha256File(path.join(ws, "node_modules/.package-lock.json"), signal) : "",
+    tree: await treeDigest(ws, signal),
   };
 }
 
@@ -667,12 +672,14 @@ export async function preinstall(ws: string, tc: Toolchain, scratch: string, tim
  * sha256 over the sorted walk of the checkout, node_modules included and `.git` excluded:
  * each entry's path, type, mode, size, and content hash or symlink target.
  */
-export async function treeDigest(ws: string): Promise<string> {
+export async function treeDigest(ws: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   const root = realpathSync(ws);
   const hash = createHash("sha256");
   const walk = async (dir: string, rel: string): Promise<void> => {
     const names = (await readdir(dir)).sort();
     for (const name of names) {
+      signal?.throwIfAborted();
       if (rel === "" && name === ".git") continue;
       const full = path.join(dir, name);
       const relPath = rel ? `${rel}/${name}` : name;
@@ -682,11 +689,12 @@ export async function treeDigest(ws: string): Promise<string> {
       else if (st.isDirectory()) {
         hash.update(`D\0${relPath}\0${mode}\n`);
         await walk(full, relPath);
-      } else if (st.isFile()) hash.update(`F\0${relPath}\0${mode}\0${st.size}\0${await sha256File(full)}\n`);
+      } else if (st.isFile()) hash.update(`F\0${relPath}\0${mode}\0${st.size}\0${await sha256File(full, signal)}\n`);
       else hash.update(`O\0${relPath}\0${mode}\0${st.mode >>> 12}\n`);
     }
   };
   await walk(root, "");
+  signal?.throwIfAborted();
   return hash.digest("hex");
 }
 

@@ -1,0 +1,12 @@
+{
+  "ok": false,
+  "errors": [
+    {
+      "path": [
+        "cohort",
+        "stages"
+      ],
+      "message": "`cohort.stages` must add up to 60 min or less in this release."
+    }
+  ]
+}

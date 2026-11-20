@@ -1,0 +1,36 @@
+name: Load acceptance
+
+# Loopback acceptance for the load engine (e4 plan v3 §4 step 9): runs when a pull request
+# carries the `load-accept` label, and again on each push while it does.
+on:
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    if: contains(github.event.pull_request.labels.*.name, 'load-accept')
+    strategy:
+      fail-fast: false
+      matrix:
+        cpus: ["all", "0,1"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.22.3"
+      - run: npm ci
+      - name: 60 s, 100 users, 200 req/s through the real jail (CPUs ${{ matrix.cpus }})
+        run: |
+          if [ "${{ matrix.cpus }}" = "all" ]; then
+            node --test --import tsx test/load-accept.test.ts
+          else
+            taskset -c ${{ matrix.cpus }} node --test --import tsx test/load-accept.test.ts
+          fi
+        env:
+          LOAD_ACCEPT: "1"
+          LOAD_JAIL_TESTS: "1"

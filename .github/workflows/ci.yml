@@ -67,14 +67,14 @@ jobs:
           if [ -n "$status" ]; then echo "$status"; exit 1; fi
 
   # The load jail on the runners customers use (plan v3 §9): real sudo, systemd
-  # and cgroup v2. Other jobs skip load-jail.test.ts.
+  # and cgroup v2. Other jobs skip the real-jail cases of these files.
   load-jail:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       # Pinned exactly, as in `check`: the hosted slice runs the pre-claim install,
@@ -83,6 +83,8 @@ jobs:
         with:
           node-version: "24.22.3"
       - run: npm ci
-      - run: node --test --import tsx test/load-jail.test.ts
+      # One file at a time: each real-jail run is a systemd unit with its own cgroup and sink,
+      # and the fault matrix stops this process (F1a, F1b).
+      - run: node --test --test-concurrency=1 --import tsx test/load-jail.test.ts test/load-isolation.test.ts test/load-freeze.test.ts test/load-sink.test.ts test/load-signals.test.ts test/load-turn-close.test.ts
         env:
           LOAD_JAIL_TESTS: "1"

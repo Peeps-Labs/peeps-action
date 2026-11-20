@@ -119,6 +119,7 @@ export async function startJail(spec: JailSpec, options: StartJailOptions, signa
   try {
     await sudo("/usr/bin/mkdir", "-m", "0700", dir);
     await sudo("/usr/bin/chown", String(process.getuid!()), dir);
+    signal?.throwIfAborted();
     proxy = await options.listenProxy(`${dir}/proxy.sock`);
     proxy.on("connection", (socket: net.Socket) => {
       proxySockets.add(socket);
@@ -130,6 +131,7 @@ export async function startJail(spec: JailSpec, options: StartJailOptions, signa
     await sudo("/usr/bin/chmod", "0660", `${dir}/proxy.sock`);
     await sudo("/usr/bin/chmod", "0600", `${dir}/ctl.sock`);
     await sudo("/usr/bin/chmod", "0710", dir);
+    signal?.throwIfAborted();
   } catch (error) {
     proxy?.close();
     ctlServer.close();

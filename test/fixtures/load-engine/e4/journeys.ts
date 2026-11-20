@@ -121,3 +121,31 @@ export async function script(request: APIRequestContext): Promise<void> {
   }
   if (step === "late") await request.get("/late-cookie");
 }
+
+export async function smallPost(request: APIRequestContext): Promise<void> {
+  assert.equal((await request.post("/upload", { data: "small body" })).status(), 200);
+}
+
+/** One POST of a body at the gate's limit (load-freeze F4, F5). */
+export async function bigPost(request: APIRequestContext): Promise<void> {
+  await request.post("/upload", { data: Buffer.alloc(1024 * 1024 - 4096, 0x61), headers: { "content-type": "application/octet-stream" } });
+}
+
+/** Raw `fetch` and `node:https` to the target named in `target.txt`, around the gate (load-isolation). */
+export async function rawFetch(): Promise<void> {
+  const { readFileSync } = await import("node:fs");
+  const https = await import("node:https");
+  const url = readFileSync("target.txt", "utf8").trim();
+  await fetch(url).catch(() => undefined);
+  await new Promise<void>((resolve) => https.get(url, { rejectUnauthorized: false }, () => resolve()).on("error", () => resolve()));
+}
+
+/** The journey's whole environment, sorted, as its failure message (load-jail: exactly the allowlist). */
+export async function envDump(): Promise<void> {
+  const allowed = ["HOME", "NODE_EXTRA_CA_CERTS", "PATH"];
+  // An unexpected job variable should fail the test without logging its value.
+  throw new Error(`ENV ${JSON.stringify({
+    keys: Object.keys(process.env).sort(),
+    values: allowed.map((key) => process.env[key]),
+  })}`);
+}
