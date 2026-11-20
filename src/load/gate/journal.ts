@@ -178,8 +178,8 @@ export class Journal {
     };
   }
 
-  /** An unresolved write stays open: its delivery is the one thing the counts cannot say. */
+  /** An unresolved write stays open: its delivery is the one thing the counts cannot say. A debit never attempted has none. */
   private prune(seq: number, e: Entry): void {
-    if (e.written === "accepted" && e.finished) this.open.delete(seq);
+    if (e.finished && (e.written === "accepted" || this.unattempted.has(seq))) this.open.delete(seq);
   }
 }

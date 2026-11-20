@@ -18,8 +18,8 @@ export interface Sink {
   port: number;
   caPem: string;
   arrivals: Arrival[];
-  /** TCP connections accepted, TLS handshakes completed, and socket error codes seen. */
-  stats: { connections: number; handshakes: number; socketErrors: string[] };
+  /** TCP connections accepted, TLS handshakes completed, decrypted request bytes read, and socket error codes seen. */
+  stats: { connections: number; handshakes: number; requestBytes: number; socketErrors: string[] };
   close(): Promise<void>;
 }
 
@@ -46,13 +46,14 @@ export async function startSink(options: SinkOptions = {}): Promise<Sink> {
       res.end("ok");
     });
   });
-  const stats = { connections: 0, handshakes: 0, socketErrors: [] as string[] };
+  const stats = { connections: 0, handshakes: 0, requestBytes: 0, socketErrors: [] as string[] };
   server.on("connection", (s: import("node:net").Socket) => {
     stats.connections += 1;
     s.on("error", (e: NodeJS.ErrnoException) => stats.socketErrors.push(e.code ?? e.message));
   });
   server.on("secureConnection", (s: import("node:tls").TLSSocket) => {
     stats.handshakes += 1;
+    s.on("data", (d: Buffer) => (stats.requestBytes += d.length));
     s.on("error", (e: NodeJS.ErrnoException) => stats.socketErrors.push(`tls:${e.code ?? e.message}`));
   });
   // After the handshake, the HTTP layer reports socket errors (a reset among them) here.

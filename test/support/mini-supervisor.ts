@@ -180,6 +180,8 @@ export class MiniSupervisor {
       authorize: (c) => self?.credentials.get(c),
       limits: o.proxyLimits,
       clocks: sharedClocks,
+      // The mini supervisor's lease runs an hour: an expiry here is a test bug, seen as refusals.
+      onLeaseExpired: () => undefined,
       dial: o.dial ? o.dial(real) : real,
     });
     proxy.server.on("connect", (req: import("node:http").IncomingMessage) => self!.connects.push(String(req.headers["proxy-authorization"] ?? "")));

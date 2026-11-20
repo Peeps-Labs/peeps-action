@@ -284,9 +284,10 @@ export class Gate {
 
   /**
    * At TCP and at TLS start: liveness and that boundary's rate token. Totals, the ceiling and
-   * outstanding are not rechecked: this permit is already counted.
+   * outstanding are not rechecked: this permit is already counted. With no boundary (before the
+   * dial starts), liveness only.
    */
-  checkDial(p: Permit, t: Clocks, boundary: "tcp" | "tls"): Denied | undefined {
+  checkDial(p: Permit, t: Clocks, boundary?: "tcp" | "tls"): Denied | undefined {
     return this.recheck(p, t, boundary);
   }
 
@@ -300,10 +301,11 @@ export class Gate {
     this.resolve(p.seq, false);
   }
 
-  private recheck(p: Permit, t: Clocks, boundary: "tcp" | "tls" | "handoff"): Denied | undefined {
+  private recheck(p: Permit, t: Clocks, boundary: "tcp" | "tls" | "handoff" | undefined): Denied | undefined {
     if (!this.permits.has(p) || !this.exchanges.has(p.seq)) return deny("turn_closed", true);
     const d = this.live(p.turn, t);
     if (!("turn" in d)) return d;
+    if (!boundary) return;
     this.refill(t.monoMs);
     const denied = this.rateDenial(this.milliTokens[boundary]);
     if (denied) return denied;
