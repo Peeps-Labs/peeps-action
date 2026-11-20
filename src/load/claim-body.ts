@@ -166,6 +166,15 @@ const runHostTool: HostRun = (file, args) =>
     execFile(file, args, { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" }, timeout: 2_000, maxBuffer: 16 * 1024, killSignal: "SIGKILL" }, (error, stdout) => resolve(error ? undefined : String(stdout)));
   });
 
+function imageLabel(env: NodeJS.ProcessEnv): string {
+  try {
+    const image = env.ImageOS;
+    return image === "ubuntu22" || image === "ubuntu24" ? image : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 function kernelRelease(): string {
   try {
     return KERNEL_RELEASE.exec(os.release())?.[0] ?? "unknown";
@@ -179,7 +188,6 @@ function versionLine(out: string | undefined, pattern: RegExp): string {
   return line && pattern.test(line) ? line : "unavailable";
 }
 
-const IMAGE_VERSION = /^[0-9]{8}\.[0-9]{1,5}\.[0-9]{1,5}$/;
 const KERNEL_RELEASE = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:-[0-9]{1,6}-(?:azure|generic))?/;
 const SYSTEMD_VERSION = /^systemd [0-9]{1,4}(?: \([0-9]{1,4}\.[0-9]{1,4}-[0-9]{1,4}ubuntu[0-9]{0,4}(?:\.[0-9]{1,4}){0,3}\))?$/;
 const UNSHARE_VERSION = /^unshare from util-linux [0-9]{1,4}\.[0-9]{1,4}(?:\.[0-9]{1,4})?$/;
@@ -187,12 +195,11 @@ const CLOCK_OFFSET = /^[0-9]{1,8}\.[0-9]{1,9} seconds (?:fast|slow) of NTP time$
 const LEAP_STATUS = new Set(["normal", "insert second", "delete second", "not synchronised"]);
 
 /**
- * The four probe labels: the runner image (`ImageOS` and `ImageVersion` on GitHub-hosted runners),
+ * The four probe labels: the runner image family (a fixed enum),
  * the kernel, the versions of the host tools the fence runs on (systemd-run, unshare), and
- * chrony's leap status and offset. Each is kept only when it reads in a known format (the S0
- * images' values), so no environment or command text reaches the claim; anything else says
- * `unknown` or `unavailable`. It never rejects: a probe that fails is `unavailable` and the
- * other labels stand.
+ * chrony's leap status and offset. ImageVersion is workflow-controlled and its format does not
+ * establish provenance. Host probe values must match the expected formats. A failed probe says
+ * `unknown` or `unavailable`, and the other labels stand.
  */
 export async function hostLabels(env: NodeJS.ProcessEnv = process.env, run: HostRun = runHostTool): Promise<ProbeLabels> {
   const read = async (file: string, args: string[]) => {
@@ -210,10 +217,8 @@ export async function hostLabels(env: NodeJS.ProcessEnv = process.env, run: Host
   const field = (name: string) => tracking?.split("\n").find((line) => line.split(":", 1)[0]?.trimEnd() === name)?.split(":").slice(1).join(":").trim();
   const leap = field("Leap status")?.toLowerCase();
   const offset = field("System time");
-  const { ImageOS: imageOS, ImageVersion: imageVersion } = env;
   return {
-    image: (imageOS === "ubuntu22" || imageOS === "ubuntu24") && imageVersion && IMAGE_VERSION.test(imageVersion)
-      ? `${imageOS} ${imageVersion}` : "unknown",
+    image: imageLabel(env),
     kernel: kernelRelease(),
     tools: clip(`${versionLine(systemd, SYSTEMD_VERSION)}; ${versionLine(unshare, UNSHARE_VERSION)}`, MAX_LABEL),
     chrony: leap && LEAP_STATUS.has(leap)

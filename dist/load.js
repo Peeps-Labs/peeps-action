@@ -350,6 +350,7 @@ var HttpControlPort = class {
     return new Promise((resolve, reject) => {
       if (signal.aborted) return reject(abortError(op, signal));
       let settled = false;
+      let renewRefusalStatus;
       const headers = { accept: "application/json", authorization: `Bearer ${bearer}`, "user-agent": this.userAgent };
       if (body !== void 0) {
         headers["content-type"] = "application/json";
@@ -378,7 +379,11 @@ var HttpControlPort = class {
         signal.removeEventListener("abort", onAbort);
         if (error) {
           req.destroy();
-          reject(error);
+          if (renewRefusalStatus !== void 0 && error.code !== "aborted") {
+            resolve({ status: renewRefusalStatus, json: void 0 });
+          } else {
+            reject(error);
+          }
         } else resolve(answer);
       };
       const onAbort = () => finish(abortError(op, signal));
@@ -389,6 +394,7 @@ var HttpControlPort = class {
         if (status >= 300 && status < 400) return finish(new ControlHttpError(op, "redirect", status));
         if (status >= 500 || status === 408 || status === 429) return finish(new ControlHttpError(op, "status", status));
         if (status < 200) return finish(new ControlHttpError(op, "status", status));
+        if (op === "renew" && status >= 400 && status < 500) renewRefusalStatus = status;
         if (!/^application\/json\s*(;|$)/i.test(String(res.headers["content-type"] ?? ""))) return finish(new ControlHttpError(op, "content_type", status));
         const declared = Number(res.headers["content-length"]);
         if (Number.isFinite(declared) && declared > cap) return finish(new ControlHttpError(op, "too_large", status));
@@ -850,6 +856,14 @@ function claimBodyProblem(body) {
 var runHostTool = (file, args) => new Promise((resolve) => {
   (0, import_node_child_process.execFile)(file, args, { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" }, timeout: 2e3, maxBuffer: 16 * 1024, killSignal: "SIGKILL" }, (error, stdout) => resolve(error ? void 0 : String(stdout)));
 });
+function imageLabel(env) {
+  try {
+    const image = env.ImageOS;
+    return image === "ubuntu22" || image === "ubuntu24" ? image : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 function kernelRelease() {
   try {
     return KERNEL_RELEASE.exec(import_node_os.default.release())?.[0] ?? "unknown";
@@ -861,7 +875,6 @@ function versionLine(out, pattern) {
   const line = out?.split("\n", 1)[0];
   return line && pattern.test(line) ? line : "unavailable";
 }
-var IMAGE_VERSION = /^[0-9]{8}\.[0-9]{1,5}\.[0-9]{1,5}$/;
 var KERNEL_RELEASE = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:-[0-9]{1,6}-(?:azure|generic))?/;
 var SYSTEMD_VERSION = /^systemd [0-9]{1,4}(?: \([0-9]{1,4}\.[0-9]{1,4}-[0-9]{1,4}ubuntu[0-9]{0,4}(?:\.[0-9]{1,4}){0,3}\))?$/;
 var UNSHARE_VERSION = /^unshare from util-linux [0-9]{1,4}\.[0-9]{1,4}(?:\.[0-9]{1,4})?$/;
@@ -883,9 +896,8 @@ async function hostLabels(env = process.env, run = runHostTool) {
   const field = (name2) => tracking?.split("\n").find((line) => line.split(":", 1)[0]?.trimEnd() === name2)?.split(":").slice(1).join(":").trim();
   const leap = field("Leap status")?.toLowerCase();
   const offset = field("System time");
-  const { ImageOS: imageOS, ImageVersion: imageVersion } = env;
   return {
-    image: (imageOS === "ubuntu22" || imageOS === "ubuntu24") && imageVersion && IMAGE_VERSION.test(imageVersion) ? `${imageOS} ${imageVersion}` : "unknown",
+    image: imageLabel(env),
     kernel: kernelRelease(),
     tools: clip(`${versionLine(systemd, SYSTEMD_VERSION)}; ${versionLine(unshare, UNSHARE_VERSION)}`, MAX_LABEL),
     chrony: leap && LEAP_STATUS.has(leap) ? `${leap}${offset && CLOCK_OFFSET.test(offset) ? `, ${offset}` : ""}` : "unavailable"
@@ -4841,6 +4853,8 @@ var LoadRun = class {
       if (signal.aborted) return;
       const decoded = decodeRenewReply(raw);
       if (decoded.kind === "unknown_refusal") {
+        this.emit({ type: "renewal", seq: tx.seq, state, decision: "unknown_refusal" });
+        record.outcome = "refused";
         lease.abandon();
         return this.onExpiry();
       }

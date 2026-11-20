@@ -22,6 +22,7 @@ import { ANSWER_MAX_BYTES, CLAIM_ANSWER_MAX_BYTES, CLAIM_RETRY_MS, ControlHttpEr
 import { RunnerLease } from "../src/load/lease";
 import { json, jwt, loopbackLookup, startTestServer, type Responder, type TestServer } from "./support/control-server";
 import { FakeControlPort } from "./support/fake-control-port";
+import { invariants, onPhase, rig, smallPlan, why } from "./support/run-supervisor";
 
 const REQUEST_TOKEN = `REQTOKEN-${randomBytes(12).toString("hex")}`;
 const ID_TOKEN = jwt(`IDTOKEN-${randomBytes(12).toString("hex")}`);
@@ -261,6 +262,42 @@ test("an answer that is not 2xx is a refusal or nothing: a success-shaped 4xx ne
   assert.deepEqual(await h.port.events("claim-1", EVENTS_TOKEN, EVENTS, signal()), { ok: false, reason: "gap" });
 });
 
+test("a permanent renewal 4xx with an unreadable body is an unknown refusal", async (t) => {
+  const h = await harness(t);
+  const unreadable: [string, Responder][] = [
+    ["plain text", (_a, res) => res.writeHead(403, { "content-type": "text/plain" }).end("Forbidden")],
+    ["empty JSON", (_a, res) => res.writeHead(401, { "content-type": "application/json" }).end()],
+    ["oversized JSON", (_a, res) => res.writeHead(400, { "content-type": "application/json", "content-length": ANSWER_MAX_BYTES + 1 }).end()],
+    ["stalled JSON", (_a, res) => res.writeHead(401, { "content-type": "application/json" }).flushHeaders()],
+  ];
+  for (const [name, responder] of unreadable) {
+    await t.test(name, async () => {
+      h.peeps.answer(responder);
+      const raw = await h.port.renew(CLAIM_ID, RUN_TOKEN, RENEW, signal(name === "stalled JSON" ? 750 : 5000));
+      assert.deepEqual(decodeRenewReply(raw), { kind: "unknown_refusal" });
+    });
+  }
+  h.peeps.answer((_a, res) => json(res, 401, { refused: "auth" }));
+  assert.deepEqual(await h.port.renew(CLAIM_ID, RUN_TOKEN, RENEW, signal()), { refused: "auth" });
+});
+
+test("a plain-text renewal 403 revokes a measuring run after one request", async (t) => {
+  const h = await harness(t, (_a, res) => res.writeHead(403, { "content-type": "text/plain" }).end("Forbidden"));
+  const r = await rig(t, {
+    plan: smallPlan({ exportName: "get", durationMs: 20_000 }),
+    observer: onPhase("measurement", ({ port }) => {
+      const fakeRenew = port.renew.bind(port);
+      port.renew = (claimId, token, body, renewSignal) => JSON.parse(body).state === "closed"
+        ? fakeRenew(claimId, token, body, renewSignal)
+        : h.port.renew(claimId, token, body, renewSignal);
+    }),
+  });
+  const result = await r.result;
+  assert.equal(result.reason, "lease_lost", why(r, result));
+  assert.equal(h.peeps.arrivals.length, 1);
+  invariants(r, result);
+});
+
 test("a 2xx events acknowledgement needs a boolean replay and no refusal beside it", async (t) => {
   const h = await harness(t);
   for (const reply of [{ ok: true, replay: false, refused: "budget" }, { ok: true, replay: true, reason: "conflict" }, { ok: true }, { ok: true, replay: "false" }]) {
@@ -333,7 +370,7 @@ test("answers past their cap reject, with or without a declared length", async (
   }
 });
 
-test("only a JSON answer below 500 resolves", async (t) => {
+test("unreadable successful renewals and transient transport failures reject", async (t) => {
   const h = await harness(t);
   const cases: [Responder, string, number | undefined][] = [
     [(_a, res) => (res.writeHead(200, { "content-type": "text/html" }), res.end("<html></html>")), "content_type", 200],
@@ -553,7 +590,7 @@ test("no token reaches an error, a log or the output", async (t) => {
   const errors = [...seen, ...events].filter((e) => e instanceof Error);
   assert.ok(errors.length >= 10);
   const refusals = [...seen.filter((e) => typeof e === "object" && e !== null && "refused" in e), ...events.filter((e) => !(e instanceof Error))];
-  assert.equal(refusals.length, 4);
+  assert.equal(refusals.length, 5, "including the plain-text renewal refusal");
   const text = [...errors.map((e) => `${e.message}\n${e.stack}\n${inspect(e, { depth: 8, showHidden: true })}\n${JSON.stringify(e)}`), ...refusals.map((r) => JSON.stringify(r)), ...written].join("\n");
   for (const sentinel of SENTINELS) assert.ok(!text.includes(sentinel), `a token leaked: ${sentinel.slice(0, 8)}…`);
   const source = readFileSync(path.resolve(__dirname, "../src/load/http-control-port.ts"), "utf8").replace(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gm, "");

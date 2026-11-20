@@ -269,14 +269,23 @@ test("the probe labels come from the image, the kernel, the fence's tools and ch
     "/usr/bin/unshare": "unshare from util-linux 2.39.3\n",
     "/usr/bin/chronyc": "Reference ID    : A9FEA97B (169.254.169.123)\nSystem time     : 0.000021000 seconds fast of NTP time\nLeap status     : Normal\n",
   };
-  const labels = await hostLabels({ ImageOS: "ubuntu24", ImageVersion: "20261116.376.1" }, async (file) => out[file]);
-  assert.equal(labels.image, "ubuntu24 20261116.376.1");
+  const labels = await hostLabels({ ImageOS: "ubuntu24" }, async (file) => out[file]);
+  assert.equal(labels.image, "ubuntu24");
   assert.equal(labels.tools, "systemd 255 (255.4-1ubuntu8.4); unshare from util-linux 2.39.3");
   assert.equal(labels.chrony, "normal, 0.000021000 seconds fast of NTP time");
   assert.ok(labels.kernel.length > 0);
   assert.deepEqual(await hostLabels({}, async () => undefined), { image: "unknown", kernel: labels.kernel, tools: "unavailable; unavailable", chrony: "unavailable" });
   const real = await hostLabels({});
   for (const k of ["image", "kernel", "tools", "chrony"] as const) assert.equal(typeof real[k], "string");
+});
+
+test("a workflow image-version value that looks like a release stays out of the claim", async () => {
+  const marker = "20310107.35241.68419";
+  const labels = await hostLabels({ ImageOS: "ubuntu24", ImageVersion: marker }, async () => undefined);
+  const request = claimBody({ ...inputsOf(claim.request), labels });
+  assert.ok(request.ok);
+  assert.ok(!canonical(request.body).includes(marker));
+  assert.equal(request.body.fence.probe.image, "ubuntu24");
 });
 
 // ---------------------------------------------------------------- renewals

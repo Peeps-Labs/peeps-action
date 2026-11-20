@@ -248,6 +248,7 @@ export class HttpControlPort implements ControlPort {
     return new Promise<Answer>((resolve, reject) => {
       if (signal.aborted) return reject(abortError(op, signal));
       let settled = false;
+      let renewRefusalStatus: number | undefined;
       const headers: Record<string, string> = { accept: "application/json", authorization: `Bearer ${bearer}`, "user-agent": this.userAgent };
       if (body !== undefined) {
         headers["content-type"] = "application/json";
@@ -277,7 +278,13 @@ export class HttpControlPort implements ControlPort {
         signal.removeEventListener("abort", onAbort);
         if (error) {
           req.destroy();
-          reject(error);
+          // A permanent renewal 4xx still denies the renewal if its body cannot be read.
+          // Keep explicit cancellation and failures before response headers on the error path.
+          if (renewRefusalStatus !== undefined && error.code !== "aborted") {
+            resolve({ status: renewRefusalStatus, json: undefined });
+          } else {
+            reject(error);
+          }
         } else resolve(answer!);
       };
       const onAbort = () => finish(abortError(op, signal));
@@ -288,6 +295,7 @@ export class HttpControlPort implements ControlPort {
         if (status >= 300 && status < 400) return finish(new ControlHttpError(op, "redirect", status));
         if (status >= 500 || status === 408 || status === 429) return finish(new ControlHttpError(op, "status", status));
         if (status < 200) return finish(new ControlHttpError(op, "status", status));
+        if (op === "renew" && status >= 400 && status < 500) renewRefusalStatus = status;
         if (!/^application\/json\s*(;|$)/i.test(String(res.headers["content-type"] ?? ""))) return finish(new ControlHttpError(op, "content_type", status));
         const declared = Number(res.headers["content-length"]);
         if (Number.isFinite(declared) && declared > cap) return finish(new ControlHttpError(op, "too_large", status));

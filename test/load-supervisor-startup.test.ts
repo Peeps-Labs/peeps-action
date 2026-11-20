@@ -50,6 +50,10 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
     const res = await r.result;
     assert.equal(res.reason, "lease_lost", why(r, res));
     assert.equal(refusals, 1);
+    assert.ok(r.events.some((e) => e.type === "renewal" && e.decision === "unknown_refusal"), "the refusal is in the event stream");
+    const refused = res.latency.records.filter(([, , , outcome]) => outcome === "refused");
+    assert.equal(refused.length, 1, "the refused renewal's latency record says so");
+    assert.equal(refused[0]![2], null, "a refusal is never applied");
     invariants(r, res);
   });
 

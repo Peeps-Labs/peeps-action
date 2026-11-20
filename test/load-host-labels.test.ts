@@ -9,7 +9,7 @@ test("probe evidence drops arbitrary image and command text while preserving rec
     "/usr/bin/unshare": `unshare from util-linux 2.39.3 ${sentinel}\n`,
     "/usr/bin/chronyc": `Leap status     : Normal\nSystem time     : ${sentinel}\n`,
   };
-  const labels = await hostLabels({ ImageOS: "ubuntu24", ImageVersion: sentinel.repeat(30) }, async (file) => outputs[file]);
+  const labels = await hostLabels({ ImageOS: sentinel }, async (file) => outputs[file]);
   assert.equal(labels.image, "unknown");
   assert.equal(labels.tools, "unavailable; unavailable");
   assert.equal(labels.chrony, "normal");
@@ -17,12 +17,12 @@ test("probe evidence drops arbitrary image and command text while preserving rec
 });
 
 test("a failed host command leaves the other labels available", async () => {
-  const labels = await hostLabels({ ImageOS: "ubuntu22", ImageVersion: "20261116.365.1" }, async (file) => {
+  const labels = await hostLabels({ ImageOS: "ubuntu22" }, async (file) => {
     if (file === "/usr/bin/systemd-run") throw new Error("host probe failed");
     if (file === "/usr/bin/unshare") return "unshare from util-linux 2.37.2\n";
     return undefined;
   });
-  assert.equal(labels.image, "ubuntu22 20261116.365.1");
+  assert.equal(labels.image, "ubuntu22");
   assert.equal(labels.tools, "unavailable; unshare from util-linux 2.37.2");
   assert.equal(labels.chrony, "unavailable");
 });

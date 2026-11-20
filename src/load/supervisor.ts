@@ -573,6 +573,9 @@ class LoadRun {
       if (signal.aborted) return;
       const decoded = decodeRenewReply(raw);
       if (decoded.kind === "unknown_refusal") {
+        // Recorded like a rejected reply: answered, never applied, so `ms` stays null.
+        this.emit({ type: "renewal", seq: tx.seq, state, decision: "unknown_refusal" });
+        record.outcome = "refused";
         lease.abandon();
         return this.onExpiry();
       }
