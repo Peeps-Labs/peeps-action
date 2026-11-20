@@ -3,15 +3,21 @@
  * permanent). Runs only with LOAD_JAIL_TESTS=1, which the hosted 22.04 and
  * 24.04 jobs in ci.yml set; there it needs sudo, systemd and cgroup v2.
  */
-import { after, before, test } from "node:test";
+import { after, before, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { startJail, type JailHandle } from "../src/load/jail";
+import { setTimeout as sleep } from "node:timers/promises";
+import { sharedClocks } from "../src/load/clocks";
+import { probe, startJail, TicketRefused, type JailHandle } from "../src/load/jail";
+import { encode, type Ticket } from "../src/load/jail/ctl";
 import type { JailSpec } from "../src/load/jail/spec";
+import { preinstall, trustedToolchain } from "../src/load/install";
+import { MiniSupervisor, type ExecutorLink } from "./support/mini-supervisor";
+import { FIXTURES, respond } from "./support/e4-fixtures";
 
 const enabled = process.env.LOAD_JAIL_TESTS === "1";
 
@@ -92,16 +98,18 @@ function forwardToSink(sockPath: string): Promise<net.Server> {
   });
 }
 
-function spec(command: string[]): JailSpec {
+function spec(command: string[], ws = workspace): JailSpec {
   const node = process.execPath;
+  const runId = `t${process.pid}-${++runs}`;
   return {
-    runId: `t${process.pid}-${++runs}`,
+    runId,
+    claimId: `claim-${runId}`,
     node,
     nodeDir: path.dirname(path.dirname(node)),
     actionDir,
     outer: path.join(actionDir, "load-outer.js"),
     init: path.join(actionDir, "load-init.js"),
-    workspace,
+    workspace: ws,
     executorUid: process.getuid!(),
     executorGid: process.getgid!(),
     command,
@@ -110,14 +118,28 @@ function spec(command: string[]): JailSpec {
   };
 }
 
+/** A ticket for `s`, minted now, good for `ms`. */
+function ticketFor(s: JailSpec, ms = 60_000): Ticket {
+  const now = sharedClocks();
+  return { claimId: s.claimId, epoch: 1, planHash: "p", leaseSeq: 1, nonce: "n", monoDeadline: now.monoMs + ms, wallDeadline: now.wallMs + ms };
+}
+
+/** `start`, then `launch`, each with a ticket minted at the send. */
+async function begin(handle: JailHandle, s: JailSpec): Promise<void> {
+  const installed = await handle.start(() => ticketFor(s));
+  assert.equal(installed.code, 0, JSON.stringify(installed));
+  await handle.launch(() => ticketFor(s));
+}
+
 async function runToExit(command: string[]): Promise<{ out: string; handle: JailHandle }> {
   await startSink();
-  const handle = await startJail(spec(command), { listenProxy: forwardToSink, stdout: "pipe" });
+  const s = spec(command);
+  const handle = await startJail(s, { listenProxy: forwardToSink, stdout: "pipe" });
   let out = "";
   handle.stdout!.setEncoding("utf8");
   handle.stdout!.on("data", (d: string) => (out += d));
   await handle.ready;
-  handle.start();
+  await begin(handle, s);
   const exit = await handle.exited;
   assert.deepEqual(exit, { code: 0, signal: null }, "the executor exited cleanly");
   const end = await handle.end();
@@ -125,28 +147,12 @@ async function runToExit(command: string[]): Promise<{ out: string; handle: Jail
   return { out, handle };
 }
 
-test("inside the jail, the relay is the only way out (Peeps' own probe)", options, async () => {
-  sinkHits = [];
-  const { out } = await runToExit(["/run/peeps/node/bin/node", "/run/peeps/action/load-init.js", "--probe", "SINK"].map((a) => (a === "SINK" ? sinkAddr : a)));
-  const line = out.split("\n").map((l) => l.replace(/^jail\| /, "")).find((l) => l.startsWith("PEEPS-PROBE "));
-  assert.ok(line, out);
-  const probe = JSON.parse(line!.slice("PEEPS-PROBE ".length));
-  assert.equal(probe.uid, process.getuid!());
-  assert.equal(probe.relay, "connected");
-  assert.notEqual(probe.direct, "connected");
-  assert.notEqual(probe.dns, "resolved");
-  assert.equal(probe.unixProxy, "EACCES");
-  assert.deepEqual(probe.hostPaths, []);
-  assert.equal(probe.procOne, "EACCES");
-  assert.equal(probe.procOneRoot, "EACCES");
-  assert.equal(probe.procSelf, "readable", "a positive control: /proc works");
-  const allowed = /^\/(usr|bin|sbin|lib\w*|etc\/[\w.]+|dev(\/\w+)?|tmp|proc|run\/peeps\/[\w-]+)?$/;
-  assert.deepEqual(probe.mounts.filter((m: string) => !allowed.test(m)), [], "only the manifest's mounts are visible");
-  assert.deepEqual(probe.mounts.filter((m: string) => /ws-lower|\/up$/.test(m)), [], "the overlay's backing folders are hidden");
-  // Writes land in the overlay, never in the checkout.
-  assert.equal(probe.workspaceWrite, "written");
+test("inside the jail, the relay is the only way out (probe())", options, async () => {
+  const { runId: _r, claimId: _c, command: _x, ...base } = spec([]);
+  const report = await probe(base, `p${process.pid}-${++runs}`);
+  assert.deepEqual(report.failures, [], JSON.stringify(report.seen));
+  assert.equal(report.passed, true);
   assert.equal(existsSync(path.join(workspace, ".peeps-probe")), false);
-  assert.deepEqual(sinkHits, ["GET /probe-relay HTTP/1.0"]);
 });
 
 test("vsock (64- and 32-bit), io_uring, bpf, setns and keyrings are refused by the unit's filter", options, async () => {
@@ -194,9 +200,10 @@ test("a line longer than 64 KiB reaches the log cut into pieces, each prefixed",
 
 test("end() with the executor still running empties the cgroup within 5 s", options, async () => {
   await startSink();
-  const handle = await startJail(spec(HOLD), { listenProxy: forwardToSink });
+  const s = spec(HOLD);
+  const handle = await startJail(s, { listenProxy: forwardToSink });
   await handle.ready;
-  handle.start();
+  await begin(handle, s);
   await new Promise((r) => setTimeout(r, 500));
   const end = await handle.end();
   assert.ok(end.clean);
@@ -289,9 +296,254 @@ test("a run that outlives maxRunMs is ended by systemd", options, async () => {
   s.limits.maxRunMs = 3000;
   const handle = await startJail(s, { listenProxy: forwardToSink });
   await handle.ready;
-  handle.start();
+  await begin(handle, s);
   const cgroup = await cgroupOf(handle.unit);
   assert.notEqual(await emptiesWithin(cgroup, 8000), null);
   await handle.end();
 });
 
+
+// ---- Tickets, the in-jail install, and the fd 3 channel (e4 plan v3 §2.1, §2.2, §3.1) ----
+
+const NODE_IN_JAIL = "/run/peeps/node/bin/node";
+const NPM_REBUILD = [NODE_IN_JAIL, "/run/peeps/node/lib/node_modules/npm/bin/npm-cli.js", "rebuild", "--foreground-scripts"];
+
+/** A checkout of its own under the runner's home, holding `files`. */
+function workspaceWith(files: Record<string, string>): string {
+  const ws = mkdtempSync(path.join(os.homedir(), "peeps-jail-ws-"));
+  chmodSync(ws, 0o755);
+  for (const [name, text] of Object.entries(files)) writeFileSync(path.join(ws, name), text);
+  return ws;
+}
+
+/** A gate stand-in that counts what reaches it and lets nothing through. */
+function countingProxy(seen: { connections: number }) {
+  return (sockPath: string): Promise<net.Server> =>
+    new Promise((resolve) => {
+      const server = net.createServer((c) => {
+        seen.connections++;
+        c.destroy();
+      });
+      server.listen(sockPath, () => resolve(server));
+    });
+}
+
+/** A jail whose end is registered as soon as it exists: a failed assertion still ends the unit. */
+async function jailWithOutput(t: TestContext, s: JailSpec, listenProxy: (p: string) => Promise<net.Server> = forwardToSink): Promise<{ handle: JailHandle; out: () => string }> {
+  await startSink();
+  const handle = await startJail(s, { listenProxy, stdout: "pipe" });
+  t.after(async () => {
+    await handle.end();
+  });
+  let out = "";
+  handle.stdout!.setEncoding("utf8");
+  handle.stdout!.on("data", (d: string) => (out += d));
+  await handle.ready;
+  return { handle, out: () => out };
+}
+
+async function waitForOutput(out: () => string, line: RegExp): Promise<void> {
+  const deadline = performance.now() + 5_000;
+  while (!line.test(out()) && performance.now() < deadline) await sleep(10);
+  assert.match(out(), line);
+}
+
+const ECHO_RAN = ["/bin/sh", "-c", "echo EXECUTOR-RAN; exec sleep 60"];
+
+test("a stale start ticket is refused before the install, and is not used up", options, async (t) => {
+  const s = spec(ECHO_RAN);
+  s.install = ["/bin/sh", "-c", "echo INSTALL-RAN"];
+  const { handle, out } = await jailWithOutput(t, s);
+  const stale = ticketFor(s, -1);
+  await assert.rejects(handle.start(() => stale), (e: unknown) => e instanceof TicketRefused && e.reason === "stale_ticket");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.doesNotMatch(out(), /INSTALL-RAN/, "nothing ran on a stale ticket");
+  // The refusal used nothing up: a fresh ticket starts the install.
+  assert.equal((await handle.start(() => ticketFor(s))).code, 0);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.match(out(), /INSTALL-RAN/);
+  assert.ok((await handle.end()).clean);
+});
+
+test("a launch ticket that went stale during a long install starts no executor", options, async (t) => {
+  const s = spec(ECHO_RAN);
+  s.install = ["/bin/sh", "-c", "sleep 2"];
+  const { handle, out } = await jailWithOutput(t, s);
+  const minted = ticketFor(s, 1000);
+  assert.equal((await handle.start(() => ticketFor(s))).code, 0);
+  await assert.rejects(handle.launch(() => minted), (e: unknown) => e instanceof TicketRefused && e.reason === "stale_ticket");
+  await new Promise((r) => setTimeout(r, 500));
+  assert.doesNotMatch(out(), /EXECUTOR-RAN/);
+  assert.ok((await handle.end()).clean);
+});
+
+test("a failing install reports its code, and no launch follows it", options, async (t) => {
+  const s = spec(ECHO_RAN);
+  s.install = ["/bin/sh", "-c", "exit 7"];
+  const { handle, out } = await jailWithOutput(t, s);
+  const installed = await handle.start(() => ticketFor(s));
+  assert.equal(installed.code, 7);
+  await assert.rejects(handle.launch(() => ticketFor(s)), (e: unknown) => e instanceof TicketRefused && e.reason === "early_ticket");
+  assert.doesNotMatch(out(), /EXECUTOR-RAN/);
+  assert.ok((await handle.end()).clean);
+});
+
+test("row 11: a postinstall that writes a marker and runs curl fails the install, writes nothing to the checkout, and reaches nothing", options, async (t) => {
+  await startSink();
+  sinkHits = [];
+  const ws = workspaceWith({
+    "package.json": JSON.stringify({ name: "row11", version: "1.0.0", scripts: { postinstall: `echo x > .peeps-marker && echo ROW11-MARKER-WRITTEN && curl -sS -m 5 http://${sinkAddr}/row11` } }),
+  });
+  try {
+    const s = spec(ECHO_RAN, ws);
+    s.install = NPM_REBUILD;
+    const seen = { connections: 0 };
+    const { handle, out } = await jailWithOutput(t, s, countingProxy(seen));
+    const installed = await handle.start(() => ticketFor(s));
+    assert.equal(installed.code, 7, "curl attempted the connection and could not connect");
+    await waitForOutput(out, /^jail\| ROW11-MARKER-WRITTEN$/m);
+    assert.equal(existsSync(path.join(ws, ".peeps-marker")), false, "the marker stayed in the overlay");
+    assert.deepEqual(sinkHits, [], "zero sink arrivals");
+    assert.equal(seen.connections, 0);
+    assert.ok((await handle.end()).clean);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("the rebuild runs as the runner's uid in the overlay, with no upstream traffic; root preinstall, install and postinstall run (npm 11), prepare does not", options, async (t) => {
+  const hook = (name: string) => `echo HOOK ${name} $(id -u) && echo x > .peeps-${name}`;
+  const ws = workspaceWith({
+    "package.json": JSON.stringify({ name: "hooks", version: "1.0.0", scripts: Object.fromEntries(["preinstall", "install", "postinstall", "prepare"].map((n) => [n, hook(n)])) }),
+  });
+  try {
+    // The executor checks, from inside the overlay, that the hooks wrote their files there.
+    const s = spec(["/bin/sh", "-c", "test -f .peeps-preinstall && test -f .peeps-install && test -f .peeps-postinstall && test ! -e .peeps-prepare"], ws);
+    s.install = NPM_REBUILD;
+    const seen = { connections: 0 };
+    const { handle, out } = await jailWithOutput(t, s, countingProxy(seen));
+    assert.doesNotMatch(out(), /^jail\| HOOK /m);
+    assert.equal((await handle.start(() => ticketFor(s))).code, 0, out());
+    await waitForOutput(out, /^jail\| HOOK postinstall \d+$/m);
+    await handle.launch(() => ticketFor(s));
+    assert.deepEqual(await handle.exited, { code: 0, signal: null }, "the marker files are present only in the overlay");
+    const ran = [...out().matchAll(/HOOK (\w+) (\d+)/g)].map((m) => [m[1], Number(m[2])]);
+    assert.deepEqual(ran, ["preinstall", "install", "postinstall"].map((name) => [name, process.getuid!()]), out());
+    for (const n of ["preinstall", "install", "postinstall", "prepare"]) assert.equal(existsSync(path.join(ws, `.peeps-${n}`)), false, n);
+    assert.equal(seen.connections, 0, "the rebuild sent nothing upstream");
+    assert.ok((await handle.end()).clean);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+for (const [name, frame] of [
+  ["a forged exit", encode({ type: "exit", code: 0, signal: null })],
+  ["a frame for the executor", encode({ type: "stop" })],
+] as const) {
+  test(`${name} on fd 3 ends the jail as protocol`, options, async (t) => {
+    const s = spec(["/bin/sh", "-c", `printf '%s' "$0" >&3; exec sleep 60`, frame]);
+    const { handle } = await jailWithOutput(t, s);
+    await begin(handle, s);
+    assert.deepEqual(await handle.exited, { code: null, signal: "protocol" });
+    assert.ok((await handle.end()).clean);
+  });
+}
+
+test("an executor that stops reading stdin is ended by the 1 MiB rule", options, async (t) => {
+  const s = spec(["/bin/sleep", "60"]);
+  const { handle } = await jailWithOutput(t, s);
+  await begin(handle, s);
+  for (let turn = 1; turn <= 60_000; turn++) handle.send({ type: "cancel", turn });
+  const t0 = performance.now();
+  assert.deepEqual(await handle.exited, { code: null, signal: "protocol" });
+  assert.ok(performance.now() - t0 < 10_000);
+  assert.ok((await handle.end()).clean);
+});
+
+// ---- The hosted slice (e4 plan v3 §3.1): the real jail, install, executor, relay, CA and GateProxy ----
+
+/** A checkout holding the e4 journeys and a lockfile for the pinned Playwright, installed as the action would before a claim. */
+async function sliceWorkspace(withPlaywright: boolean): Promise<string> {
+  const ws = workspaceWith({});
+  cpSync(FIXTURES, ws, { recursive: true });
+  if (withPlaywright) {
+    cpSync(path.join(__dirname, "fixtures/load-engine/slice"), ws, { recursive: true });
+    const scratch = mkdtempSync(path.join(os.tmpdir(), "peeps-slice-npm-"));
+    try {
+      await preinstall(ws, trustedToolchain(path.dirname(path.dirname(process.execPath)), ws), scratch);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+  return ws;
+}
+
+/** The mini supervisor's executor, in a real jail: the gate's proxy listens on the jail's socket. */
+function jailLink(ws: string, o: { ca: boolean; install: boolean }) {
+  return async (ctx: { caFile: string }, proxy: { server: net.Server }): Promise<ExecutorLink> => {
+    const s = spec([NODE_IN_JAIL, "/run/peeps/action/load-executor.js"], ws);
+    if (o.ca) s.caPem = ctx.caFile;
+    if (o.install) s.install = NPM_REBUILD;
+    s.limits.memoryMax = "2G";
+    const handle = await startJail(s, { listenProxy: (p) => new Promise((resolve) => proxy.server.listen(p, () => resolve(proxy.server))) });
+    try {
+      await begin(handle, s);
+    } catch (error) {
+      await handle.end();
+      throw error;
+    }
+    return {
+      send: (f) => handle.send(f),
+      onFrame: (l) => void handle.onFrame(l),
+      exited: handle.exited,
+      end: async () => {
+        assert.ok((await handle.end()).clean);
+      },
+      stderr: () => "",
+    };
+  };
+}
+
+test("hosted slice: two turns through the jail keep the slot's cookie, each with a fresh credential and CONNECT; a closed credential reaches nothing", { ...options, timeout: 600_000 }, async (t) => {
+  const ws = await sliceWorkspace(true);
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  const m = await MiniSupervisor.start(t, { journey: { module: "journeys.ts", export: "cookie" }, workspace: ws, respond, link: jailLink(ws, { ca: true, install: true }) });
+  const loaded = await m.init();
+  assert.equal(loaded.type, "loaded", JSON.stringify(loaded));
+  assert.match((loaded as { playwright: string }).playwright, /^1\.46\./);
+
+  const first = m.open(1);
+  assert.equal((await first.outcome).kind, "success");
+  const second = m.open(1);
+  assert.equal((await second.outcome).kind, "success");
+  assert.equal(m.sink.arrivals.length, 2);
+  assert.equal(m.sink.arrivals[0]!.headers.cookie, undefined);
+  assert.ok(m.sink.arrivals[1]!.headers.cookie, "the slot kept its cookie across turns");
+  assert.notEqual(first.credential, second.credential);
+  assert.deepEqual(m.connects, [first.credential, second.credential], "one CONNECT per turn, each with its own credential");
+
+  const closed = m.open(1);
+  m.proxy.closeTurn(closed.turn);
+  assert.equal((await closed.outcome).kind, "failure");
+  assert.deepEqual(m.connects, [first.credential, second.credential, closed.credential]);
+  assert.equal(m.journal.snapshot().denied.turn_closed, 1, "the closed credential was refused by the gate");
+  assert.equal(m.sink.arrivals.length, 2, "a closed credential got 0 arrivals");
+});
+
+test("hosted slice: with no CA in the jail, or no Playwright in the checkout, nothing arrives", { ...options, timeout: 600_000 }, async (t) => {
+  const ws = await sliceWorkspace(true);
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  const noCa = await MiniSupervisor.start(t, { journey: { module: "journeys.ts", export: "get" }, workspace: ws, respond, link: jailLink(ws, { ca: false, install: true }) });
+  assert.equal((await noCa.init()).type, "loaded");
+  assert.equal((await noCa.turn(1)).kind, "failure");
+  assert.equal(noCa.sink.arrivals.length, 0, "no CA: 0 arrivals");
+
+  const bare = await sliceWorkspace(false);
+  t.after(() => rmSync(bare, { recursive: true, force: true }));
+  const noPw = await MiniSupervisor.start(t, { journey: { module: "journeys.ts", export: "get" }, workspace: bare, respond, link: jailLink(bare, { ca: true, install: false }) });
+  const f = await noPw.init();
+  assert.equal(f.type, "fatal");
+  assert.equal((f as { code: string }).code, "playwright");
+  assert.equal(noPw.sink.arrivals.length, 0, "no Playwright: 0 arrivals");
+});

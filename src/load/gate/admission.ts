@@ -16,7 +16,7 @@
  */
 
 export interface Clocks {
-  /** A monotonic clock, in ms (`performance.now()`). */
+  /** CLOCK_MONOTONIC, in ms (`sharedClocks` in `clocks.ts`): the same clock in every process of the unit. */
   monoMs: number;
   /** The wall clock, in ms since the epoch (`Date.now()`). */
   wallMs: number;

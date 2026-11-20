@@ -30,7 +30,9 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/load/jail/init.ts
 var init_exports = {};
 __export(init_exports, {
-  isolate: () => isolate
+  MAX_QUEUE_BYTES: () => MAX_QUEUE_BYTES,
+  isolate: () => isolate,
+  serveControl: () => serveControl
 });
 module.exports = __toCommonJS(init_exports);
 var import_node_child_process = require("node:child_process");
@@ -39,9 +41,36 @@ var import_node_net = __toESM(require("node:net"));
 
 // src/load/jail/ctl.ts
 var MAX_FRAME_BYTES = 64 * 1024;
+var MAX_MESSAGE = 2e3;
+var MAX_LOCATION = 500;
+var TO_EXECUTOR = /* @__PURE__ */ new Set(["init", "turn", "cancel", "stop"]);
+var TO_SUPERVISOR = /* @__PURE__ */ new Set(["loaded", "fatal", "outcome"]);
+function relayable(frame, from) {
+  return (from === "supervisor" ? TO_EXECUTOR : TO_SUPERVISOR).has(frame.type);
+}
 function encode(frame) {
   return `${JSON.stringify(frame)}
 `;
+}
+var isSafePositive = (v) => Number.isSafeInteger(v) && v > 0;
+var isSafeCount = (v) => Number.isSafeInteger(v) && v >= 0;
+var isFinitePositive = (v) => typeof v === "number" && Number.isFinite(v) && v > 0;
+var isText = (v, max, min = 0) => typeof v === "string" && v.length >= min && v.length <= max;
+var isCode = (v) => v === null || Number.isSafeInteger(v);
+var isSignal = (v) => v === null || isText(v, 32, 1);
+var PASSWORD = /^[A-Za-z0-9_-]{43}$/;
+var NONCE = /^[0-9a-f]{64}$/;
+var IDENT = /^[A-Za-z_$][A-Za-z0-9_$]{0,255}$/;
+function ticketOf(v) {
+  if (typeof v !== "object" || v === null) return null;
+  const t = v;
+  if (!isText(t.claimId, 256, 1) || !isSafeCount(t.epoch) || !isText(t.planHash, 256, 1) || !isSafeCount(t.leaseSeq) || !isText(t.nonce, 256, 1)) return null;
+  if (!isFinitePositive(t.monoDeadline) || !isFinitePositive(t.wallDeadline)) return null;
+  return { claimId: t.claimId, epoch: t.epoch, planHash: t.planHash, leaseSeq: t.leaseSeq, nonce: t.nonce, monoDeadline: t.monoDeadline, wallDeadline: t.wallDeadline };
+}
+function optional(v, name, max) {
+  if (v[name] === void 0) return {};
+  return isText(v[name], max) ? { [name]: v[name] } : null;
 }
 function decode(line) {
   let value;
@@ -50,18 +79,52 @@ function decode(line) {
   } catch {
     return null;
   }
-  if (typeof value !== "object" || value === null) return null;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const v = value;
   switch (v.type) {
     case "hello":
-      return typeof v.nonce === "string" && /^[0-9a-f]{64}$/.test(v.nonce) ? { type: "hello", nonce: v.nonce } : null;
+      return typeof v.nonce === "string" && NONCE.test(v.nonce) ? { type: "hello", nonce: v.nonce } : null;
     case "ready":
-    case "start":
+    case "launched":
+    case "stop":
       return { type: v.type };
-    case "exit": {
-      const code = v.code === null || typeof v.code === "number" && Number.isInteger(v.code) ? v.code : void 0;
-      const signal = v.signal === null || typeof v.signal === "string" ? v.signal : void 0;
-      return code === void 0 || signal === void 0 ? null : { type: "exit", code, signal };
+    case "start":
+    case "launch": {
+      const ticket = ticketOf(v.ticket);
+      return ticket ? { type: v.type, ticket } : null;
+    }
+    case "refused":
+      return v.reason === "stale_ticket" || v.reason === "used_ticket" || v.reason === "foreign_ticket" || v.reason === "early_ticket" ? { type: "refused", reason: v.reason } : null;
+    case "installed":
+      return isCode(v.code) && isSignal(v.signal) && typeof v.ms === "number" && Number.isFinite(v.ms) && v.ms >= 0 ? { type: "installed", code: v.code, signal: v.signal, ms: v.ms } : null;
+    case "exit":
+      return isCode(v.code) && isSignal(v.signal) ? { type: "exit", code: v.code, signal: v.signal } : null;
+    case "init": {
+      const j = v.journey;
+      if (typeof j !== "object" || j === null || !isText(j.module, 1024, 1) || typeof j.export !== "string" || !IDENT.test(j.export)) return null;
+      if (!isText(v.baseURL, 2048, 1) || !isText(v.proxy, 256, 1) || !isFinitePositive(v.renewEveryMs)) return null;
+      if (!Number.isInteger(v.parallel) || v.parallel < 1 || v.parallel > 8) return null;
+      return { type: "init", journey: { module: j.module, export: j.export }, baseURL: v.baseURL, proxy: v.proxy, renewEveryMs: v.renewEveryMs, parallel: v.parallel };
+    }
+    case "turn":
+      if (!isSafePositive(v.turn) || !isSafePositive(v.slot) || typeof v.password !== "string" || !PASSWORD.test(v.password) || !isFinitePositive(v.deadlineMono)) return null;
+      return { type: "turn", turn: v.turn, slot: v.slot, password: v.password, deadlineMono: v.deadlineMono };
+    case "cancel":
+      return isSafePositive(v.turn) ? { type: "cancel", turn: v.turn } : null;
+    case "loaded":
+      return isText(v.playwright, 64, 1) ? { type: "loaded", playwright: v.playwright } : null;
+    case "fatal": {
+      if (v.code !== "unreadable" && v.code !== "playwright" && v.code !== "journey" && v.code !== "protocol") return null;
+      const location = optional(v, "location", MAX_LOCATION);
+      if (!isText(v.message, MAX_MESSAGE) || !location) return null;
+      return { type: "fatal", code: v.code, message: v.message, ...location };
+    }
+    case "outcome": {
+      if (!isSafePositive(v.turn) || v.kind !== "success" && v.kind !== "failure" && v.kind !== "timeout" && v.kind !== "cancelled") return null;
+      const message = optional(v, "message", MAX_MESSAGE);
+      const location = optional(v, "location", MAX_LOCATION);
+      if (!message || !location) return null;
+      return { type: "outcome", turn: v.turn, kind: v.kind, ...message, ...location };
     }
     default:
       return null;
@@ -69,6 +132,10 @@ function decode(line) {
 }
 var LineSplitter = class {
   buffer = "";
+  /** Bytes after the last newline: at end of input, a frame cut short. */
+  get incomplete() {
+    return this.buffer !== "";
+  }
   push(chunk) {
     this.buffer += chunk;
     const lines = this.buffer.split("\n");
@@ -77,6 +144,26 @@ var LineSplitter = class {
     return lines;
   }
 };
+function sameNonce(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+function newTicketState() {
+  return { used: /* @__PURE__ */ new Set(), installed: false };
+}
+function consumeTicket(kind, ticket, now, config, state) {
+  if (!sameText(ticket.claimId, config.claimId)) return "foreign";
+  if (state.used.has(kind)) return "used";
+  if (kind === "launch" && !state.installed) return "early";
+  if (!(now.monoMs < ticket.monoDeadline) || !(now.wallMs < ticket.wallDeadline)) return "stale";
+  state.used.add(kind);
+  return "ok";
+}
+function sameText(a, b) {
+  return a.length === b.length && sameNonce(a, b);
+}
 
 // src/load/jail/spec.ts
 var RELAY_UID = 65533;
@@ -100,6 +187,22 @@ function executorEnv(config) {
     ...Object.entries(config.env).map(([name, value]) => `${name}=${value}`)
   ];
 }
+function rebuildEnv(config) {
+  return [
+    `PATH=${dirOf(config.nodeInJail)}:/usr/bin:/bin`,
+    `HOME=${IN_JAIL.home}`,
+    "npm_config_offline=true",
+    "npm_config_registry=https://registry.npmjs.org/",
+    `npm_config_userconfig=${IN_JAIL.home}/.npmrc-none`,
+    `npm_config_globalconfig=${IN_JAIL.home}/.npmrc-global-none`,
+    "npm_config_git=/bin/false",
+    `npm_config_cache=${IN_JAIL.home}/.npm`,
+    "npm_config_install_links=false",
+    "npm_config_audit=false",
+    "npm_config_fund=false",
+    "npm_config_update_notifier=false"
+  ];
+}
 function dropArgs(uid, gid) {
   return [
     `--reuid=${uid}`,
@@ -116,6 +219,7 @@ function dirOf(file) {
 }
 
 // src/load/jail/init.ts
+var MAX_QUEUE_BYTES = 1024 * 1024;
 function run(cmd, args) {
   (0, import_node_child_process.execFileSync)(cmd, args, { stdio: ["ignore", "ignore", "inherit"] });
 }
@@ -209,35 +313,120 @@ function startRelay(config) {
     relay2.once("exit", (code) => reject(new Error(`relay exited ${code}`)));
   });
 }
+var REFUSED = { stale: "stale_ticket", used: "used_ticket", foreign: "foreign_ticket", early: "early_ticket" };
+function serveControl(ctl, config, io) {
+  const tickets = newTicketState();
+  let executor;
+  let over = false;
+  const finish = (code, signal) => {
+    if (over) return;
+    over = true;
+    ctl.write(encode({ type: "exit", code, signal }));
+    io.end();
+  };
+  const violation = () => finish(null, "protocol");
+  const send = (frame) => {
+    if (over) return true;
+    const flowing = ctl.write(encode(frame));
+    if (ctl.writableLength > MAX_QUEUE_BYTES) violation();
+    return flowing;
+  };
+  const install = () => {
+    const t0 = io.now().monoMs;
+    const child = io.install();
+    if (!child) {
+      tickets.installed = true;
+      send({ type: "installed", code: 0, signal: null, ms: 0 });
+      return;
+    }
+    let done = false;
+    const report = (code, signal) => {
+      if (done) return;
+      done = true;
+      if (code === 0) tickets.installed = true;
+      send({ type: "installed", code, signal, ms: Math.max(0, Math.round(io.now().monoMs - t0)) });
+    };
+    child.once("error", () => report(null, "spawn_error"));
+    child.once("exit", (code, signal) => report(code, signal));
+  };
+  const launch = () => {
+    const child = io.executor();
+    executor = child;
+    const stdin = child.stdin;
+    const fd3 = child.stdio[3];
+    stdin.on("error", () => child.exitCode === null && child.signalCode === null && violation());
+    const lines2 = new LineSplitter();
+    fd3.setEncoding("utf8");
+    fd3.on("error", violation);
+    fd3.once("end", () => {
+      if (lines2.incomplete) violation();
+    });
+    fd3.on("data", (chunk) => {
+      if (over) return;
+      const got = lines2.push(chunk);
+      if (got === null) return violation();
+      for (const line of got) {
+        const frame = decode(line);
+        if (!frame || !relayable(frame, "executor")) return violation();
+        if (!send(frame)) {
+          fd3.pause();
+          ctl.once("drain", () => fd3.resume());
+        }
+        if (over) return;
+      }
+    });
+    child.once("error", () => finish(null, "spawn_error"));
+    child.once("close", (code, signal) => finish(code, signal));
+    send({ type: "launched" });
+  };
+  const lines = new LineSplitter();
+  ctl.setEncoding("utf8");
+  ctl.once("end", () => {
+    if (lines.incomplete) violation();
+  });
+  ctl.on("data", (chunk) => {
+    if (over) return;
+    const got = lines.push(chunk);
+    if (got === null) return violation();
+    for (const line of got) {
+      const frame = decode(line);
+      if (!frame) return violation();
+      if (frame.type === "start" || frame.type === "launch") {
+        const verdict = consumeTicket(frame.type, frame.ticket, io.now(), config, tickets);
+        if (verdict !== "ok") send({ type: "refused", reason: REFUSED[verdict] });
+        else if (frame.type === "start") install();
+        else launch();
+        if (over) return;
+        continue;
+      }
+      if (!relayable(frame, "supervisor") || !executor) return violation();
+      const stdin = executor.stdin;
+      stdin.write(encode(frame));
+      if (stdin.writableLength > MAX_QUEUE_BYTES) return violation();
+    }
+  });
+}
+function monoNow() {
+  return { monoMs: Number(process.hrtime.bigint()) / 1e6, wallMs: Date.now() };
+}
 async function init() {
   const config = JSON.parse(process.env.PEEPS_JAIL_CONFIG ?? "");
   const nonce = process.env.PEEPS_CTL_NONCE ?? "";
   delete process.env.PEEPS_CTL_NONCE;
   isolate(config);
   const ctl = await connectCtl(nonce);
-  const send = (frame) => ctl.write(encode(frame));
   ctl.on("close", () => process.exit(0));
   ctl.on("error", () => process.exit(0));
   await startRelay(config);
-  send({ type: "ready" });
-  const lines = new LineSplitter();
-  let started = false;
-  ctl.setEncoding("utf8");
-  ctl.on("data", (chunk) => {
-    const got = lines.push(chunk);
-    if (got === null) process.exit(1);
-    for (const line of got) {
-      if (decode(line)?.type !== "start" || started) continue;
-      started = true;
-      const executor = (0, import_node_child_process.spawn)(
-        "/usr/bin/setpriv",
-        [...dropArgs(config.executorUid, config.executorGid), "/usr/bin/env", "-i", ...executorEnv(config), ...config.command],
-        { stdio: ["ignore", "inherit", "inherit"], cwd: IN_JAIL.workspace, env: {} }
-      );
-      executor.on("exit", (code, signal) => {
-        send({ type: "exit", code, signal });
-        ctl.end(() => process.exit(0));
-      });
+  ctl.write(encode({ type: "ready" }));
+  const asExecutor = (env, command, stdio) => (0, import_node_child_process.spawn)("/usr/bin/setpriv", [...dropArgs(config.executorUid, config.executorGid), "/usr/bin/env", "-i", ...env, ...command], { stdio, cwd: IN_JAIL.workspace, env: {} });
+  serveControl(ctl, config, {
+    install: () => config.install ? asExecutor(rebuildEnv(config), config.install, ["ignore", "inherit", "inherit"]) : null,
+    executor: () => asExecutor(executorEnv(config), config.command, ["pipe", "inherit", "inherit", "pipe"]),
+    now: monoNow,
+    end: () => {
+      ctl.end(() => process.exit(0));
+      setTimeout(() => process.exit(0), 1e3).unref();
     }
   });
 }
@@ -312,16 +501,20 @@ Host: ${host}\r
   process.stdout.write(`PEEPS-PROBE ${JSON.stringify(result)}
 `);
 }
-var mode = process.argv[2];
-if (mode === "--relay") relay();
-else if (mode === "--probe") void probe(process.argv[3] ?? "");
-else
-  init().catch((error) => {
-    process.stderr.write(`peeps load jail init: ${error instanceof Error ? error.message : String(error)}
+if (require.main === module) {
+  const mode = process.argv[2];
+  if (mode === "--relay") relay();
+  else if (mode === "--probe") void probe(process.argv[3] ?? "");
+  else
+    init().catch((error) => {
+      process.stderr.write(`peeps load jail init: ${error instanceof Error ? error.message : String(error)}
 `);
-    process.exit(1);
-  });
+      process.exit(1);
+    });
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  isolate
+  MAX_QUEUE_BYTES,
+  isolate,
+  serveControl
 });

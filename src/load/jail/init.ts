@@ -3,6 +3,14 @@
  * net, pid, mount, ipc and uts namespaces, built by the outer watcher.
  *
  * - `isolate` builds a minimal root from read-only staged inputs and pivots into it.
+ * - `serveControl` serves the control socket (e4 plan v3 §2.1): a `start` ticket runs the
+ *   install (`npm rebuild`, offline) as the executor's uid and answers `installed`; a `launch`
+ *   ticket, accepted only after that, starts the executor with frames in on its fd 0 and out on
+ *   its fd 3, and answers `launched`. Each ticket is used once, for this claim, before both of
+ *   its deadlines; a stale or foreign one is refused without being used up. Then init relays
+ *   the executor's frames both ways. A line that is malformed, unknown, in the wrong
+ *   direction or too long, a queue over 1 MiB, or a broken pipe ends the jail with
+ *   `exit {signal: "protocol"}`: init exits, and the pid namespace takes every process with it.
  * - `--relay` is the relay: uid 65533, 127.0.0.1:3128 to the supervisor's proxy socket.
  * - `--probe <host:port>` is Peeps' own self-test, run as the executor would be.
  *
@@ -11,8 +19,12 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import { decode, encode, LineSplitter, type CtlFrame } from "./ctl";
-import { dropArgs, executorEnv, IN_JAIL, RELAY_UID, rootDir, type InitConfig } from "./spec";
+import type { Duplex, Readable, Writable } from "node:stream";
+import { consumeTicket, decode, encode, LineSplitter, newTicketState, relayable, type CtlFrame, type RefusedReason } from "./ctl";
+import { dropArgs, executorEnv, IN_JAIL, rebuildEnv, RELAY_UID, rootDir, type InitConfig } from "./spec";
+
+/** A relay queue (to the executor's stdin, or to the control socket) longer than this ends the jail. */
+export const MAX_QUEUE_BYTES = 1024 * 1024;
 
 function run(cmd: string, args: string[]): void {
   execFileSync(cmd, args, { stdio: ["ignore", "ignore", "inherit"] });
@@ -123,37 +135,144 @@ function startRelay(config: InitConfig): Promise<ChildProcess> {
   });
 }
 
+export interface ControlIo {
+  /** Starts the install as the executor's uid; null when the spec has none. */
+  install(): ChildProcess | null;
+  /** Starts the executor, its fd 0 and fd 3 piped. */
+  executor(): ChildProcess;
+  /** CLOCK_MONOTONIC and the wall clock, in ms. */
+  now(): { monoMs: number; wallMs: number };
+  /** The jail is over: init exits, and the pid namespace ends every process in it. */
+  end(): void;
+}
+
+const REFUSED: Record<"stale" | "used" | "foreign" | "early", RefusedReason> = { stale: "stale_ticket", used: "used_ticket", foreign: "foreign_ticket", early: "early_ticket" };
+
+/** Serves the control socket after `ready`: tickets, the install, the executor, and the relay. */
+export function serveControl(ctl: Duplex, config: Pick<InitConfig, "claimId">, io: ControlIo): void {
+  const tickets = newTicketState();
+  let executor: ChildProcess | undefined;
+  let over = false;
+  const finish = (code: number | null, signal: string | null) => {
+    if (over) return;
+    over = true;
+    ctl.write(encode({ type: "exit", code, signal }));
+    io.end();
+  };
+  const violation = () => finish(null, "protocol");
+  /** Writes one frame to the supervisor; false when the socket is backed up. */
+  const send = (frame: CtlFrame): boolean => {
+    if (over) return true;
+    const flowing = ctl.write(encode(frame));
+    if (ctl.writableLength > MAX_QUEUE_BYTES) violation();
+    return flowing;
+  };
+
+  const install = () => {
+    const t0 = io.now().monoMs;
+    const child = io.install();
+    if (!child) {
+      tickets.installed = true;
+      send({ type: "installed", code: 0, signal: null, ms: 0 });
+      return;
+    }
+    let done = false;
+    const report = (code: number | null, signal: string | null) => {
+      if (done) return;
+      done = true;
+      if (code === 0) tickets.installed = true;
+      send({ type: "installed", code, signal, ms: Math.max(0, Math.round(io.now().monoMs - t0)) });
+    };
+    child.once("error", () => report(null, "spawn_error"));
+    child.once("exit", (code, signal) => report(code, signal));
+  };
+
+  const launch = () => {
+    const child = io.executor();
+    executor = child;
+    const stdin = child.stdin as Writable;
+    const fd3 = child.stdio[3] as Readable;
+    stdin.on("error", () => child.exitCode === null && child.signalCode === null && violation());
+    const lines = new LineSplitter();
+    fd3.setEncoding("utf8");
+    fd3.on("error", violation);
+    // An exit after half a frame is not a clean exit.
+    fd3.once("end", () => {
+      if (lines.incomplete) violation();
+    });
+    fd3.on("data", (chunk: string) => {
+      if (over) return;
+      const got = lines.push(chunk);
+      if (got === null) return violation();
+      for (const line of got) {
+        const frame = decode(line);
+        if (!frame || !relayable(frame, "executor")) return violation();
+        // The supervisor is behind: stop reading the executor until it catches up.
+        if (!send(frame)) {
+          fd3.pause();
+          ctl.once("drain", () => fd3.resume());
+        }
+        if (over) return;
+      }
+    });
+    child.once("error", () => finish(null, "spawn_error"));
+    // After its stdio closed, so every frame it wrote is relayed first.
+    child.once("close", (code, signal) => finish(code, signal));
+    send({ type: "launched" });
+  };
+
+  const lines = new LineSplitter();
+  ctl.setEncoding("utf8");
+  ctl.once("end", () => {
+    if (lines.incomplete) violation();
+  });
+  ctl.on("data", (chunk: string) => {
+    if (over) return;
+    const got = lines.push(chunk);
+    if (got === null) return violation();
+    for (const line of got) {
+      const frame = decode(line);
+      if (!frame) return violation();
+      if (frame.type === "start" || frame.type === "launch") {
+        const verdict = consumeTicket(frame.type, frame.ticket, io.now(), config, tickets);
+        if (verdict !== "ok") send({ type: "refused", reason: REFUSED[verdict] });
+        else if (frame.type === "start") install();
+        else launch();
+        if (over) return;
+        continue;
+      }
+      if (!relayable(frame, "supervisor") || !executor) return violation();
+      const stdin = executor.stdin as Writable;
+      stdin.write(encode(frame));
+      if (stdin.writableLength > MAX_QUEUE_BYTES) return violation();
+    }
+  });
+}
+
+function monoNow(): { monoMs: number; wallMs: number } {
+  return { monoMs: Number(process.hrtime.bigint()) / 1e6, wallMs: Date.now() };
+}
+
 async function init(): Promise<void> {
   const config = JSON.parse(process.env.PEEPS_JAIL_CONFIG ?? "") as InitConfig;
   const nonce = process.env.PEEPS_CTL_NONCE ?? "";
   delete process.env.PEEPS_CTL_NONCE;
   isolate(config);
   const ctl = await connectCtl(nonce);
-  const send = (frame: CtlFrame) => ctl.write(encode(frame));
   ctl.on("close", () => process.exit(0));
   ctl.on("error", () => process.exit(0));
   await startRelay(config);
-  send({ type: "ready" });
-
-  const lines = new LineSplitter();
-  let started = false;
-  ctl.setEncoding("utf8");
-  ctl.on("data", (chunk: string) => {
-    const got = lines.push(chunk);
-    if (got === null) process.exit(1);
-    for (const line of got) {
-      if (decode(line)?.type !== "start" || started) continue;
-      started = true;
-      const executor = spawn(
-        "/usr/bin/setpriv",
-        [...dropArgs(config.executorUid, config.executorGid), "/usr/bin/env", "-i", ...executorEnv(config), ...config.command],
-        { stdio: ["ignore", "inherit", "inherit"], cwd: IN_JAIL.workspace, env: {} },
-      );
-      executor.on("exit", (code, signal) => {
-        send({ type: "exit", code, signal });
-        ctl.end(() => process.exit(0));
-      });
-    }
+  ctl.write(encode({ type: "ready" }));
+  const asExecutor = (env: string[], command: string[], stdio: ("pipe" | "inherit" | "ignore")[]) =>
+    spawn("/usr/bin/setpriv", [...dropArgs(config.executorUid, config.executorGid), "/usr/bin/env", "-i", ...env, ...command], { stdio, cwd: IN_JAIL.workspace, env: {} });
+  serveControl(ctl, config, {
+    install: () => (config.install ? asExecutor(rebuildEnv(config), config.install, ["ignore", "inherit", "inherit"]) : null),
+    executor: () => asExecutor(executorEnv(config), config.command, ["pipe", "inherit", "inherit", "pipe"]),
+    now: monoNow,
+    end: () => {
+      ctl.end(() => process.exit(0));
+      setTimeout(() => process.exit(0), 1000).unref();
+    },
   });
 }
 
@@ -231,11 +350,14 @@ async function probe(target: string): Promise<void> {
   process.stdout.write(`PEEPS-PROBE ${JSON.stringify(result)}\n`);
 }
 
-const mode = process.argv[2];
-if (mode === "--relay") relay();
-else if (mode === "--probe") void probe(process.argv[3] ?? "");
-else
-  init().catch((error: unknown) => {
-    process.stderr.write(`peeps load jail init: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(1);
-  });
+// Run as a program (the bundle), never on import (the tests import `serveControl`).
+if (require.main === module) {
+  const mode = process.argv[2];
+  if (mode === "--relay") relay();
+  else if (mode === "--probe") void probe(process.argv[3] ?? "");
+  else
+    init().catch((error: unknown) => {
+      process.stderr.write(`peeps load jail init: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.exit(1);
+    });
+}
