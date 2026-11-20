@@ -177,6 +177,8 @@ interface TurnState {
   slot: number;
   phase: "checking" | "measurement";
   startMono: number;
+  deadlineWall: number;
+  deadlineReached: boolean;
   outcome?: string;
   timers: NodeJS.Timeout[];
   accountingId: string;
@@ -223,7 +225,7 @@ class LoadRun {
 
   private readonly credentials = new Map<string, number>();
   private readonly turns = new Map<number, TurnState>();
-  private readonly busySlots = new Set<number>();
+  private readonly busySlots = new Map<number, TurnState>();
   private duplicateOutcomes = 0;
   private readonly failures: LoadResult["failures"] = [];
   private playwright: string | null = null;
@@ -496,8 +498,14 @@ class LoadRun {
     if (this.reason !== undefined || !this.lease) return;
     const t = this.clocks();
     if (!this.lease.held(t)) return this.onExpiry();
-    if (!(t.monoMs < this.runEndMono && t.wallMs < this.runEndWall)) return this.terminate("run_end", "failed");
-    if (this.graceEnd && !(t.monoMs < this.graceEnd.monoMs && t.wallMs < this.graceEnd.wallMs)) return this.terminate(this.gracefulStop ? "stopped" : "completed");
+    const cutoff = this.gate?.checkRunEnd(t);
+    if (cutoff === "hard" || (!this.gate && !(t.monoMs < this.runEndMono && t.wallMs < this.runEndWall))) {
+      return this.terminate("run_end", "failed");
+    }
+    if (cutoff === "drain") return this.terminate(this.gracefulStop ? "stopped" : "completed");
+    for (const state of this.busySlots.values()) {
+      if (!(t.wallMs < state.deadlineWall)) this.expireTurn(state);
+    }
     this.armWatch();
   }
 
@@ -549,6 +557,11 @@ class LoadRun {
       limits: { ...limits.value.proxy, exchangeMs: this.engine.turnDeadlineMs },
       clocks: this.clocks,
       onLeaseExpired: () => this.onExpiry(),
+      onRunEnded: () => this.watch(),
+      onTurnExpired: (turn) => {
+        const state = this.turns.get(turn);
+        if (state) this.expireTurn(state);
+      },
       dial: this.s.dial ?? (this.s.dialSeams ? makeDial(this.s.dialSeams) : undefined),
       seqHeader: this.s.seqHeader,
     });
@@ -644,26 +657,33 @@ class LoadRun {
     const gate = this.gate!;
     const t = this.clocks();
     const opened = gate.openTurn(`s${slot}`, t, deadlineMs);
-    if (!opened.ok) return null;
+    if (!opened.ok) {
+      if (opened.reason === "run_end") this.watch();
+      return null;
+    }
     const turn = opened.turn;
     const password = randomBytes(32).toString("base64url");
     this.credentials.set(`Basic ${Buffer.from(`${turn}:${password}`).toString("base64")}`, turn);
     const deadlineMono = Math.min(t.monoMs + deadlineMs, this.runEndMono);
-    const state: TurnState = { turn, slot, phase, startMono: t.monoMs, timers: [], accountingId };
+    const state: TurnState = { turn, slot, phase, startMono: t.monoMs, deadlineWall: t.wallMs + deadlineMs, deadlineReached: false, timers: [], accountingId };
     this.turns.set(turn, state);
-    this.busySlots.add(slot);
+    this.busySlots.set(slot, state);
     if (phase === "checking") this.journal!.trackTurn(turn);
-    // At the deadline the gate side closes and `cancel` goes; the slot stays busy until the outcome.
-    state.timers.push(setTimeout(() => {
-      this.proxy!.closeTurn(turn);
-      this.jail!.send({ type: "cancel", turn });
-      state.timers.push(setTimeout(() => {
-        if (state.outcome === undefined && this.reason === undefined) this.terminate("executor_unresponsive", "failed");
-      }, this.k.stopGraceMs));
-    }, Math.max(0, deadlineMono - t.monoMs)));
+    state.timers.push(setTimeout(() => this.expireTurn(state), Math.max(0, deadlineMono - t.monoMs)));
     this.jail!.send({ type: "turn", turn, slot, password, deadlineMono });
     this.emit({ type: "turn", turn, slot, phase });
     return state;
+  }
+
+  /** At the deadline, close the gate side and cancel. The slot stays busy until its outcome. */
+  private expireTurn(state: TurnState): void {
+    if (state.deadlineReached || state.outcome !== undefined || this.reason !== undefined) return;
+    state.deadlineReached = true;
+    this.proxy!.closeTurn(state.turn);
+    this.jail!.send({ type: "cancel", turn: state.turn });
+    state.timers.push(setTimeout(() => {
+      if (state.outcome === undefined && this.reason === undefined) this.terminate("executor_unresponsive", "failed");
+    }, this.k.stopGraceMs));
   }
 
   private onFrame(f: CtlFrame): void {

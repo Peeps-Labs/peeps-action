@@ -487,3 +487,22 @@ test("handoff stops when drain grace runs out before the original hard end", () 
   assert.equal(reason(g.handoff(a.permit, at(150, at(200).wallMs))), "run_end");
   assert.equal(reason(g.handoff(a.permit, at(200, at(150).wallMs))), "run_end");
 });
+
+for (const cutoff of ["turn", "run", "drain"] as const) {
+  test(`a ${cutoff} cutoff stays closed after the wall clock steps back`, () => {
+    const { g, req } = gate({
+      turnDeadlineMs: cutoff === "turn" ? 100 : 500,
+      runEndWall: at(cutoff === "run" ? 100 : 500).wallMs,
+    });
+    const first = admit(g, req(), at(1));
+    const pending = admit(g, req(), at(2));
+    assert.ok(first.ok && pending.ok);
+    if (cutoff === "drain") g.drain(at(100));
+    const why = cutoff === "turn" ? "turn_deadline" : "run_end";
+    assert.equal(reason(g.handoff(first.permit, at(50, at(100).wallMs))), why);
+    assert.equal(reason(g.checkDial(pending.permit, at(51), "tcp")), why);
+    assert.equal(reason(g.handoff(pending.permit, at(52))), why);
+    assert.equal(reason(admit(g, req(), at(53))), why);
+    assert.equal(g.admitted, 2);
+  });
+}

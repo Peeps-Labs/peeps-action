@@ -7,6 +7,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Dial } from "../src/load/gate/proxy";
 import type { Upstream } from "../src/load/gate/resolve";
 import type { LoadResult } from "../src/load/supervisor";
@@ -115,3 +116,40 @@ for (const jail of JAILS) {
     invariants(r, res);
   });
 }
+
+test("the watch cuts an idle exchange at a wall-only turn deadline", { timeout: 4000 }, async (t) => {
+  const cancel = new AbortController();
+  let measuring = false;
+  let queued: Upstream | undefined;
+  let reset!: () => void;
+  const resetSeen = new Promise<boolean>((resolve) => { reset = () => resolve(true); });
+  const r = await rig(t, {
+    signal: cancel.signal,
+    setup: { ttlMs: 6000 },
+    seams: { constants: { ...FAST, turnDeadlineMs: 2000 } },
+    plan: smallPlan({ exportName: "get", users: 1 }),
+    dial: (inner) => async (...args) => {
+      const upstream = await inner(...args);
+      if (!measuring || queued) return upstream;
+      queued = upstream;
+      upstream.socket.cork();
+      return { ...upstream, reset: () => {
+        upstream.reset();
+        reset();
+      } };
+    },
+    observer: (e) => {
+      if (e.type === "phase" && e.phase === "measurement") measuring = true;
+    },
+  });
+  try {
+    for (let i = 0; i < 100 && !queued?.socket.writableLength; i++) await sleep(5);
+    assert.ok(queued?.socket.writableLength, "the measured request is queued");
+    r.seam.wallShift = 2500;
+    assert.equal(await Promise.race([resetSeen, sleep(500, false)]), true, "the watch reset the write before the monotonic turn deadline");
+    assert.equal(r.sink.arrivals.length, 1, "only Checking reached the target");
+  } finally {
+    cancel.abort();
+    await r.result;
+  }
+});

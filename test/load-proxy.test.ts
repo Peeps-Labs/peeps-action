@@ -1395,6 +1395,41 @@ for (const cutoff of ["close", "closeTurn", "lease"] as const) {
   });
 }
 
+for (const cutoff of ["turn", "run", "drain"] as const) {
+  test(`observing the wall-clock ${cutoff} cutoff resets an already queued write`, { timeout: 3000 }, async (t) => {
+    let upstream: Upstream | undefined;
+    const r = await rig(t, {
+      gate: { turnDeadlineMs: cutoff === "turn" ? 100 : 1000, runEndWall: 1_700_000_000_000 + (cutoff === "run" ? 100 : 1000) },
+      dial: (inner) => async (...args) => {
+        const u = await inner(...args);
+        if (upstream === undefined) {
+          upstream = u;
+          u.socket.cork();
+        }
+        return u;
+      },
+    });
+    const first = exchange(r, get(r, "/queued")).catch(() => undefined);
+    try {
+      for (let i = 0; i < 100 && !upstream?.socket.writableLength; i++) await sleep(5);
+      assert.ok(upstream?.socket.writableLength, "the first write is queued");
+      if (cutoff === "drain") r.gate.drain({ monoMs: 100, wallMs: r.clock.wallMs + 100 });
+      r.clock.wallMs += 100;
+      await exchange(r, get(r, "/at-cutoff")).catch(() => undefined);
+      assert.deepEqual(r.journal.snapshot().denied, { [cutoff === "turn" ? "turn_deadline" : "run_end"]: 1 });
+      assert.equal(r.dials.resets, 1, "the denial reset the existing exchange");
+      r.clock.wallMs -= 100;
+      upstream.socket.uncork();
+      await first;
+      assert.equal(r.sink.stats.requestBytes, 0);
+      assert.equal(r.gate.admitted, 1);
+    } finally {
+      await r.proxy.close();
+      await first;
+    }
+  });
+}
+
 test("a lower lease ceiling stops new permits; permits already debited go on", { timeout: 3000 }, async (t) => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });

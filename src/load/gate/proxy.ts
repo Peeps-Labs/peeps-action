@@ -102,6 +102,10 @@ export interface ProxyOptions {
    * supervisor's terminate. It may close this proxy re-entrantly.
    */
   onLeaseExpired(): void;
+  /** Closes the run when a request observes the hard or drain cutoff. */
+  onRunEnded?(): void;
+  /** Cancels the executor's turn when a request observes its deadline. */
+  onTurnExpired?(turn: number): void;
   /** Defaults to resolving and dialling through `resolve.ts`; tests inject fixture trust. */
   dial?: Dial;
   /** Tests only: a header carrying each request's seq, so a sink's receipts can be joined to the journal. */
@@ -403,7 +407,7 @@ export class GateProxy {
     const permitted = gate.permit({ turn, origin: n.origin, method: n.method }, t);
     if (!permitted.ok) {
       this.denied(res, permitted);
-      return this.expiredIf(permitted);
+      return this.handleCutoff(turn, permitted);
     }
     const { permit } = permitted;
     journal.begin(permit.seq, { turn, origin: n.origin, method: n.method, path: n.path, monoMs: t.monoMs });
@@ -431,7 +435,7 @@ export class GateProxy {
       const ready: DialReady = (boundary) => {
         if (this.closed || tunnel.revoked || res.destroyed) return false;
         dialDenial = gate.checkDial(permit, this.clocks(), boundary);
-        if (dialDenial?.reason === "lease") this.o.onLeaseExpired();
+        if (dialDenial) this.handleCutoff(turn, dialDenial);
         return dialDenial === undefined;
       };
       while (!this.pins.has(n.origin)) {
@@ -484,7 +488,7 @@ export class GateProxy {
         if (denial) {
           reset();
           this.cutUnsent(res, permit, denial.reason);
-          return this.expiredIf(denial);
+          return this.handleCutoff(turn, denial);
         }
         await sleep(Math.min(wait, 50), undefined, { signal: controller.signal, ref: false }).catch(() => undefined);
         if (controller.signal.aborted || res.destroyed) {
@@ -518,9 +522,16 @@ export class GateProxy {
     this.answer(res, status, CUT_HEADER, reason);
   }
 
-  /** `onLeaseExpired` after a `lease` answer; last, since it may close the proxy. */
-  private expiredIf(d: Denied): void {
+  /** A cutoff also resets exchanges that were already handed off. */
+  private handleCutoff(turn: number, d: Denied): void {
     if (d.reason === "lease") this.o.onLeaseExpired();
+    else if (d.reason === "run_end") {
+      if (this.o.onRunEnded) this.o.onRunEnded();
+      else void this.close();
+    } else if (d.reason === "turn_deadline") {
+      this.closeTurn(turn);
+      this.o.onTurnExpired?.(turn);
+    }
   }
 
   /**
@@ -541,7 +552,7 @@ export class GateProxy {
     if (denial) {
       upstream.reset();
       this.cutUnsent(res, permit, denial.reason);
-      return this.expiredIf(denial);
+      return this.handleCutoff(permit.turn, denial);
     }
     this.pins.set(n.origin, address);
     const finish = this.relay(tunnel, seq, n.method, upstream, res);

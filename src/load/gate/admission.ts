@@ -117,6 +117,7 @@ const MILLI = 1000;
 interface Turn {
   deadlineMono: number;
   deadlineWall: number;
+  expired: boolean;
   outstanding: number;
   /** Requests this turn was permitted, for good. */
   admitted: number;
@@ -143,6 +144,7 @@ export class Gate {
   private stoppedFlag = false;
   private drainingFlag = false;
   private drainEnd: Clocks | undefined;
+  private runCutoff: "hard" | "drain" | undefined;
   private phase: PhaseCaps;
   // A reservation bounds pending work. Actual traffic is also paced at each boundary,
   // since time spent waiting in a dial can bunch work from different reservations.
@@ -245,8 +247,8 @@ export class Gate {
     // A turn's own deadline (Checking's is shorter) can only shorten the limit, never stretch it.
     const ms = Math.min(deadlineMs, this.limits.turnDeadlineMs);
     if (this.stoppedFlag) return { ok: false, reason: "stopped" };
+    if (this.checkRunEnd(t)) return { ok: false, reason: "run_end" };
     if (this.drainingFlag) return { ok: false, reason: "draining" };
-    if (this.runEnded(t)) return { ok: false, reason: "run_end" };
     if ([...this.liveSlots.values()].includes(slot)) return { ok: false, reason: "slot_busy" };
     if (!(this.liveTurns < this.phase.maxUsers)) return { ok: false, reason: "users" };
     const turn = this.nextTurn++;
@@ -254,6 +256,7 @@ export class Gate {
     this.turns.set(turn, {
       deadlineMono: t.monoMs + ms,
       deadlineWall: t.wallMs + ms,
+      expired: false,
       outstanding: 0,
       admitted: 0,
       open: true,
@@ -340,16 +343,22 @@ export class Gate {
     this.milliTokens[boundary] -= MILLI;
   }
 
-  private runEnded(t: Clocks): boolean {
+  /** Once either clock reaches a cutoff, a clock correction cannot reopen the run. */
+  checkRunEnd(t: Clocks): "hard" | "drain" | undefined {
+    if (this.runCutoff) return this.runCutoff;
     const drain = this.drainEnd;
-    return !(t.monoMs < this.limits.runEndMono && t.wallMs < (this.limits.runEndWall ?? Infinity))
-      || (drain !== undefined && !(t.monoMs < drain.monoMs && t.wallMs < drain.wallMs));
+    if (!(t.monoMs < this.limits.runEndMono && t.wallMs < (this.limits.runEndWall ?? Infinity))) {
+      this.runCutoff = "hard";
+    } else if (drain && !(t.monoMs < drain.monoMs && t.wallMs < drain.wallMs)) {
+      this.runCutoff = "drain";
+    }
+    return this.runCutoff;
   }
 
   /** Stop, run end, lease and turn expiry on both clocks. */
   private live(turnId: number, t: Clocks): { turn: Turn } | Denied {
     if (this.stoppedFlag) return deny("stopped", true);
-    if (this.runEnded(t)) return deny("run_end", true);
+    if (this.checkRunEnd(t)) return deny("run_end", true);
     if (!(t.monoMs < this.lease.monoUntil && t.wallMs < this.lease.wallUntil)) {
       // Seen expired on either clock: a clock stepping back later, or a renewal the runner
       // accepted under that stepped-back clock, must not revive it.
@@ -359,7 +368,8 @@ export class Gate {
     }
     const turn = this.turns.get(turnId);
     if (!turn?.open) return deny("turn_closed", true);
-    if (!(t.monoMs < turn.deadlineMono && t.wallMs < turn.deadlineWall)) return deny("turn_deadline", true);
+    if (!(t.monoMs < turn.deadlineMono && t.wallMs < turn.deadlineWall)) turn.expired = true;
+    if (turn.expired) return deny("turn_deadline", true);
     return { turn };
   }
 
