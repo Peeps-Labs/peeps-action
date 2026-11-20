@@ -177,7 +177,7 @@ function decodeRenewReply(raw) {
   };
 }
 function decodeClosedReceipt(raw) {
-  if (!isObj(raw) || raw.closed !== true || !text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.planHash, 64) || !whole(raw.seq) || !text(raw.nonce, 256)) return void 0;
+  if (!isObj(raw) || raw.closed !== true || raw.lease !== "lost" || raw.ttlMs !== 0 || !whole(raw.ceiling) || !finite(raw.leaseUntilServerMs) || !finite(raw.serverNowMs) || "refused" in raw || !text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.planHash, 64) || !whole(raw.seq) || !text(raw.nonce, 256)) return void 0;
   return { claimId: raw.claimId, epoch: raw.epoch, planHash: raw.planHash, seq: raw.seq, nonce: raw.nonce, closed: true };
 }
 
@@ -2536,6 +2536,7 @@ var import_node_child_process = require("node:child_process");
 var import_node_crypto6 = require("node:crypto");
 var import_node_fs = require("node:fs");
 var import_promises3 = require("node:fs/promises");
+var import_node_module = require("node:module");
 var import_node_path = __toESM(require("node:path"));
 
 // src/load/jail/spec.ts
@@ -3161,13 +3162,37 @@ async function sha256File(file, signal) {
 }
 function netnsPrefix(o) {
   if (!Number.isSafeInteger(o.uid) || o.uid < 0 || !Number.isSafeInteger(o.gid) || o.gid < 0) throw new InstallRefused(["the runner's uid and gid must be whole numbers"]);
-  return ["/usr/bin/sudo", "-n", "/usr/bin/unshare", "--net", "--", "/usr/bin/setpriv", `--reuid=${o.uid}`, `--regid=${o.gid}`, "--init-groups", "/usr/bin/env", "-i"];
+  return ["/usr/bin/sudo", "-n", "/usr/bin/unshare", "--net", "--", "/usr/bin/setpriv", `--reuid=${o.uid}`, `--regid=${o.gid}`, "--init-groups", "--pdeathsig", "SIGKILL", "/usr/bin/env", "-i"];
 }
 function offlineInstallArgv(tc, cache, scratch, o) {
   const env = { ...installEnv(tc, scratch), npm_config_cache: cache, npm_config_offline: "true", npm_config_logs_dir: import_node_path.default.join(scratch, "logs") };
   const [file, ...prefix] = netnsPrefix(o);
   const vars = Object.entries(env).map(([k, v2]) => `${k}=${v2}`);
   return { file, args: [...prefix, ...vars, tc.node, tc.npmCli, "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache", cache], env };
+}
+async function verifyRecipeCache(cache, tc, lock, signal) {
+  const { packages } = lock;
+  const checked = /* @__PURE__ */ new Set();
+  const cacheDir = import_node_path.default.join(cache, "_cacache");
+  const requireFromNpm = (0, import_node_module.createRequire)(tc.npmCli);
+  for (const [name2, entry] of Object.entries(packages)) {
+    if (!registryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity)) continue;
+    signal?.throwIfAborted();
+    const cacache = requireFromNpm("cacache");
+    const stream = cacache.get.stream.byDigest(cacheDir, entry.integrity);
+    const abort = () => stream.destroy(new Error("cache verification cancelled"));
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      for await (const _chunk of stream) signal?.throwIfAborted();
+      signal?.throwIfAborted();
+      checked.add(entry.integrity);
+    } catch {
+      signal?.throwIfAborted();
+      throw new Error(`install_failed: cached tarball missing or corrupt for ${name2}`);
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
+  }
 }
 async function offlinePreinstall(ws, tc, scratch, o, timeoutMs = INSTALL_MS, signal) {
   signal?.throwIfAborted();
@@ -3178,8 +3203,11 @@ async function offlinePreinstall(ws, tc, scratch, o, timeoutMs = INSTALL_MS, sig
   } catch {
     throw new InstallRefused(["the recipe's npm cache is missing"]);
   }
-  const problems = installProblems(readWorkspace(ws));
+  const workspace = readWorkspace(ws);
+  const problems = installProblems(workspace);
   if (problems.length > 0) throw new InstallRefused(problems);
+  await verifyRecipeCache(cache, tc, workspace.lock, signal);
+  signal?.throwIfAborted();
   const { file, args } = offlineInstallArgv(tc, cache, scratch, o);
   await runNpm(file, args, { cwd: ws, env: { PATH: "/usr/bin:/bin" } }, timeoutMs, signal);
   return digestsOf(ws, signal);
@@ -4448,6 +4476,8 @@ var LoadRun = class {
   measurement = { started: 0, missed: 0, success: 0, failure: 0, timeout: 0, cancelled: 0 };
   accounting;
   measureStartMono = 0;
+  measureStartWall;
+  measureEndWall;
   scheduler;
   lastSnapshot;
   terminated;
@@ -4533,7 +4563,7 @@ var LoadRun = class {
     try {
       return await offlinePreinstall(this.o.workspace, trustedToolchain(this.o.nodeDir, this.o.workspace), scratch, { cache: this.o.npmCache, uid: process.getuid(), gid: process.getgid() }, void 0, this.signal);
     } catch (error) {
-      throw new Refused("didnt_start", "install_unsupported", error.message);
+      throw new Refused("didnt_start", error instanceof InstallRefused ? "install_unsupported" : "install_failed", error.message);
     } finally {
       (0, import_node_fs3.rmSync)(scratch, { recursive: true, force: true });
     }
@@ -4616,7 +4646,14 @@ var LoadRun = class {
     this.renewals.sent += 1;
     this.renewals.states.push(state);
     if (this.reason !== void 0) this.renewals.afterTerminate += 1;
-    const record = { attempts: 0, ms: null, outcome: "none" };
+    const record = {
+      attempts: 0,
+      ms: null,
+      outcome: "none",
+      firstSendAtMs: tx.firstSendWall,
+      answerAppliedAtMs: null,
+      phase: this.phase
+    };
     this.latency.set(tx.seq, record);
     const signal = this.renewController.signal;
     const again = async () => {
@@ -4650,7 +4687,10 @@ var LoadRun = class {
         if (!await again()) return;
         continue;
       }
-      record.ms = Math.max(0, now.monoMs - tx.firstSendMono);
+      if (d.kind !== "rejected") {
+        record.ms = Math.max(0, now.monoMs - tx.firstSendMono);
+        record.answerAppliedAtMs = now.wallMs;
+      }
       record.outcome = d.kind === "lease" ? "held" : d.kind;
       if (d.kind === "lost") {
         if (d.stop?.mode === "now") {
@@ -4685,8 +4725,10 @@ var LoadRun = class {
     this.maybeFinishMeasurement();
   }
   startDrain() {
+    this.renewState = "draining";
     if (this.graceEnd === void 0) {
       const t = this.clocks();
+      this.markMeasurementEnd(t);
       this.graceEnd = { monoMs: t.monoMs + this.drainGraceMs, wallMs: t.wallMs + this.drainGraceMs };
       this.gate.drain(this.graceEnd);
     }
@@ -4957,8 +4999,10 @@ var LoadRun = class {
   async runMeasurement() {
     const plan = this.plan;
     this.phase = "measurement";
+    const started = this.clocks();
+    this.measureStartMono = started.monoMs;
+    this.measureStartWall = started.wallMs;
     this.emit({ type: "phase", phase: "measurement" });
-    this.measureStartMono = this.clocks().monoMs;
     this.scheduler = new Scheduler({ pacingEveryMs: plan.cohort.pacingEveryMs, stages: plan.cohort.stages }, this.limits.budgets.startSlackMs);
     this.tick();
     await this.terminated;
@@ -4983,7 +5027,8 @@ var LoadRun = class {
           continue;
         }
         this.measurement.started += 1;
-        this.startLags.push({ atMs: planNow, lagMs: Math.max(0, planNow - st.dueMs) });
+        const startMs = opened.startMono - this.measureStartMono;
+        this.startLags.push({ atMs: startMs, lagMs: Math.max(0, startMs - st.dueMs) });
         this.accounting.start(id, planNow, st.stage, planNow + this.limits.budgets.measurement.turnDeadlineMs);
       }
     }
@@ -4997,6 +5042,15 @@ var LoadRun = class {
     if (this.reason !== void 0 || this.phase !== "measurement") return;
     const ending = this.gracefulStop || this.scheduler !== void 0 && this.graceEnd !== void 0;
     if (ending && this.busySlots.size === 0) this.terminate(this.gracefulStop ? "stopped" : "completed");
+  }
+  markMeasurementEnd(at) {
+    if (this.measureStartWall === void 0 || this.measureEndWall !== void 0) return;
+    const elapsed = Math.max(0, at.monoMs - this.measureStartMono);
+    this.measureEndWall = this.measureStartWall + Math.min(elapsed, this.plan.durationMs);
+  }
+  measurementWindow() {
+    if (this.measureStartWall === void 0 || this.measureEndWall === void 0) return null;
+    return { startedAtMs: this.measureStartWall, endedAtMs: this.measureEndWall };
   }
   countRequests(planNow) {
     const snap = this.journal.snapshot();
@@ -5024,6 +5078,7 @@ var LoadRun = class {
     if (this.expiryObserved || this.gate?.leaseExpired) [reason, st] = ["lease_lost", "lease_lost"];
     else if (this.stopNowLive) [reason, st] = ["stopped", "stopped"];
     else if (this.lease && !this.lease.held(this.clocks())) [reason, st] = ["lease_lost", "lease_lost"];
+    this.markMeasurementEnd(this.clocks());
     this.reason = reason;
     this.status = st ?? statusOf(reason);
     clearTimeout(this.watchTimer);
@@ -5092,6 +5147,7 @@ var LoadRun = class {
       playwright: this.playwright,
       checking: this.checking,
       measurement: this.measurement,
+      measurementWindow: this.measurementWindow(),
       journal: this.journal?.snapshot() ?? null,
       handoffs: this.journal ? encodeHandoffs(this.journal.handoffs()) : null,
       gateClosed: this.gateClosed,
@@ -5131,6 +5187,7 @@ var LoadRun = class {
       this.closedOutcome = { state: "withheld", reason: withheld, attempts: 0, latencyMs: null };
       return;
     }
+    if (deadline.expired()) return;
     const t0 = this.clocks();
     const tx = lease.beginClosed(
       t0,
@@ -5143,7 +5200,7 @@ var LoadRun = class {
     const stop = AbortSignal.any([this.closedCancel.signal, this.hardSignalOr()]);
     void deadline.then(() => this.closedCancel.abort());
     let pause = this.k.retryMs;
-    while (!stop.aborted) {
+    while (!stop.aborted && !deadline.expired()) {
       out.attempts += 1;
       let raw;
       let answered = true;
@@ -5152,6 +5209,7 @@ var LoadRun = class {
       } catch {
         answered = false;
       }
+      if (stop.aborted || deadline.expired()) break;
       if (answered) {
         const receipt = decodeClosedReceipt(raw);
         if (receipt && lease.ackClosed(receipt)) {
@@ -5179,7 +5237,9 @@ var LoadRun = class {
   }
   /** The renewal latency record; `withRecords` keeps every allocation's entry. */
   latencySummary(withRecords) {
-    const records = [...this.latency.entries()].sort((a, b) => a[0] - b[0]).map(([seq2, r]) => [seq2, r.attempts, r.ms === null ? null : round(r.ms), r.outcome]);
+    const records = [...this.latency.entries()].sort((a, b) => a[0] - b[0]).map(
+      ([seq2, r]) => [seq2, r.attempts, r.ms === null ? null : round(r.ms), r.outcome, r.firstSendAtMs, r.answerAppliedAtMs, r.phase]
+    );
     const values = records.map((r) => r[2] === null ? Number.POSITIVE_INFINITY : r[2]).sort((a, b) => a - b);
     const at = (q) => {
       const v2 = nearestRank(values, q);
@@ -5207,7 +5267,7 @@ var LoadRun = class {
     this.queueRecords("renewals", "records", latency.records, {});
     const { records: _records, ...latencyStats } = latency;
     const loop = this.loopDelay;
-    this.queue({ kind: "summary", journal: this.journal.snapshot(), checking: this.checking, measurement: this.measurement, reason: this.reason, playwright: this.playwright, failures: this.failures.slice(0, 20), denyReasons: DENY_REASONS.length, cutReasons: CUT_REASONS.length, zero: zeroCounts().debited, latency: latencyStats, eventLoop: { p99Ms: loop.count ? round(loop.percentile(99) / 1e6) : 0, maxMs: loop.count ? round(loop.max / 1e6) : 0 } });
+    this.queue({ kind: "summary", journal: this.journal.snapshot(), checking: this.checking, measurement: this.measurement, measurementWindow: this.measurementWindow(), reason: this.reason, playwright: this.playwright, failures: this.failures.slice(0, 20), denyReasons: DENY_REASONS.length, cutReasons: CUT_REASONS.length, zero: zeroCounts().debited, latency: latencyStats, eventLoop: { p99Ms: loop.count ? round(loop.percentile(99) / 1e6) : 0, maxMs: loop.count ? round(loop.max / 1e6) : 0 } });
   }
   queueFinal(watermark) {
     if (this.incomplete) return;
@@ -5256,14 +5316,14 @@ var LoadRun = class {
       }
       if (this.evidenceStopped) return;
       if (answered && isObj3(answer)) {
-        if (answer.ok === true) {
+        if (answer.ok === true && typeof answer.replay === "boolean" && !("reason" in answer) && !("refused" in answer)) {
           this.evidenceQueue.shift();
           if (head.body.final) this.finalSent = head.body.final;
           pause = this.k.retryMs;
           continue;
         }
         const refusal = answer.ok === false ? answer.reason : answer.refused;
-        if (answer.ok === false || typeof answer.refused === "string") {
+        if (answer.ok === false || answer.ok !== true && typeof answer.refused === "string") {
           this.latchIncomplete({ seq: head.body.seq, reason: typeof refusal === "string" ? refusal.slice(0, 64) : "unknown" });
           this.evidenceStopped = true;
           return;
@@ -5325,18 +5385,23 @@ function delay(ms2, signal) {
   });
 }
 function delayResolve(ms2) {
-  let timer;
+  const end = performance.now() + ms2;
+  let finished = false;
   let done;
   const p = new Promise((resolve) => {
     done = resolve;
-    timer = setTimeout(resolve, ms2);
   });
-  p.cancel = () => clearTimeout(timer);
-  p.finish = () => {
+  const finish = () => {
+    finished = true;
     clearTimeout(timer);
     done();
   };
-  return p;
+  const timer = setTimeout(finish, ms2);
+  return Object.assign(p, {
+    cancel: () => clearTimeout(timer),
+    expired: () => finished || performance.now() >= end,
+    finish
+  });
 }
 
 // src/load/main.ts
@@ -5449,8 +5514,9 @@ async function mainLoad(env = process.env, deps = {}, actionDir = __dirname) {
     write(JSON.stringify({ refused: "port", code }));
     return 2;
   }
-  const signals = (deps.signals ?? loadSignals)();
+  let signals;
   try {
+    signals = (deps.signals ?? loadSignals)();
     const res = await (deps.run ?? runLoad)({
       runId: i.runId,
       workspace: i.workspace,
@@ -5467,13 +5533,16 @@ async function mainLoad(env = process.env, deps = {}, actionDir = __dirname) {
       signal: signals.signal,
       hardSignal: signals.hard
     });
-    write(JSON.stringify(reportOf(res)));
-    if (i.summaryFile) (0, import_node_fs4.appendFileSync)(i.summaryFile, stepSummary(res));
     if (i.resultFile) (0, import_node_fs4.writeFileSync)(i.resultFile, `${JSON.stringify(res)}
-`, { mode: 420 });
-    return res.status === "completed" ? 0 : 1;
+`, { mode: 384 });
+    if (i.summaryFile) (0, import_node_fs4.appendFileSync)(i.summaryFile, stepSummary(res));
+    write(JSON.stringify(reportOf(res)));
+    return res.status === "completed" && res.cleanup === "clean" && res.closed.state === "acked" && res.evidence.state === "complete" && res.final !== "missing" && res.final.watermark === res.closed.debited ? 0 : 1;
+  } catch {
+    write('{"failed":"run_or_report"}');
+    return 1;
   } finally {
-    signals.dispose();
+    signals?.dispose();
     port.close();
   }
 }

@@ -58,3 +58,7 @@ test("the action is checked out at one pinned commit, the all-zero placeholder t
   assert.match(code, /repository: Peeps-Labs\/peeps-action\n\s+ref: 0{40}\n/);
   assert.equal(text.match(/\b[0-9a-f]{40}\b/g)?.length, 1);
 });
+
+test("failure to produce the result artifact fails its upload step", () => {
+  assert.match(code, /path: \$\{\{ runner\.temp \}\}\/peeps-load-result\.json\n\s+if-no-files-found: error\n/);
+});

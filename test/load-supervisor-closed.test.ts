@@ -19,7 +19,33 @@ describe("load supervisor: closed, latency, drain and the events pump", { concur
   // ---------------------------------------------------------------- closed
 
   test("closed is sent once, after gate_closed and a clean jail end, with the final debit; Peeps acknowledges it", async (t) => {
-    const r = await rig(t);
+    let enterEnd!: () => void;
+    let allowEnd!: () => void;
+    const ended = new Promise<void>((resolve) => { enterEnd = resolve; });
+    const held = new Promise<void>((resolve) => { allowEnd = resolve; });
+    t.after(allowEnd);
+    const r = await rig(t, {
+      launch: async (spec, options, signal) => {
+        const handle = await fakeJail().launch(spec, options, signal);
+        return { ...handle, end: async () => {
+          enterEnd();
+          await held;
+          return handle.end();
+        } };
+      },
+    });
+    await ended;
+    // Let the gate and evidence settle while the jail still has not returned its proof.
+    const limit = Date.now() + FAST.reportingMs / 2;
+    while (!r.port.posted.some((p) => p.final) && Date.now() < limit) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    try {
+      assert.ok(r.port.posted.some((p) => p.final), "reporting reached the final with jail proof still held");
+      assert.ok(!r.port.renewals.some(({ fields }) => fields.state === "closed"), "no outbound closed while jail proof is held");
+    } finally {
+      allowEnd();
+    }
     const res = await r.result;
     assert.equal(res.status, "completed", why(r, res));
     assert.equal(res.cleanup, "clean");
@@ -119,6 +145,31 @@ describe("load supervisor: closed, latency, drain and the events pump", { concur
     assert.equal(r.port.renewals.filter((x) => x.fields.state === "closed").length, 0);
   });
 
+  test("a pending renewal blocks closed even after the proxy and jail have finished", async (t) => {
+    const ac = new AbortController();
+    let releaseRenew!: () => void;
+    const held = new Promise<void>((resolve) => { releaseRenew = resolve; });
+    t.after(releaseRenew);
+    const r = await rig(t, {
+      signal: ac.signal,
+      seams: { constants: { ...FAST, reportingMs: 500 } },
+      observer: onPhase("measurement", ({ port }) => {
+        const renew = port.renew.bind(port);
+        port.renew = async (...args) => {
+          if (JSON.parse(args[2]).state === "closed") return renew(...args);
+          ac.abort();
+          await held;
+          return renew(...args);
+        };
+      }),
+    });
+    const res = await r.result;
+    assert.equal(res.status, "cancelled", why(r, res));
+    assert.equal(res.cleanup, "clean");
+    assert.deepEqual(res.closed, { state: "withheld", reason: "unsettled", attempts: 0, latencyMs: null });
+    assert.ok(!r.port.renewals.some(({ fields }) => fields.state === "closed"));
+  });
+
   test("a hung events upload does not delay closed's acknowledgement", async (t) => {
     const r = await rig(t, { script: { eventsBlocked: true } });
     const res = await r.result;
@@ -149,6 +200,45 @@ describe("load supervisor: closed, latency, drain and the events pump", { concur
     assert.deepEqual({ state: res.closed.state, reason: res.closed.reason, attempts: res.closed.attempts }, { state: "refused", reason: "debited", attempts: 1 });
   });
 
+  test("closed retries an addressed receipt with a contradictory lease or TTL", async (t) => {
+    let receipts = 0;
+    const r = await rig(t, { script: { mangle: (answer) => {
+      if (answer.closed !== true) return answer;
+      receipts += 1;
+      if (receipts === 1) return { ...answer, lease: "held" };
+      if (receipts === 2) return { ...answer, ttlMs: 5000 };
+      return answer;
+    } } });
+    const res = await r.result;
+    assert.equal(res.closed.state, "acked");
+    assert.equal(res.closed.attempts, 3);
+    assert.equal(new Set(r.port.renewals.filter((r) => r.fields.state === "closed").map((r) => r.body)).size, 1);
+  });
+
+  test("a receipt delivered after reporting returns cannot change the result", async (t) => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const r = await rig(t, {
+      seams: { constants: { ...FAST, reportingMs: 250 } },
+      observer: (event, x) => {
+        if (event.type !== "claimed") return;
+        const renew = x.port.renew.bind(x.port);
+        x.port.renew = async (claimId, token, body, signal) => {
+          const reply = await renew(claimId, token, body, signal);
+          if (JSON.parse(body).state === "closed") await blocked;
+          return reply;
+        };
+      },
+    });
+    t.after(release);
+    const res = await r.result;
+    assert.equal(res.closed.state, "unanswered");
+    assert.equal(res.closed.attempts, 1);
+    release();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(res.closed.state, "unanswered");
+  });
+
   // ---------------------------------------------------------------- drain
 
   test("a graceful stop drains for the grant's grace, capped at the turn deadline: a turn in flight for 3.5 s finishes and succeeds", async (t) => {
@@ -169,6 +259,9 @@ describe("load supervisor: closed, latency, drain and the events pump", { concur
     assert.equal(res.status, "stopped", why(r, res));
     assert.equal(res.measurement.started, 1);
     assert.equal(res.measurement.success, 1, "the turn in flight at the stop finished and succeeded");
+    assert.equal(res.renewals.afterTerminate, 0);
+    assert.ok(r.port.renewals.some(({ fields }) => fields.phase === "measurement" && fields.state === "draining"),
+      "the runner reported draining while the admitted turn was finishing");
     assert.equal(res.closed.state, "acked");
     invariants(r, res);
   });
@@ -184,12 +277,34 @@ describe("load supervisor: closed, latency, drain and the events pump", { concur
   // ---------------------------------------------------------------- latency
 
   test("every allocated renewal's latency is recorded, sent in the evidence, and summarized nearest-rank", async (t) => {
-    const r = await rig(t, { plan: smallPlan({ exportName: "get", durationMs: 4_000 }) });
+    let firstSendWallMs: number | undefined;
+    let answerWallMs: number | undefined;
+    const r = await rig(t, {
+      plan: smallPlan({ exportName: "get", durationMs: 4_000 }),
+      observer: onPhase("measurement", (rig) => {
+        const renew = rig.port.renew.bind(rig.port);
+        rig.port.renew = async (...args) => {
+          if (firstSendWallMs !== undefined) return renew(...args);
+          firstSendWallMs = Date.now();
+          const response = await renew(...args);
+          answerWallMs = Date.now();
+          return response;
+        };
+      }),
+    });
     const res = await r.result;
     assert.equal(res.status, "completed", why(r, res));
     const sent = new Set(r.port.renewals.filter((x) => x.fields.state !== "closed").map((x) => x.seq));
     assert.deepEqual(res.latency.records.map((x) => x[0]), [...sent].sort((a, b) => a - b), "one record per allocated renewal");
     assert.equal(res.latency.count, sent.size);
+    const window = res.measurementWindow;
+    assert.ok(window, "the actual run recorded a measurement window");
+    assert.equal(window.endedAtMs - window.startedAtMs, 4_000);
+    const sample = res.latency.records.find(([, , , , , , phase]) => phase === "measurement");
+    assert.ok(sample && sample[5] !== null);
+    assert.ok(sample[4] >= window.startedAtMs && sample[4] <= window.endedAtMs);
+    assert.ok(sample[4] <= firstSendWallMs!);
+    assert.ok(sample[5] >= answerWallMs! && sample[5] <= window.endedAtMs);
     for (const [, attempts, ms, outcome] of res.latency.records) {
       assert.ok(attempts >= 1);
       if (outcome === "held") assert.ok(ms !== null && ms >= 0);
@@ -197,11 +312,12 @@ describe("load supervisor: closed, latency, drain and the events pump", { concur
     const values = res.latency.records.map((x) => (x[2] === null ? Infinity : x[2])).sort((a, b) => a - b);
     assert.equal(res.latency.maxMs, Number.isFinite(values.at(-1)!) ? values.at(-1) : null);
     assert.equal(res.latency.p50Ms, nearestRank(values, 0.5));
-    const batches = r.port.batches() as { kind: string; records?: unknown[]; first?: number; latency?: { count: number }; eventLoop?: { p99Ms: number } }[];
+    const batches = r.port.batches() as { kind: string; records?: unknown[]; first?: number; latency?: { count: number }; eventLoop?: { p99Ms: number }; measurementWindow?: typeof window }[];
     const records = batches.filter((b) => b.kind === "renewals").flatMap((b) => b.records!);
     assert.deepEqual(records, res.latency.records);
     const summary = batches.find((b) => b.kind === "summary")!;
     assert.equal(summary.latency!.count, res.latency.count);
+    assert.deepEqual(summary.measurementWindow, window);
     assert.equal(typeof summary.eventLoop!.p99Ms, "number");
     for (const rec of r.port.renewals) assert.ok(Number.isSafeInteger(rec.fields.lagP99Ms) && (rec.fields.lagP99Ms as number) >= 0, "lagP99Ms is a whole number");
   });
@@ -211,9 +327,25 @@ describe("load supervisor: closed, latency, drain and the events pump", { concur
     const res = await r.result;
     const hung = res.latency.records.find((x) => x[0] === 3)!;
     assert.equal(hung[2], null);
+    assert.equal(hung[5], null, "no applied-answer timestamp for an unanswered renewal");
     assert.ok(hung[1] >= 2, "its retries are counted");
     assert.equal(res.latency.unanswered, 1);
     assert.equal(res.latency.maxMs, null);
+  });
+
+  test("lagP99Ms includes time between starts in one scheduler poll", async (t) => {
+    let delayed = false;
+    const r = await rig(t, {
+      observer: (event, x) => {
+        if (event.type === "turn" && event.phase === "measurement" && !delayed) {
+          delayed = true;
+          x.seam.monoShift += 250;
+        }
+      },
+    });
+    const res = await r.result;
+    assert.equal(res.status, "completed", why(r, res));
+    assert.ok(r.port.renewals.some(({ fields }) => fields.phase === "measurement" && Number(fields.lagP99Ms) >= 250));
   });
 
   test("nearestRank: p99.9 of 2,400 samples is the 2,398th value", () => {

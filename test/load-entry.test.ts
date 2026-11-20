@@ -82,7 +82,8 @@ test("mainLoad runs the supervisor with the harness hosts, the grant and the rec
     write: (line) => lines.push(line),
     signals: () => ({ signal: new AbortController().signal, hard: new AbortController().signal, received: [], dispose: () => undefined }),
   }, DIST);
-  assert.equal(code, res.status === "completed" ? 0 : 1);
+  assert.equal(res.status, "completed");
+  assert.equal(code, 0);
   assert.equal(given!.grantRef, GRANT);
   assert.deepEqual(given!.harnessHosts, ["sink.peeps-harness.example.com"]);
   assert.equal(given!.npmCache, env().PEEPS_LOAD_NPM_CACHE);
@@ -97,6 +98,49 @@ test("mainLoad runs the supervisor with the harness hosts, the grant and the rec
   const written = lines.join("\n") + readFileSync(summary, "utf8") + readFileSync(result, "utf8");
   for (const secret of [SENTINEL, r.port.runToken, r.port.eventsToken]) assert.ok(!written.includes(secret), "a token was written");
   assert.doesNotMatch(written, /::(?:add-mask|set-output|warning|error)/);
+});
+
+test("the entry reduces a startup exception to a fixed diagnostic", async () => {
+  const lines: string[] = [];
+  const code = await mainLoad(env(), {
+    run: async () => { throw new Error(`${SENTINEL}\n::error::untrusted detail`); },
+    write: (line) => lines.push(line),
+  }, DIST);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ['{"failed":"run_or_report"}']);
+});
+
+test("a report write error emits a fixed diagnostic and preserves the result artifact", async (t) => {
+  const r = await rig(t);
+  const res = await r.result;
+  const dir = mkdtempSync(path.join(os.tmpdir(), "peeps-load-entry-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const lines: string[] = [];
+  const result = path.join(dir, "result.json");
+  const summary = path.join(dir, SENTINEL, "\n::error::untrusted path");
+  const code = await mainLoad(env({ GITHUB_STEP_SUMMARY: summary, PEEPS_LOAD_RESULT_FILE: result }), {
+    run: async () => res,
+    write: (line) => lines.push(line),
+  }, DIST);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ['{"failed":"run_or_report"}']);
+  assert.deepEqual(JSON.parse(readFileSync(result, "utf8")), res);
+});
+
+test("a completed measurement fails the go-line job when shutdown proof or final evidence is missing", async (t) => {
+  const r = await rig(t);
+  const res = await r.result;
+  assert.equal(res.status, "completed");
+  for (const broken of [
+    { ...res, closed: { state: "unanswered", attempts: 1, latencyMs: null } } as const,
+    { ...res, evidence: { state: "missing" }, final: "missing" } as const,
+    { ...res, cleanup: "dirty" } as const,
+  ]) {
+    const lines: string[] = [];
+    const code = await mainLoad(env(), { run: async () => broken, write: (line) => lines.push(line) }, DIST);
+    assert.equal(code, 1);
+    assert.equal(JSON.parse(lines[0]!).status, "completed", "preserve the measurement result for diagnosis");
+  }
 });
 
 function runBundle(e: NodeJS.ProcessEnv): Promise<{ code: number | null; out: string }> {

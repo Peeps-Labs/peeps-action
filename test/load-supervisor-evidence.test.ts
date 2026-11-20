@@ -54,6 +54,30 @@ describe("load supervisor: evidence and hard cancel", { concurrency: 4 }, () => 
     assert.notEqual(res.final, "missing");
   });
 
+  test("a malformed positive final reply leaves the same batch pending until a real ack", async (t) => {
+    const attempts: string[] = [];
+    const r = await rig(t, {
+      observer: (event, x) => {
+        if (event.type !== "claimed") return;
+        const events = x.port.events.bind(x.port);
+        x.port.events = async (...args: Parameters<typeof events>) => {
+          const body = args[2];
+          if (body.final) {
+            attempts.push(JSON.stringify(body));
+            if (attempts.length === 1) return { ok: true };
+            if (attempts.length === 2) return { ok: true, replay: false, refused: "budget" };
+          }
+          return events(...args);
+        };
+      },
+    });
+    const res = await r.result;
+    assert.equal(attempts.length, 3);
+    assert.equal(new Set(attempts).size, 1);
+    assert.equal(r.port.posted.filter((p) => p.final && !p.refused).length, 1);
+    assert.equal(res.evidence.state, "complete");
+  });
+
   test("a blocked events endpoint: the run still ends within its reporting deadline, final missing", async (t) => {
     const r = await rig(t, { script: { eventsBlocked: true } });
     const res = await r.result;

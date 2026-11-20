@@ -279,6 +279,8 @@ export function decodeRenewReply(raw: unknown): DecodedRenew {
  * `closed: true` (with `lease: "lost"` and `ttlMs: 0`). Anything else is no acknowledgement.
  */
 export function decodeClosedReceipt(raw: unknown): ClosedReceipt | undefined {
-  if (!isObj(raw) || raw.closed !== true || !text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.planHash, 64) || !whole(raw.seq) || !text(raw.nonce, 256)) return undefined;
+  if (!isObj(raw) || raw.closed !== true || raw.lease !== "lost" || raw.ttlMs !== 0 ||
+      !whole(raw.ceiling) || !finite(raw.leaseUntilServerMs) || !finite(raw.serverNowMs) || "refused" in raw ||
+      !text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.planHash, 64) || !whole(raw.seq) || !text(raw.nonce, 256)) return undefined;
   return { claimId: raw.claimId, epoch: raw.epoch, planHash: raw.planHash, seq: raw.seq, nonce: raw.nonce, closed: true };
 }

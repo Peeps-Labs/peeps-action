@@ -19,6 +19,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir, readlink } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { neutralize } from "./jail/spec";
 
@@ -655,10 +656,15 @@ export interface OfflineInstall {
   gid: number;
 }
 
-/** Runs the rest of the argv in a new network namespace (only a loopback, down) as `uid:gid`, with an empty environment. */
+/**
+ * Runs the rest of the argv in a new network namespace (only a loopback, down) as `uid:gid`, with
+ * an empty environment. `--pdeathsig`: killing sudo (a timeout, a cancel) does not reach what it
+ * started, and SIGKILL is never relayed; without it npm outlives the kill, holds the output pipes
+ * open and the install settles only when npm ends by itself.
+ */
 export function netnsPrefix(o: { uid: number; gid: number }): string[] {
   if (!Number.isSafeInteger(o.uid) || o.uid < 0 || !Number.isSafeInteger(o.gid) || o.gid < 0) throw new InstallRefused(["the runner's uid and gid must be whole numbers"]);
-  return ["/usr/bin/sudo", "-n", "/usr/bin/unshare", "--net", "--", "/usr/bin/setpriv", `--reuid=${o.uid}`, `--regid=${o.gid}`, "--init-groups", "/usr/bin/env", "-i"];
+  return ["/usr/bin/sudo", "-n", "/usr/bin/unshare", "--net", "--", "/usr/bin/setpriv", `--reuid=${o.uid}`, `--regid=${o.gid}`, "--init-groups", "--pdeathsig", "SIGKILL", "/usr/bin/env", "-i"];
 }
 
 /** The offline install's command: the namespace prefix, npm's whole environment as arguments, then npm ci offline. */
@@ -667,6 +673,37 @@ export function offlineInstallArgv(tc: Toolchain, cache: string, scratch: string
   const [file, ...prefix] = netnsPrefix(o);
   const vars = Object.entries(env).map(([k, v]) => `${k}=${v}`);
   return { file: file!, args: [...prefix, ...vars, tc.node, tc.npmCli, "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache", cache], env };
+}
+
+type CacheReadStream = AsyncIterable<Buffer> & { destroy(error?: Error): void };
+
+/** Verify all locked registry tarballs, even ones npm might omit (optional or platform-specific). */
+async function verifyRecipeCache(cache: string, tc: Toolchain, lock: unknown, signal?: AbortSignal): Promise<void> {
+  // installProblems has checked the lock. Use the same cache reader as the pinned npm CLI.
+  const { packages } = lock as { packages: Record<string, Record<string, unknown>> };
+  const checked = new Set<string>();
+  const cacheDir = path.join(cache, "_cacache");
+  const requireFromNpm = createRequire(tc.npmCli);
+  for (const [name, entry] of Object.entries(packages)) {
+    if (!registryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity)) continue;
+    signal?.throwIfAborted();
+    const cacache = requireFromNpm("cacache") as {
+      get: { stream: { byDigest(cacheDir: string, integrity: string): CacheReadStream } };
+    };
+    const stream = cacache.get.stream.byDigest(cacheDir, entry.integrity);
+    const abort = () => stream.destroy(new Error("cache verification cancelled"));
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      for await (const _chunk of stream) signal?.throwIfAborted();
+      signal?.throwIfAborted();
+      checked.add(entry.integrity);
+    } catch {
+      signal?.throwIfAborted();
+      throw new Error(`install_failed: cached tarball missing or corrupt for ${name}`);
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
+  }
 }
 
 /**
@@ -683,8 +720,11 @@ export async function offlinePreinstall(ws: string, tc: Toolchain, scratch: stri
   } catch {
     throw new InstallRefused(["the recipe's npm cache is missing"]);
   }
-  const problems = installProblems(readWorkspace(ws));
+  const workspace = readWorkspace(ws);
+  const problems = installProblems(workspace);
   if (problems.length > 0) throw new InstallRefused(problems);
+  await verifyRecipeCache(cache, tc, workspace.lock, signal);
+  signal?.throwIfAborted();
   const { file, args } = offlineInstallArgv(tc, cache, scratch, o);
   await runNpm(file, args, { cwd: ws, env: { PATH: "/usr/bin:/bin" } }, timeoutMs, signal);
   return digestsOf(ws, signal);

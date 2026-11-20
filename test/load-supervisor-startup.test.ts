@@ -18,6 +18,11 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
     const res = await r.result;
     assert.equal(res.status, "lease_lost", why(r, res));
     assert.ok(r.events.some((e) => e.type === "renewal" && e.decision === "rejected"));
+    const rejected = res.latency.records.find(([, , , outcome]) => outcome === "rejected");
+    assert.ok(rejected);
+    assert.equal(rejected[2], null, "a malformed reply was never applied");
+    assert.equal(rejected[5], null);
+    assert.equal(res.latency.maxMs, null);
     invariants(r, res);
   });
 
@@ -179,5 +184,49 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
     assert.equal(res.reason, "executor_journey", why(r, res));
     assert.equal(res.failures.length, 1);
     assert.doesNotMatch(res.failures[0]!.message, /::/);
+  });
+
+  // ---------------------------------------------------------------- the harness hosts (e5 plan v3 §4)
+
+  test("a grant naming a host off the harness list is refused outside_harness before the jail starts: nothing launched, nothing sent, a zero-debit closed", async (t) => {
+    for (const harnessHosts of [["sink.load-harness.example.com"], ["test"], ["evil-sink.test"], ["sink.test.example.com"]]) {
+      const r = await rig(t, { harnessHosts });
+      const res = await r.result;
+      assert.equal(res.status, "didnt_start", why(r, res));
+      assert.equal(res.reason, "outside_harness", JSON.stringify(harnessHosts));
+      assert.equal(r.jails.made.length, 0, "no jail was launched");
+      assert.equal(res.cleanup, "not_started");
+      assert.equal(res.journal, null, "no gate, no proxy");
+      assert.deepEqual(r.sink.arrivals, []);
+      assert.equal(res.closed.state, "acked");
+      assert.equal(r.port.closed!.debited, 0);
+    }
+  });
+
+  test("a grant whose every origin is on the harness list runs (the list is matched whole, whatever its case)", async (t) => {
+    const r = await rig(t, { harnessHosts: ["other.example.com", "SINK.test"] });
+    const res = await r.result;
+    assert.equal(res.status, "completed", why(r, res));
+    invariants(r, res);
+  });
+
+  test("a grant with any off-list origin is refused before launch or a sink request", async (t) => {
+    let launches = 0;
+    const r = await rig(t, {
+      harnessHosts: ["sink.test"],
+      setup: { baseURL: "https://sink.test" },
+      limits: { allowedOrigins: ["https://sink.test", "https://off-list.test"] },
+      launch: async () => {
+        launches += 1;
+        throw new Error("the harness guard must run first");
+      },
+    });
+    const res = await r.result;
+    assert.equal(res.reason, "outside_harness", why(r, res));
+    assert.equal(res.cleanup, "not_started");
+    assert.equal(launches, 0);
+    assert.equal(r.sink.arrivals.length, 0);
+    assert.equal(res.closed.state, "acked");
+    assert.equal(res.closed.debited, 0);
   });
 });

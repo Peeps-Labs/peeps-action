@@ -170,8 +170,9 @@ export async function mainLoad(env: NodeJS.ProcessEnv = process.env, deps: LoadE
     write(JSON.stringify({ refused: "port", code }));
     return 2;
   }
-  const signals = (deps.signals ?? loadSignals)();
+  let signals: LoadSignals | undefined;
   try {
+    signals = (deps.signals ?? loadSignals)();
     const res = await (deps.run ?? runLoad)({
       runId: i.runId,
       workspace: i.workspace,
@@ -188,12 +189,20 @@ export async function mainLoad(env: NodeJS.ProcessEnv = process.env, deps: LoadE
       signal: signals.signal,
       hardSignal: signals.hard,
     });
-    write(JSON.stringify(reportOf(res)));
+    if (i.resultFile) writeFileSync(i.resultFile, `${JSON.stringify(res)}\n`, { mode: 0o600 });
     if (i.summaryFile) appendFileSync(i.summaryFile, stepSummary(res));
-    if (i.resultFile) writeFileSync(i.resultFile, `${JSON.stringify(res)}\n`, { mode: 0o644 });
-    return res.status === "completed" ? 0 : 1;
+    write(JSON.stringify(reportOf(res)));
+    return res.status === "completed" &&
+      res.cleanup === "clean" &&
+      res.closed.state === "acked" &&
+      res.evidence.state === "complete" &&
+      res.final !== "missing" &&
+      res.final.watermark === res.closed.debited ? 0 : 1;
+  } catch {
+    write('{"failed":"run_or_report"}');
+    return 1;
   } finally {
-    signals.dispose();
+    signals?.dispose();
     port.close();
   }
 }

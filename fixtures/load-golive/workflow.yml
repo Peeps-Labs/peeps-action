@@ -81,4 +81,4 @@ jobs:
         with:
           name: peeps-load-result-${{ inputs.runner }}
           path: ${{ runner.temp }}/peeps-load-result.json
-          if-no-files-found: warn
+          if-no-files-found: error

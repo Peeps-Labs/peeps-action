@@ -31,14 +31,14 @@ import os from "node:os";
 import path from "node:path";
 import { CUT_REASONS, DENY_REASONS, Accounting, requestDelta, zeroCounts, type IntervalRecord, type CohortRecord } from "./accounting";
 import { sharedClocks } from "./clocks";
-import { decodeClaimReply, decodeClosedReceipt, decodeRenewReply, planHashOf, renewBody, type Binding, type ClaimRequest, type ControlPort, type Grant, type RenewState } from "./control-port";
+import { decodeClaimReply, decodeClosedReceipt, decodeRenewReply, planHashOf, renewBody, type Binding, type ClaimRequest, type ControlPort, type Grant, type RenewFields, type RenewState } from "./control-port";
 import { DIALS_PER_TURN, ENGINE_LIMITS, OUTSTANDING_PER_TURN, runLimits, type EngineConstants, type RunLimits } from "./engine-limits";
 import { Gate, type Clocks } from "./gate/admission";
 import { createRunCa } from "./gate/ca";
 import { encodeHandoffs, Journal, type JournalSnapshot } from "./gate/journal";
 import { GateProxy, makeDial, type Dial, type DialSeams } from "./gate/proxy";
 import { batchHash } from "./gate/reconcile";
-import { checkoutHead, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests } from "./install";
+import { checkoutHead, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests } from "./install";
 import { NoTicket, probe as realProbe, startJail, TicketRefused, type JailHandle, type ProbeReport, type StartJailOptions } from "./jail";
 import type { CtlFrame, Ticket } from "./jail/ctl";
 import type { JailSpec } from "./jail/spec";
@@ -129,6 +129,8 @@ export interface LoadSeams {
   onJournal?: (journal: Journal) => void;
 }
 
+type LoadPhase = RenewFields["phase"];
+
 export type LoadStatus = "completed" | "stopped" | "cancelled" | "lease_lost" | "didnt_start" | "failed";
 
 export type LoadEvent =
@@ -157,13 +159,17 @@ export interface ClosedOutcome {
 }
 
 /**
- * Every renewal allocated, in seq order, as `[seq, attempts, ms, outcome]`: `ms` runs from its
+ * Every renewal allocated, in seq order, as `[seq, attempts, ms, outcome, firstSendAtMs,
+ * answerAppliedAtMs, phase]`: `ms` runs from its
  * first send to the answer applied (retries included, on the monotonic clock), null when no
- * answer was applied. Percentiles are nearest-rank over every renewal, an unanswered one counted
+ * answer was applied (a rejected reply is never applied). The two wall-clock stamps (UTC ms)
+ * place each renewal against a deploy's timestamps and the result's `measurementWindow`.
+ * Percentiles are nearest-rank over every renewal, an unanswered one counted
  * above any answered one (null when the rank lands on it).
  */
 export interface RenewalLatency {
-  records: [number, number, number | null, string][];
+  records: [seq: number, attempts: number, ms: number | null, outcome: string,
+    firstSendAtMs: number, answerAppliedAtMs: number | null, phase: LoadPhase][];
   count: number;
   unanswered: number;
   p50Ms: number | null;
@@ -189,6 +195,8 @@ export interface LoadResult {
   playwright: string | null;
   checking: { turns: number; success: number; failure: number; timeout: number; cancelled: number; responded: number[] };
   measurement: { started: number; missed: number; success: number; failure: number; timeout: number; cancelled: number };
+  /** UTC bounds of the measurement before drain. Null when measurement never started. */
+  measurementWindow: { startedAtMs: number; endedAtMs: number } | null;
   journal: JournalSnapshot | null;
   handoffs: { debited: number; unattempted: number[] } | null;
   /** The gate settled and the local marker was written. */
@@ -284,7 +292,7 @@ class LoadRun {
   private expiryObserved = false;
   private stopNowLive = false;
   private gracefulStop = false;
-  private phase: "starting" | "checking" | "measurement" = "starting";
+  private phase: LoadPhase = "starting";
 
   private renewController = new AbortController();
   private renewing = false;
@@ -298,7 +306,10 @@ class LoadRun {
   /** How long a drain may take: the grant's grace, never longer than a measured turn's deadline (also how long a cohort waits to be sealed). */
   private drainGraceMs = 0;
   /** Per allocated renewal: its attempts, the ms from first send to the applied answer, and the outcome. */
-  private readonly latency = new Map<number, { attempts: number; ms: number | null; outcome: string }>();
+  private readonly latency = new Map<number, {
+    attempts: number; ms: number | null; outcome: string;
+    firstSendAtMs: number; answerAppliedAtMs: number | null; phase: LoadPhase;
+  }>();
   /** Measured starts' lag behind their due tick, on the plan's clock, for `lagP99Ms`. */
   private readonly startLags: { atMs: number; lagMs: number }[] = [];
   private readonly loopDelay = monitorEventLoopDelay({ resolution: 10 });
@@ -315,6 +326,8 @@ class LoadRun {
   private readonly measurement = { started: 0, missed: 0, success: 0, failure: 0, timeout: 0, cancelled: 0 };
   private accounting: Accounting;
   private measureStartMono = 0;
+  private measureStartWall: number | undefined;
+  private measureEndWall: number | undefined;
   private scheduler: Scheduler | undefined;
   private lastSnapshot: JournalSnapshot | undefined;
 
@@ -422,7 +435,8 @@ class LoadRun {
     try {
       return await offlinePreinstall(this.o.workspace, trustedToolchain(this.o.nodeDir, this.o.workspace), scratch, { cache: this.o.npmCache, uid: process.getuid!(), gid: process.getgid!() }, undefined, this.signal);
     } catch (error) {
-      throw new Refused("didnt_start", "install_unsupported", (error as Error).message);
+      // A checkout or toolchain refused before npm ran is unsupported; npm or the cache failing is install_failed.
+      throw new Refused("didnt_start", error instanceof InstallRefused ? "install_unsupported" : "install_failed", (error as Error).message);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -512,7 +526,10 @@ class LoadRun {
     this.renewals.sent += 1;
     this.renewals.states.push(state);
     if (this.reason !== undefined) this.renewals.afterTerminate += 1;
-    const record = { attempts: 0, ms: null as number | null, outcome: "none" };
+    const record = {
+      attempts: 0, ms: null as number | null, outcome: "none",
+      firstSendAtMs: tx.firstSendWall, answerAppliedAtMs: null as number | null, phase: this.phase,
+    };
     this.latency.set(tx.seq, record);
     const signal = this.renewController.signal;
     // Before every retry: a pause, so a port that fails or answers at once never holds the event
@@ -549,7 +566,10 @@ class LoadRun {
         if (!(await again())) return;
         continue;
       }
-      record.ms = Math.max(0, now.monoMs - tx.firstSendMono);
+      if (d.kind !== "rejected") {
+        record.ms = Math.max(0, now.monoMs - tx.firstSendMono);
+        record.answerAppliedAtMs = now.wallMs;
+      }
       record.outcome = d.kind === "lease" ? "held" : d.kind;
       if (d.kind === "lost") {
         if (d.stop?.mode === "now") {
@@ -587,8 +607,10 @@ class LoadRun {
   }
 
   private startDrain(): void {
+    this.renewState = "draining";
     if (this.graceEnd === undefined) {
       const t = this.clocks();
+      this.markMeasurementEnd(t);
       this.graceEnd = { monoMs: t.monoMs + this.drainGraceMs, wallMs: t.wallMs + this.drainGraceMs };
       this.gate!.drain(this.graceEnd);
     }
@@ -886,8 +908,10 @@ class LoadRun {
   private async runMeasurement(): Promise<void> {
     const plan = this.plan!;
     this.phase = "measurement";
+    const started = this.clocks();
+    this.measureStartMono = started.monoMs;
+    this.measureStartWall = started.wallMs;
     this.emit({ type: "phase", phase: "measurement" });
-    this.measureStartMono = this.clocks().monoMs;
     this.scheduler = new Scheduler({ pacingEveryMs: plan.cohort.pacingEveryMs, stages: plan.cohort.stages }, this.limits!.budgets.startSlackMs);
     this.tick();
     await this.terminated;
@@ -913,7 +937,8 @@ class LoadRun {
           continue;
         }
         this.measurement.started += 1;
-        this.startLags.push({ atMs: planNow, lagMs: Math.max(0, planNow - st.dueMs) });
+        const startMs = opened.startMono - this.measureStartMono;
+        this.startLags.push({ atMs: startMs, lagMs: Math.max(0, startMs - st.dueMs) });
         this.accounting.start(id, planNow, st.stage, planNow + this.limits!.budgets.measurement.turnDeadlineMs);
       }
     }
@@ -928,6 +953,17 @@ class LoadRun {
     if (this.reason !== undefined || this.phase !== "measurement") return;
     const ending = this.gracefulStop || (this.scheduler !== undefined && this.graceEnd !== undefined);
     if (ending && this.busySlots.size === 0) this.terminate(this.gracefulStop ? "stopped" : "completed");
+  }
+
+  private markMeasurementEnd(at: Clocks): void {
+    if (this.measureStartWall === undefined || this.measureEndWall !== undefined) return;
+    const elapsed = Math.max(0, at.monoMs - this.measureStartMono);
+    this.measureEndWall = this.measureStartWall + Math.min(elapsed, this.plan!.durationMs);
+  }
+
+  private measurementWindow(): LoadResult["measurementWindow"] {
+    if (this.measureStartWall === undefined || this.measureEndWall === undefined) return null;
+    return { startedAtMs: this.measureStartWall, endedAtMs: this.measureEndWall };
   }
 
   private countRequests(planNow: number): void {
@@ -959,6 +995,7 @@ class LoadRun {
     if (this.expiryObserved || this.gate?.leaseExpired) [reason, st] = ["lease_lost", "lease_lost"];
     else if (this.stopNowLive) [reason, st] = ["stopped", "stopped"];
     else if (this.lease && !this.lease.held(this.clocks())) [reason, st] = ["lease_lost", "lease_lost"];
+    this.markMeasurementEnd(this.clocks());
     this.reason = reason;
     this.status = st ?? statusOf(reason);
     clearTimeout(this.watchTimer);
@@ -1033,6 +1070,7 @@ class LoadRun {
       playwright: this.playwright,
       checking: this.checking,
       measurement: this.measurement,
+      measurementWindow: this.measurementWindow(),
       journal: this.journal?.snapshot() ?? null,
       handoffs: this.journal ? encodeHandoffs(this.journal.handoffs()) : null,
       gateClosed: this.gateClosed,
@@ -1064,7 +1102,7 @@ class LoadRun {
    * The release-bearing `closed` renewal: once, only with settlement proven, retried with
    * identical bytes until a matching receipt, a refusal or the reporting deadline.
    */
-  private async close(settled: boolean, cleanup: "clean" | "dirty" | "not_started", debited: number, deadline: Promise<void>): Promise<void> {
+  private async close(settled: boolean, cleanup: "clean" | "dirty" | "not_started", debited: number, deadline: ReturnType<typeof delayResolve>): Promise<void> {
     const lease = this.lease;
     const g = this.grant;
     if (!lease || !g) return;
@@ -1074,6 +1112,7 @@ class LoadRun {
       this.closedOutcome = { state: "withheld", reason: withheld, attempts: 0, latencyMs: null };
       return;
     }
+    if (deadline.expired()) return;
     const t0 = this.clocks();
     const tx = lease.beginClosed(t0, randomBytes(16).toString("hex"), (seq, nonce) =>
       renewBody({ epoch: g.epoch, seq, nonce, phase: this.phase, debited, unresolved: this.gate?.unresolved ?? 0, inFlight: 0, state: "closed", lagP99Ms: this.lagP99Ms() }),
@@ -1084,7 +1123,7 @@ class LoadRun {
     const stop = AbortSignal.any([this.closedCancel.signal, this.hardSignalOr()]);
     void deadline.then(() => this.closedCancel.abort());
     let pause = this.k.retryMs;
-    while (!stop.aborted) {
+    while (!stop.aborted && !deadline.expired()) {
       out.attempts += 1;
       let raw: unknown;
       let answered = true;
@@ -1093,6 +1132,7 @@ class LoadRun {
       } catch {
         answered = false;
       }
+      if (stop.aborted || deadline.expired()) break;
       if (answered) {
         const receipt = decodeClosedReceipt(raw);
         if (receipt && lease.ackClosed(receipt)) {
@@ -1123,7 +1163,9 @@ class LoadRun {
 
   /** The renewal latency record; `withRecords` keeps every allocation's entry. */
   private latencySummary(withRecords: boolean): RenewalLatency {
-    const records: RenewalLatency["records"] = [...this.latency.entries()].sort((a, b) => a[0] - b[0]).map(([seq, r]) => [seq, r.attempts, r.ms === null ? null : round(r.ms), r.outcome]);
+    const records: RenewalLatency["records"] = [...this.latency.entries()].sort((a, b) => a[0] - b[0]).map(([seq, r]) =>
+      [seq, r.attempts, r.ms === null ? null : round(r.ms), r.outcome, r.firstSendAtMs, r.answerAppliedAtMs, r.phase],
+    );
     const values = records.map((r) => (r[2] === null ? Number.POSITIVE_INFINITY : r[2])).sort((a, b) => a - b);
     const at = (q: number) => {
       const v = nearestRank(values, q);
@@ -1154,7 +1196,7 @@ class LoadRun {
     this.queueRecords("renewals", "records", latency.records, {});
     const { records: _records, ...latencyStats } = latency;
     const loop = this.loopDelay;
-    this.queue({ kind: "summary", journal: this.journal!.snapshot(), checking: this.checking, measurement: this.measurement, reason: this.reason, playwright: this.playwright, failures: this.failures.slice(0, 20), denyReasons: DENY_REASONS.length, cutReasons: CUT_REASONS.length, zero: zeroCounts().debited, latency: latencyStats, eventLoop: { p99Ms: loop.count ? round(loop.percentile(99) / 1e6) : 0, maxMs: loop.count ? round(loop.max / 1e6) : 0 } });
+    this.queue({ kind: "summary", journal: this.journal!.snapshot(), checking: this.checking, measurement: this.measurement, measurementWindow: this.measurementWindow(), reason: this.reason, playwright: this.playwright, failures: this.failures.slice(0, 20), denyReasons: DENY_REASONS.length, cutReasons: CUT_REASONS.length, zero: zeroCounts().debited, latency: latencyStats, eventLoop: { p99Ms: loop.count ? round(loop.percentile(99) / 1e6) : 0, maxMs: loop.count ? round(loop.max / 1e6) : 0 } });
   }
 
   private queueFinal(watermark: number): void {
@@ -1210,14 +1252,14 @@ class LoadRun {
       }
       if (this.evidenceStopped) return;
       if (answered && isObj(answer)) {
-        if (answer.ok === true) {
+        if (answer.ok === true && typeof answer.replay === "boolean" && !("reason" in answer) && !("refused" in answer)) {
           this.evidenceQueue.shift();
           if (head.body.final) this.finalSent = head.body.final;
           pause = this.k.retryMs;
           continue;
         }
         const refusal = answer.ok === false ? answer.reason : answer.refused;
-        if (answer.ok === false || typeof answer.refused === "string") {
+        if (answer.ok === false || (answer.ok !== true && typeof answer.refused === "string")) {
           this.latchIncomplete({ seq: head.body.seq, reason: typeof refusal === "string" ? refusal.slice(0, 64) : "unknown" });
           this.evidenceStopped = true;
           return;
@@ -1292,17 +1334,20 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function delayResolve(ms: number): Promise<void> & { cancel(): void; finish(): void } {
-  let timer!: NodeJS.Timeout;
+function delayResolve(ms: number): Promise<void> & { expired(): boolean; cancel(): void; finish(): void } {
+  const end = performance.now() + ms;
+  let finished = false;
   let done!: () => void;
-  const p = new Promise<void>((resolve) => {
-    done = resolve;
-    timer = setTimeout(resolve, ms);
-  }) as Promise<void> & { cancel(): void; finish(): void };
-  p.cancel = () => clearTimeout(timer);
-  p.finish = () => {
+  const p = new Promise<void>((resolve) => { done = resolve; });
+  const finish = () => {
+    finished = true;
     clearTimeout(timer);
     done();
   };
-  return p;
+  const timer = setTimeout(finish, ms);
+  return Object.assign(p, {
+    cancel: () => clearTimeout(timer),
+    expired: () => finished || performance.now() >= end,
+    finish,
+  });
 }
