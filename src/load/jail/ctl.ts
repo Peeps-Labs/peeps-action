@@ -150,6 +150,11 @@ export function decode(line: string): CtlFrame | null {
 export class LineSplitter {
   private buffer = "";
 
+  /** Bytes after the last newline: at end of input, a frame cut short. */
+  get incomplete(): boolean {
+    return this.buffer !== "";
+  }
+
   push(chunk: string): string[] | null {
     this.buffer += chunk;
     const lines = this.buffer.split("\n");

@@ -25,6 +25,8 @@ import { decode, encode, LineSplitter, relayable, sameNonce, type CtlFrame, type
 import { IN_JAIL, neutralize, RELAY_UID, rootDir, socketDir, specProblems, systemdRunArgs, unitName, type JailSpec } from "./jail/spec";
 
 const exec = promisify(execFile);
+/** Host tools run by absolute path with a fixed PATH: nothing the job put on its PATH is found first. */
+const HOST_ENV = { PATH: "/usr/sbin:/usr/bin:/sbin:/bin" };
 const HEARTBEAT_MS = 1000;
 const STOP_GRACE_MS = 2000;
 const EMPTY_WAIT_MS = 3000;
@@ -115,23 +117,23 @@ export async function startJail(spec: JailSpec, options: StartJailOptions, signa
   const ctlServer = net.createServer();
   const proxySockets = new Set<net.Socket>();
   try {
-    await sudo("mkdir", "-m", "0700", dir);
-    await sudo("chown", String(process.getuid!()), dir);
+    await sudo("/usr/bin/mkdir", "-m", "0700", dir);
+    await sudo("/usr/bin/chown", String(process.getuid!()), dir);
     proxy = await options.listenProxy(`${dir}/proxy.sock`);
     proxy.on("connection", (socket: net.Socket) => {
       proxySockets.add(socket);
       socket.once("close", () => proxySockets.delete(socket));
     });
     await new Promise<void>((resolve, reject) => ctlServer.once("error", reject).listen(`${dir}/ctl.sock`, resolve));
-    await sudo("chown", `root:${RELAY_UID}`, dir, `${dir}/proxy.sock`);
-    await sudo("chown", "root:root", `${dir}/ctl.sock`);
-    await sudo("chmod", "0660", `${dir}/proxy.sock`);
-    await sudo("chmod", "0600", `${dir}/ctl.sock`);
-    await sudo("chmod", "0710", dir);
+    await sudo("/usr/bin/chown", `root:${RELAY_UID}`, dir, `${dir}/proxy.sock`);
+    await sudo("/usr/bin/chown", "root:root", `${dir}/ctl.sock`);
+    await sudo("/usr/bin/chmod", "0660", `${dir}/proxy.sock`);
+    await sudo("/usr/bin/chmod", "0600", `${dir}/ctl.sock`);
+    await sudo("/usr/bin/chmod", "0710", dir);
   } catch (error) {
     proxy?.close();
     ctlServer.close();
-    await sudo("rm", "-rf", dir).catch(() => undefined);
+    await sudo("/usr/bin/rm", "-rf", dir).catch(() => undefined);
     throw error;
   }
   const gate = proxy;
@@ -139,7 +141,7 @@ export async function startJail(spec: JailSpec, options: StartJailOptions, signa
   const ctl = acceptCtl(ctlServer, nonce);
   ctl.catch(() => undefined);
   // Never hand the job's log the jail's raw output: the runner reads workflow commands there.
-  const child = spawn("sudo", ["-n", ...systemdRunArgs(spec)], { stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn("/usr/bin/sudo", ["-n", ...systemdRunArgs(spec)], { env: HOST_ENV, stdio: ["pipe", "pipe", "pipe"] });
   const stdout = neutralized(child.stdout!);
   const stderr = neutralized(child.stderr!);
   if (options.stdout !== "pipe") stdout.pipe(process.stdout);
@@ -161,10 +163,10 @@ export async function startJail(spec: JailSpec, options: StartJailOptions, signa
       lifeline.destroy();
       ctlServer.close();
       const group = await cgroup;
-      if (!group || !(await becomesInactive(unit, STOP_GRACE_MS))) await sudo("systemctl", "stop", `${unit}.service`).catch(() => undefined);
+      if (!group || !(await becomesInactive(unit, STOP_GRACE_MS))) await sudo("/usr/bin/systemctl", "stop", `${unit}.service`).catch(() => undefined);
       // With no cgroup path the unit may not have registered yet: clean only once systemd-run itself is gone too.
       const clean = group ? await cgroupEmpties(group, EMPTY_WAIT_MS) : (await childGone(child, EMPTY_WAIT_MS)) && (await becomesInactive(unit, 0));
-      await sudo("rm", "-rf", dir, rootDir(spec.runId)).catch(() => undefined);
+      await sudo("/usr/bin/rm", "-rf", dir, rootDir(spec.runId)).catch(() => undefined);
       return { clean, ms: Math.round(performance.now() - t0) };
     })());
 
@@ -455,14 +457,14 @@ function neutralized(source: NodeJS.ReadableStream): PassThrough {
 /** Sockets and FIFOs in the checkout would stay usable through a read-only bind: a way round the gate. */
 async function refuseSpecialFiles(tree: string): Promise<void> {
   if ((await realpath(tree)) !== tree) throw new Error(`load jail: ${tree} must not go through a symlink`);
-  const { stdout } = await exec("find", [tree, "-xdev", "(", "-type", "s", "-o", "-type", "p", "-o", "-type", "b", "-o", "-type", "c", ")", "-print", "-quit"]);
+  const { stdout } = await exec("/usr/bin/find", [tree, "-xdev", "(", "-type", "s", "-o", "-type", "p", "-o", "-type", "b", "-o", "-type", "c", ")", "-print", "-quit"], { env: HOST_ENV, timeout: CALL_MS });
   if (stdout.trim()) throw new Error(`load jail: ${tree} holds a socket, FIFO or device (${stdout.trim()})`);
 }
 
 /** A supervisor that was killed leaves its folders; reuse is safe only once its unit is gone. */
 async function removeStale(unit: string, dir: string, runId: string): Promise<void> {
   if (!(await becomesInactive(unit, 0))) throw new Error(`load jail: ${unit} is still running`);
-  await sudo("rm", "-rf", dir, rootDir(runId));
+  await sudo("/usr/bin/rm", "-rf", dir, rootDir(runId));
 }
 
 export interface Ctl {
@@ -535,12 +537,12 @@ export function acceptCtl(server: net.Server, nonce: string): Promise<Ctl> {
 }
 
 async function sudo(...args: string[]): Promise<void> {
-  await exec("sudo", ["-n", ...args], { timeout: CALL_MS });
+  await exec("/usr/bin/sudo", ["-n", ...args], { env: HOST_ENV, timeout: CALL_MS });
 }
 
 async function controlGroup(unit: string): Promise<string> {
   for (let i = 0; i < 50; i++) {
-    const { stdout } = await exec("systemctl", ["show", "-p", "ControlGroup", "--value", `${unit}.service`], { timeout: CALL_MS }).catch(() => ({ stdout: "" }));
+    const { stdout } = await exec("/usr/bin/systemctl", ["show", "-p", "ControlGroup", "--value", `${unit}.service`], { env: HOST_ENV, timeout: CALL_MS }).catch(() => ({ stdout: "" }));
     if (stdout.trim()) return stdout.trim();
     await sleep(100);
   }
@@ -550,7 +552,7 @@ async function controlGroup(unit: string): Promise<string> {
 async function becomesInactive(unit: string, ms: number): Promise<boolean> {
   const until = performance.now() + ms;
   do {
-    const { stdout } = await exec("systemctl", ["is-active", `${unit}.service`], { timeout: CALL_MS }).catch((e: { stdout?: string }) => ({ stdout: e.stdout ?? "" }));
+    const { stdout } = await exec("/usr/bin/systemctl", ["is-active", `${unit}.service`], { env: HOST_ENV, timeout: CALL_MS }).catch((e: { stdout?: string }) => ({ stdout: e.stdout ?? "" }));
     if (["inactive", "failed"].includes(stdout.trim())) return true;
     await sleep(100);
   } while (performance.now() < until);

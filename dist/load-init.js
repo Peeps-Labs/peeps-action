@@ -132,6 +132,10 @@ function decode(line) {
 }
 var LineSplitter = class {
   buffer = "";
+  /** Bytes after the last newline: at end of input, a frame cut short. */
+  get incomplete() {
+    return this.buffer !== "";
+  }
   push(chunk) {
     this.buffer += chunk;
     const lines = this.buffer.split("\n");
@@ -353,7 +357,12 @@ function serveControl(ctl, config, io) {
     stdin.on("error", () => child.exitCode === null && child.signalCode === null && violation());
     const lines2 = new LineSplitter();
     fd3.setEncoding("utf8");
+    fd3.on("error", violation);
+    fd3.once("end", () => {
+      if (lines2.incomplete) violation();
+    });
     fd3.on("data", (chunk) => {
+      if (over) return;
       const got = lines2.push(chunk);
       if (got === null) return violation();
       for (const line of got) {
@@ -363,6 +372,7 @@ function serveControl(ctl, config, io) {
           fd3.pause();
           ctl.once("drain", () => fd3.resume());
         }
+        if (over) return;
       }
     });
     child.once("error", () => finish(null, "spawn_error"));
@@ -371,6 +381,9 @@ function serveControl(ctl, config, io) {
   };
   const lines = new LineSplitter();
   ctl.setEncoding("utf8");
+  ctl.once("end", () => {
+    if (lines.incomplete) violation();
+  });
   ctl.on("data", (chunk) => {
     if (over) return;
     const got = lines.push(chunk);
@@ -383,6 +396,7 @@ function serveControl(ctl, config, io) {
         if (verdict !== "ok") send({ type: "refused", reason: REFUSED[verdict] });
         else if (frame.type === "start") install();
         else launch();
+        if (over) return;
         continue;
       }
       if (!relayable(frame, "supervisor") || !executor) return violation();

@@ -193,16 +193,21 @@ export class MiniSupervisor {
       await new Promise<void>((resolve) => proxy.server.listen(0, "127.0.0.1", resolve));
       proxyUrl = `http://127.0.0.1:${(proxy.server.address() as AddressInfo).port}`;
     }
-    const link = await (o.link ?? ((ctx) => processLink(o.workspace, o.env, o.nodeArgs)(ctx)))({ proxyUrl, caFile }, proxy);
-    self.link = link;
-    link.onFrame((f) => self!.onFrame(f));
+    // Teardown is registered before the link starts: a link that fails to start still frees the rest.
+    let link: ExecutorLink | undefined;
     t.after(async () => {
       for (const timer of self!.timers) clearTimeout(timer);
-      await link.end();
-      await proxy.close();
-      await sink.close();
-      rmSync(dir, { recursive: true, force: true });
+      try {
+        await link?.end();
+      } finally {
+        await proxy.close();
+        await sink.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
+    link = await (o.link ?? ((ctx) => processLink(o.workspace, o.env, o.nodeArgs)(ctx)))({ proxyUrl, caFile }, proxy);
+    self.link = link;
+    link.onFrame((f) => self!.onFrame(f));
     return self;
   }
 

@@ -3,13 +3,14 @@
  * permanent). Runs only with LOAD_JAIL_TESTS=1, which the hosted 22.04 and
  * 24.04 jobs in ci.yml set; there it needs sudo, systemd and cgroup v2.
  */
-import { after, before, test } from "node:test";
+import { after, before, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { sharedClocks } from "../src/load/clocks";
 import { probe, startJail, TicketRefused, type JailHandle } from "../src/load/jail";
 import { encode, type Ticket } from "../src/load/jail/ctl";
@@ -327,9 +328,13 @@ function countingProxy(seen: { connections: number }) {
     });
 }
 
-async function jailWithOutput(s: JailSpec, listenProxy: (p: string) => Promise<net.Server> = forwardToSink): Promise<{ handle: JailHandle; out: () => string }> {
+/** A jail whose end is registered as soon as it exists: a failed assertion still ends the unit. */
+async function jailWithOutput(t: TestContext, s: JailSpec, listenProxy: (p: string) => Promise<net.Server> = forwardToSink): Promise<{ handle: JailHandle; out: () => string }> {
   await startSink();
   const handle = await startJail(s, { listenProxy, stdout: "pipe" });
+  t.after(async () => {
+    await handle.end();
+  });
   let out = "";
   handle.stdout!.setEncoding("utf8");
   handle.stdout!.on("data", (d: string) => (out += d));
@@ -337,12 +342,18 @@ async function jailWithOutput(s: JailSpec, listenProxy: (p: string) => Promise<n
   return { handle, out: () => out };
 }
 
+async function waitForOutput(out: () => string, line: RegExp): Promise<void> {
+  const deadline = performance.now() + 5_000;
+  while (!line.test(out()) && performance.now() < deadline) await sleep(10);
+  assert.match(out(), line);
+}
+
 const ECHO_RAN = ["/bin/sh", "-c", "echo EXECUTOR-RAN; exec sleep 60"];
 
-test("a stale start ticket is refused before the install, and is not used up", options, async () => {
+test("a stale start ticket is refused before the install, and is not used up", options, async (t) => {
   const s = spec(ECHO_RAN);
   s.install = ["/bin/sh", "-c", "echo INSTALL-RAN"];
-  const { handle, out } = await jailWithOutput(s);
+  const { handle, out } = await jailWithOutput(t, s);
   const stale = ticketFor(s, -1);
   await assert.rejects(handle.start(() => stale), (e: unknown) => e instanceof TicketRefused && e.reason === "stale_ticket");
   await new Promise((r) => setTimeout(r, 300));
@@ -354,10 +365,10 @@ test("a stale start ticket is refused before the install, and is not used up", o
   assert.ok((await handle.end()).clean);
 });
 
-test("a launch ticket that went stale during a long install starts no executor", options, async () => {
+test("a launch ticket that went stale during a long install starts no executor", options, async (t) => {
   const s = spec(ECHO_RAN);
   s.install = ["/bin/sh", "-c", "sleep 2"];
-  const { handle, out } = await jailWithOutput(s);
+  const { handle, out } = await jailWithOutput(t, s);
   const minted = ticketFor(s, 1000);
   assert.equal((await handle.start(() => ticketFor(s))).code, 0);
   await assert.rejects(handle.launch(() => minted), (e: unknown) => e instanceof TicketRefused && e.reason === "stale_ticket");
@@ -366,10 +377,10 @@ test("a launch ticket that went stale during a long install starts no executor",
   assert.ok((await handle.end()).clean);
 });
 
-test("a failing install reports its code, and no launch follows it", options, async () => {
+test("a failing install reports its code, and no launch follows it", options, async (t) => {
   const s = spec(ECHO_RAN);
   s.install = ["/bin/sh", "-c", "exit 7"];
-  const { handle, out } = await jailWithOutput(s);
+  const { handle, out } = await jailWithOutput(t, s);
   const installed = await handle.start(() => ticketFor(s));
   assert.equal(installed.code, 7);
   await assert.rejects(handle.launch(() => ticketFor(s)), (e: unknown) => e instanceof TicketRefused && e.reason === "early_ticket");
@@ -377,19 +388,20 @@ test("a failing install reports its code, and no launch follows it", options, as
   assert.ok((await handle.end()).clean);
 });
 
-test("row 11: a postinstall that writes a marker and runs curl fails the install, writes nothing to the checkout, and reaches nothing", options, async () => {
+test("row 11: a postinstall that writes a marker and runs curl fails the install, writes nothing to the checkout, and reaches nothing", options, async (t) => {
   await startSink();
   sinkHits = [];
   const ws = workspaceWith({
-    "package.json": JSON.stringify({ name: "row11", version: "1.0.0", scripts: { postinstall: `echo x > .peeps-marker && curl -sS -m 5 http://${sinkAddr}/row11` } }),
+    "package.json": JSON.stringify({ name: "row11", version: "1.0.0", scripts: { postinstall: `echo x > .peeps-marker && echo ROW11-MARKER-WRITTEN && curl -sS -m 5 http://${sinkAddr}/row11` } }),
   });
   try {
     const s = spec(ECHO_RAN, ws);
     s.install = NPM_REBUILD;
     const seen = { connections: 0 };
-    const { handle } = await jailWithOutput(s, countingProxy(seen));
+    const { handle, out } = await jailWithOutput(t, s, countingProxy(seen));
     const installed = await handle.start(() => ticketFor(s));
-    assert.notEqual(installed.code, 0, "install_failed");
+    assert.equal(installed.code, 7, "curl attempted the connection and could not connect");
+    await waitForOutput(out, /^jail\| ROW11-MARKER-WRITTEN$/m);
     assert.equal(existsSync(path.join(ws, ".peeps-marker")), false, "the marker stayed in the overlay");
     assert.deepEqual(sinkHits, [], "zero sink arrivals");
     assert.equal(seen.connections, 0);
@@ -399,20 +411,24 @@ test("row 11: a postinstall that writes a marker and runs curl fails the install
   }
 });
 
-test("the rebuild runs as the runner's uid in the overlay, with no upstream traffic; root preinstall, install and postinstall run (npm 11), prepare does not", options, async () => {
+test("the rebuild runs as the runner's uid in the overlay, with no upstream traffic; root preinstall, install and postinstall run (npm 11), prepare does not", options, async (t) => {
   const hook = (name: string) => `echo HOOK ${name} $(id -u) && echo x > .peeps-${name}`;
   const ws = workspaceWith({
     "package.json": JSON.stringify({ name: "hooks", version: "1.0.0", scripts: Object.fromEntries(["preinstall", "install", "postinstall", "prepare"].map((n) => [n, hook(n)])) }),
   });
   try {
-    const s = spec(ECHO_RAN, ws);
+    // The executor checks, from inside the overlay, that the hooks wrote their files there.
+    const s = spec(["/bin/sh", "-c", "test -f .peeps-preinstall && test -f .peeps-install && test -f .peeps-postinstall && test ! -e .peeps-prepare"], ws);
     s.install = NPM_REBUILD;
     const seen = { connections: 0 };
-    const { handle, out } = await jailWithOutput(s, countingProxy(seen));
+    const { handle, out } = await jailWithOutput(t, s, countingProxy(seen));
+    assert.doesNotMatch(out(), /^jail\| HOOK /m);
     assert.equal((await handle.start(() => ticketFor(s))).code, 0, out());
-    await new Promise((r) => setTimeout(r, 300));
+    await waitForOutput(out, /^jail\| HOOK postinstall \d+$/m);
+    await handle.launch(() => ticketFor(s));
+    assert.deepEqual(await handle.exited, { code: 0, signal: null }, "the marker files are present only in the overlay");
     const ran = [...out().matchAll(/HOOK (\w+) (\d+)/g)].map((m) => [m[1], Number(m[2])]);
-    assert.deepEqual(ran, [["preinstall", process.getuid!()], ["install", process.getuid!()], ["postinstall", process.getuid!()]], out());
+    assert.deepEqual(ran, ["preinstall", "install", "postinstall"].map((name) => [name, process.getuid!()]), out());
     for (const n of ["preinstall", "install", "postinstall", "prepare"]) assert.equal(existsSync(path.join(ws, `.peeps-${n}`)), false, n);
     assert.equal(seen.connections, 0, "the rebuild sent nothing upstream");
     assert.ok((await handle.end()).clean);
@@ -425,18 +441,18 @@ for (const [name, frame] of [
   ["a forged exit", encode({ type: "exit", code: 0, signal: null })],
   ["a frame for the executor", encode({ type: "stop" })],
 ] as const) {
-  test(`${name} on fd 3 ends the jail as protocol`, options, async () => {
+  test(`${name} on fd 3 ends the jail as protocol`, options, async (t) => {
     const s = spec(["/bin/sh", "-c", `printf '%s' "$0" >&3; exec sleep 60`, frame]);
-    const { handle } = await jailWithOutput(s);
+    const { handle } = await jailWithOutput(t, s);
     await begin(handle, s);
     assert.deepEqual(await handle.exited, { code: null, signal: "protocol" });
     assert.ok((await handle.end()).clean);
   });
 }
 
-test("an executor that stops reading stdin is ended by the 1 MiB rule", options, async () => {
+test("an executor that stops reading stdin is ended by the 1 MiB rule", options, async (t) => {
   const s = spec(["/bin/sleep", "60"]);
-  const { handle } = await jailWithOutput(s);
+  const { handle } = await jailWithOutput(t, s);
   await begin(handle, s);
   for (let turn = 1; turn <= 60_000; turn++) handle.send({ type: "cancel", turn });
   const t0 = performance.now();
@@ -471,7 +487,12 @@ function jailLink(ws: string, o: { ca: boolean; install: boolean }) {
     if (o.install) s.install = NPM_REBUILD;
     s.limits.memoryMax = "2G";
     const handle = await startJail(s, { listenProxy: (p) => new Promise((resolve) => proxy.server.listen(p, () => resolve(proxy.server))) });
-    await begin(handle, s);
+    try {
+      await begin(handle, s);
+    } catch (error) {
+      await handle.end();
+      throw error;
+    }
     return {
       send: (f) => handle.send(f),
       onFrame: (l) => void handle.onFrame(l),
@@ -505,6 +526,8 @@ test("hosted slice: two turns through the jail keep the slot's cookie, each with
   const closed = m.open(1);
   m.proxy.closeTurn(closed.turn);
   assert.equal((await closed.outcome).kind, "failure");
+  assert.deepEqual(m.connects, [first.credential, second.credential, closed.credential]);
+  assert.equal(m.journal.snapshot().denied.turn_closed, 1, "the closed credential was refused by the gate");
   assert.equal(m.sink.arrivals.length, 2, "a closed credential got 0 arrivals");
 });
 

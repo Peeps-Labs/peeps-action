@@ -23767,6 +23767,10 @@ function decode(line) {
 }
 var LineSplitter = class {
   buffer = "";
+  /** Bytes after the last newline: at end of input, a frame cut short. */
+  get incomplete() {
+    return this.buffer !== "";
+  }
   push(chunk) {
     this.buffer += chunk;
     const lines2 = this.buffer.split("\n");
@@ -24007,6 +24011,7 @@ function originalLocation(stack, root2) {
 }
 
 // src/load/session.ts
+var import_promises = require("node:timers/promises");
 var DENIED_HEADER = "x-peeps-load-denied";
 var CUT_HEADER = "x-peeps-load-cut";
 var RETRY_HEADER = "x-peeps-load-retry-after-ms";
@@ -24041,20 +24046,36 @@ var FORWARDED = /* @__PURE__ */ new Set(["data", "form", "multipart", "headers",
 var CHECKED = /* @__PURE__ */ new Set(["method", "maxRetries", "maxRedirects", "failOnStatusCode", "ignoreHTTPSErrors"]);
 var FORBIDDEN_HEADERS = /* @__PURE__ */ new Set(["host", "proxy-authorization", "proxy-connection"]);
 var Pacer = class {
-  tail = Promise.resolve();
-  /** Runs `body` once every earlier waiter is done. */
-  run(body) {
-    const result = this.tail.then(body);
-    this.tail = result.then(
-      () => void 0,
-      () => void 0
-    );
-    return result;
+  active = false;
+  queue = [];
+  /** Runs `body` once every earlier waiter is done. An aborted waiter leaves the queue at once. */
+  async run(signal, body) {
+    signal.throwIfAborted();
+    if (this.active) {
+      await new Promise((resolve, reject) => {
+        const enter = () => {
+          signal.removeEventListener("abort", abort);
+          resolve();
+        };
+        const abort = () => {
+          this.queue.splice(this.queue.indexOf(enter), 1);
+          reject(signal.reason);
+        };
+        this.queue.push(enter);
+        signal.addEventListener("abort", abort, { once: true });
+      });
+    }
+    this.active = true;
+    try {
+      signal.throwIfAborted();
+      return await body();
+    } finally {
+      const next = this.queue.shift();
+      if (next) next();
+      else this.active = false;
+    }
   }
 };
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
-}
 function facade(response) {
   const r = response;
   const call = (name) => (...args) => r[name].apply(response, args);
@@ -24101,7 +24122,7 @@ var Sessions = class {
     if (slot.turn) throw new LoadRefusal(`slot ${spec.slot} is busy`);
     let markCancelled;
     const onCancel = new Promise((resolve) => markCancelled = resolve);
-    const state = { spec, closed: false, cancelled: false, outstanding: /* @__PURE__ */ new Set(), responses: [], active: 0, queue: [], onCancel, markCancelled };
+    const state = { spec, closed: false, cancelled: false, pace: new AbortController(), outstanding: /* @__PURE__ */ new Set(), responses: [], active: 0, queue: [], onCancel, markCancelled };
     slot.turn = state;
     this.turns.set(spec.turn, state);
     let result;
@@ -24121,7 +24142,7 @@ var Sessions = class {
       result = state.cancelled ? { kind: "cancelled" } : error instanceof TurnDeadline ? { kind: "timeout" } : { kind: "failure", error };
     }
     await this.finishTurn(state, slot);
-    return result;
+    return state.cancelled ? { kind: "cancelled" } : result;
   }
   /**
    * Cancel a running turn: the facade is closed first, then the context disposed, which ends
@@ -24132,9 +24153,10 @@ var Sessions = class {
     if (!state || state.cancelled) return;
     state.cancelled = true;
     state.closed = true;
+    state.pace.abort(new TurnDeadline());
     state.markCancelled();
     for (const wake of state.queue.splice(0)) wake();
-    void state.context?.dispose({ reason: "load: turn cancelled" }).catch(() => void 0);
+    if (state.context) void this.disposeContext(state);
   }
   /** Every running turn, cancelled. */
   cancelAll() {
@@ -24146,6 +24168,7 @@ var Sessions = class {
    */
   async finishTurn(state, slot) {
     state.closed = true;
+    state.pace.abort(new TurnDeadline());
     for (const wake of state.queue.splice(0)) wake();
     while (state.outstanding.size > 0) await Promise.allSettled([...state.outstanding]);
     if (!state.cancelled && state.context && slot.turn === state) {
@@ -24157,9 +24180,12 @@ var Sessions = class {
     }
     await Promise.allSettled(state.responses.map((r) => r.dispose()));
     state.responses.length = 0;
-    await state.context?.dispose({ reason: "load: turn ended" }).catch(() => void 0);
+    await this.disposeContext(state);
     this.turns.delete(state.spec.turn);
     if (slot.turn === state) slot.turn = void 0;
+  }
+  disposeContext(state) {
+    return state.disposing ??= state.context?.dispose({ reason: "load: turn ended" }).catch(() => void 0);
   }
   remaining(state) {
     return Math.floor(state.spec.deadlineMono - this.o.now());
@@ -24258,10 +24284,13 @@ var Sessions = class {
       let answer = await this.sendOnce(state, verb, p);
       while (answer.waitMs !== void 0) {
         const waitMs = answer.waitMs;
-        const started = this.pacer.run(async () => {
+        const started = this.pacer.run(state.pace.signal, async () => {
           const left = this.remaining(state);
           if (left <= 0 || state.closed) throw new TurnDeadline();
-          await Promise.race([sleep(Math.min(waitMs, left)), state.onCancel]);
+          await (0, import_promises.setTimeout)(Math.min(waitMs, left), void 0, { signal: state.pace.signal }).catch((error) => {
+            if (state.pace.signal.aborted) throw state.pace.signal.reason;
+            throw error;
+          });
           const sent = this.sendOnce(state, verb, p);
           sent.catch(() => void 0);
           return { sent };
@@ -24272,7 +24301,7 @@ var Sessions = class {
         answer = await (await Promise.race([started, cancelled])).sent;
       }
       const response = answer.response;
-      if (p.failOnStatusCode && !(response.status() >= 200 && response.status() < 300)) {
+      if (p.failOnStatusCode && !(response.status() >= 200 && response.status() < 400)) {
         throw new Error(`${response.status()} ${response.statusText()}`);
       }
       return facade(response);
@@ -24300,12 +24329,18 @@ var Sessions = class {
       if (this.remaining(state) <= 1) throw new TurnDeadline();
       throw error;
     }
-    state.responses.push(response);
     const headers = response.headers();
     const cut = headers[CUT_HEADER];
-    if (cut !== void 0) throw new GateDenied(cut, true);
     const denied = headers[DENIED_HEADER];
-    if (denied === void 0) return { response };
+    if (cut !== void 0) {
+      await response.dispose().catch(() => void 0);
+      throw new GateDenied(cut, true);
+    }
+    if (denied === void 0) {
+      state.responses.push(response);
+      return { response };
+    }
+    await response.dispose().catch(() => void 0);
     if (ENDS_TURN.has(denied)) throw new TurnDeadline();
     if (!WAITABLE.has(denied)) throw new GateDenied(denied, false);
     if (denied === "ceiling") return { waitMs: this.o.renewEveryMs };
@@ -24360,7 +24395,7 @@ function findPlaywright(dirs) {
       } catch {
         continue;
       }
-      const version = String(JSON.parse((0, import_node_fs2.readFileSync)(pkg, "utf8")).version ?? "?");
+      const version = String(JSON.parse((0, import_node_fs2.readFileSync)(pkg, "utf8").replace(/^\uFEFF/, "")).version ?? "?");
       return { version, load: () => req(name).request };
     }
   }
@@ -24381,16 +24416,19 @@ function onInit(frame) {
   } catch (error) {
     return fatal("unreadable", error);
   }
-  const found = findPlaywright([root, import_node_path2.default.dirname(file)]);
-  if (!found) return fatal("playwright", new Error("Playwright was not found from the working directory or the journey's folder"));
-  if (!atLeastFloor(found.version)) return fatal("playwright", new Error(`Playwright ${found.version} is below ${PLAYWRIGHT_FLOOR.join(".")}, the oldest a load journey runs on`));
   let request;
+  let version;
   try {
-    request = found.load();
+    const found = findPlaywright([root, import_node_path2.default.dirname(file)]);
+    if (!found) throw new Error("Playwright was not found from the working directory or the journey's folder");
+    version = found.version;
+    if (!atLeastFloor(version)) throw new Error(`Playwright ${version} is below ${PLAYWRIGHT_FLOOR.join(".")}, the oldest a load journey runs on`);
+    const loaded = found.load();
+    if (typeof loaded?.newContext !== "function") throw new Error(`Playwright ${version} has no request API`);
+    request = loaded;
   } catch (error) {
     return fatal("playwright", error);
   }
-  if (typeof request?.newContext !== "function") return fatal("playwright", new Error(`Playwright ${found.version} has no request API`));
   try {
     journey = loadJourney(root, frame.journey.module, frame.journey.export);
   } catch (error) {
@@ -24404,7 +24442,7 @@ function onInit(frame) {
     renewEveryMs: frame.renewEveryMs,
     now: () => sharedClocks().monoMs
   });
-  send({ type: "loaded", playwright: found.version.slice(0, 64) });
+  send({ type: "loaded", playwright: version.slice(0, 64) });
 }
 function onTurn(frame) {
   if (!sessions || !journey) return protocol("turn before loaded");

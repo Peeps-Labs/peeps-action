@@ -221,6 +221,20 @@ test("fatal: no Playwright, Playwright below 1.46, a journey that throws as it l
   assert.match((f3 as { message: string }).message, /fails as it loads/);
 });
 
+test("a Playwright manifest with a UTF-8 BOM is read before reporting its version", async (t) => {
+  const ws = mkdtempSync(path.join(os.tmpdir(), "peeps-playwright-bom-"));
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  cpSync(FIXTURES, ws, { recursive: true });
+  const pkg = path.join(ws, "node_modules", "playwright-core");
+  mkdirSync(pkg, { recursive: true });
+  writeFileSync(path.join(pkg, "package.json"), '\uFEFF{"name":"playwright-core","version":"1.46.1","main":"index.js"}');
+  writeFileSync(path.join(pkg, "index.js"), "exports.request = { newContext() {} };");
+  const m = await MiniSupervisor.start(t, { journey: { module: "journeys.ts", export: "get" }, workspace: ws, respond });
+  const frame = await m.init();
+  assert.deepEqual(frame, { type: "loaded", playwright: "1.46.1" });
+  assert.equal(m.sink.arrivals.length, 0);
+});
+
 test("a request the journey did not await, and that fails, ends no other turn", async (t) => {
   const m = await mini(t, "floating");
   const gone = m.link.exited.then((e) => ({ kind: `the executor exited (${e.code})`, message: m.link.stderr().slice(0, 300) }));

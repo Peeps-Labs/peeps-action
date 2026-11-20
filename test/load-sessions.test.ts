@@ -9,6 +9,139 @@ import type { ServerResponse } from "node:http";
 import { MiniSupervisor, type MiniOptions } from "./support/mini-supervisor";
 import type { Arrival } from "./support/load-sink";
 import { fixtureWorkspace } from "./support/e4-fixtures";
+import { DENIED_HEADER, Sessions, type RealResponse } from "../src/load/session";
+
+function turnSpec(turn: number) {
+  return { turn, slot: turn, password: "A".repeat(43), deadlineMono: performance.now() + 60_000 };
+}
+
+const sessionOptions = {
+  baseURL: "https://fixture.test",
+  proxy: "http://127.0.0.1:3128",
+  parallel: 1,
+  renewEveryMs: 3_000,
+  now: () => performance.now(),
+};
+
+test("cancel wakes a paced retry and removes a queued retry from another slot", { timeout: 2_000 }, async () => {
+  let fetched!: () => void;
+  let nextFetch = new Promise<void>((resolve) => {
+    fetched = resolve;
+  });
+  let disposedResponses = 0;
+  let disposedContexts = 0;
+  const reply: RealResponse = {
+    status: () => 503,
+    statusText: () => "Service Unavailable",
+    headers: () => ({ [DENIED_HEADER]: "ceiling" }),
+    dispose: async () => {
+      disposedResponses++;
+    },
+  };
+  const sessions = new Sessions({
+    ...sessionOptions,
+    playwright: {
+      newContext: async () => ({
+        fetch: async () => {
+          fetched();
+          return reply;
+        },
+        storageState: async () => ({}),
+        dispose: async () => {
+          disposedContexts++;
+        },
+      }),
+    },
+  });
+  const journey = (api: Record<string, unknown>) => (api.get as (url: string) => Promise<unknown>)("/");
+  const first = sessions.run(turnSpec(1), journey);
+  await nextFetch;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  nextFetch = new Promise<void>((resolve) => {
+    fetched = resolve;
+  });
+  const second = sessions.run(turnSpec(2), journey);
+  await nextFetch;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const earlyDisposals = disposedResponses;
+  try {
+    sessions.cancel(2);
+    assert.deepEqual(await second, { kind: "cancelled" });
+    assert.equal(sessions.busy(1), true, "the head is still waiting");
+    assert.equal(sessions.busy(2), false);
+  } finally {
+    sessions.cancel(2);
+    sessions.cancel(1);
+  }
+  assert.deepEqual(await first, { kind: "cancelled" });
+  assert.equal(earlyDisposals, 2, "denials are disposed before either retry");
+  assert.equal(disposedContexts, 2);
+});
+
+test("cancel during cleanup waits for the one context disposal and returns cancelled", async () => {
+  let finishDisposal!: () => void;
+  const disposal = new Promise<void>((resolve) => {
+    finishDisposal = resolve;
+  });
+  let started!: () => void;
+  const cleanupStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let disposals = 0;
+  const sessions = new Sessions({
+    ...sessionOptions,
+    playwright: {
+      newContext: async () => ({
+        fetch: async () => {
+          throw new Error("no fetch expected");
+        },
+        storageState: async () => ({}),
+        dispose: () => {
+          disposals++;
+          started();
+          return disposal;
+        },
+      }),
+    },
+  });
+  const outcome = sessions.run(turnSpec(1), () => undefined);
+  await cleanupStarted;
+  sessions.cancel(1);
+  assert.equal(sessions.busy(1), true);
+  finishDisposal();
+  assert.deepEqual(await outcome, { kind: "cancelled" });
+  assert.equal(disposals, 1);
+});
+
+test("failOnStatusCode accepts a returned redirect and fails on a target 503", async () => {
+  let status = 302;
+  const reply: RealResponse = {
+    status: () => status,
+    statusText: () => "fixture",
+    headers: () => ({}),
+    dispose: async () => undefined,
+  };
+  const sessions = new Sessions({
+    ...sessionOptions,
+    playwright: {
+      newContext: async () => ({
+        fetch: async (_url, options) => {
+          assert.equal(options.maxRedirects, 0);
+          assert.equal(options.failOnStatusCode, false);
+          return reply;
+        },
+        storageState: async () => ({}),
+        dispose: async () => undefined,
+      }),
+    },
+  });
+  const journey = (api: Record<string, unknown>) =>
+    (api.get as (url: string, options: { failOnStatusCode: boolean }) => Promise<unknown>)("/", { failOnStatusCode: true });
+  assert.deepEqual(await sessions.run(turnSpec(1), journey), { kind: "success" });
+  status = 503;
+  assert.equal((await sessions.run(turnSpec(2), journey)).kind, "failure");
+});
 
 interface Script {
   /** What `/script` tells the next turn to do. */

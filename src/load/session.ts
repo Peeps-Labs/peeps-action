@@ -22,6 +22,8 @@
  * count, a time or a limit: the gate enforces those.
  */
 
+import { setTimeout as sleep } from "node:timers/promises";
+
 export const DENIED_HEADER = "x-peeps-load-denied";
 export const CUT_HEADER = "x-peeps-load-cut";
 export const RETRY_HEADER = "x-peeps-load-retry-after-ms";
@@ -117,6 +119,10 @@ interface TurnState {
   context?: RealContext;
   closed: boolean;
   cancelled: boolean;
+  /** Aborted when the turn closes: its place in the pacer's queue and its wait end at once. */
+  pace: AbortController;
+  /** The one disposal of the context, shared by cancel and the turn's end. */
+  disposing?: Promise<void>;
   outstanding: Set<Promise<unknown>>;
   responses: RealResponse[];
   /** Per-turn FIFO semaphore: `parallel` sends at once. */
@@ -135,21 +141,36 @@ interface Slot {
 
 /** One process-wide FIFO: only its head waits out a denial and starts its re-send. */
 class Pacer {
-  private tail: Promise<void> = Promise.resolve();
+  private active = false;
+  private readonly queue: (() => void)[] = [];
 
-  /** Runs `body` once every earlier waiter is done. */
-  run<T>(body: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(body);
-    this.tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+  /** Runs `body` once every earlier waiter is done. An aborted waiter leaves the queue at once. */
+  async run<T>(signal: AbortSignal, body: () => Promise<T>): Promise<T> {
+    signal.throwIfAborted();
+    if (this.active) {
+      await new Promise<void>((resolve, reject) => {
+        const enter = () => {
+          signal.removeEventListener("abort", abort);
+          resolve();
+        };
+        const abort = () => {
+          this.queue.splice(this.queue.indexOf(enter), 1);
+          reject(signal.reason);
+        };
+        this.queue.push(enter);
+        signal.addEventListener("abort", abort, { once: true });
+      });
+    }
+    this.active = true;
+    try {
+      signal.throwIfAborted();
+      return await body();
+    } finally {
+      const next = this.queue.shift();
+      if (next) next();
+      else this.active = false;
+    }
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
 
 /** What the journey gets back: a plain object with a response's readers, and nothing else. */
@@ -202,7 +223,7 @@ export class Sessions {
     if (slot.turn) throw new LoadRefusal(`slot ${spec.slot} is busy`);
     let markCancelled!: () => void;
     const onCancel = new Promise<void>((resolve) => (markCancelled = resolve));
-    const state: TurnState = { spec, closed: false, cancelled: false, outstanding: new Set(), responses: [], active: 0, queue: [], onCancel, markCancelled };
+    const state: TurnState = { spec, closed: false, cancelled: false, pace: new AbortController(), outstanding: new Set(), responses: [], active: 0, queue: [], onCancel, markCancelled };
     slot.turn = state;
     this.turns.set(spec.turn, state);
     let result: TurnResult;
@@ -222,7 +243,8 @@ export class Sessions {
       result = state.cancelled ? { kind: "cancelled" } : error instanceof TurnDeadline ? { kind: "timeout" } : { kind: "failure", error };
     }
     await this.finishTurn(state, slot);
-    return result;
+    // A cancel that arrived while the turn was cleaning up still decides its outcome.
+    return state.cancelled ? { kind: "cancelled" } : result;
   }
 
   /**
@@ -234,9 +256,10 @@ export class Sessions {
     if (!state || state.cancelled) return;
     state.cancelled = true;
     state.closed = true;
+    state.pace.abort(new TurnDeadline());
     state.markCancelled();
     for (const wake of state.queue.splice(0)) wake();
-    void state.context?.dispose({ reason: "load: turn cancelled" }).catch(() => undefined);
+    if (state.context) void this.disposeContext(state);
   }
 
   /** Every running turn, cancelled. */
@@ -250,6 +273,7 @@ export class Sessions {
    */
   private async finishTurn(state: TurnState, slot: Slot): Promise<void> {
     state.closed = true;
+    state.pace.abort(new TurnDeadline());
     for (const wake of state.queue.splice(0)) wake();
     while (state.outstanding.size > 0) await Promise.allSettled([...state.outstanding]);
     if (!state.cancelled && state.context && slot.turn === state) {
@@ -262,9 +286,13 @@ export class Sessions {
     }
     await Promise.allSettled(state.responses.map((r) => r.dispose()));
     state.responses.length = 0;
-    await state.context?.dispose({ reason: "load: turn ended" }).catch(() => undefined);
+    await this.disposeContext(state);
     this.turns.delete(state.spec.turn);
     if (slot.turn === state) slot.turn = undefined;
+  }
+
+  private disposeContext(state: TurnState): Promise<void> | undefined {
+    return (state.disposing ??= state.context?.dispose({ reason: "load: turn ended" }).catch(() => undefined));
   }
 
   private remaining(state: TurnState): number {
@@ -372,10 +400,13 @@ export class Sessions {
         // Only the head of the process-wide queue waits and starts its re-send. The exchange
         // itself is awaited outside the queue: a slow target holds no other send back, and a
         // send the gate refuses again goes to the back.
-        const started = this.pacer.run(async () => {
+        const started = this.pacer.run(state.pace.signal, async () => {
           const left = this.remaining(state);
           if (left <= 0 || state.closed) throw new TurnDeadline();
-          await Promise.race([sleep(Math.min(waitMs, left)), state.onCancel]);
+          await sleep(Math.min(waitMs, left), undefined, { signal: state.pace.signal }).catch((error: unknown) => {
+            if (state.pace.signal.aborted) throw state.pace.signal.reason;
+            throw error;
+          });
           const sent = this.sendOnce(state, verb, p);
           sent.catch(() => undefined);
           return { sent };
@@ -387,7 +418,8 @@ export class Sessions {
         answer = await (await Promise.race([started, cancelled])).sent;
       }
       const response = answer.response!;
-      if (p.failOnStatusCode && !(response.status() >= 200 && response.status() < 300)) {
+      // Playwright's own failOnStatusCode passes 200-399: a returned redirect is an answer.
+      if (p.failOnStatusCode && !(response.status() >= 200 && response.status() < 400)) {
         throw new Error(`${response.status()} ${response.statusText()}`);
       }
       return facade(response);
@@ -416,12 +448,19 @@ export class Sessions {
       if (this.remaining(state) <= 1) throw new TurnDeadline();
       throw error;
     }
-    state.responses.push(response);
     const headers = response.headers();
     const cut = headers[CUT_HEADER];
-    if (cut !== undefined) throw new GateDenied(cut, true);
     const denied = headers[DENIED_HEADER];
-    if (denied === undefined) return { response };
+    // A refusal is never handed to the journey: its body is let go now, not at the turn's end.
+    if (cut !== undefined) {
+      await response.dispose().catch(() => undefined);
+      throw new GateDenied(cut, true);
+    }
+    if (denied === undefined) {
+      state.responses.push(response);
+      return { response };
+    }
+    await response.dispose().catch(() => undefined);
     if (ENDS_TURN.has(denied)) throw new TurnDeadline();
     if (!WAITABLE.has(denied)) throw new GateDenied(denied, false);
     if (denied === "ceiling") return { waitMs: this.o.renewEveryMs };

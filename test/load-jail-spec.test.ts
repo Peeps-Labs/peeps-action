@@ -58,6 +58,7 @@ test("the unit's whole cgroup is killed on stop, with a hard end and resource li
 
 test("the unit's main process is the trusted Node running the outer watcher", () => {
   const args = systemdRunArgs(spec());
+  assert.equal(args[0], "/usr/bin/systemd-run");
   assert.deepEqual(args.slice(-2), ["/opt/node/bin/node", "/a/dist/load-outer.js"]);
   const config = JSON.parse(args.find((a) => a.startsWith("--setenv=PEEPS_JAIL_CONFIG="))!.slice("--setenv=PEEPS_JAIL_CONFIG=".length));
   assert.equal(config.initInJail, "/run/peeps/action/load-init.js");
@@ -205,6 +206,7 @@ const send = (f) => out.write(JSON.stringify(f) + "\\n");
 if (mode === "forge") send({ type: "exit", code: 0, signal: null });
 if (mode === "garbage") out.write("not a frame\\n");
 if (mode === "huge") out.write("x".repeat(70 * 1024) + "\\n");
+if (mode === "partial") out.end(JSON.stringify({ type: "loaded", playwright: "1.46.1" }), () => process.exit(0));
 if (mode === "deaf") { setInterval(() => {}, 1000); }
 else {
   let buf = "";
@@ -350,6 +352,7 @@ for (const [label, mode, from] of [
   ["a forged exit on fd 3", "forge", "executor"],
   ["a line that is not a frame on fd 3", "garbage", "executor"],
   ["an oversized line on fd 3", "huge", "executor"],
+  ["an unterminated frame on fd 3", "partial", "executor"],
   ["a wrong-direction frame from the supervisor", "echo", "supervisor"],
   ["an unknown frame from the supervisor", "echo", "supervisor-garbage"],
 ] as const) {

@@ -195,7 +195,13 @@ export function serveControl(ctl: Duplex, config: Pick<InitConfig, "claimId">, i
     stdin.on("error", () => child.exitCode === null && child.signalCode === null && violation());
     const lines = new LineSplitter();
     fd3.setEncoding("utf8");
+    fd3.on("error", violation);
+    // An exit after half a frame is not a clean exit.
+    fd3.once("end", () => {
+      if (lines.incomplete) violation();
+    });
     fd3.on("data", (chunk: string) => {
+      if (over) return;
       const got = lines.push(chunk);
       if (got === null) return violation();
       for (const line of got) {
@@ -206,6 +212,7 @@ export function serveControl(ctl: Duplex, config: Pick<InitConfig, "claimId">, i
           fd3.pause();
           ctl.once("drain", () => fd3.resume());
         }
+        if (over) return;
       }
     });
     child.once("error", () => finish(null, "spawn_error"));
@@ -216,6 +223,9 @@ export function serveControl(ctl: Duplex, config: Pick<InitConfig, "claimId">, i
 
   const lines = new LineSplitter();
   ctl.setEncoding("utf8");
+  ctl.once("end", () => {
+    if (lines.incomplete) violation();
+  });
   ctl.on("data", (chunk: string) => {
     if (over) return;
     const got = lines.push(chunk);
@@ -228,6 +238,7 @@ export function serveControl(ctl: Duplex, config: Pick<InitConfig, "claimId">, i
         if (verdict !== "ok") send({ type: "refused", reason: REFUSED[verdict] });
         else if (frame.type === "start") install();
         else launch();
+        if (over) return;
         continue;
       }
       if (!relayable(frame, "supervisor") || !executor) return violation();

@@ -69,10 +69,16 @@ export interface WorkspaceFiles {
   externalLinks: string[];
 }
 
-function readJson(file: string, unreadable: string[], name: string): unknown {
-  if (!existsSync(file)) return undefined;
+/** A JSON file the checkout holds: a regular file, inside it by real path, never followed out or read when special. */
+function readJson(root: string, file: string, unreadable: string[], name: string): unknown {
+  if (!lstatExists(file)) return undefined;
   try {
-    return JSON.parse(readFileSync(file, "utf8"));
+    const resolved = realpathSync(file);
+    if (!inside(resolved, root) || !statSync(resolved).isFile()) {
+      unreadable.push(name);
+      return undefined;
+    }
+    return JSON.parse(readFileSync(resolved, "utf8"));
   } catch {
     unreadable.push(name);
     return undefined;
@@ -95,8 +101,8 @@ function workspacePatterns(manifest: unknown): unknown[] {
 export function readWorkspace(dir: string): WorkspaceFiles {
   const root = realpathSync(dir);
   const unreadable: string[] = [];
-  const manifest = readJson(path.join(root, "package.json"), unreadable, "package.json");
-  const lock = readJson(path.join(root, "package-lock.json"), unreadable, "package-lock.json");
+  const manifest = readJson(root, path.join(root, "package.json"), unreadable, "package.json");
+  const lock = readJson(root, path.join(root, "package-lock.json"), unreadable, "package-lock.json");
   const workspaces: WorkspaceManifest[] = [];
   for (const pattern of workspacePatterns(manifest)) {
     if (typeof pattern !== "string" || !/^[A-Za-z0-9._@/-]+(\/\*)?$/.test(pattern) || pattern.startsWith("/")) {
@@ -112,7 +118,10 @@ export function readWorkspace(dir: string): WorkspaceFiles {
         workspaces.push({ rel: pattern, problem: "workspace is outside the checkout" });
         continue;
       }
-      dirs = pattern.endsWith("/*") ? readdirSync(real).filter((name) => statSync(path.join(real, name)).isDirectory()).map((name) => path.join(lexical, name)) : [lexical];
+      // A symlinked workspace folder is listed too: its real path is checked below.
+      dirs = pattern.endsWith("/*")
+        ? readdirSync(real, { withFileTypes: true }).filter((entry) => entry.isDirectory() || entry.isSymbolicLink()).map((entry) => path.join(lexical, entry.name))
+        : [lexical];
     } catch {
       if (!inside(lexical, root)) workspaces.push({ rel: pattern, problem: "workspace is outside the checkout" });
       continue;
@@ -129,8 +138,8 @@ export function readWorkspace(dir: string): WorkspaceFiles {
         workspaces.push({ rel, problem: "workspace is outside the checkout" });
         continue;
       }
-      if (!existsSync(path.join(real, "package.json"))) continue;
-      workspaces.push({ rel, manifest: readJson(path.join(real, "package.json"), unreadable, `${rel}/package.json`) });
+      if (!statSync(real).isDirectory() || !lstatExists(path.join(real, "package.json"))) continue;
+      workspaces.push({ rel, manifest: readJson(root, path.join(real, "package.json"), unreadable, `${rel}/package.json`) });
     }
   }
   return {
@@ -372,7 +381,34 @@ function manifestProblems(manifest: unknown, where: string): string[] {
       if (typeof parsed === "string") out.push(`${where}: ${field} ${parsed}`);
     }
   }
+  // npm applies overrides while it builds the tree, before it checks the tree against the lock.
+  if (Object.hasOwn(manifest, "overrides")) validateOverrides((manifest as Record<string, unknown>).overrides, where, out);
   return out;
+}
+
+function validateOverrides(overrides: unknown, where: string, out: string[], depth = 0): void {
+  if (typeof overrides !== "object" || overrides === null || Array.isArray(overrides) || depth > 64) {
+    out.push(`${where}: invalid overrides object`);
+    return;
+  }
+  for (const [name, value] of Object.entries(overrides)) {
+    if (typeof value === "object" && value !== null) validateOverrides(value, where, out, depth + 1);
+    else if (!(typeof value === "string" && value.startsWith("$") && NAME.test(value.slice(1)))) {
+      const spec = specOf(name, value);
+      if (typeof spec === "string") out.push(`${where}: overrides ${spec}`);
+    }
+  }
+}
+
+/** A tarball on the public registry itself: its origin, with no credentials in the URL. */
+function registryTarball(value: unknown): boolean {
+  if (typeof value !== "string" || !value.startsWith(REGISTRY)) return false;
+  try {
+    const url = new URL(value);
+    return url.origin === new URL(REGISTRY).origin && url.username === "" && url.password === "";
+  } catch {
+    return false;
+  }
 }
 
 const BAD_LEGACY = /^(?:git\b|git\+|github:|gist:|bitbucket:|gitlab:|file:|link:|https?:|[^@/:]+\/[^@/:])/;
@@ -396,7 +432,7 @@ function lockProblems(ws: WorkspaceFiles): string[] {
   const lock = ws.lock as Record<string, unknown> | undefined;
   if (lock === undefined) return ws.unreadable.includes("package-lock.json") ? [] : ["package-lock.json is required"];
   if (typeof lock !== "object" || lock === null) return ["package-lock.json: not a JSON object"];
-  if ((lock.lockfileVersion !== 2 && lock.lockfileVersion !== 3) || typeof lock.packages !== "object" || lock.packages === null) {
+  if ((lock.lockfileVersion !== 2 && lock.lockfileVersion !== 3) || typeof lock.packages !== "object" || lock.packages === null || Array.isArray(lock.packages)) {
     return [`package-lock.json: lockfileVersion ${String(lock.lockfileVersion)} is not supported (2 or 3 with packages)`];
   }
   const out: string[] = [];
@@ -407,14 +443,17 @@ function lockProblems(ws: WorkspaceFiles): string[] {
   // v2 or v3 lock, so an entry with a `resolved` is fetched from it whatever else it says, and
   // one without is asked of the registry as name@version; `hasShrinkwrap` makes npm install the
   // package's dependencies from the URLs in the package's own shrinkwrap, which nothing here sees.
+  // Every entry's own dependency specs are read too: npm builds its tree from them before it
+  // compares the tree with the lock, so a git or URL spec in a transitive package reaches out.
   for (const [key, entry] of Object.entries(packages)) {
-    if (key === "") continue;
     const inModules = key.includes("node_modules/");
-    const name = inModules ? key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length) : key;
-    if (typeof entry !== "object" || entry === null) {
-      if (inModules) out.push(`package-lock.json: ${name} is not an object`);
+    const name = key === "" ? "<root>" : inModules ? key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length) : key;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      out.push(`package-lock.json: ${name} is not an object`);
       continue;
     }
+    out.push(...manifestProblems(entry, `package-lock.json: ${key || "<root>"}`));
+    if (key === "") continue;
     if (entry.hasShrinkwrap) {
       out.push(`package-lock.json: ${name} carries its own shrinkwrap, which is not supported`);
       continue;
@@ -425,7 +464,15 @@ function lockProblems(ws: WorkspaceFiles): string[] {
       if (!ok) out.push(`package-lock.json: ${name} links to ${String(entry.resolved)}, not a workspace folder in the checkout`);
       continue;
     }
-    if (!inModules) continue;
+    if (!inModules) {
+      if (!workspaceFolders.has(key)) out.push(`package-lock.json: ${name} is not a workspace`);
+      continue;
+    }
+    if (entry.inBundle === true && entry.resolved !== undefined) {
+      // npm does not read inBundle from a v2 or v3 lock and fetches `resolved`: a bundled entry names no source.
+      out.push(`package-lock.json: bundled ${name} has an explicit source (${String(entry.resolved)}), not resolved from ${REGISTRY} by its parent`);
+      continue;
+    }
     if (entry.resolved === undefined && entry.inBundle === true) {
       // Shipped inside its parent's tarball. Should npm fetch it after all, it asks the registry for name@version.
       const plainName = entry.name === undefined || (typeof entry.name === "string" && NAME.test(entry.name));
@@ -434,11 +481,26 @@ function lockProblems(ws: WorkspaceFiles): string[] {
       }
       continue;
     }
-    if (typeof entry.resolved !== "string" || !entry.resolved.startsWith(REGISTRY) || typeof entry.integrity !== "string") {
+    if (!registryTarball(entry.resolved) || typeof entry.integrity !== "string" || !entry.integrity) {
       out.push(`package-lock.json: ${name} is not resolved from ${REGISTRY} with an integrity hash (${String(entry.resolved)})`);
     }
   }
   legacyProblems(lock.dependencies, "", out);
+
+  // Each declared workspace's lock record agrees with its manifest: npm reads the record.
+  for (const workspace of ws.workspaces) {
+    if (workspace.problem || typeof workspace.manifest !== "object" || workspace.manifest === null) continue;
+    const manifest = workspace.manifest as Record<string, unknown>;
+    const locked = packages[workspace.rel];
+    if (!locked || manifest.version !== locked.version) out.push(`package-lock.json: ${workspace.rel} has a different locked version`);
+    for (const field of DEP_FIELDS) {
+      const wanted = depsOf(manifest, field);
+      const actual = depsOf(locked, field);
+      if ([...new Set([...Object.keys(wanted), ...Object.keys(actual)])].some((dep) => wanted[dep] !== actual[dep])) {
+        out.push(`package-lock.json: ${workspace.rel} has different ${field}`);
+      }
+    }
+  }
 
   // The root entry agrees with the manifest, and each locked version satisfies its range.
   const rootEntry = packages[""] ?? {};
@@ -454,7 +516,9 @@ function lockProblems(ws: WorkspaceFiles): string[] {
       const spec = specOf(name, wanted[name]);
       if (typeof spec === "string") continue;
       const optionalPeer = field === "peerDependencies" && (ws.manifest as { peerDependenciesMeta?: Record<string, { optional?: boolean }> }).peerDependenciesMeta?.[name]?.optional === true;
-      const entry = packages[`node_modules/${name}`];
+      // A link records only `link` and `resolved`: the version is on the workspace's own record.
+      const dependency = packages[`node_modules/${name}`];
+      const entry = dependency?.link === true && typeof dependency.resolved === "string" ? packages[path.posix.normalize(dependency.resolved)] : dependency;
       if (!entry) {
         if (!optionalPeer) out.push(`package-lock.json: ${field} ${name} has no locked version`);
         continue;
@@ -472,7 +536,7 @@ function lockProblems(ws: WorkspaceFiles): string[] {
 /** Why the checkout cannot be installed by E4's rules; empty when it can. */
 export function installProblems(ws: WorkspaceFiles): string[] {
   const out: string[] = [];
-  for (const name of ws.unreadable) out.push(`${name} is not valid JSON`);
+  for (const name of ws.unreadable) out.push(`${name} must be a valid JSON file inside the checkout`);
   if (ws.manifest === undefined && !ws.unreadable.includes("package.json")) out.push("package.json is required");
   else if (ws.manifest !== undefined) out.push(...manifestProblems(ws.manifest, "package.json"));
   for (const w of ws.workspaces) {
@@ -514,19 +578,35 @@ export function installEnv(tc: Toolchain, scratch: string): Record<string, strin
 
 /**
  * The node and npm in `nodeDir`, by real path, never in or through the workspace, at a
- * version CI pins. Throws `install_unsupported` otherwise.
+ * version CI pins. `nodeDir` must be setup-node's folder for a pinned version under the
+ * runner's toolcache, checked before anything in it runs. Throws `install_unsupported` otherwise.
  */
-export function trustedToolchain(nodeDir: string, ws: string, supported: readonly { node: string; npm: string }[] = SUPPORTED_TOOLCHAIN): Toolchain {
+export function trustedToolchain(
+  nodeDir: string,
+  ws: string,
+  supported: readonly { node: string; npm: string }[] = SUPPORTED_TOOLCHAIN,
+  toolCache = process.env.RUNNER_TOOL_CACHE,
+): Toolchain {
   const fail = (why: string): never => {
     throw new InstallRefused([why]);
   };
   const root = realpathSync(ws);
+  if (!toolCache) return fail("RUNNER_TOOL_CACHE is required");
   let dir: string;
   let node: string;
   let npmCli: string;
   let npmPkg: string;
   try {
+    const cache = realpathSync(toolCache);
     dir = realpathSync(nodeDir);
+    if (inside(cache, root) || inside(root, cache) || !supported.some(({ node: version }) => dir === path.join(cache, "node", version, process.arch))) {
+      return fail("Node must come from the runner's pinned setup-node toolcache");
+    }
+  } catch (error) {
+    if (error instanceof InstallRefused) throw error;
+    return fail(`cannot resolve the runner toolcache or ${nodeDir}`);
+  }
+  try {
     node = realpathSync(path.join(nodeDir, "bin/node"));
     npmCli = realpathSync(path.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"));
     npmPkg = realpathSync(path.join(nodeDir, "lib/node_modules/npm/package.json"));
@@ -539,7 +619,7 @@ export function trustedToolchain(nodeDir: string, ws: string, supported: readonl
   }
   const nodeVersion = execFileSync(node, ["--version"], { encoding: "utf8", env: {}, timeout: 10_000 }).trim().replace(/^v/, "");
   const npmVersion = String((JSON.parse(readFileSync(npmPkg, "utf8")) as { version?: unknown }).version);
-  if (!supported.some((s) => s.node === nodeVersion)) fail(`node ${nodeVersion} is not a supported toolchain`);
+  if (path.basename(path.dirname(dir)) !== nodeVersion) fail(`node ${nodeVersion} disagrees with its pinned toolcache directory`);
   if (!supported.some((s) => s.node === nodeVersion && s.npm === npmVersion)) fail(`npm ${npmVersion} with node ${nodeVersion} is not a supported toolchain`);
   return { nodeDir: dir, node, npmCli, nodeVersion, npmVersion };
 }

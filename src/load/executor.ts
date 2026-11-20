@@ -81,7 +81,8 @@ function findPlaywright(dirs: string[]): { version: string; load: () => Playwrig
       } catch {
         continue;
       }
-      const version = String((JSON.parse(readFileSync(pkg, "utf8")) as { version?: unknown }).version ?? "?");
+      // npm and Node accept a manifest that opens with a byte-order mark; JSON.parse does not.
+      const version = String((JSON.parse(readFileSync(pkg, "utf8").replace(/^\uFEFF/, "")) as { version?: unknown }).version ?? "?");
       return { version, load: () => (req(name) as { request?: PlaywrightRequest }).request };
     }
   }
@@ -104,16 +105,20 @@ function onInit(frame: Extract<CtlFrame, { type: "init" }>): void {
   } catch (error) {
     return fatal("unreadable", error);
   }
-  const found = findPlaywright([root, path.dirname(file)]);
-  if (!found) return fatal("playwright", new Error("Playwright was not found from the working directory or the journey's folder"));
-  if (!atLeastFloor(found.version)) return fatal("playwright", new Error(`Playwright ${found.version} is below ${PLAYWRIGHT_FLOOR.join(".")}, the oldest a load journey runs on`));
-  let request: PlaywrightRequest | undefined;
+  // Finding, reading and loading Playwright fail one way: a fatal frame, never a dead executor.
+  let request: PlaywrightRequest;
+  let version: string;
   try {
-    request = found.load();
+    const found = findPlaywright([root, path.dirname(file)]);
+    if (!found) throw new Error("Playwright was not found from the working directory or the journey's folder");
+    version = found.version;
+    if (!atLeastFloor(version)) throw new Error(`Playwright ${version} is below ${PLAYWRIGHT_FLOOR.join(".")}, the oldest a load journey runs on`);
+    const loaded = found.load();
+    if (typeof loaded?.newContext !== "function") throw new Error(`Playwright ${version} has no request API`);
+    request = loaded;
   } catch (error) {
     return fatal("playwright", error);
   }
-  if (typeof request?.newContext !== "function") return fatal("playwright", new Error(`Playwright ${found.version} has no request API`));
   try {
     journey = loadJourney(root, frame.journey.module, frame.journey.export) as Journey;
   } catch (error) {
@@ -127,7 +132,7 @@ function onInit(frame: Extract<CtlFrame, { type: "init" }>): void {
     renewEveryMs: frame.renewEveryMs,
     now: () => sharedClocks().monoMs,
   });
-  send({ type: "loaded", playwright: found.version.slice(0, 64) });
+  send({ type: "loaded", playwright: version.slice(0, 64) });
 }
 
 function onTurn(frame: Extract<CtlFrame, { type: "turn" }>): void {

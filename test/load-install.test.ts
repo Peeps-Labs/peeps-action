@@ -6,7 +6,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -142,6 +142,32 @@ test("a lock entry is read as npm reads it: inBundle, hasShrinkwrap, a truthy li
   assert.match(mutate((p) => (p["somewhere/else"] = { link: true, resolved: "../outside" })), /somewhere\/else links to/);
 });
 
+test("all install metadata uses supported dependency sources", (t) => {
+  const lock = baseLock();
+  const packages = lock.packages as Record<string, Record<string, unknown>>;
+  packages["node_modules/left-pad"]!.dependencies = { nested: "latest" };
+  assert.match(problems(workspace(t, { lock })).join("; "), /left-pad.*nested.*semver/);
+
+  const manifest = { ...BASE_MANIFEST, overrides: { "left-pad": { nested: "latest" } } };
+  assert.match(problems(workspace(t, { manifest })).join("; "), /overrides.*nested.*semver/);
+
+  const bundled = baseLock();
+  (bundled.packages as Record<string, unknown>)["node_modules/left-pad/node_modules/nested"] = {
+    version: "1.0.0", inBundle: true, resolved: "https://example.invalid/nested.tgz",
+  };
+  assert.match(problems(workspace(t, { lock: bundled })).join("; "), /bundled.*explicit source/);
+});
+
+test("a dependency on a declared workspace uses the locked workspace version", (t) => {
+  const local = { name: "local", version: "1.3.0" };
+  const manifest = { name: "app", version: "1.0.0", dependencies: { local: "^1.0.0" }, workspaces: ["packages/local"] };
+  const lock = { lockfileVersion: 3, packages: { "": manifest, "node_modules/local": { resolved: "packages/local", link: true }, "packages/local": local } };
+  const files = { "packages/local/package.json": JSON.stringify(local) };
+  assert.deepEqual(problems(workspace(t, { manifest, lock, files })), []);
+  lock.packages["packages/local"].version = "2.0.0";
+  assert.match(problems(workspace(t, { manifest, lock, files })).join("; "), /local.*outside/);
+});
+
 test("a project .npmrc and a symlink that leaves the checkout are refused", (t) => {
   assert.match(problems(workspace(t, { files: { ".npmrc": "registry=https://evil.example/\n" } })).join("; "), /\.npmrc/);
   const dir = workspace(t);
@@ -150,6 +176,17 @@ test("a project .npmrc and a symlink that leaves the checkout are refused", (t) 
   const inside = workspace(t);
   symlinkSync("package.json", path.join(inside, "alias.json"));
   assert.deepEqual(problems(inside), [], "a symlink that stays inside is fine");
+});
+
+test("manifest validation does not read metadata outside the checkout", (t) => {
+  const outside = workspace(t);
+  const ws = workspace(t);
+  const manifest = path.join(ws, "package.json");
+  rmSync(manifest);
+  symlinkSync(path.join(outside, "package.json"), manifest);
+  const files = readWorkspace(ws);
+  assert.equal(files.manifest, undefined);
+  assert.match(installProblems(files).join("; "), /package.json.*inside the checkout/);
 });
 
 test("a manifest the lock disagrees with is refused: a range the locked version misses, a missing dependency", (t) => {
@@ -180,9 +217,8 @@ test("satisfies follows npm for the ranges it reads, and refuses the rest", () =
   for (const [v, r] of no) assert.equal(satisfies(v, r), false, `${v} not in ${r}`);
 });
 
-function fakeToolchain(t: TestContext, nodeVersion: string, npmVersion: string, script = ""): string {
-  const dir = tmp(t, "peeps-node-");
-  mkdirSync(path.join(dir, "bin"));
+function fakeToolchain(t: TestContext, nodeVersion: string, npmVersion: string, script = "", dir = tmp(t, "peeps-node-")): string {
+  mkdirSync(path.join(dir, "bin"), { recursive: true });
   mkdirSync(path.join(dir, "lib/node_modules/npm/bin"), { recursive: true });
   writeFileSync(path.join(dir, "bin/node"), `#!/bin/sh\necho v${nodeVersion}\n`);
   chmodSync(path.join(dir, "bin/node"), 0o755);
@@ -191,26 +227,32 @@ function fakeToolchain(t: TestContext, nodeVersion: string, npmVersion: string, 
   return dir;
 }
 
-test("trustedToolchain: npm and node from nodeDir only, never through the workspace, at a supported version", (t) => {
+test("trustedToolchain only accepts the pinned runner toolcache and checks the versions", (t) => {
   const supported = [{ node: "24.22.3", npm: "11.19.1" }];
   const ws = workspace(t);
-  const nodeDir = fakeToolchain(t, "24.22.3", "11.19.1");
-  const tc = trustedToolchain(nodeDir, ws, supported);
-  assert.equal(tc.npmCli, path.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"));
-  assert.equal(tc.node, path.join(nodeDir, "bin/node"));
-  assert.throws(() => trustedToolchain(fakeToolchain(t, "24.22.3", "11.0.0"), ws, supported), /install_unsupported.*npm/);
-  assert.throws(() => trustedToolchain(fakeToolchain(t, "22.1.0", "11.19.1"), ws, supported), /install_unsupported.*node/);
-  // npm inside the workspace, or reached through a symlink into it.
-  const inWs = path.join(ws, "toolchain");
-  execFileSync("cp", ["-r", nodeDir, inWs]);
-  assert.throws(() => trustedToolchain(inWs, ws, supported), /install_unsupported/);
-  const linked = fakeToolchain(t, "24.22.3", "11.19.1");
-  rmSync(path.join(linked, "lib/node_modules/npm"), { recursive: true });
-  mkdirSync(path.join(ws, "npm-copy/bin"), { recursive: true });
-  writeFileSync(path.join(ws, "npm-copy/package.json"), JSON.stringify({ version: "11.19.1" }));
-  writeFileSync(path.join(ws, "npm-copy/bin/npm-cli.js"), "");
-  symlinkSync(path.join(ws, "npm-copy"), path.join(linked, "lib/node_modules/npm"));
-  assert.throws(() => trustedToolchain(linked, ws, supported), /install_unsupported/);
+  const cache = realpathSync(tmp(t, "peeps-toolcache-"));
+  const nodeDir = path.join(cache, "node", "24.22.3", process.arch);
+  const verify = (dir: string) => trustedToolchain(dir, ws, supported, cache);
+
+  fakeToolchain(t, "24.22.3", "11.19.1", "", nodeDir);
+  assert.equal(verify(nodeDir).node, path.join(nodeDir, "bin/node"));
+  assert.equal(verify(nodeDir).npmCli, path.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"));
+
+  const unrelated = fakeToolchain(t, "24.22.3", "11.19.1");
+  assert.throws(() => verify(unrelated), /install_unsupported.*toolcache/);
+  chmodSync(path.join(unrelated, "bin/node"), 0o644);
+  assert.throws(() => verify(unrelated), /install_unsupported.*toolcache/, "provenance is checked before any version probe");
+  const inWs = fakeToolchain(t, "24.22.3", "11.19.1", "", path.join(ws, "toolchain"));
+  assert.throws(() => verify(inWs), /install_unsupported.*toolcache/);
+
+  fakeToolchain(t, "22.1.0", "11.19.1", "", nodeDir);
+  assert.throws(() => verify(nodeDir), /install_unsupported.*node 22/);
+  fakeToolchain(t, "24.22.3", "11.0.0", "", nodeDir);
+  assert.throws(() => verify(nodeDir), /install_unsupported.*npm 11/);
+
+  rmSync(path.join(nodeDir, "lib/node_modules/npm"), { recursive: true });
+  symlinkSync(path.join(inWs, "lib/node_modules/npm"), path.join(nodeDir, "lib/node_modules/npm"));
+  assert.throws(() => verify(nodeDir), /install_unsupported.*workspace/);
 });
 
 test("installEnv is the action's config only: registry fixed, no git, no scripts, nothing from the job", (t) => {
@@ -287,8 +329,11 @@ test("installEnv alone keeps a project .npmrc's git from running, even for a loc
   const ws = workspace(t, { manifest, lock: { name: "app", lockfileVersion: 1, requires: true, dependencies: { x: { version: "git+https://example.invalid/x.git#0123456789abcdef0123456789abcdef01234567", from: "git+https://example.invalid/x.git" } } }, files: { ".npmrc": `git=${gitScript}\n` } });
   assert.match(problems(ws).join("; "), /lockfile|\.npmrc/, "installProblems refuses it first");
   const scratch = tmp(t);
+  const env = installEnv(localToolchain(), scratch);
+  const npmGit = execFileSync(process.execPath, [localNpm, "config", "get", "git"], { cwd: ws, env, encoding: "utf8", timeout: 10_000 });
+  assert.equal(npmGit.trim(), "/bin/false", "npm itself reads the trusted git setting");
   try {
-    execFileSync(process.execPath, [localNpm, "ci", "--ignore-scripts"], { cwd: ws, env: installEnv(localToolchain(), scratch), stdio: "ignore", timeout: 60_000 });
+    execFileSync(process.execPath, [localNpm, "ci", "--ignore-scripts"], { cwd: ws, env, stdio: "ignore", timeout: 60_000 });
   } catch {
     // It fails: what matters is what it ran.
   }

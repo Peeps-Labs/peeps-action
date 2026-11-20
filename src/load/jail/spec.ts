@@ -179,7 +179,7 @@ export function systemdRunArgs(spec: JailSpec): string[] {
   const { maxRunMs, memoryMax, tasksMax, cpuQuotaPercent } = spec.limits;
   const property = (value: string) => ["-p", value];
   return [
-    "systemd-run",
+    "/usr/bin/systemd-run",
     `--unit=${unitName(spec.runId)}`,
     "--pipe",
     "--wait",
