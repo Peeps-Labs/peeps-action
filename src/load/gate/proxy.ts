@@ -455,7 +455,8 @@ export class GateProxy {
     } catch {
       releaseFirstDial?.();
       tunnel.dial = undefined;
-      const reason = this.closed ? "stopped" : this.closedTurns.has(turn) ? "turn_closed" : tunnel.revoked ? "revoked" : dialDenial ? dialDenial.reason : timedOut ? "dial_timeout" : "dial";
+      // A boundary that refused the dial is the reason, even when its lease callback closed the proxy.
+      const reason = dialDenial ? dialDenial.reason : this.closed ? "stopped" : this.closedTurns.has(turn) ? "turn_closed" : tunnel.revoked ? "revoked" : timedOut ? "dial_timeout" : "dial";
       return this.cutUnsent(res, permit, reason, dialDenial || this.closed || tunnel.revoked || timedOut ? 503 : 502);
     } finally {
       clearTimeout(timer);

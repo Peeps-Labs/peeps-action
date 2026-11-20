@@ -1117,6 +1117,30 @@ test("a lease that runs out while the dial is resolving sends nothing at all to 
   assert.equal(r.expiries.count, 1, "checkDial saw the lease gone");
 });
 
+test("a dial cut for the lease is journalled lease even when the expiry closes the proxy at once", async (t) => {
+  const r = await rig(t, {
+    // The supervisor closes the proxy inside onLeaseExpired, before the dial's reason is chosen.
+    onLeaseExpired: ({ proxy }) => void proxy.close(),
+    dial: () =>
+      makeDial({
+        lookup: async () => {
+          await sleep(300);
+          return [{ address: "93.184.216.34", family: 4 }];
+        },
+        connect: (_address, o, opts) => connectVerified("127.0.0.1", o, { ...opts, ca: [r.sink.caPem] }),
+      }),
+  });
+  const pending = exchange(r, get(r));
+  for (let k = 0; k < 100 && r.dials.count === 0; k++) await sleep(5);
+  assert.equal(r.dials.count, 1, "the dial started under a live lease");
+  r.clock.wallMs += 3_600_000; // the lease runs out on the wall clock while DNS answers
+  await pending.catch(() => undefined); // the close may take the client's answer with it
+  assert.deepEqual(r.journal.snapshot().cut, { lease: 1 });
+  assert.equal(r.sink.stats.connections, 0, "no SYN after the lease ran out");
+  assert.equal(r.gate.admitted, 1, "the debit stays, unattempted");
+  assert.equal(r.expiries.count, 1, "checkDial saw the lease gone");
+});
+
 test("an early response while the request's write is still pending resets the upstream", async (t) => {
   let liveResets = 0;
   const r = await rig(t, {

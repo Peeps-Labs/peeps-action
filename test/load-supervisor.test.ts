@@ -506,6 +506,23 @@ describe("load supervisor", { concurrency: 4 }, () => {
     assert.deepEqual([...new Set(r.port.posted.map((p) => p.seq))], [1]);
   });
 
+  test("an events answer that does not decode is no answer: the batch is sent again and the stream goes on", async (t) => {
+    let garbled = 0;
+    const r = await rig(t, {
+      observer: onPhase("checking", (x) => {
+        const events = x.port.events.bind(x.port);
+        x.port.events = async (...args: Parameters<typeof events>) => {
+          const answer = await events(...args);
+          return garbled++ < 2 ? null : answer;
+        };
+      }),
+    });
+    const res = await r.result;
+    assert.equal(res.status, "completed", why(r, res));
+    assert.equal(garbled > 2, true, "the stream went on after the undecodable answers");
+    assert.notEqual(res.final, "missing");
+  });
+
   test("a blocked events endpoint: the run still ends within its reporting deadline, final missing", async (t) => {
     const r = await rig(t, { script: { eventsBlocked: true } });
     const res = await r.result;

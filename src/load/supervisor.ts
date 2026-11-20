@@ -19,7 +19,7 @@ import path from "node:path";
 import { CUT_REASONS, DENY_REASONS, Accounting, requestDelta, zeroCounts, type IntervalRecord, type CohortRecord } from "./accounting";
 import { sharedClocks } from "./clocks";
 import { decodeClaimReply, decodeRenewReply, planHashOf, renewBody, type Binding, type ClaimRequest, type ControlPort, type Grant, type RenewState } from "./control-port";
-import { ENGINE_LIMITS, OUTSTANDING_PER_TURN, runLimits, type EngineConstants, type RunLimits } from "./engine-limits";
+import { DIALS_PER_TURN, ENGINE_LIMITS, OUTSTANDING_PER_TURN, runLimits, type EngineConstants, type RunLimits } from "./engine-limits";
 import { Gate, type Clocks } from "./gate/admission";
 import { createRunCa } from "./gate/ca";
 import { encodeHandoffs, Journal, type JournalSnapshot } from "./gate/journal";
@@ -610,7 +610,7 @@ class LoadRun {
     await jail.launch(this.ticketOf, this.signal);
     this.throwIfDone();
     const answer = this.nextFrame((f) => f.type === "loaded" || f.type === "fatal", this.k.loadedMs);
-    jail.send({ type: "init", journey: this.plan!.journey, baseURL: this.grant!.baseURL, proxy: jail.relayUrl, renewEveryMs: this.grant!.lease.renewEveryMs, parallel: Math.min(4, 8, OUTSTANDING_PER_TURN) });
+    jail.send({ type: "init", journey: this.plan!.journey, baseURL: this.grant!.baseURL, proxy: jail.relayUrl, renewEveryMs: this.grant!.lease.renewEveryMs, parallel: DIALS_PER_TURN });
     const f = await answer;
     this.throwIfDone();
     if (!f) throw new Refused("didnt_start", "loaded_timeout");
@@ -945,14 +945,19 @@ class LoadRun {
         await delay(50).catch(() => undefined);
         continue;
       }
-      const a = answer as { ok?: boolean; reason?: string };
-      if (a?.ok === true || (a?.ok === false && a.reason !== "conflict")) {
+      const a = answer as { ok?: boolean; reason?: string } | null;
+      if (a?.ok === false && a.reason === "conflict") {
+        // A conflicting replay: Peeps holds other bytes at this seq. Nothing more is sent.
+        this.evidenceStopped = true;
+        continue;
+      }
+      if (a?.ok === true || a?.ok === false) {
         this.evidenceQueue.shift();
         if (a.ok && head.body.final) this.finalSent = head.body.final;
         continue;
       }
-      // A conflicting replay: Peeps holds other bytes at this seq. Nothing more is sent.
-      this.evidenceStopped = true;
+      // An answer that does not decode is no answer (control-port.ts): the same bytes go again.
+      await delay(50).catch(() => undefined);
     }
   }
 
