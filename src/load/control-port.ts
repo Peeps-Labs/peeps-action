@@ -8,12 +8,15 @@
  *     tree digest, workload);
  *   - a renew reply echoes `claimId` and `planHash`;
  *   - a renew body is `RenewFields` plus `requestHash` (over the canonical fields);
- *   - `state: "closed"` is reserved for E5: E4 never sends it.
+ *   - `state: "closed"` is the release-bearing last renewal (e5 plan §2.4): sent once, after
+ *     settlement, and acknowledged by a receipt that echoes its address with `closed: true`;
+ *   - the claim carries the dispatch's `grantRef` when the entry has one (A1 makes it required,
+ *     with the strict claim schema).
  *
  * Pure: no clock, no timer, no I/O.
  */
 import { createHash } from "node:crypto";
-import type { RenewReply } from "./lease";
+import type { ClosedReceipt, RenewReply } from "./lease";
 
 export const PROTOCOL = 1;
 
@@ -27,6 +30,7 @@ export interface Binding {
 
 export interface ClaimRequest extends Binding {
   protocol: 1;
+  grantRef?: string;
   actionVersion: string;
   idempotencyKey: string;
   runAttempt: number;
@@ -83,7 +87,7 @@ export interface Grant {
 
 export type ClaimReply = { ok: true; grant: Grant } | { ok: false; refused: string };
 
-export type RenewState = "running" | "draining";
+export type RenewState = "running" | "draining" | "closed";
 
 export interface RenewFields {
   epoch: number;
@@ -268,4 +272,15 @@ export function decodeRenewReply(raw: unknown): DecodedRenew {
       ...(stop ? { stop } : {}),
     },
   };
+}
+
+/**
+ * A `closed` acknowledgement, untrusted: P1's receipt is the renew reply's address plus
+ * `closed: true` (with `lease: "lost"` and `ttlMs: 0`). Anything else is no acknowledgement.
+ */
+export function decodeClosedReceipt(raw: unknown): ClosedReceipt | undefined {
+  if (!isObj(raw) || raw.closed !== true || raw.lease !== "lost" || raw.ttlMs !== 0 ||
+      !whole(raw.ceiling) || !finite(raw.leaseUntilServerMs) || !finite(raw.serverNowMs) || "refused" in raw ||
+      !text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.planHash, 64) || !whole(raw.seq) || !text(raw.nonce, 256)) return undefined;
+  return { claimId: raw.claimId, epoch: raw.epoch, planHash: raw.planHash, seq: raw.seq, nonce: raw.nonce, closed: true };
 }

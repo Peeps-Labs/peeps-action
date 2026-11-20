@@ -6,7 +6,8 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -15,6 +16,9 @@ import {
   checkoutHead,
   installEnv,
   installProblems,
+  netnsPrefix,
+  offlineInstallArgv,
+  offlinePreinstall,
   preinstall,
   readWorkspace,
   satisfies,
@@ -426,3 +430,176 @@ test("cancelling a running preinstall kills npm and waits for it to close", asyn
   await cancelled;
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 });
+
+// ---------------------------------------------------------------- the offline preinstall (e5 plan v3 §2.10)
+
+const ids = { uid: 1001, gid: 118 };
+
+test("the load path's install is npm ci offline from the recipe cache, in a fresh network namespace, as the runner's user", (t) => {
+  const tc: Toolchain = { nodeDir: "/opt/hostedtoolcache/node/24.22.3/x64", node: "/opt/hostedtoolcache/node/24.22.3/x64/bin/node", npmCli: "/opt/hostedtoolcache/node/24.22.3/x64/lib/node_modules/npm/bin/npm-cli.js", nodeVersion: "24.22.3", npmVersion: "11.19.1" };
+  const scratch = tmp(t);
+  const { file, args } = offlineInstallArgv(tc, "/home/runner/recipe/npm-cache", scratch, ids);
+  assert.equal(file, "/usr/bin/sudo");
+  const envAt = args.indexOf("/usr/bin/env");
+  assert.deepEqual(args.slice(0, envAt + 2), ["-n", "/usr/bin/unshare", "--net", "--", "/usr/bin/setpriv", "--reuid=1001", "--regid=118", "--init-groups", "--pdeathsig", "SIGKILL", "/usr/bin/env", "-i"]);
+  assert.deepEqual(netnsPrefix(ids), ["/usr/bin/sudo", ...args.slice(0, envAt + 2)]);
+  const rest = args.slice(envAt + 2);
+  const nodeAt = rest.indexOf(tc.node);
+  const env = Object.fromEntries(rest.slice(0, nodeAt).map((kv) => [kv.slice(0, kv.indexOf("=")), kv.slice(kv.indexOf("=") + 1)]));
+  assert.deepEqual(rest.slice(nodeAt), [tc.node, tc.npmCli, "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache", "/home/runner/recipe/npm-cache"]);
+  assert.equal(env.npm_config_offline, "true");
+  assert.equal(env.npm_config_cache, "/home/runner/recipe/npm-cache");
+  assert.equal(env.npm_config_ignore_scripts, "true");
+  assert.equal(env.npm_config_git, "/bin/false");
+  assert.ok(env.npm_config_logs_dir!.startsWith(scratch), "npm writes its logs to the scratch folder, not the cache");
+  for (const key of Object.keys(env)) assert.match(key, /^(PATH|HOME|npm_config_[a-z_]+)$/, key);
+});
+
+test("a missing recipe cache is refused before npm runs", async (t) => {
+  const ws = workspace(t);
+  await assert.rejects(offlinePreinstall(ws, localToolchainOrFake(), tmp(t), { cache: path.join(tmp(t), "absent"), ...ids }), /install_unsupported: .*npm cache/);
+});
+
+const canUnshare = (() => {
+  if (process.platform !== "linux") return false;
+  try {
+    execFileSync("/usr/bin/sudo", ["-n", "/usr/bin/unshare", "--net", "--", "/bin/true"], { stdio: "ignore", timeout: 10_000 });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+const self = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+
+test("the namespace the install runs in has no route out: a connection to a listener on the host fails", { skip: canUnshare ? false : "needs passwordless sudo and unshare (hosted Ubuntu, S0)" }, async (t) => {
+  const server = await markerServer(t);
+  const port = new URL(server.url).port;
+  const [file, ...prefix] = netnsPrefix(self);
+  const out = execFileSync(file!, [...prefix, process.execPath, "-e", `require("node:net").connect(${port}, "127.0.0.1").on("connect", () => console.log("connected")).on("error", (e) => console.log(e.code))`], { encoding: "utf8", timeout: 20_000 });
+  assert.notEqual(out.trim(), "connected");
+  assert.deepEqual(server.hits, []);
+});
+
+test("a missing optional tarball refuses the recipe even though npm ci can omit the package", { skip: canUnshare && hasLocalNpm ? false : "needs passwordless sudo, unshare and npm beside this Node" }, async (t) => {
+  const manifest = { name: "app", version: "1.0.0", optionalDependencies: { "left-pad": "1.3.0" } };
+  const lock = { name: "app", version: "1.0.0", lockfileVersion: 3, packages: { "": manifest, "node_modules/left-pad": {
+    version: "1.3.0", resolved: `${REG}/left-pad/-/left-pad-1.3.0.tgz`, integrity: INTEGRITY, optional: true,
+  } } };
+  const ws = workspace(t, { manifest, lock });
+  await assert.rejects(offlinePreinstall(ws, localToolchain(), tmp(t), { cache: tmp(t), ...self }), /install_failed:.*left-pad/);
+  assert.equal(existsSync(path.join(ws, "node_modules")), false, "the invalid cache was refused before npm ran");
+});
+
+test("a required tarball missing from an existing recipe cache is refused", { skip: canUnshare && hasLocalNpm ? false : "needs passwordless sudo, unshare and npm beside this Node" }, async (t) => {
+  const ws = workspace(t, { manifest: { name: "app", version: "1.0.0", dependencies: { "left-pad": "^1.3.0" } }, lock: { name: "app", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "app", version: "1.0.0", dependencies: { "left-pad": "^1.3.0" } }, "node_modules/left-pad": { version: "1.3.0", resolved: `${REG}/left-pad/-/left-pad-1.3.0.tgz`, integrity: INTEGRITY } } } });
+  const cache = tmp(t);
+  chmodSync(cache, 0o755);
+  await assert.rejects(offlinePreinstall(ws, localToolchain(), tmp(t), { cache, ...self }), /install_failed/);
+  assert.equal(existsSync(path.join(ws, "node_modules/left-pad")), false);
+});
+
+test("offlinePreinstall reads a real tarball from the cache with no host connection or lifecycle script", { skip: canUnshare && hasLocalNpm ? false : "needs passwordless sudo, unshare and npm beside this Node" }, async (t) => {
+  const scratch = tmp(t);
+  const marker = path.join(scratch, "script-ran");
+  const nsMarker = path.join(scratch, "namespace");
+  const tc = localToolchain();
+  const cache = tmp(t);
+  const tarRoot = tmp(t);
+  const tarball = path.join(scratch, "dep.tgz");
+  const script = `touch ${marker}`;
+  mkdirSync(path.join(tarRoot, "package"));
+  writeFileSync(path.join(tarRoot, "package/package.json"), JSON.stringify({ name: "fixture-dep", version: "1.0.0", scripts: { install: script } }));
+  execFileSync("tar", ["-czf", tarball, "-C", tarRoot, "package"]);
+  const cacache = createRequire(tc.npmCli)("cacache");
+  const integrity = String(await cacache.put(path.join(cache, "_cacache"), "fixture-dep", readFileSync(tarball)));
+  const root = { name: "app", version: "1.0.0", dependencies: { "fixture-dep": "1.0.0" } };
+  const manifest = { ...root, scripts: { preinstall: script, postinstall: script } };
+  const lock = { name: "app", version: "1.0.0", lockfileVersion: 3, packages: {
+    "": root,
+    "node_modules/fixture-dep": { version: "1.0.0", resolved: `${REG}/fixture-dep/-/fixture-dep-1.0.0.tgz`, integrity, hasInstallScript: true },
+  } };
+  const ws = workspace(t, { manifest, lock });
+  const server = await markerServer(t);
+  const entry = path.join(scratch, "npm-probe.cjs");
+  writeFileSync(entry, `const fs = require('node:fs');
+const connection = require('node:net').connect(${Number(new URL(server.url).port)}, '127.0.0.1');
+const probe = (outcome) => {
+  connection.destroy();
+  fs.writeFileSync(${JSON.stringify(nsMarker)}, JSON.stringify({ ns: fs.readlinkSync('/proc/self/ns/net'), outcome }));
+  require(${JSON.stringify(tc.npmCli)});
+};
+connection.once('connect', () => probe('connected'));
+connection.once('error', (error) => probe(error.code));`);
+  // The probe wraps the same npm CLI and resolves the same bundled cache reader.
+  const probeToolchain = { ...tc, npmCli: entry };
+  const npmModules = createRequire(tc.npmCli).resolve("cacache/package.json");
+  mkdirSync(path.join(scratch, "node_modules"));
+  symlinkSync(path.dirname(npmModules), path.join(scratch, "node_modules/cacache"));
+  const digests = await offlinePreinstall(ws, probeToolchain, scratch, { cache, ...self });
+  const ns = JSON.parse(readFileSync(nsMarker, "utf8"));
+  assert.notEqual(ns.ns, readlinkSync("/proc/self/ns/net"));
+  assert.notEqual(ns.outcome, "connected");
+  assert.deepEqual(server.hits, []);
+  assert.equal(existsSync(marker), false, "a lifecycle script ran");
+  assert.equal(JSON.parse(readFileSync(path.join(ws, "node_modules/fixture-dep/package.json"), "utf8")).name, "fixture-dep");
+  assert.equal(digests.tree, await treeDigest(ws));
+
+  const [algorithm, encoded] = integrity.split("-", 2) as [string, string];
+  const hex = Buffer.from(encoded, "base64").toString("hex");
+  writeFileSync(path.join(cache, "_cacache/content-v2", algorithm, hex.slice(0, 2), hex.slice(2, 4), hex.slice(4)), "corrupt tarball");
+  await assert.rejects(offlinePreinstall(ws, tc, scratch, { cache, ...self }), /install_failed:.*fixture-dep/);
+});
+
+function localToolchainOrFake(): Toolchain {
+  return hasLocalNpm ? localToolchain() : { nodeDir: path.dirname(path.dirname(process.execPath)), node: process.execPath, npmCli: "/nonexistent/npm-cli.js", nodeVersion: process.versions.node, npmVersion: "0.0.0" };
+}
+
+test("cancelling a running offline preinstall kills npm inside the namespace and settles at once", { skip: canUnshare ? false : "needs passwordless sudo and unshare (hosted Ubuntu, S0)" }, async (t) => {
+  const ws = noDepsWorkspace(t);
+  const scratch = tmp(t);
+  // The install runs as `self` after `env -i`: everything it touches must be readable by that user.
+  chmodSync(scratch, 0o777);
+  const marker = path.join(scratch, "started");
+  const script = path.join(scratch, "npm.cjs");
+  writeFileSync(script, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setTimeout(() => {}, 20_000);`);
+  // As root, run npm as another user, so setpriv changes credentials before it arms the signal,
+  // as it does on a hosted runner.
+  const as = self.uid === 0 ? { uid: 65534, gid: 65534 } : self;
+  const ac = new AbortController();
+  const running = offlinePreinstall(ws, { node: process.execPath, nodeDir: path.dirname(path.dirname(process.execPath)), npmCli: script, nodeVersion: process.version, npmVersion: "11.0.0" }, scratch, { cache: tmp(t), ...as }, 60_000, ac.signal);
+  const cancelled = assert.rejects(running, { name: "AbortError" });
+  for (let i = 0; i < 500 && !existsSync(marker); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(existsSync(marker), "the install child was running before cancellation");
+  const pid = Number(readFileSync(marker, "utf8"));
+  const at = Date.now();
+  ac.abort();
+  await cancelled;
+  assert.ok(Date.now() - at < 5_000, `the cancel waited ${Date.now() - at} ms for npm to end by itself`);
+  // Gone, or a zombie nothing has reaped yet (its parent died first): either way it runs no more.
+  const alive = () => {
+    try {
+      return readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop()![0] !== "Z";
+    } catch {
+      return false;
+    }
+  };
+  for (let i = 0; i < 100 && alive(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(alive(), false, "npm outlived the cancel");
+});
+
+test("a timed-out offline preinstall ends npm, never waits for it", { skip: canUnshare ? false : "needs passwordless sudo and unshare (hosted Ubuntu, S0)" }, async (t) => {
+  const ws = noDepsWorkspace(t);
+  const scratch = tmp(t);
+  chmodSync(scratch, 0o777);
+  const script = path.join(scratch, "npm.cjs");
+  writeFileSync(script, `setTimeout(() => {}, 20_000);`);
+  const at = Date.now();
+  await assert.rejects(offlinePreinstall(ws, { node: process.execPath, nodeDir: path.dirname(path.dirname(process.execPath)), npmCli: script, nodeVersion: process.version, npmVersion: "11.0.0" }, scratch, { cache: tmp(t), ...self }, 500), /install_failed/);
+  assert.ok(Date.now() - at < 5_000, `the timeout waited ${Date.now() - at} ms`);
+});
+
+/** A checkout with no dependencies: the cache check has nothing to read, so npm (a stand-in here) runs at once. */
+function noDepsWorkspace(t: TestContext): string {
+  const root = { name: "app", version: "1.0.0" };
+  return workspace(t, { manifest: root, lock: { ...root, lockfileVersion: 3, packages: { "": root } } });
+}

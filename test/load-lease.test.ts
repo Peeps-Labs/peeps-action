@@ -269,3 +269,54 @@ test("an unreadable server clock cannot hide a shorter readable TTL", () => {
   assert.equal(l.apply(shortened, at(1050)).kind, "lost");
   assert.equal(l.held(at(1050)), false);
 });
+
+// ---------------------------------------------------------------- the closed renewal (e5 plan §2.4, v2 §4)
+
+const receipt = (seq: number, nonce: string, over: Record<string, unknown> = {}) => ({ ...binding, seq, nonce, closed: true as const, ...over });
+
+test("seq advances at allocation: closed follows the last allocated seq, even across an abandoned one", () => {
+  const l = lease();
+  assert.equal(l.lastAllocatedSeq, 0);
+  const tx1 = l.begin(at(200), "n1", build("h1"))!;
+  assert.equal(l.lastAllocatedSeq, 1);
+  // Answered: seq 1 applied.
+  assert.equal(l.apply(reply(1, "n1", SERVER0 + 300), at(400)).kind, "lease");
+  const tx2 = l.begin(at(1700), "n2", build("h2"))!;
+  assert.equal(tx2.seq, 2);
+  // Never answered: abandoned. Peeps may or may not have seen it.
+  l.abandon();
+  assert.equal(l.lastAllocatedSeq, 2);
+  const closed = l.beginClosed(at(9000), "nc", (seq, nonce) => ({ requestHash: `c${seq}`, body: JSON.stringify({ seq, nonce, state: "closed" }) }))!;
+  assert.equal(closed.seq, 3);
+  assert.equal(closed.body, '{"seq":3,"nonce":"nc","state":"closed"}');
+  assert.ok(Object.isFrozen(closed));
+  void tx1;
+});
+
+test("beginClosed is allowed after the lease is lost, once, and drops a renewal still outstanding", () => {
+  const l = lease();
+  l.begin(at(200), "n1", build("h1"));
+  // The lease runs out with seq 1 unanswered.
+  assert.equal(l.held(at(6000)), false);
+  assert.ok(l.lost);
+  const closed = l.beginClosed(at(7000), "nc", build("hc"))!;
+  assert.equal(closed.seq, 2);
+  assert.equal(l.outstanding, undefined, "no renewal is outstanding once closed is allocated");
+  assert.equal(l.beginClosed(at(7001), "nc2", build("hc2")), null, "one closed, once");
+  assert.equal(l.begin(at(7002), "n3", build("h3")), null, "no renewal after closed");
+});
+
+test("only a matching closed: true receipt acknowledges closed, and nothing it says changes the lease", () => {
+  const l = lease();
+  assert.equal(l.ackClosed(receipt(1, "nc")), false, "nothing to acknowledge before closed is sent");
+  const closed = l.beginClosed(at(200), "nc", build("hc"))!;
+  const before = l.grantNow;
+  for (const wrong of [receipt(closed.seq, "other"), receipt(closed.seq + 1, "nc"), receipt(closed.seq, "nc", { claimId: "c2" }), receipt(closed.seq, "nc", { epoch: 4 }), receipt(closed.seq, "nc", { planHash: "q" }), receipt(closed.seq, "nc", { closed: false })]) {
+    assert.equal(l.ackClosed(wrong as never), false, JSON.stringify(wrong));
+    assert.equal(l.closedAcked, false);
+  }
+  assert.equal(l.ackClosed(receipt(closed.seq, "nc")), true);
+  assert.equal(l.closedAcked, true);
+  assert.deepEqual(l.grantNow, before, "the receipt reopens nothing");
+  assert.equal(l.held(at(201)), false, "closed ends the lease on the runner");
+});
