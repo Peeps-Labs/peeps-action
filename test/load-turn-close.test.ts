@@ -7,10 +7,10 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import { setTimeout as sleep } from "node:timers/promises";
 import type { Dial } from "../src/load/gate/proxy";
 import type { Upstream } from "../src/load/gate/resolve";
 import type { LoadResult } from "../src/load/supervisor";
+import { sharedClocks } from "../src/load/clocks";
 import { arrivedSeqs } from "./support/load-sink";
 import { FAST, installedWorkspace, invariants, rig, smallPlan, type Rig, type RigOptions } from "./support/run-supervisor";
 
@@ -119,34 +119,47 @@ for (const jail of JAILS) {
 
 test("the watch cuts an idle exchange at a wall-only turn deadline", { timeout: 4000 }, async (t) => {
   const cancel = new AbortController();
-  let measuring = false;
+  const turnDeadlineMs = 2000;
+  // Sampled when Measurement starts, before its turn opens, so the turn's monotonic deadline is no earlier than this plus turnDeadlineMs.
+  let measuringSince: number | undefined;
   let queued: Upstream | undefined;
-  let reset!: () => void;
-  const resetSeen = new Promise<boolean>((resolve) => { reset = () => resolve(true); });
+  let markQueued!: () => void;
+  const written = new Promise<void>((resolve) => { markQueued = resolve; });
+  let markReset!: (monoMs: number) => void;
+  const resetAt = new Promise<number>((resolve) => { markReset = resolve; });
   const r = await rig(t, {
     signal: cancel.signal,
     setup: { ttlMs: 6000 },
-    seams: { constants: { ...FAST, turnDeadlineMs: 2000 } },
+    seams: { constants: { ...FAST, turnDeadlineMs } },
     plan: smallPlan({ exportName: "get", users: 1 }),
     dial: (inner) => async (...args) => {
       const upstream = await inner(...args);
-      if (!measuring || queued) return upstream;
+      if (measuringSince === undefined || queued) return upstream;
       queued = upstream;
-      upstream.socket.cork();
+      const socket = upstream.socket;
+      socket.cork();
+      // The proxy writes the request once, into the corked socket: that call is the event to wait on.
+      const write = socket.write.bind(socket) as (...a: unknown[]) => boolean;
+      socket.write = ((...a: unknown[]) => {
+        const ok = write(...a);
+        markQueued();
+        return ok;
+      }) as typeof socket.write;
       return { ...upstream, reset: () => {
+        markReset(sharedClocks().monoMs);
         upstream.reset();
-        reset();
       } };
     },
     observer: (e) => {
-      if (e.type === "phase" && e.phase === "measurement") measuring = true;
+      if (e.type === "phase" && e.phase === "measurement") measuringSince = sharedClocks().monoMs;
     },
   });
   try {
-    for (let i = 0; i < 100 && !queued?.socket.writableLength; i++) await sleep(5);
+    await written;
     assert.ok(queued?.socket.writableLength, "the measured request is queued");
-    r.seam.wallShift = 2500;
-    assert.equal(await Promise.race([resetSeen, sleep(500, false)]), true, "the watch reset the write before the monotonic turn deadline");
+    r.seam.wallShift = turnDeadlineMs + 500;
+    const at = await resetAt;
+    assert.ok(at < measuringSince! + turnDeadlineMs, "the watch reset the write before the monotonic turn deadline");
     assert.equal(r.sink.arrivals.length, 1, "only Checking reached the target");
   } finally {
     cancel.abort();
