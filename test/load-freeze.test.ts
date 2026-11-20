@@ -13,6 +13,7 @@
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { Socket } from "node:net";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { encodeHandoffs, type Journal } from "../src/load/gate/journal";
@@ -284,4 +285,49 @@ for (const jail of JAILS) {
       invariants(r, res);
     });
   }
+  test(`F4 (${jail.name}): an accepted write without a receipt still gets a TCP reset`, jail.options, async (t) => {
+    const cancel = new AbortController();
+    let measuring = false;
+    let journal!: Journal;
+    let measuredPort: number | undefined;
+    let resets = 0;
+    const resetAndDestroy = Socket.prototype.resetAndDestroy;
+    t.mock.method(Socket.prototype, "resetAndDestroy", function (this: Socket) {
+      if (measuredPort !== undefined && this.localPort === measuredPort) resets += 1;
+      return resetAndDestroy.call(this);
+    });
+    const r = await start(t, jail.real, {
+      signal: cancel.signal,
+      plan: smallPlan({
+        exportName: "smallPost", users: 1, durationMs: 60_000, perJourneyMax: 1,
+        allowedRequests: [{ method: "POST", path: "/upload" }],
+      }),
+      seams: { onJournal: (j) => { journal = j; } },
+      stall: () => measuring,
+      observer: (e) => {
+        if (e.type === "phase" && e.phase === "measurement") measuring = true;
+      },
+      dial: (inner) => async (...args) => {
+        const upstream = await inner(...args);
+        if (measuring) measuredPort ??= upstream.socket.localPort;
+        return upstream;
+      },
+    });
+    try {
+      await until("the measured write was accepted while its target was paused", () =>
+        r.sink.stats.stalled === 1 && measuredPort !== undefined && journal.snapshot().accepted === 2, 10_000);
+      assert.equal(r.sink.arrivals.length, 1, "only the Checking request has a receipt");
+      cancel.abort();
+      const res = await r.result;
+      assert.equal(res.status, "cancelled", why(r, res));
+      assert.equal(resets, 1, "the gate reset the underlying TCP socket after the successful write callback");
+      r.sink.resumeStalled();
+      const snap = r.events.find((e) => e.type === "snapshot")!;
+      boundaryHolds(r, res, snap.handoffs);
+    } finally {
+      cancel.abort();
+      r.sink.resumeStalled();
+      await r.result;
+    }
+  });
 }

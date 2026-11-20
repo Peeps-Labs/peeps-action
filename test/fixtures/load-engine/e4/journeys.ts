@@ -122,6 +122,10 @@ export async function script(request: APIRequestContext): Promise<void> {
   if (step === "late") await request.get("/late-cookie");
 }
 
+export async function smallPost(request: APIRequestContext): Promise<void> {
+  assert.equal((await request.post("/upload", { data: "small body" })).status(), 200);
+}
+
 /** One POST of a body at the gate's limit (load-freeze F4, F5). */
 export async function bigPost(request: APIRequestContext): Promise<void> {
   await request.post("/upload", { data: Buffer.alloc(1024 * 1024 - 4096, 0x61), headers: { "content-type": "application/octet-stream" } });
