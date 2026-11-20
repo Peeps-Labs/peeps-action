@@ -266,6 +266,38 @@ describe("load supervisor: closed, latency, drain and the events pump", { concur
     invariants(r, res);
   });
 
+  test("a natural drain whose later renewals reach Peeps late ends at Peeps' grace cap as completed, not lease_lost", async (t) => {
+    // Peeps caps a draining lease at its drain start plus the grace; the runner maps each answer
+    // from that renewal's first send, so a slow renewal places the cap before the runner's own
+    // grace end. A turn still in flight there must not turn the run into a lost lease.
+    let measuring = false;
+    let endAt = Number.POSITIVE_INFINITY;
+    let fast = true;
+    const r = await rig(t, {
+      plan: smallPlan({ exportName: "get", users: 1, durationMs: 2_000, pacingMs: 1000 }),
+      observer: onPhase("measurement", ({ port }) => {
+        measuring = true;
+        endAt = Date.now() + 2_000;
+        const renew = port.renew.bind(port);
+        port.renew = async (...args) => {
+          const { state } = JSON.parse(args[2]);
+          if (state !== "closed" && Date.now() >= endAt) {
+            if (fast) fast = false;
+            else await new Promise((resolve) => setTimeout(resolve, 400));
+          }
+          return renew(...args);
+        };
+      }),
+      respond: (a, res) => setTimeout(() => fixtureRespond(a, res), measuring ? 6_000 : 0),
+    });
+    const res = await r.result;
+    assert.equal(res.status, "completed", why(r, res));
+    assert.equal(res.reason, "completed");
+    assert.ok(r.port.renewals.some(({ fields }) => fields.state === "draining"));
+    assert.equal(res.closed.state, "acked");
+    invariants(r, res);
+  });
+
   test("the supervisor has no single stop grace: drain, cohort seal and outcome timeout are apart", () => {
     const code = readFileSync(path.resolve(__dirname, "../src/load/supervisor.ts"), "utf8");
     assert.doesNotMatch(code, /stopGraceMs/);

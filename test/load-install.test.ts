@@ -562,8 +562,11 @@ test("cancelling a running offline preinstall kills npm inside the namespace and
   const marker = path.join(scratch, "started");
   const script = path.join(scratch, "npm.cjs");
   writeFileSync(script, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setTimeout(() => {}, 20_000);`);
+  // As root, run npm as another user, so setpriv changes credentials before it arms the signal,
+  // as it does on a hosted runner.
+  const as = self.uid === 0 ? { uid: 65534, gid: 65534 } : self;
   const ac = new AbortController();
-  const running = offlinePreinstall(ws, { node: process.execPath, nodeDir: path.dirname(path.dirname(process.execPath)), npmCli: script, nodeVersion: process.version, npmVersion: "11.0.0" }, scratch, { cache: tmp(t), ...self }, 60_000, ac.signal);
+  const running = offlinePreinstall(ws, { node: process.execPath, nodeDir: path.dirname(path.dirname(process.execPath)), npmCli: script, nodeVersion: process.version, npmVersion: "11.0.0" }, scratch, { cache: tmp(t), ...as }, 60_000, ac.signal);
   const cancelled = assert.rejects(running, { name: "AbortError" });
   for (let i = 0; i < 500 && !existsSync(marker); i++) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.ok(existsSync(marker), "the install child was running before cancellation");

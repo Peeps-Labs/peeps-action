@@ -78,6 +78,44 @@ describe("load supervisor: evidence and hard cancel", { concurrency: 4 }, () => 
     assert.equal(res.evidence.state, "complete");
   });
 
+  test("an interval acknowledged during settlement cannot strand the final evidence", async (t) => {
+    let release: (() => void) | undefined;
+    const r = await rig(t, {
+      plan: smallPlan({ exportName: "get", users: 1, durationMs: 900, pacingMs: 1000 }),
+      seams: { constants: { ...FAST, intervalMs: 500, reportingMs: 1000 } },
+      observer: (event, x) => {
+        if (event.type === "claimed") {
+          const events = x.port.events.bind(x.port);
+          x.port.events = (...args) => {
+            const ack = events(...args);
+            if (args[2].seq !== 1) return ack;
+            return new Promise((resolve) => {
+              void ack.then((answer) => { release = () => resolve(answer); });
+            });
+          };
+        }
+        if (event.type === "terminate") {
+          // Deliver the outstanding interval acknowledgement as finish resumes
+          // from the settlement race, before it queues the final evidence.
+          let remaining = 7;
+          const advance = () => {
+            if (remaining-- === 0) release?.();
+            else queueMicrotask(advance);
+          };
+          advance();
+        }
+      },
+    });
+    const res = await r.result;
+    assert.equal(res.status, "completed", why(r, res));
+    assert.ok(release, "an interval acknowledgement was held");
+    assert.equal(res.closed.state, "acked");
+    assert.equal(res.evidence.state, "complete");
+    assert.deepEqual(res.final, { watermark: res.closed.debited });
+    const accepted = r.port.batches() as { kind: string }[];
+    assert.deepEqual(accepted.slice(-4).map(({ kind }) => kind), ["handoffs", "renewals", "summary", "final"]);
+  });
+
   test("a blocked events endpoint: the run still ends within its reporting deadline, final missing", async (t) => {
     const r = await rig(t, { script: { eventsBlocked: true } });
     const res = await r.result;

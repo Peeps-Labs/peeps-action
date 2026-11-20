@@ -5,8 +5,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { once } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const DIR = path.resolve(__dirname, "../fixtures/load-golive");
@@ -51,7 +54,7 @@ test("Peeps' origin and the sink are written in the file; only the grant comes f
     if (/inputs\.peeps-load-grant/.test(line)) assert.match(line, /^ {10}PEEPS_LOAD_GRANT: /, "the grant reaches no script text");
     if (/^\s+run:/.test(line)) assert.doesNotMatch(line, /\$\{\{/, "no expression is spliced into a script");
   }
-  assert.match(code, /run: node "\$GITHUB_WORKSPACE\/action\/dist\/load\.js"/);
+  assert.match(code, /run: exec node "\$GITHUB_WORKSPACE\/action\/dist\/load\.js"/);
 });
 
 test("the action is checked out at one pinned commit, the all-zero placeholder the fixture's copy replaces", () => {
@@ -61,4 +64,48 @@ test("the action is checked out at one pinned commit, the all-zero placeholder t
 
 test("failure to produce the result artifact fails its upload step", () => {
   assert.match(code, /path: \$\{\{ runner\.temp \}\}\/peeps-load-result\.json\n\s+if-no-files-found: error\n/);
+});
+
+test("the workflow shell delivers GitHub cancellation signals to the load process", {
+  skip: process.platform !== "linux", timeout: 10_000,
+}, async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "peeps-load-step-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dist = path.join(root, "action", "dist");
+  mkdirSync(dist, { recursive: true });
+  writeFileSync(path.join(dist, "load.js"), `
+    process.on("SIGINT", () => process.exit(21));
+    process.on("SIGTERM", () => process.exit(22));
+    console.log(process.pid);
+    setInterval(() => {}, 1000);
+  `);
+  const script = path.join(root, "step.sh");
+  const command = code.match(/^ {8}run: (.+)$/m);
+  assert.ok(command);
+  writeFileSync(script, `${command[1]}\n`);
+
+  for (const [signal, exitCode] of [["SIGINT", 21], ["SIGTERM", 22]] as const) {
+    // The runner invokes the script as a file and signals that PID, not its group.
+    const child = spawn("/bin/bash", ["-e", script], {
+      env: { ...process.env, GITHUB_WORKSPACE: root, PATH: `${path.dirname(process.execPath)}:${process.env.PATH}` },
+      detached: true, stdio: ["ignore", "pipe", "ignore"],
+    });
+    const exited = once(child, "close", { signal: t.signal });
+    // A timeout can also reject this promise while the test is waiting for the ready line.
+    void exited.catch(() => undefined);
+    try {
+      const [pid] = await once(child.stdout!, "data", { signal: t.signal });
+      assert.equal(Number(String(pid).trim()), child.pid, "node must own the step entry PID");
+      assert.equal(child.kill(signal), true);
+      assert.deepEqual(await exited, [exitCode, null]);
+    } finally {
+      if (child.pid && child.exitCode === null) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+    }
+  }
 });

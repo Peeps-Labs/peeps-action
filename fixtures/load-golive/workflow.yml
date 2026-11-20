@@ -61,7 +61,7 @@ jobs:
           node-version: "24.22.3"
 
       - name: Load run
-        run: node "$GITHUB_WORKSPACE/action/dist/load.js"
+        run: exec node "$GITHUB_WORKSPACE/action/dist/load.js"
         env:
           PEEPS_URL: https://dev.peepsai.com
           # PLACEHOLDER: the harness sink host, to confirm before the fixture copy is registered.

@@ -303,6 +303,10 @@ class LoadRun {
   private watchTimer: NodeJS.Timeout | undefined;
   private tickTimer: NodeJS.Timeout | undefined;
   private graceEnd: Clocks | undefined;
+  /** The drain's own end, before `alignDrain` brings it forward to a lease Peeps capped. */
+  private drainLimit: Clocks | undefined;
+  /** The end of the last lease applied (`grantNow` reads -Infinity once the lease is lost). */
+  private leaseUntil: Clocks | undefined;
   /** How long a drain may take: the grant's grace, never longer than a measured turn's deadline (also how long a cohort waits to be sealed). */
   private drainGraceMs = 0;
   /** Per allocated renewal: its attempts, the ms from first send to the applied answer, and the outcome. */
@@ -585,6 +589,7 @@ class LoadRun {
       if (d.kind === "lease") {
         this.gate?.applyLease(d.grant);
         if (d.stop?.mode === "graceful") this.onGracefulStop();
+        this.alignDrain(decoded.reply);
       }
       this.armWatch();
       this.scheduleRenew(tx.firstSendMono, now.monoMs);
@@ -593,6 +598,7 @@ class LoadRun {
   }
 
   private onExpiry(): void {
+    if (this.drainCutFirst(this.clocks())) return this.terminate(this.gracefulStop ? "stopped" : "completed");
     this.expiryObserved = true;
     this.gate?.revokeLease();
     this.terminate("lease_lost");
@@ -612,9 +618,36 @@ class LoadRun {
       const t = this.clocks();
       this.markMeasurementEnd(t);
       this.graceEnd = { monoMs: t.monoMs + this.drainGraceMs, wallMs: t.wallMs + this.drainGraceMs };
+      this.drainLimit = this.graceEnd;
       this.gate!.drain(this.graceEnd);
     }
     this.armWatch();
+  }
+
+  /**
+   * While the runner drains, Peeps caps the lease at its own drain start plus the grace (rule 10).
+   * The runner maps that cap from the renewal's first send, so a slow or retried renewal places it
+   * before `graceEnd`. A capped lease (one that ends before its TTL) then ends the drain with it,
+   * so the cap is the drain's cut, not a lost lease. An uncapped one restores the drain's own end.
+   */
+  private alignDrain(reply: { ttlMs: number; leaseUntilServerMs: number; serverNowMs: number }): void {
+    if (!this.lease) return;
+    const g = this.lease.grantNow;
+    this.leaseUntil = { monoMs: g.monoUntil, wallMs: g.wallUntil };
+    if (!this.drainLimit || this.reason !== undefined) return;
+    const capped = reply.leaseUntilServerMs - reply.serverNowMs < reply.ttlMs;
+    this.graceEnd = capped
+      ? { monoMs: Math.min(this.drainLimit.monoMs, g.monoUntil), wallMs: Math.min(this.drainLimit.wallMs, g.wallUntil) }
+      : this.drainLimit;
+    this.gate!.drain(this.graceEnd);
+  }
+
+  /** The drain's end came at or before the lease's, and has passed: running out is the drain's cut. */
+  private drainCutFirst(t: Clocks): boolean {
+    const end = this.graceEnd;
+    const lease = this.leaseUntil;
+    if (!end || !lease) return false;
+    return end.monoMs <= lease.monoMs && end.wallMs <= lease.wallMs && !(t.monoMs < end.monoMs && t.wallMs < end.wallMs);
   }
 
   /** One self-re-arming timer on the nearest deadline: the lease, the run's end, and the grace end. */
@@ -994,7 +1027,7 @@ class LoadRun {
     let st: LoadStatus | undefined = status;
     if (this.expiryObserved || this.gate?.leaseExpired) [reason, st] = ["lease_lost", "lease_lost"];
     else if (this.stopNowLive) [reason, st] = ["stopped", "stopped"];
-    else if (this.lease && !this.lease.held(this.clocks())) [reason, st] = ["lease_lost", "lease_lost"];
+    else if (this.lease && !this.lease.held(this.clocks()) && !this.drainCutFirst(this.clocks())) [reason, st] = ["lease_lost", "lease_lost"];
     this.markMeasurementEnd(this.clocks());
     this.reason = reason;
     this.status = st ?? statusOf(reason);
@@ -1229,7 +1262,11 @@ class LoadRun {
     const batch = JSON.stringify(payload);
     const payloadHash = batchHash({ streamId: this.streamId, seq, payload: batch, final });
     this.evidenceQueue.push({ body: { streamId: this.streamId, seq, payloadHash, batch, ...(final ? { final } : {}) } });
-    this.evidenceRunning ??= this.pump().finally(() => (this.evidenceRunning = undefined));
+    this.startEvidence();
+  }
+
+  private startEvidence(): Promise<void> {
+    return this.evidenceRunning ??= this.pump().finally(() => (this.evidenceRunning = undefined));
   }
 
   /**
@@ -1271,7 +1308,11 @@ class LoadRun {
   }
 
   private async flushEvidence(): Promise<void> {
-    while (this.evidenceRunning) await this.evidenceRunning;
+    // Final batches can be queued after the last pump saw an empty queue but
+    // before its finally handler cleared evidenceRunning. Start a pump for them.
+    while (this.evidenceRunning || (!this.evidenceStopped && this.evidenceQueue.length > 0)) {
+      await this.startEvidence();
+    }
   }
 }
 
