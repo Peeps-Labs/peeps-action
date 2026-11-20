@@ -31,11 +31,13 @@ import { ResponseReader, ResponseTooLarge } from "./response";
 
 /** The header that names why the gate answered instead of the target. */
 export const DENIED_HEADER = "x-peeps-load-denied";
+/** The header that names why the gate ended an exchange it had admitted: final, never re-sent. */
+export const CUT_HEADER = "x-peeps-load-cut";
 /** On a `rate` denial: how long until the gate could admit again. */
 export const RETRY_HEADER = "x-peeps-load-retry-after-ms";
 
-/** Response headers never passed back: the proxy frames its own answer. */
-const HOP_HEADERS = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade", "content-length"]);
+/** Response headers never passed back: the proxy frames its own answer, and only the gate speaks for the gate. */
+const HOP_HEADERS = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade", "content-length", DENIED_HEADER, CUT_HEADER, RETRY_HEADER]);
 
 /** Dial `origin`; `pinned`, when set, is the only address to use. */
 /** TCP and TLS must each call `ready` at their start boundary. */
@@ -85,8 +87,8 @@ export interface ProxyOptions {
   /** The turn a `Proxy-Authorization` value belongs to, if any. */
   authorize(credential: string): number | undefined;
   limits?: Partial<ProxyLimits>;
-  /** Read at each check. Defaults to `performance.now()` and `Date.now()`. */
-  clocks?: () => Clocks;
+  /** Read at each check: `sharedClocks` in production, a seam in tests. */
+  clocks: () => Clocks;
   /** Defaults to resolving and dialling through `resolve.ts`; tests inject fixture trust. */
   dial?: Dial;
   /** Tests only: a header carrying each request's seq, so a sink's receipts can be joined to the journal. */
@@ -115,8 +117,6 @@ interface TunnelState {
   /** Request body bytes this tunnel holds, counted in the run-wide budget. */
   bodyBytes: number;
 }
-
-const systemClocks = (): Clocks => ({ monoMs: performance.now(), wallMs: Date.now() });
 
 export interface DialSeams {
   /** Tests only: a resolver for fixture names. */
@@ -166,7 +166,7 @@ export class GateProxy {
   constructor(private readonly o: ProxyOptions) {
     validatePolicy(o.policy);
     this.limits = { ...DEFAULT_PROXY_LIMITS, ...o.limits };
-    this.clocks = o.clocks ?? systemClocks;
+    this.clocks = o.clocks;
     this.dial = o.dial ?? makeDial({ maxLookups: this.limits.maxPendingDials });
     // maxHeadersCount 0: Node keeps every header, so nothing is hidden from the checks here
     // (with a count cap it drops the excess from rawHeaders yet still acts on their framing).
@@ -528,7 +528,7 @@ export class GateProxy {
       gate.finish(seq);
       journal.finish(seq);
       if (!reason) res.end();
-      else if (reason !== "revoked" && !res.headersSent) this.answer(res, 502, reason);
+      else if (reason !== "revoked" && !res.headersSent) this.answer(res, 502, CUT_HEADER, reason);
       else if (!res.writableEnded) res.destroy();
     };
     const reader = new ResponseReader(method, {
@@ -605,17 +605,17 @@ export class GateProxy {
 
   private refuse(res: ServerResponse, status: number, reason: string, extra: Record<string, string> = {}): void {
     this.o.journal.deny(reason);
-    this.answer(res, status, reason, extra);
+    this.answer(res, status, DENIED_HEADER, reason, extra);
   }
 
-  /** The refusal's answer alone: for an admitted request, which is cut, never denied. */
-  private answer(res: ServerResponse, status: number, reason: string, extra: Record<string, string> = {}): void {
+  /** The gate's answer: `DENIED_HEADER` before admission, `CUT_HEADER` for an admitted exchange it ended. */
+  private answer(res: ServerResponse, status: number, header: typeof DENIED_HEADER | typeof CUT_HEADER, reason: string, extra: Record<string, string> = {}): void {
     if (res.headersSent || res.destroyed) {
       res.destroy();
       return;
     }
     res.shouldKeepAlive = false;
-    res.writeHead(status, { [DENIED_HEADER]: reason, ...extra, "content-length": "0", connection: "close" });
+    res.writeHead(status, { [header]: reason, ...extra, "content-length": "0", connection: "close" });
     res.end();
   }
 

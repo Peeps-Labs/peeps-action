@@ -15,7 +15,7 @@ import { buildCa, createRunCa, issueLeaf } from "../src/load/gate/ca";
 import { Journal } from "../src/load/gate/journal";
 import { receivedOutsideGate } from "../src/load/gate/reconcile";
 import { canonicalOrigin, normalize, parseAuthority, validatePolicy, type ArrivedRequest, type RequestPolicy } from "../src/load/gate/normalize";
-import { DENIED_HEADER, GateProxy, makeDial, RETRY_HEADER, type Dial, type ProxyLimits } from "../src/load/gate/proxy";
+import { CUT_HEADER, DENIED_HEADER, GateProxy, makeDial, RETRY_HEADER, type Dial, type ProxyLimits } from "../src/load/gate/proxy";
 import { ResponseReader } from "../src/load/gate/response";
 import { bundledRoots, canonical, checkedAddresses, classify, connectVerified, DialRefused, reachable, unmap, type ApprovedOrigin, type Upstream } from "../src/load/gate/resolve";
 import { startSink, type Sink, type SinkOptions } from "./support/load-sink";
@@ -471,6 +471,7 @@ async function exchange(r: Rig, inner: string | Buffer | undefined, o: ExchangeO
 const get = (r: Rig, target = "/", extra = "") => `GET ${target} HTTP/1.1\r\nHost: ${r.authority}\r\nAccept: */*\r\n${extra}\r\n`;
 const statusOf = (s: string) => Number(/^HTTP\/1\.1 (\d{3})/.exec(s)?.[1]);
 const deniedOf = (s: string) => new RegExp(`${DENIED_HEADER}: ([a-z_]+)`).exec(s)?.[1];
+const cutOf = (s: string) => new RegExp(`${CUT_HEADER}: ([a-z_]+)`).exec(s)?.[1];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 test("a GET is rebuilt, admitted, sent once and answered; the journal and gate agree", async (t) => {
@@ -819,6 +820,8 @@ test("an exchange has a deadline: a target that never answers is reset, and the 
   const r = await rig(t, { limits: { exchangeMs: 150 }, respond: () => undefined });
   const { response } = await exchange(r, get(r));
   assert.equal(statusOf(response), 502);
+  assert.equal(cutOf(response), "exchange_timeout", "a cut answers x-peeps-load-cut");
+  assert.equal(deniedOf(response), undefined, "a cut is never answered as a denial");
   await sleep(50);
   assert.equal(r.gate.inFlight, 0);
   assert.equal(r.dials.resets >= 1, true, "the upstream was reset");
@@ -1162,7 +1165,8 @@ test("a response head Node would refuse to write back is a failed exchange, not 
   for (const _ of heads) {
     const { response } = await exchange(r, get(r));
     assert.equal(statusOf(response), 502);
-    assert.equal(deniedOf(response), "upstream");
+    assert.equal(cutOf(response), "upstream", "an admitted exchange is cut, not denied");
+    assert.equal(deniedOf(response), undefined);
   }
   const snap = r.journal.snapshot();
   assert.equal(snap.received, 0, "never reported as received");
@@ -1460,4 +1464,18 @@ test("one response input yields on backpressure and resumes without dropping dec
   reader.resume();
   assert.deepEqual(writes, ["a", "b", "c"]);
   assert.equal(ends, 1);
+});
+
+test("the target cannot speak for the gate: its denied, cut and retry headers are stripped", async (t) => {
+  const r = await rig(t, {
+    respond: (_a, res) => {
+      res.writeHead(503, { [DENIED_HEADER]: "rate", [CUT_HEADER]: "upstream", [RETRY_HEADER]: "5", "x-kept": "1" });
+      res.end("busy");
+    },
+  });
+  const { response } = await exchange(r, get(r));
+  assert.equal(statusOf(response), 503, "the target's own 503 passes");
+  assert.match(response, /x-kept: 1/i);
+  assert.doesNotMatch(response, /x-peeps-load-/i, "no gate header the target sent reaches the journey");
+  assert.deepEqual(r.journal.snapshot().denied, {});
 });
