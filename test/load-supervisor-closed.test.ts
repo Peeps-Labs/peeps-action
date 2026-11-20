@@ -120,7 +120,7 @@ describe("load supervisor: closed, latency, drain and the events pump", { concur
   });
 
   test("a refused claim sends no closed", async (t) => {
-    const r = await rig(t, { script: { claimRefused: "matrix" } });
+    const r = await rig(t, { script: { claimRefused: "rerun" } });
     const res = await r.result;
     assert.equal(res.closed.state, "none");
     assert.equal(r.port.renewals.length, 0);

@@ -11,6 +11,7 @@
  * Pure: no clock, no timer, no I/O. The caller passes the clocks and the nonces.
  */
 import type { Clocks, LeaseGrant } from "./gate/admission";
+import type { StopReason } from "./wire";
 
 export const MAX_REMAINING_MS = 6000;
 
@@ -41,7 +42,7 @@ export interface RenewReply extends ServerLease {
   seq: number;
   nonce: string;
   lease: "held" | "lost";
-  stop?: { mode: "graceful" | "now"; reason: string };
+  stop?: { mode: "graceful" | "now"; reason: StopReason };
 }
 
 /** What acknowledges a `closed` renewal: its address and `closed: true`, nothing else. */

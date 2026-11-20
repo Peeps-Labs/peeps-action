@@ -8,7 +8,9 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
-import { invariants, onPhase, rig, scripted, smallPlan, why, WORKLOAD_PATH } from "./support/run-supervisor";
+import { claimBodyProblem } from "../src/load/claim-body";
+import { canonical } from "../src/load/control-port";
+import { GRANT_REF, invariants, onPhase, rig, scripted, smallPlan, why, WORKLOAD_PATH } from "./support/run-supervisor";
 
 describe("load supervisor: malformed replies and startup", { concurrency: 4 }, () => {
   // ---------------------------------------------------------------- malformed replies
@@ -111,6 +113,27 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
     assert.equal(res.cleanup, "not_started");
   });
 
+  test("the claim is P1's strict body: the grant reference, the probe's labels, observed digests", async (t) => {
+    const r = await rig(t, { seams: { labels: async () => ({ image: "ubuntu24 20261116.376.1", kernel: "6.8.0-1017-azure", tools: "systemd 255; unshare 2.39.3", chrony: "normal" }) } });
+    const res = await r.result;
+    assert.equal(res.status, "completed", why(r, res));
+    const sent = r.port.claims[0]!;
+    assert.equal(claimBodyProblem(canonical(sent)), undefined);
+    assert.equal(sent.grantRef, GRANT_REF);
+    assert.deepEqual(Object.keys(sent.lockDigests), ["package-lock.json"]);
+    assert.match(sent.observed.generatedLockDigest, /^[0-9a-f]{64}$/);
+    assert.deepEqual(sent.fence.probe, { passed: true, failures: [], image: "ubuntu24 20261116.376.1", kernel: "6.8.0-1017-azure", tools: "systemd 255; unshare 2.39.3", chrony: "normal" });
+  });
+
+  test("a body Peeps' strict schema would refuse is never sent: nothing is claimed", async (t) => {
+    const r = await rig(t, { grantRef: "not-a-grant-ref" });
+    const res = await r.result;
+    assert.equal(res.status, "didnt_start");
+    assert.equal(res.reason, "claim_invalid");
+    assert.equal(r.port.claims.length, 0);
+    assert.equal(r.jails.made.length, 0);
+  });
+
   test("a failed fence probe: nothing is claimed", async (t) => {
     const r = await rig(t, { seams: { probe: async () => ({ passed: false, failures: ["egress"], seen: null }) } });
     const res = await r.result;
@@ -121,10 +144,10 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
   });
 
   test("a refused claim: no jail starts", async (t) => {
-    const r = await rig(t, { script: { claimRefused: "matrix" } });
+    const r = await rig(t, { script: { claimRefused: "rerun" } });
     const res = await r.result;
     assert.equal(res.status, "didnt_start");
-    assert.equal(res.reason, "claim_matrix");
+    assert.equal(res.reason, "claim_rerun");
     assert.equal(r.jails.made.length, 0);
     assert.equal(r.port.renewals.length, 0);
   });

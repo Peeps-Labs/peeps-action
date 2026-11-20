@@ -1,0 +1,150 @@
+{
+  "about": "Canonical JSON (keys sorted at every depth, undefined dropped) and sha256 hex over its UTF-8. `renew` vectors: `renewBody(fields)`. `batch` vectors: `batchHash` over [streamId, seq, batch, final?.watermark ?? null] as JSON.stringify. `plans`: `planHashOf` of each v1/common golden plan.",
+  "canonical": [
+    {
+      "name": "nested key order",
+      "value": {
+        "b": [
+          3,
+          {
+            "z": 1,
+            "y": {
+              "d": null,
+              "c": true
+            }
+          }
+        ],
+        "a": "x"
+      },
+      "canonical": "{\"a\":\"x\",\"b\":[3,{\"y\":{\"c\":true,\"d\":null},\"z\":1}]}",
+      "sha256": "5abc5ac9dbadef6faa75bcdef0d5e1452244478b7d9243e9eaa0969eb05f4c33"
+    },
+    {
+      "name": "unicode and escapes",
+      "value": {
+        "é": "é  \n\t\"\\/",
+        "\u0001": "😀"
+      },
+      "canonical": "{\"\\u0001\":\"😀\",\"é\":\"é  \\n\\t\\\"\\\\/\"}",
+      "sha256": "7d0f5254a0a86d26d2d204ea611792f0ad495a5adc3ea6c034ed066e9d5c9735"
+    },
+    {
+      "name": "numbers",
+      "value": [
+        0,
+        0,
+        1.5,
+        -2,
+        1e+21,
+        1e-7,
+        9007199254740991,
+        123456789.125
+      ],
+      "canonical": "[0,0,1.5,-2,1e+21,1e-7,9007199254740991,123456789.125]",
+      "sha256": "168e1bb799c40b1ccfb004a58a3115ad55138c3c749328b4e0b2c46949f201d5"
+    },
+    {
+      "name": "empty containers",
+      "value": {
+        "a": {},
+        "b": [],
+        "c": ""
+      },
+      "canonical": "{\"a\":{},\"b\":[],\"c\":\"\"}",
+      "sha256": "e052004170cc85d084722ffe760c499548014bfdbdf5275548b688255770dfc2"
+    }
+  ],
+  "renew": [
+    {
+      "fields": {
+        "epoch": 1,
+        "seq": 1,
+        "nonce": "5eed0001",
+        "phase": "checking",
+        "debited": 10,
+        "unresolved": 0,
+        "inFlight": 0,
+        "state": "running",
+        "lagP99Ms": 0
+      },
+      "requestHash": "687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589",
+      "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}"
+    },
+    {
+      "fields": {
+        "epoch": 1,
+        "seq": 7,
+        "nonce": "5eed0007",
+        "phase": "measurement",
+        "debited": 70,
+        "unresolved": 3,
+        "inFlight": 2,
+        "state": "draining",
+        "lagP99Ms": 12
+      },
+      "requestHash": "96ce3cbc7a76800088f66531ff13d30e54faa434f2589b1015c44ab7b367317f",
+      "body": "{\"debited\":70,\"epoch\":1,\"inFlight\":2,\"lagP99Ms\":12,\"nonce\":\"5eed0007\",\"phase\":\"measurement\",\"requestHash\":\"96ce3cbc7a76800088f66531ff13d30e54faa434f2589b1015c44ab7b367317f\",\"seq\":7,\"state\":\"draining\",\"unresolved\":3}"
+    },
+    {
+      "fields": {
+        "epoch": 1,
+        "seq": 9,
+        "nonce": "5eed0009",
+        "phase": "checking",
+        "debited": 4000,
+        "unresolved": 0,
+        "inFlight": 0,
+        "state": "closed",
+        "lagP99Ms": 0
+      },
+      "requestHash": "42b277eacfd82e99e21b8e47f2662599a843912f3d538dc263690189459929fb",
+      "body": "{\"debited\":4000,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0009\",\"phase\":\"checking\",\"requestHash\":\"42b277eacfd82e99e21b8e47f2662599a843912f3d538dc263690189459929fb\",\"seq\":9,\"state\":\"closed\",\"unresolved\":0}"
+    }
+  ],
+  "batch": [
+    {
+      "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+      "seq": 1,
+      "batch": "",
+      "hash": "beb12d1596256b943408d31bc529e6844200b64cb55bc4effef1eb6cdb847ece"
+    },
+    {
+      "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+      "seq": 2,
+      "batch": "{\"é\":\" \"}",
+      "hash": "30a9ed51ca45f55aefd69a8b99ce7b3b62febec17b6a3229832e927e36b6a6be"
+    },
+    {
+      "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+      "seq": 3,
+      "batch": "x",
+      "final": {
+        "watermark": 0
+      },
+      "hash": "0dd4b2410a9a4ca8ac1854d4621b67ec40119ffd9a0fa386fb3b8b3596195cbd"
+    },
+    {
+      "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+      "seq": 4,
+      "batch": "line\nline",
+      "final": {
+        "watermark": 9007199254740991
+      },
+      "hash": "ba6afe350fc28596f27782096a15e263a8f70671756a7f657686cf9dd30cbe7e"
+    }
+  ],
+  "plans": [
+    {
+      "name": "starter",
+      "planHash": "8d49d8add31d533e30998fa4e01c6d3be741063b17b1eafc165e3402973187d4"
+    },
+    {
+      "name": "spec-example",
+      "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33"
+    },
+    {
+      "name": "monorepo",
+      "planHash": "30b4648001d0049dee59ef6ba1ef8b853165067c71fbde24e58885e1cb215893"
+    }
+  ]
+}

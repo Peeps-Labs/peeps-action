@@ -1,0 +1,396 @@
+{
+  "about": "Events batches against one claim's empty stream. Steps run in order; `clockMs` defaults to T0+1000. `fill` builds the body as the envelope plus `batch` = `char` repeated `count` times, JSON-encoded. `expect` is the 200 answer. The byte budget charges each stored batch its whole body, envelope included, so an empty batch costs bytes too.",
+  "validUntilMs": 1800001000000,
+  "byteBudget": 1024,
+  "cases": [
+    {
+      "name": "accepted, replayed, then final",
+      "steps": [
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 1,
+              "batch": "{\"k\":\"turn\",\"n\":1}",
+              "payloadHash": "6053b137b6ebcd39251d0e9373a6a9d52f00643690852b643a46b15e2c287f78"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "replay": false
+          }
+        },
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 1,
+              "batch": "{\"k\":\"turn\",\"n\":1}",
+              "payloadHash": "6053b137b6ebcd39251d0e9373a6a9d52f00643690852b643a46b15e2c287f78"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "replay": true
+          }
+        },
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 2,
+              "batch": "é ✓  ",
+              "final": {
+                "watermark": 12
+              },
+              "payloadHash": "d113a495443cd62b68226d07b4086a20d0dc77ddd2d17c1f0e42b8fd9bfb007d"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "replay": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "conflict: other bytes at a seen seq",
+      "steps": [
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 1,
+              "batch": "a",
+              "payloadHash": "a083600930380d0eec85d830790f1635bb0d84d9bff945f1f7569955dafd4616"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "replay": false
+          }
+        },
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 1,
+              "batch": "b",
+              "payloadHash": "7a59fc23a400a85f61fb627607fcbb66a5b7613c66bafd420857136085531ba3"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "reason": "conflict"
+          }
+        }
+      ]
+    },
+    {
+      "name": "gap",
+      "steps": [
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 2,
+              "batch": "a",
+              "payloadHash": "19e5f27ba3f6e21a57aa5572155f78fa1788100db52686d465d82b4c54703574"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "reason": "gap"
+          }
+        }
+      ]
+    },
+    {
+      "name": "after_final",
+      "steps": [
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 1,
+              "batch": "a",
+              "final": {
+                "watermark": 0
+              },
+              "payloadHash": "73a77b188bd53b5116c81eabe55909eface35f9e28e48e5670f527beba2c212f"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "replay": false
+          }
+        },
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 2,
+              "batch": "b",
+              "payloadHash": "cbd30c6f8771e9ac4a8088d08ebcf03916adcff9c072cf610516598471b778c1"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "reason": "after_final"
+          }
+        }
+      ]
+    },
+    {
+      "name": "stream: another stream id",
+      "steps": [
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 1,
+              "batch": "a",
+              "payloadHash": "a083600930380d0eec85d830790f1635bb0d84d9bff945f1f7569955dafd4616"
+            }
+          },
+          "expect": {
+            "ok": true,
+            "replay": false
+          }
+        },
+        {
+          "body": {
+            "json": {
+              "streamId": "00000000-0000-4000-8000-000000000000",
+              "seq": 2,
+              "batch": "b",
+              "payloadHash": "20d1633ba41d74fb9ada18172830d00107bdea18eec3eb44975190709705b418"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "reason": "stream"
+          }
+        }
+      ]
+    },
+    {
+      "name": "hash",
+      "steps": [
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 1,
+              "batch": "a",
+              "payloadHash": "0000000000000000000000000000000000000000000000000000000000000000"
+            }
+          },
+          "expect": {
+            "ok": false,
+            "reason": "hash"
+          }
+        }
+      ]
+    },
+    {
+      "name": "auth",
+      "steps": [
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 1,
+              "batch": "a",
+              "payloadHash": "a083600930380d0eec85d830790f1635bb0d84d9bff945f1f7569955dafd4616"
+            }
+          },
+          "tokenValid": false,
+          "expect": {
+            "ok": false,
+            "reason": "auth"
+          }
+        }
+      ]
+    },
+    {
+      "name": "expired",
+      "steps": [
+        {
+          "body": {
+            "json": {
+              "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+              "seq": 1,
+              "batch": "a",
+              "payloadHash": "a083600930380d0eec85d830790f1635bb0d84d9bff945f1f7569955dafd4616"
+            }
+          },
+          "clockMs": 1800001000001,
+          "expect": {
+            "ok": false,
+            "reason": "expired"
+          }
+        }
+      ]
+    },
+    {
+      "name": "budget: the claim's byte budget",
+      "steps": [
+        {
+          "body": {
+            "text": "{\"streamId\":\"3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090\",\"seq\":1,\"batch\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"payloadHash\":\"de7328e88ff59d48ff4302b9f99560c1a086e41fb48a6a0857c15718b6c4f828\"}"
+          },
+          "expect": {
+            "ok": true,
+            "replay": false
+          }
+        },
+        {
+          "body": {
+            "text": "{\"streamId\":\"3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090\",\"seq\":2,\"batch\":\"xxxxx\",\"payloadHash\":\"2b76f0cb8bd40ab3b0e22ce71566375849b901989a0b3dfaec13d440981aa390\"}"
+          },
+          "expect": {
+            "ok": false,
+            "reason": "budget"
+          }
+        }
+      ],
+      "byteBudget": 366
+    },
+    {
+      "name": "budget: an empty batch is charged its envelope",
+      "byteBudget": 151,
+      "steps": [
+        {
+          "body": {
+            "text": "{\"streamId\":\"3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090\",\"seq\":1,\"batch\":\"\",\"payloadHash\":\"beb12d1596256b943408d31bc529e6844200b64cb55bc4effef1eb6cdb847ece\"}"
+          },
+          "expect": {
+            "ok": true,
+            "replay": false
+          }
+        },
+        {
+          "body": {
+            "text": "{\"streamId\":\"3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090\",\"seq\":1,\"batch\":\"\",\"payloadHash\":\"beb12d1596256b943408d31bc529e6844200b64cb55bc4effef1eb6cdb847ece\"}"
+          },
+          "expect": {
+            "ok": true,
+            "replay": true
+          }
+        },
+        {
+          "body": {
+            "text": "{\"streamId\":\"3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090\",\"seq\":2,\"batch\":\"\",\"payloadHash\":\"3c80ef7c70bac6c42ab45f71060f585c9158dd473703315d296460edd9c69510\"}"
+          },
+          "expect": {
+            "ok": false,
+            "reason": "budget"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: a NUL escaped in the batch",
+      "steps": [
+        {
+          "body": {
+            "text": "{\"streamId\":\"3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090\",\"seq\":1,\"payloadHash\":\"e68358b29aa14646179206801bbcd16d59d2ac3172d51170f34c9286019c8ae7\",\"batch\":\"a\\u0000b\"}"
+          },
+          "expect": {
+            "ok": false,
+            "reason": "malformed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: a lone surrogate escaped in the batch",
+      "steps": [
+        {
+          "body": {
+            "text": "{\"streamId\":\"3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090\",\"seq\":1,\"payloadHash\":\"3c9ab484b2bc8c9839651331c07e022b0b27813005735c9debbe8d78572e68b7\",\"batch\":\"a\\ud800b\"}"
+          },
+          "expect": {
+            "ok": false,
+            "reason": "malformed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: not UTF-8",
+      "steps": [
+        {
+          "body": {
+            "base64": "e8MofQ=="
+          },
+          "expect": {
+            "ok": false,
+            "reason": "malformed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: a valid envelope but for one byte that is not UTF-8, inside the batch (its hash is the one a lenient decoder would accept)",
+      "steps": [
+        {
+          "body": {
+            "base64": "eyJzdHJlYW1JZCI6IjNmMmMxYjBhLTllOGQtNGM3Yi1hNmY1LWU0ZDNjMmIxYTA5MCIsInNlcSI6MSwicGF5bG9hZEhhc2giOiJlNjM1NzVkMTI4YWRiZDE2Y2I4NmZkODkxMWRiYjNhMjMxMzIwODAwZTk4N2RjMDBlN2EyMGNkMWZlNGJhNjExIiwiYmF0Y2giOiJh/2IifQ=="
+          },
+          "expect": {
+            "ok": false,
+            "reason": "malformed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: a batch over 256 KiB of UTF-8",
+      "byteBudget": 1048576,
+      "steps": [
+        {
+          "body": {
+            "fill": {
+              "envelope": {
+                "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+                "seq": 1,
+                "payloadHash": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              "char": "é",
+              "count": 131073
+            }
+          },
+          "expect": {
+            "ok": false,
+            "reason": "malformed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: an encoded envelope over 300 KiB whose batch is under 256 KiB",
+      "byteBudget": 1048576,
+      "steps": [
+        {
+          "body": {
+            "fill": {
+              "envelope": {
+                "streamId": "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090",
+                "seq": 1,
+                "payloadHash": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              "char": "\"",
+              "count": 163840
+            }
+          },
+          "expect": {
+            "ok": false,
+            "reason": "malformed"
+          }
+        }
+      ]
+    }
+  ]
+}

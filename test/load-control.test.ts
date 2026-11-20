@@ -10,7 +10,7 @@ import type { Clocks } from "../src/load/gate/admission";
 import { FakeControlPort, type FakeSetup } from "./support/fake-control-port";
 
 const PLAN = { protocolVersion: 1, journey: { module: "j.ts", export: "go" }, z: [3, 1, 2], a: { y: 1, b: 2 } };
-const BINDING = { checkoutSha: "a".repeat(40), lockDigests: { "package-lock.json": "d1" }, treeDigest: "t".repeat(64), workload: { path: "peeps/load/x.workload.yaml", digest: "w1" } };
+const BINDING = { checkoutSha: "a".repeat(40), lockDigests: { "package-lock.json": "d1".repeat(32) }, observed: { treeDigest: "7".repeat(64), generatedLockDigest: "6".repeat(64) }, workload: { path: "peeps/load/x.workload.yaml", digest: "f1".repeat(32) } };
 const SETUP: FakeSetup = {
   plan: PLAN,
   limits: { allowedOrigins: ["https://shop.test"], privateOrigins: {}, maxUsers: 5, requestBudget: 1000, policyRevision: 1, phases: {} },
@@ -19,7 +19,8 @@ const SETUP: FakeSetup = {
   binding: BINDING,
   allowance: 100,
 };
-const CLAIM: ClaimRequest = { protocol: 1, actionVersion: "1.0.0", idempotencyKey: "k1", runAttempt: 1, checkRunId: 7, fence: { kind: "netns", probe: { passed: true, failures: [] } }, ...BINDING };
+const PROBE = { passed: true, failures: [], image: "ubuntu24 20261116.376.1", kernel: "6.8.0", tools: "systemd 255; unshare 2.39.3", chrony: "normal" };
+const CLAIM: ClaimRequest = { protocol: 1, actionVersion: "1.0.0", grantRef: "q2Jx7Vf0bH1kR8sTzW4uYg", idempotencyKey: "0b5e4a6c-7d1f-4e2a-8b3c-9d4e5f6a7b8c", runAttempt: 1, checkRunId: 7, fence: { kind: "netns", probe: PROBE }, ...BINDING };
 const signal = new AbortController().signal;
 
 async function claimed(script = {}) {
@@ -60,7 +61,8 @@ test("the claim reply decoder refuses anything malformed, and passes a refusal t
     ["lease seq 1", (x) => (x.lease.seq = 1)],
     ["negative ceiling", (x) => (x.lease.ceiling = -1)],
     ["missing binding", (x) => delete x.binding],
-    ["binding without tree digest", (x) => delete x.binding.treeDigest],
+    ["binding without tree digest", (x) => delete x.binding.observed.treeDigest],
+    ["binding with a second lock digest", (x) => (x.binding.lockDigests["node_modules/.package-lock.json"] = "6".repeat(64))],
     ["a phase rate of zero", (x) => (x.limits.phases = { checking: { ratePerSecond: 0 } })],
     ["a fractional phase total", (x) => (x.limits.phases = { measurement: { total: 1.5 } })],
     ["origin caps not whole", (x) => (x.limits.originCaps = { "https://shop.test": -1 })],
@@ -69,19 +71,22 @@ test("the claim reply decoder refuses anything malformed, and passes a refusal t
   ] as [string, (x: Record<string, any>) => void][]) {
     assert.deepEqual(mutate(f), { ok: false, refused: "malformed" }, name);
   }
-  assert.deepEqual(decodeClaimReply({ refused: "matrix" }), { ok: false, refused: "matrix" });
+  assert.deepEqual(decodeClaimReply({ refused: "rerun" }), { ok: false, refused: "rerun" });
+  assert.deepEqual(decodeClaimReply({ refused: "matrix" }), { ok: false, refused: "unknown" }, "a code the wire does not name");
   assert.deepEqual(decodeClaimReply("x"), { ok: false, refused: "malformed" });
-  assert.deepEqual(decodeClaimReply(await port.claim({ ...CLAIM, idempotencyKey: "k2" }, signal)), { ok: false, refused: "duplicate_claim" });
+  assert.deepEqual(decodeClaimReply(await port.claim({ ...CLAIM, idempotencyKey: "1b5e4a6c-7d1f-4e2a-8b3c-9d4e5f6a7b8c" }, signal)), { ok: false, refused: "duplicate_claim" });
 });
 
 test("the fake verifies the claim's binding, each input on its own", async () => {
-  for (const over of [{ checkoutSha: "b".repeat(40) }, { treeDigest: "u".repeat(64) }, { lockDigests: { "package-lock.json": "d2" } }, { workload: { ...BINDING.workload, digest: "w2" } }]) {
+  for (const over of [{ checkoutSha: "b".repeat(40) }, { observed: { ...BINDING.observed, treeDigest: "8".repeat(64) } }, { observed: { ...BINDING.observed, generatedLockDigest: "8".repeat(64) } }, { lockDigests: { "package-lock.json": "d2".repeat(32) } }, { workload: { ...BINDING.workload, digest: "f2".repeat(32) } }]) {
     const port = new FakeControlPort(SETUP);
     assert.deepEqual(decodeClaimReply(await port.claim({ ...CLAIM, ...over }, signal)), { ok: false, refused: "binding" }, JSON.stringify(over));
   }
   const { grant } = await claimed();
   assert.equal(grant.planHash, planHashOf(PLAN));
   assert.deepEqual(grant.binding, BINDING);
+  const port = new FakeControlPort(SETUP);
+  assert.deepEqual(decodeClaimReply(await port.claim({ ...CLAIM, lockDigests: { ...CLAIM.lockDigests, "node_modules/.package-lock.json": "6".repeat(64) } } as ClaimRequest, signal)), { ok: false, refused: "malformed" }, "a body outside the strict schema");
 });
 
 test("the fake refuses a changed payload, a seq gap and a falling debited; an exact retry is never extended", async () => {
@@ -137,8 +142,9 @@ test("a reply for the wrong claim, epoch, plan, seq or nonce is ignored, each on
 test("a matching malformed reply: one with only a bad field keeps the old grant; a stop, a shorter lease or an unreadable state fails closed", () => {
   assert.deepEqual(applied(wire({ ceiling: "lots" })), { kind: "rejected", reason: "malformed" });
   assert.deepEqual(applied(wire({ ttlMs: null })), { kind: "rejected", reason: "malformed" });
-  assert.equal(applied(wire({ ceiling: "lots", stop: { mode: "graceful", reason: "owner" } })).kind, "lost", "a stop");
+  assert.equal(applied(wire({ ceiling: "lots", stop: { mode: "graceful", reason: "user_stop" } })).kind, "lost", "a stop");
   assert.equal(applied(wire({ ceiling: "lots", leaseUntilServerMs: SERVER0 + 2000 })).kind, "lost", "a shorter lease");
   assert.equal(applied(wire({ lease: "maybe" })).kind, "lost", "an unreadable lease state");
   assert.equal(applied(wire({ stop: { mode: "later" } })).kind, "lost", "an unreadable stop");
+  assert.equal(applied(wire({ stop: { mode: "graceful", reason: "owner" } })).kind, "lost", "a stop reason the wire does not name");
 });

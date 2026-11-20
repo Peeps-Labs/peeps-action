@@ -31,7 +31,8 @@ import os from "node:os";
 import path from "node:path";
 import { CUT_REASONS, DENY_REASONS, Accounting, requestDelta, zeroCounts, type IntervalRecord, type CohortRecord } from "./accounting";
 import { sharedClocks } from "./clocks";
-import { decodeClaimReply, decodeClosedReceipt, decodeRenewReply, planHashOf, renewBody, type Binding, type ClaimRequest, type ControlPort, type Grant, type RenewFields, type RenewState } from "./control-port";
+import { claimBody, hostLabels, type ProbeLabels } from "./claim-body";
+import { decodeClaimReply, decodeClosedReceipt, decodeRenewReply, planHashOf, renewBody, type Binding, type ControlPort, type Grant, type RenewFields, type RenewState } from "./control-port";
 import { DIALS_PER_TURN, ENGINE_LIMITS, OUTSTANDING_PER_TURN, runLimits, type EngineConstants, type RunLimits } from "./engine-limits";
 import { Gate, type Clocks } from "./gate/admission";
 import { createRunCa } from "./gate/ca";
@@ -45,6 +46,7 @@ import type { JailSpec } from "./jail/spec";
 import { RunnerLease, type ClaimGrant } from "./lease";
 import { validatePlanInput, type Plan } from "./plan-input";
 import { Scheduler } from "./scheduler";
+import { EVENTS_BATCH_MAX_BYTES, EVENTS_BODY_MAX_BYTES } from "./wire";
 
 export interface SupervisorConstants {
   /** From `init` to `loaded`. */
@@ -78,8 +80,8 @@ export const SUPERVISOR_CONSTANTS: SupervisorConstants = {
   tickMs: 50,
   renewAttemptMs: 1_000,
   outcomeTimeoutMs: 5_000,
-  maxBatchBytes: 256 * 1024,
-  maxEventsBodyBytes: 300 * 1024,
+  maxBatchBytes: EVENTS_BATCH_MAX_BYTES,
+  maxEventsBodyBytes: EVENTS_BODY_MAX_BYTES,
   retryMs: 100,
   retryMaxMs: 2_000,
 };
@@ -97,7 +99,7 @@ export interface LoadRunOptions {
   actionDir: string;
   port: ControlPort;
   /** The dispatch's grant reference, sent with the claim. */
-  grantRef?: string;
+  grantRef: string;
   /** The recipe's npm cache, for the offline pre-claim install. Without it the real install refuses. */
   npmCache?: string;
   /** When set, every origin the grant allows must be on one of these hosts (E5's harness: the sink only). */
@@ -117,6 +119,8 @@ export interface LoadSeams {
   /** Starts the jail (the fake jail in tests). */
   launch?: (spec: JailSpec, options: StartJailOptions, signal?: AbortSignal) => Promise<JailHandle>;
   probe?: () => Promise<ProbeReport>;
+  /** The claim's probe labels (tests: fixed values instead of the host's). */
+  labels?: () => Promise<ProbeLabels>;
   /** The pre-claim install (tests without the pinned toolchain): the digests it leaves. */
   preinstall?: (workspace: string) => Promise<InstallDigests>;
   dialSeams?: DialSeams;
@@ -227,15 +231,19 @@ export async function runLoad(o: LoadRunOptions, s: LoadSeams = {}): Promise<Loa
 
 const sha256Of = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 
-/** The binding a claim is made for and prepare checks again: checkout, lock digests, tree, workload. */
+/**
+ * The binding a claim is made for and prepare checks again: the checkout, its lockfile, what the
+ * install left (the tree and npm's generated lockfile), the workload. A missing lockfile reads as
+ * an empty digest, which the claim body's strict check refuses.
+ */
 export async function bindingOf(workspace: string, workloadPath: string, tree?: string, signal?: AbortSignal): Promise<Binding> {
   signal?.throwIfAborted();
   const lock = path.join(workspace, "package-lock.json");
-  const hidden = path.join(workspace, "node_modules/.package-lock.json");
+  const generated = path.join(workspace, "node_modules/.package-lock.json");
   return {
     checkoutSha: checkoutHead(workspace),
-    lockDigests: { "package-lock.json": existsSync(lock) ? sha256Of(lock) : "", "node_modules/.package-lock.json": existsSync(hidden) ? sha256Of(hidden) : "" },
-    treeDigest: tree ?? (await treeDigest(workspace, signal)),
+    lockDigests: { "package-lock.json": existsSync(lock) ? sha256Of(lock) : "" },
+    observed: { treeDigest: tree ?? (await treeDigest(workspace, signal)), generatedLockDigest: existsSync(generated) ? sha256Of(generated) : "" },
     workload: { path: workloadPath, digest: sha256Of(path.resolve(workspace, workloadPath)) },
   };
 }
@@ -449,16 +457,21 @@ class LoadRun {
   // ---------------------------------------------------------------- claim and the lease controller
 
   private async claim(binding: Binding, report: ProbeReport): Promise<void> {
-    const body: ClaimRequest = {
-      protocol: 1,
-      ...(this.o.grantRef !== undefined ? { grantRef: this.o.grantRef } : {}),
+    const labels = await (this.s.labels ? this.s.labels() : hostLabels());
+    this.throwIfDone();
+    const built = claimBody({
+      grantRef: this.o.grantRef,
       actionVersion: this.o.actionVersion ?? "0.0.0",
       idempotencyKey: randomUUID(),
       runAttempt: this.o.runAttempt ?? 1,
       checkRunId: this.o.checkRunId ?? 0,
-      fence: { kind: "netns", probe: { passed: report.passed, failures: report.failures } },
-      ...binding,
-    };
+      binding,
+      probe: { passed: report.passed, failures: report.failures },
+      labels,
+    });
+    // Never sent: Peeps' strict schema would refuse it `malformed`.
+    if (!built.ok) throw new Refused("didnt_start", "claim_invalid", built.problem);
+    const body = built.body;
     const sent = this.clocks();
     const raw = await this.o.port.claim(body, this.signal);
     const received = this.clocks();

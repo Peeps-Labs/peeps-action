@@ -127,7 +127,7 @@ test("a server clock that runs back loses the lease", () => {
 });
 
 test("lost, a hard stop, and an empty remaining lose the lease; a graceful stop is passed on", () => {
-  const stop = { mode: "now" as const, reason: "owner" };
+  const stop = { mode: "now" as const, reason: "user_stop" as const };
   for (const r of [reply(1, "n1", SERVER0 + 1100, { lease: "lost" }), reply(1, "n1", SERVER0 + 1100, { stop }), reply(1, "n1", SERVER0 + 1100, { leaseUntilServerMs: SERVER0 + 1100 })]) {
     const l = lease();
     l.begin(at(1000), "n1", build("h1"));
@@ -137,7 +137,7 @@ test("lost, a hard stop, and an empty remaining lose the lease; a graceful stop 
   }
   const l = lease();
   l.begin(at(1000), "n1", build("h1"));
-  const drain = { mode: "graceful" as const, reason: "drain" };
+  const drain = { mode: "graceful" as const, reason: "load_testing_off" as const };
   // While draining the server caps the deadline at the grace end; the runner takes the shorter grant.
   const d = l.apply(reply(1, "n1", SERVER0 + 1100, { stop: drain, leaseUntilServerMs: SERVER0 + 1100 + 2000 }), at(1200));
   assert.deepEqual(d.kind === "lease" && d.stop, drain);
@@ -188,7 +188,7 @@ test("an unusable answer loses the lease and still passes on its stop", () => {
   l.begin(at(1000), "n1", build("h1"));
   assert.equal(l.apply(reply(1, "n1", SERVER0 + 1100), at(1200)).kind, "lease");
   l.begin(at(2500), "n2", build("h2"));
-  const drain = { mode: "graceful" as const, reason: "drain" };
+  const drain = { mode: "graceful" as const, reason: "load_testing_off" as const };
   assert.deepEqual(l.apply(reply(2, "n2", SERVER0 + 1000, { stop: drain }), at(2600)), { kind: "lost", stop: drain });
 });
 
@@ -216,7 +216,7 @@ test("a lost lease is a newer grant, so a gate fed from grantNow revokes", async
 test("a malformed reply that carries a stop loses the lease", () => {
   const l = lease();
   l.begin(at(1000), "n1", build("h1"));
-  const drain = { mode: "graceful" as const, reason: "drain" };
+  const drain = { mode: "graceful" as const, reason: "load_testing_off" as const };
   assert.deepEqual(l.apply(reply(1, "n1", SERVER0 + 1100, { ceiling: Number.NaN, stop: drain }), at(1200)), { kind: "lost", stop: drain });
   assert.equal(lease({ renewEveryMs: 0 }).lost, true, "a claim with no renewal interval is lost");
 });
@@ -248,7 +248,7 @@ test("begin hands build the seq it allocates, and stores the hash and the frozen
 });
 
 test("Stop now survives apply when the grant was live on receipt, and not when it had run out", () => {
-  const now = { mode: "now" as const, reason: "owner" };
+  const now = { mode: "now" as const, reason: "user_stop" as const };
   {
     const l = lease();
     l.begin(at(1000), "n1", build("h1"));

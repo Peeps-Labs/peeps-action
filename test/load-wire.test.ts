@@ -3,9 +3,8 @@
  * and §4). `HttpControlPort` against local HTTPS servers with per-test CAs: one stands in for
  * Peeps' load routes, one for GitHub's OIDC service.
  *
- * The conformance half (shared wire fixtures, byte-identical requests, hash vectors) is A1's,
- * and lands here when P1's fixtures exist. Until then these cases build their answers locally,
- * and the refusal codes the port enumerates are a draft that A1's fixtures replace.
+ * The conformance half (the shared wire-v1 fixtures, byte-identical requests, hash vectors) is
+ * `load-wire-v1.test.ts`; these cases build their answers locally.
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -33,13 +32,14 @@ const SENTINELS = [REQUEST_TOKEN, ID_TOKEN, ID_TOKEN.split(".")[2]!, RUN_TOKEN, 
 const CLAIM: ClaimRequest = {
   protocol: 1,
   actionVersion: "0.0.0-test",
+  grantRef: "q2Jx7Vf0bH1kR8sTzW4uYg",
   idempotencyKey: "4b0d5a52-7c1e-4b8f-9e3a-2f6c1d0e9a77",
   runAttempt: 1,
   checkRunId: 42,
-  fence: { kind: "netns", probe: { passed: true, failures: [] } },
+  fence: { kind: "netns", probe: { passed: true, failures: [], image: "ubuntu24 20261116.376.1", kernel: "6.8.0", tools: "systemd 255; unshare 2.39.3", chrony: "normal" } },
   checkoutSha: "a".repeat(40),
   lockDigests: { "package-lock.json": "b".repeat(64) },
-  treeDigest: "c".repeat(64),
+  observed: { treeDigest: "c".repeat(64), generatedLockDigest: "e".repeat(64) },
   workload: { path: "peeps/load/smoke.workload.yaml", digest: "d".repeat(64) },
 };
 const CLAIM_ID = "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f";
@@ -61,7 +61,7 @@ const peepsDefault: Responder = (a, res) => (a.url.endsWith("/claims") ? json(re
 async function harness(t: TestContext, peepsResponder: Responder = peepsDefault): Promise<Harness> {
   const peeps = await startTestServer("peeps.test", peepsResponder);
   const oidc = await startTestServer("oidc.test", (_a, res) => json(res, 200, { count: 1, value: ID_TOKEN }));
-  const seams: HttpControlSeams = { ca: [peeps.caPem, oidc.caPem], lookup: loopbackLookup, oidcHosts: ["oidc.test"] };
+  const seams: HttpControlSeams = { ca: [peeps.caPem, oidc.caPem], lookup: loopbackLookup, oidcHosts: [`oidc.test:${oidc.port}`] };
   const ports: HttpControlPort[] = [];
   const build = (extra: Partial<HttpControlSeams> = {}) => {
     const p = new HttpControlPort({ peepsUrl: peeps.url, oidc: { requestUrl: `${oidc.url}/_apis/idtoken?api-version=2.0`, requestToken: REQUEST_TOKEN } }, { ...seams, ...extra });
@@ -459,6 +459,11 @@ test("Peeps' URL and the OIDC request URL are checked before anything is sent", 
     [build(h.peeps.url, "https://actions.githubusercontent.com.evil.test/idtoken", [".actions.githubusercontent.com"]), "ACTIONS_ID_TOKEN_REQUEST_URL"],
     [build(h.peeps.url, "https://evilactions.githubusercontent.com/idtoken", [".actions.githubusercontent.com"]), "ACTIONS_ID_TOKEN_REQUEST_URL"],
     [build(h.peeps.url, "https://actions.githubusercontent.com/idtoken", [".actions.githubusercontent.com"]), "ACTIONS_ID_TOKEN_REQUEST_URL"],
+    // S0: no explicit port on GitHub's host set.
+    [build(h.peeps.url, "https://run-actions-3-azure-eastus.actions.githubusercontent.com:8443/1/idtoken", [".actions.githubusercontent.com"]), "ACTIONS_ID_TOKEN_REQUEST_URL"],
+    // An exact entry names its port: the OIDC test server's, not another.
+    [build(h.peeps.url, `https://oidc.test:${h.oidc.port + 1}/idtoken`), "ACTIONS_ID_TOKEN_REQUEST_URL"],
+    [build(h.peeps.url, good, ["oidc.test"]), "ACTIONS_ID_TOKEN_REQUEST_URL"],
   ];
   for (const [make, which] of refused) {
     assert.throws(make, (e: unknown) => e instanceof ControlHttpError && e.code === "url" && e.detail === which && !inspect(e).includes(REQUEST_TOKEN));
@@ -466,6 +471,8 @@ test("Peeps' URL and the OIDC request URL are checked before anything is sent", 
   // The default host set: GitHub-hosted runners' token service.
   assert.doesNotThrow(() => new HttpControlPort({ peepsUrl: "https://app.peepsai.com", oidc: { requestUrl: "https://pipelinesghubeus6.actions.githubusercontent.com/abc/_apis/distributedtask/hubs/Actions/plans/x/jobs/y/idtoken?api-version=2.0", requestToken: REQUEST_TOKEN } }).close());
   assert.doesNotThrow(() => new HttpControlPort({ peepsUrl: "https://app.peepsai.com/", oidc: { requestUrl: "https://run-actions-1-azure-eastus.actions.githubusercontent.com/1/idtoken", requestToken: REQUEST_TOKEN } }).close());
+  // The default port, written out, is no port at all.
+  assert.doesNotThrow(() => new HttpControlPort({ peepsUrl: "https://app.peepsai.com/", oidc: { requestUrl: "https://run-actions-3-azure-eastus.actions.githubusercontent.com:443/1/idtoken?api-version=2.0", requestToken: REQUEST_TOKEN } }).close());
   assert.equal(recorder.stats.connections, 0);
   assert.equal(h.oidc.stats.connections, 0);
   assert.equal(h.peeps.stats.connections, 0);
@@ -568,7 +575,7 @@ test("the job's proxy and TLS environment are ignored", async (t) => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "peeps-wire-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(path.join(dir, "extra.pem"), rogue.caPem);
-  const config = { peepsUrl: h.peeps.url, rogueUrl: rogue.url, oidcUrl: `${h.oidc.url}/idtoken`, oidcHost: "oidc.test", requestToken: REQUEST_TOKEN, ca: h.seams.ca, claim: CLAIM };
+  const config = { peepsUrl: h.peeps.url, rogueUrl: rogue.url, oidcUrl: `${h.oidc.url}/idtoken`, oidcHost: `oidc.test:${h.oidc.port}`, requestToken: REQUEST_TOKEN, ca: h.seams.ca, claim: CLAIM };
   const env = {
     ...process.env,
     PEEPS_TEST_CHILD_CONFIG: JSON.stringify(config),
@@ -631,7 +638,7 @@ test("Node's diagnostics that would print a request or write TLS keys refuse the
     await t.test(name, async (t) => {
       // The events token within the first 50 bytes of the grant, where a stream's debug line shows it.
       const h = await harness(t, (_a, res) => json(res, 200, { eventsToken: EVENTS_TOKEN, claimId: CLAIM_ID, epoch: 1, runToken: RUN_TOKEN }));
-      const config = { peepsUrl: h.peeps.url, rogueUrl: h.peeps.url, oidcUrl: `${h.oidc.url}/idtoken`, oidcHost: "oidc.test", requestToken: REQUEST_TOKEN, ca: h.seams.ca, claim: CLAIM };
+      const config = { peepsUrl: h.peeps.url, rogueUrl: h.peeps.url, oidcUrl: `${h.oidc.url}/idtoken`, oidcHost: `oidc.test:${h.oidc.port}`, requestToken: REQUEST_TOKEN, ca: h.seams.ca, claim: CLAIM };
       const { NODE_DEBUG: _d, NODE_OPTIONS: _o, ...base } = process.env;
       const { code, stdout, stderr } = await runChild({ ...base, ...diagnostic, PEEPS_TEST_CHILD_CONFIG: JSON.stringify(config) });
       for (const sentinel of SENTINELS) {
@@ -649,7 +656,7 @@ test("Node's diagnostics that would print a request or write TLS keys refuse the
 
 test("through the fake Peeps: the grant, renewals and events decode and apply", async (t) => {
   const limits: GrantLimits = { allowedOrigins: ["https://sink.test"], privateOrigins: {}, maxUsers: 1, requestBudget: 1000, policyRevision: 1, phases: { checking: { ratePerSecond: 5, burst: 5 }, measurement: { ratePerSecond: 5, burst: 5 } } };
-  const fake = new FakeControlPort({ claimId: CLAIM_ID, plan: { protocolVersion: 1 }, limits, workload: { path: CLAIM.workload.path, digest: CLAIM.workload.digest, module: "journeys.ts", export: "smoke" }, baseURL: "https://sink.test", binding: { checkoutSha: CLAIM.checkoutSha, lockDigests: CLAIM.lockDigests, treeDigest: CLAIM.treeDigest, workload: CLAIM.workload } });
+  const fake = new FakeControlPort({ claimId: CLAIM_ID, plan: { protocolVersion: 1 }, limits, workload: { path: CLAIM.workload.path, digest: CLAIM.workload.digest, module: "journeys.ts", export: "smoke" }, baseURL: "https://sink.test", binding: { checkoutSha: CLAIM.checkoutSha, lockDigests: CLAIM.lockDigests, observed: CLAIM.observed, workload: CLAIM.workload } });
   const h = await harness(t, (a, res) => {
     const m = /^\/api\/v1\/load\/claims(?:\/([^/]+)\/(renew|events))?$/.exec(a.url);
     const bearer = String(a.headers.authorization).replace(/^Bearer /, "");

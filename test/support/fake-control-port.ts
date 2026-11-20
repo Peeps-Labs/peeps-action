@@ -18,6 +18,7 @@
  * Refusals answer `{refused}`, which the runner cannot match to a renewal, so it is no answer.
  */
 import type { ClaimRequest, ControlPort, EventsBody, Binding, GrantLimits } from "../../src/load/control-port";
+import { claimBodyProblem } from "../../src/load/claim-body";
 import { canonical, planHashOf, sha256 } from "../../src/load/control-port";
 import { batchHash, EventLedger } from "../../src/load/gate/reconcile";
 
@@ -140,7 +141,9 @@ export class FakeControlPort implements ControlPort {
     if (this.idempotencyKey !== undefined) return body.idempotencyKey === this.idempotencyKey ? this.claimAnswer : { refused: "duplicate_claim" };
     if (this.script.claimRefused) return { refused: this.script.claimRefused };
     const b = this.setup.binding;
-    if (body.checkoutSha !== b.checkoutSha || body.treeDigest !== b.treeDigest || canonical(body.lockDigests) !== canonical(b.lockDigests) || canonical(body.workload) !== canonical(b.workload)) return { refused: "binding" };
+    // Peeps' strict schema first (P1's parseClaimBody): a body it would not parse is `malformed`.
+    if (claimBodyProblem(canonical(body)) !== undefined) return { refused: "malformed" };
+    if (body.checkoutSha !== b.checkoutSha || canonical(body.observed) !== canonical(b.observed) || canonical(body.lockDigests) !== canonical(b.lockDigests) || canonical(body.workload) !== canonical(b.workload)) return { refused: "binding" };
     if (!body.fence?.probe?.passed) return { refused: "fence_unverified" };
     const now = this.now();
     this.claimedAt = now;
@@ -272,7 +275,7 @@ export class FakeControlPort implements ControlPort {
     const at = this.since();
     const answer = { ...stored };
     if (s.lostAfterMs !== undefined && at >= s.lostAfterMs) answer.lease = "lost";
-    if (s.stopAfterMs !== undefined && at >= s.stopAfterMs) answer.stop = { mode: s.stopMode ?? "graceful", reason: "owner" };
+    if (s.stopAfterMs !== undefined && at >= s.stopAfterMs) answer.stop = { mode: s.stopMode ?? "graceful", reason: "user_stop" };
     if (this.now() >= (stored.leaseUntilServerMs as number)) answer.lease = "lost";
     return answer;
   }

@@ -1,0 +1,26 @@
+wire-v1: the control wire between Peeps and the runner, protocol 1.
+
+Peeps' source of truth is src/server/load-testing/protocol/domain/wire.ts and
+the decide functions in controlled-execution/domain/control.ts,
+controlled-execution/domain/reservation.ts and evidence/domain/event-ledger.ts.
+Peeps' wire-corpus.test.ts runs every case here through them.
+
+The action copies this folder byte for byte to test/fixtures/load-wire/v1/ and
+pins the same root hash: the sha256 of MANIFEST without its first line, the
+status line, so marking the corpus frozen does not change the hash.
+
+Status: draft until the action turns load on (A5). While draft, both
+repositories change it together. Once frozen, a change of meaning is wire-v2.
+
+Times are milliseconds from T0 = 1800000000000 on Peeps' clock. The token
+claims in claim.json are assumptions until step S0 records a real hosted
+peeps-load token.
+
+Files:
+  constants.json      byte caps, lease numbers, refusal codes, stop reasons
+  hashes.json         canonical JSON, renew bodies, batch and plan hashes
+  phase-caps.json     the grant's phases, budget and allowance per plan
+  grant-accepts.json  whole grants that the action's runLimits accepts
+  claim.json          seq 0: the grant, each refusal, replays
+  renew.json          renewals, stops, drains, replays and closed
+  events.json         the events ledger's answers and byte caps

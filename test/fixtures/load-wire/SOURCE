@@ -1,0 +1,8 @@
+v1/ is a byte-for-byte copy of peeps' control-wire corpus. Do not edit it here:
+while the corpus is a draft both repositories change it together, copied again;
+once frozen, a change of meaning is a new wire-v2 in peeps.
+
+repository: Peeps-Labs/peeps
+commit:     b0b17c3e5709776fa95ccc806df79e132ffb5751 ("Load testing P1: close round-2 review findings on claims and renewals", PR #3238)
+path:       src/server/load-testing/protocol/__fixtures__/wire-v1/
+root hash:  82eaf59837eeb778619861d9d3857f0b0533f2237bd00525568f4a3f99627b97 (sha256 of v1/MANIFEST without its first, status, line)
