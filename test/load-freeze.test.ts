@@ -155,6 +155,36 @@ for (const jail of JAILS) {
     invariants(r, res);
   });
 
+  test(`F2b (${jail.name}): live at the permit, expired at the handoff (clock seam): zero HTTP bytes, the debit unattempted and cut lease`, jail.options, async (t) => {
+    let shifting = false;
+    let shifted = 0;
+    let bytesAtShift = -1;
+    const r = await start(t, jail.real, {
+      plan: smallPlan({ exportName: "get", users: 1, durationMs: 60_000 }),
+      // The dial is done (the permit was live); the clock passes the lease before the handoff.
+      dial: (inner: Dial): Dial => async (o, signal, pin, ready) => {
+        const up = await inner(o, signal, pin, ready);
+        if (shifting && shifted === 0) {
+          shifted += 1;
+          bytesAtShift = r.sink.stats.requestBytes;
+          // Past the lease (3 s), short of the run's end (a minute on): the handoff sees the lease, not run_end.
+          r.seam.monoShift = 10_000;
+        }
+        return up;
+      },
+      observer: (e) => {
+        if (e.type === "phase" && e.phase === "measurement") shifting = true;
+      },
+    });
+    const res = await r.result;
+    assert.equal(shifted, 1, "the clock passed the lease between a dial and its handoff");
+    assert.equal(res.status, "lease_lost", why(r, res));
+    assert.equal(r.sink.stats.requestBytes, bytesAtShift, "zero HTTP bytes after the shift");
+    assert.ok(res.handoffs!.unattempted.length >= 1, "that debit stays unattempted");
+    assert.ok((res.journal!.cut.lease ?? 0) >= 1, `cut lease: ${JSON.stringify(res.journal!.cut)}`);
+    invariants(r, res);
+  });
+
   for (const clock of ["monotonic", "wall"] as const) {
     test(`F3 (${jail.name}, ${clock}): a held handshake when the lease runs out: that connection is closed, zero requests`, jail.options, async (t) => {
       const hold = await tcpHold();
