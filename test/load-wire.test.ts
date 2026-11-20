@@ -253,7 +253,7 @@ test("an answer that is not 2xx is a refusal or nothing: a success-shaped 4xx ne
   assert.deepEqual(await h.port.claim(CLAIM, signal()), { refused: "unknown" });
   const reply = { claimId: CLAIM_ID, epoch: 1, planHash: "p".repeat(64), seq: 1, nonce: "n", lease: "held", ttlMs: 5000, ceiling: 90, leaseUntilServerMs: 1, serverNowMs: 1 };
   h.peeps.answer((_a, res) => json(res, 401, reply));
-  assert.deepEqual(decodeRenewReply(await h.port.renew("claim-1", RUN_TOKEN, RENEW, signal())), { kind: "unaddressed" });
+  assert.deepEqual(decodeRenewReply(await h.port.renew("claim-1", RUN_TOKEN, RENEW, signal())), { kind: "unknown_refusal" });
   h.peeps.answer((_a, res) => json(res, 401, { ok: true, replay: false }));
   assert.notEqual((await h.port.events("claim-1", EVENTS_TOKEN, EVENTS, signal()) as { ok?: unknown }).ok, true);
   // A refusal at 4xx still resolves as its code.
@@ -655,7 +655,7 @@ test("Node's diagnostics that would print a request or write TLS keys refuse the
 });
 
 test("through the fake Peeps: the grant, renewals and events decode and apply", async (t) => {
-  const limits: GrantLimits = { allowedOrigins: ["https://sink.test"], privateOrigins: {}, maxUsers: 1, requestBudget: 1000, policyRevision: 1, phases: { checking: { ratePerSecond: 5, burst: 5 }, measurement: { ratePerSecond: 5, burst: 5 } } };
+  const limits: GrantLimits = { allowedOrigins: ["https://sink.test"], privateOrigins: {}, maxUsers: 1, requestBudget: 1000, policyRevision: 1, phases: { checking: { ratePerSecond: 5, burst: 5, maxUsers: 1, total: 5 }, measurement: { ratePerSecond: 5, burst: 5, maxUsers: 1, total: 1000 } } };
   const fake = new FakeControlPort({ claimId: CLAIM_ID, plan: { protocolVersion: 1 }, limits, workload: { path: CLAIM.workload.path, digest: CLAIM.workload.digest, module: "journeys.ts", export: "smoke" }, baseURL: "https://sink.test", binding: { checkoutSha: CLAIM.checkoutSha, lockDigests: CLAIM.lockDigests, observed: CLAIM.observed, workload: CLAIM.workload } });
   const h = await harness(t, (a, res) => {
     const m = /^\/api\/v1\/load\/claims(?:\/([^/]+)\/(renew|events))?$/.exec(a.url);

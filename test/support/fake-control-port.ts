@@ -55,7 +55,7 @@ export interface PortScript {
 }
 
 export interface FakeSetup {
-  /** The grant's claim id; "claim-1" when absent. */
+  /** The grant's claim id; a fixture UUID when absent. */
   claimId?: string;
   plan: unknown;
   limits: GrantLimits;
@@ -93,8 +93,8 @@ export class FakeControlPort implements ControlPort {
   readonly posted: (EventsBody & { refused?: string })[] = [];
   readonly ledger = new Map<string, EventLedger>();
   readonly claimId: string;
-  readonly runToken = "run-token-" + "r".repeat(20);
-  readonly eventsToken = "events-token-" + "e".repeat(20);
+  readonly runToken = "r".repeat(42) + "A";
+  readonly eventsToken = "e".repeat(42) + "A";
   readonly epoch = 1;
   readonly planHash: string;
   private claimedAt: number | undefined;
@@ -114,7 +114,7 @@ export class FakeControlPort implements ControlPort {
   private nonceN = 0;
 
   constructor(private readonly setup: FakeSetup, private readonly script: PortScript = {}) {
-    this.claimId = setup.claimId ?? "claim-1";
+    this.claimId = setup.claimId ?? "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f";
     this.planHash = planHashOf(setup.plan);
     for (const seq of script.ackLost ?? []) this.ackLost.add(seq);
   }

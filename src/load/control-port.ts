@@ -20,7 +20,7 @@
  */
 import { createHash } from "node:crypto";
 import type { ClosedReceipt, RenewReply } from "./lease";
-import { isClaimRefusal, isStopReason, WIRE_PROTOCOL } from "./wire";
+import { isClaimRefusal, isRenewRefusal, isStopReason, WIRE_PROTOCOL } from "./wire";
 
 export const PROTOCOL = WIRE_PROTOCOL;
 
@@ -45,7 +45,7 @@ export interface ClaimRequest extends Binding {
   fence: { kind: "netns"; probe: { passed: boolean; failures: string[]; image: string; kernel: string; tools: string; chrony: string } };
 }
 
-/** Per-phase caps the grant may lower; any field may be absent. */
+/** Engine cap overrides. The P1 grant decoder requires all four fields per phase. */
 export interface GrantPhaseCaps {
   ratePerSecond?: number;
   burst?: number;
@@ -159,6 +159,8 @@ const text = (v: unknown, max = 512): v is string => typeof v === "string" && v.
 const whole = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const texts = (v: unknown, max: number): v is string[] => Array.isArray(v) && v.length <= max && v.every((x) => text(x, 2048));
+const CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LOAD_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const SHA = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const sha = (v: unknown): v is string => typeof v === "string" && SHA.test(v);
@@ -180,17 +182,11 @@ function decodeBinding(v: unknown): Binding | undefined {
   };
 }
 
-function decodePhase(v: unknown): GrantPhaseCaps | undefined | false {
-  if (v === undefined) return undefined;
-  if (!isObj(v)) return false;
-  const out: GrantPhaseCaps = {};
-  for (const key of ["ratePerSecond", "burst", "maxUsers", "total"] as const) {
-    const x = v[key];
-    if (x === undefined) continue;
-    if (key === "ratePerSecond" ? !(finite(x) && x > 0) : !whole(x)) return false;
-    out[key] = x as number;
-  }
-  return out;
+function decodePhase(v: unknown): GrantPhaseCaps | undefined {
+  if (!isObj(v) || !only(v, ["ratePerSecond", "burst", "maxUsers", "total"])) return;
+  const { ratePerSecond, burst, maxUsers, total } = v;
+  if (!whole(ratePerSecond) || ratePerSecond === 0 || !whole(burst) || burst === 0 || !whole(maxUsers) || !whole(total)) return;
+  return { ratePerSecond, burst, maxUsers, total };
 }
 
 /**
@@ -201,27 +197,24 @@ export function decodeClaimReply(raw: unknown): ClaimReply {
   const bad = { ok: false as const, refused: "malformed" };
   if (!isObj(raw)) return bad;
   if (raw.refused !== undefined) return { ok: false, refused: isClaimRefusal(raw.refused) ? raw.refused : "unknown" };
+  if (!only(raw, ["claimId", "epoch", "runToken", "eventsToken", "planHash", "plan", "workload", "limits", "lease", "maxRunMs", "graceMs", "hardEndServerMs", "baseURL", "binding"])) return bad;
   const { limits: l, lease: s, workload: w } = raw;
-  if (!text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.runToken, 4096) || !text(raw.eventsToken, 4096) || !text(raw.planHash, 64) || !SHA.test(raw.planHash)) return bad;
+  if (typeof raw.claimId !== "string" || !CLAIM_ID.test(raw.claimId) || !whole(raw.epoch) ||
+      typeof raw.runToken !== "string" || !LOAD_TOKEN.test(raw.runToken) ||
+      typeof raw.eventsToken !== "string" || !LOAD_TOKEN.test(raw.eventsToken) || !sha(raw.planHash)) return bad;
   if (!isObj(raw.plan) || !text(raw.baseURL, 2048)) return bad;
-  if (!isObj(w) || !text(w.path, 1024) || !text(w.digest, 128) || !text(w.module, 1024) || !text(w.export, 256)) return bad;
-  if (!isObj(l) || !texts(l.allowedOrigins, 20) || !isObj(l.privateOrigins) || !Object.values(l.privateOrigins).every((v) => texts(v, 20)) || Object.keys(l.privateOrigins).length > 20 || !whole(l.maxUsers) || !whole(l.requestBudget) || !whole(l.policyRevision) || !isObj(l.phases)) return bad;
+  if (!isObj(w) || !only(w, ["path", "digest", "module", "export"]) || !text(w.path, 1024) || !sha(w.digest) || !text(w.module, 1024) || !text(w.export, 256)) return bad;
+  if (!isObj(l) || !only(l, ["allowedOrigins", "privateOrigins", "maxUsers", "requestBudget", "policyRevision", "phases"])) return bad;
+  if (!texts(l.allowedOrigins, 20) || !isObj(l.privateOrigins) || !Object.values(l.privateOrigins).every((v) => texts(v, 20)) || Object.keys(l.privateOrigins).length > 20 || !whole(l.maxUsers) || !whole(l.requestBudget) || !whole(l.policyRevision)) return bad;
+  if (!isObj(l.phases) || !only(l.phases, ["checking", "measurement"])) return bad;
   const checking = decodePhase(l.phases.checking);
   const measurement = decodePhase(l.phases.measurement);
-  if (checking === false || measurement === false) return bad;
-  let originCaps: Record<string, number> | undefined;
-  if (l.originCaps !== undefined) {
-    if (!isObj(l.originCaps)) return bad;
-    originCaps = {};
-    for (const [k, n] of Object.entries(l.originCaps)) {
-      if (!whole(n)) return bad;
-      originCaps[k] = n;
-    }
-  }
-  if (!isObj(s) || s.seq !== 0 || !text(s.nonce, 256) || !finite(s.ttlMs) || !(finite(s.renewEveryMs) && s.renewEveryMs > 0) || !whole(s.ceiling) || !finite(s.leaseUntilServerMs) || !finite(s.serverNowMs)) return bad;
+  if (!checking || !measurement) return bad;
+  if (!isObj(s) || !only(s, ["seq", "nonce", "ttlMs", "renewEveryMs", "ceiling", "leaseUntilServerMs", "serverNowMs"])) return bad;
+  if (s.seq !== 0 || !text(s.nonce, 256) || !finite(s.ttlMs) || !(finite(s.renewEveryMs) && s.renewEveryMs > 0) || !whole(s.ceiling) || !finite(s.leaseUntilServerMs) || !finite(s.serverNowMs)) return bad;
   if (!whole(raw.maxRunMs) || !whole(raw.graceMs) || !finite(raw.hardEndServerMs)) return bad;
   const binding = decodeBinding(raw.binding);
-  if (!binding) return bad;
+  if (!binding || w.path !== binding.workload.path || w.digest !== binding.workload.digest) return bad;
   return {
     ok: true,
     grant: {
@@ -238,8 +231,7 @@ export function decodeClaimReply(raw: unknown): ClaimReply {
         maxUsers: l.maxUsers,
         requestBudget: l.requestBudget,
         policyRevision: l.policyRevision,
-        phases: { ...(checking ? { checking } : {}), ...(measurement ? { measurement } : {}) },
-        ...(originCaps ? { originCaps } : {}),
+        phases: { checking, measurement },
       },
       lease: { seq: 0, nonce: s.nonce, ttlMs: s.ttlMs, renewEveryMs: s.renewEveryMs, ceiling: s.ceiling, leaseUntilServerMs: s.leaseUntilServerMs, serverNowMs: s.serverNowMs },
       maxRunMs: raw.maxRunMs,
@@ -254,6 +246,8 @@ export function decodeClaimReply(raw: unknown): ClaimReply {
 export type DecodedRenew =
   /** Not addressed to any renewal: ignore it. */
   | { kind: "unaddressed" }
+  /** The control endpoint sent a refusal outside the renew vocabulary. */
+  | { kind: "unknown_refusal" }
   /**
    * Addressed: claim, epoch, plan, seq and nonce all read. A lease number that does not read is
    * NaN, which `RunnerLease.apply` rejects (the old grant stays and runs out) unless the reply
@@ -265,6 +259,7 @@ export type DecodedRenew =
 
 /** A renew reply, untrusted. */
 export function decodeRenewReply(raw: unknown): DecodedRenew {
+  if (isObj(raw) && "refused" in raw) return { kind: isRenewRefusal(raw.refused) ? "unaddressed" : "unknown_refusal" };
   if (!isObj(raw) || !text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.planHash, 64) || !whole(raw.seq) || !text(raw.nonce, 256)) return { kind: "unaddressed" };
   const num = (v: unknown) => (finite(v) ? v : Number.NaN);
   let stop: RenewReply["stop"];

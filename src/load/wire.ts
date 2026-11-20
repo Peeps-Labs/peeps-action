@@ -57,4 +57,5 @@ export type Phase = (typeof PHASES)[number];
 const member = <T extends string>(list: readonly T[]) => (v: unknown): v is T => typeof v === "string" && (list as readonly string[]).includes(v);
 
 export const isClaimRefusal = member(CLAIM_REFUSALS);
+export const isRenewRefusal = member(RENEW_REFUSALS);
 export const isStopReason = member(STOP_REASONS);

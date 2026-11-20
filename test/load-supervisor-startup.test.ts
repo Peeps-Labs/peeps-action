@@ -35,6 +35,24 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
     invariants(r, res);
   });
 
+  test("an unknown renewal refusal revokes immediately without retrying the running renewal", async (t) => {
+    let measuring = false;
+    let refusals = 0;
+    const r = await rig(t, {
+      plan: smallPlan({ exportName: "get", durationMs: 20_000 }),
+      observer: onPhase("measurement", () => { measuring = true; }),
+      script: { mangle: (reply) => {
+        if (!measuring || reply.closed === true) return reply;
+        refusals++;
+        return { refused: "future_refusal" };
+      } },
+    });
+    const res = await r.result;
+    assert.equal(res.reason, "lease_lost", why(r, res));
+    assert.equal(refusals, 1);
+    invariants(r, res);
+  });
+
   test("replies for another claim are ignored: nothing is applied and the lease runs out", async (t) => {
     const r = await rig(t, { plan: smallPlan({ exportName: "get", durationMs: 20_000 }), script: { mangle: (x, seq) => (seq >= 2 ? { ...x, claimId: "someone-else" } : x) } });
     const res = await r.result;
@@ -252,4 +270,22 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
     assert.equal(res.closed.state, "acked");
     assert.equal(res.closed.debited, 0);
   });
+});
+
+test("an inconsistent workload digest in the grant starts no jail", async (t) => {
+  const r = await rig(t, {
+    setup: { workload: { path: WORKLOAD_PATH, digest: "0".repeat(64), module: "journeys.ts", export: "get" } },
+  });
+  const res = await r.result;
+  assert.equal(res.reason, "claim_malformed", why(r, res));
+  assert.equal(r.jails.made.length, 0);
+  assert.equal(r.sink.arrivals.length, 0);
+});
+
+test("a grant without its explicit phase caps starts no jail", async (t) => {
+  const r = await rig(t, { limits: { phases: {} } });
+  const res = await r.result;
+  assert.equal(res.reason, "claim_malformed", why(r, res));
+  assert.equal(r.jails.made.length, 0);
+  assert.equal(r.sink.arrivals.length, 0);
 });

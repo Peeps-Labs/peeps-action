@@ -13,6 +13,7 @@
  * Pure: no clock, no I/O.
  */
 import { createHash } from "node:crypto";
+import type { EventsBody } from "../control-port";
 import { wasAttempted, type Handoffs } from "./journal";
 
 export interface Arrivals {
@@ -58,6 +59,11 @@ export interface EventBatch {
 /** The hash a batch is compared by: over its seq, body and final marker, so none can change on replay. */
 export function batchHash(batch: EventBatch): string {
   return createHash("sha256").update(JSON.stringify([batch.streamId, batch.seq, batch.payload, batch.final?.watermark ?? null])).digest("hex");
+}
+
+/** The events envelope, hashed once when the supervisor queues it. */
+export function eventsBody(streamId: string, seq: number, batch: string, final?: EventsBody["final"]): EventsBody {
+  return { streamId, seq, batch, ...(final ? { final } : {}), payloadHash: batchHash({ streamId, seq, payload: batch, final }) };
 }
 
 export type EventAnswer = { ok: true; replay: boolean } | { ok: false; reason: "stream" | "gap" | "conflict" | "after_final" | "malformed" };

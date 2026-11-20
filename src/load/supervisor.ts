@@ -38,7 +38,7 @@ import { Gate, type Clocks } from "./gate/admission";
 import { createRunCa } from "./gate/ca";
 import { encodeHandoffs, Journal, type JournalSnapshot } from "./gate/journal";
 import { GateProxy, makeDial, type Dial, type DialSeams } from "./gate/proxy";
-import { batchHash } from "./gate/reconcile";
+import { eventsBody } from "./gate/reconcile";
 import { checkoutHead, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests } from "./install";
 import { NoTicket, probe as realProbe, startJail, TicketRefused, type JailHandle, type ProbeReport, type StartJailOptions } from "./jail";
 import type { CtlFrame, Ticket } from "./jail/ctl";
@@ -572,6 +572,10 @@ class LoadRun {
       }
       if (signal.aborted) return;
       const decoded = decodeRenewReply(raw);
+      if (decoded.kind === "unknown_refusal") {
+        lease.abandon();
+        return this.onExpiry();
+      }
       if (decoded.kind === "unaddressed") {
         if (!(await again())) return;
         continue;
@@ -1273,8 +1277,7 @@ class LoadRun {
     if (!this.fits(payload)) return this.latchIncomplete({ reason: "oversized", record: { kind: String(payload.kind), index: 0 } });
     const seq = ++this.evidenceSeq;
     const batch = JSON.stringify(payload);
-    const payloadHash = batchHash({ streamId: this.streamId, seq, payload: batch, final });
-    this.evidenceQueue.push({ body: { streamId: this.streamId, seq, payloadHash, batch, ...(final ? { final } : {}) } });
+    this.evidenceQueue.push({ body: eventsBody(this.streamId, seq, batch, final) });
     this.startEvidence();
   }
 

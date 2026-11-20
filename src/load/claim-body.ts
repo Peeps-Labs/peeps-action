@@ -73,7 +73,10 @@ export function claimBody(i: ClaimInputs): ClaimBodyResult {
   return problem === undefined ? { ok: true, body } : { ok: false, problem };
 }
 
-/** At most `max` UTF-16 units (what Peeps' schema counts), never splitting a character. */
+/**
+ * At most `max` UTF-16 units, never splitting a character. Peeps' schema counts code points, so
+ * this is the stricter count: a label it keeps is never too long for Peeps.
+ */
 function clip(text: string, max: number): string {
   if (text.length <= max) return text;
   let out = "";
@@ -160,32 +163,60 @@ export type HostRun = (file: string, args: string[]) => Promise<string | undefin
 
 const runHostTool: HostRun = (file, args) =>
   new Promise((resolve) => {
-    execFile(file, args, { env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" }, timeout: 2_000, maxBuffer: 16 * 1024, killSignal: "SIGKILL" }, (error, stdout) => resolve(error ? undefined : String(stdout)));
+    execFile(file, args, { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" }, timeout: 2_000, maxBuffer: 16 * 1024, killSignal: "SIGKILL" }, (error, stdout) => resolve(error ? undefined : String(stdout)));
   });
 
-/** Printable, one line. */
-const printable = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
-const firstLine = (out: string | undefined) => (out === undefined ? "unavailable" : printable(out.split("\n")[0] ?? "") || "unavailable");
+function kernelRelease(): string {
+  try {
+    return KERNEL_RELEASE.exec(os.release())?.[0] ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function versionLine(out: string | undefined, pattern: RegExp): string {
+  const line = out?.split("\n", 1)[0];
+  return line && pattern.test(line) ? line : "unavailable";
+}
+
+const IMAGE_VERSION = /^[0-9]{8}\.[0-9]{1,5}\.[0-9]{1,5}$/;
+const KERNEL_RELEASE = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:-[0-9]{1,6}-(?:azure|generic))?/;
+const SYSTEMD_VERSION = /^systemd [0-9]{1,4}(?: \([0-9]{1,4}\.[0-9]{1,4}-[0-9]{1,4}ubuntu[0-9]{0,4}(?:\.[0-9]{1,4}){0,3}\))?$/;
+const UNSHARE_VERSION = /^unshare from util-linux [0-9]{1,4}\.[0-9]{1,4}(?:\.[0-9]{1,4})?$/;
+const CLOCK_OFFSET = /^[0-9]{1,8}\.[0-9]{1,9} seconds (?:fast|slow) of NTP time$/;
+const LEAP_STATUS = new Set(["normal", "insert second", "delete second", "not synchronised"]);
 
 /**
  * The four probe labels: the runner image (`ImageOS` and `ImageVersion` on GitHub-hosted runners),
  * the kernel, the versions of the host tools the fence runs on (systemd-run, unshare), and
- * chrony's leap status and offset. A label it cannot read says `unknown` or `unavailable`; it
- * never fails the claim.
+ * chrony's leap status and offset. Each is kept only when it reads in a known format (the S0
+ * images' values), so no environment or command text reaches the claim; anything else says
+ * `unknown` or `unavailable`. It never rejects: a probe that fails is `unavailable` and the
+ * other labels stand.
  */
 export async function hostLabels(env: NodeJS.ProcessEnv = process.env, run: HostRun = runHostTool): Promise<ProbeLabels> {
+  const read = async (file: string, args: string[]) => {
+    try {
+      return await run(file, args);
+    } catch {
+      return undefined;
+    }
+  };
   const [systemd, unshare, tracking] = await Promise.all([
-    run("/usr/bin/systemd-run", ["--version"]),
-    run("/usr/bin/unshare", ["--version"]),
-    run("/usr/bin/chronyc", ["-n", "tracking"]),
+    read("/usr/bin/systemd-run", ["--version"]),
+    read("/usr/bin/unshare", ["--version"]),
+    read("/usr/bin/chronyc", ["-n", "tracking"]),
   ]);
-  const field = (name: string) => tracking?.split("\n").find((l) => l.startsWith(name))?.split(":").slice(1).join(":").trim();
-  const leap = field("Leap status");
+  const field = (name: string) => tracking?.split("\n").find((line) => line.split(":", 1)[0]?.trimEnd() === name)?.split(":").slice(1).join(":").trim();
+  const leap = field("Leap status")?.toLowerCase();
   const offset = field("System time");
+  const { ImageOS: imageOS, ImageVersion: imageVersion } = env;
   return {
-    image: env.ImageOS && env.ImageVersion ? printable(`${env.ImageOS} ${env.ImageVersion}`) : "unknown",
-    kernel: printable(os.release()) || "unknown",
-    tools: `${firstLine(systemd)}; ${firstLine(unshare)}`,
-    chrony: leap ? printable(`${leap.toLowerCase()}${offset ? `, ${offset}` : ""}`) : "unavailable",
+    image: (imageOS === "ubuntu22" || imageOS === "ubuntu24") && imageVersion && IMAGE_VERSION.test(imageVersion)
+      ? `${imageOS} ${imageVersion}` : "unknown",
+    kernel: kernelRelease(),
+    tools: clip(`${versionLine(systemd, SYSTEMD_VERSION)}; ${versionLine(unshare, UNSHARE_VERSION)}`, MAX_LABEL),
+    chrony: leap && LEAP_STATUS.has(leap)
+      ? `${leap}${offset && CLOCK_OFFSET.test(offset) ? `, ${offset}` : ""}` : "unavailable",
   };
 }

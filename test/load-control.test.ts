@@ -11,9 +11,10 @@ import { FakeControlPort, type FakeSetup } from "./support/fake-control-port";
 
 const PLAN = { protocolVersion: 1, journey: { module: "j.ts", export: "go" }, z: [3, 1, 2], a: { y: 1, b: 2 } };
 const BINDING = { checkoutSha: "a".repeat(40), lockDigests: { "package-lock.json": "d1".repeat(32) }, observed: { treeDigest: "7".repeat(64), generatedLockDigest: "6".repeat(64) }, workload: { path: "peeps/load/x.workload.yaml", digest: "f1".repeat(32) } };
+const CAPS = { ratePerSecond: 5, burst: 5, maxUsers: 5, total: 100 };
 const SETUP: FakeSetup = {
   plan: PLAN,
-  limits: { allowedOrigins: ["https://shop.test"], privateOrigins: {}, maxUsers: 5, requestBudget: 1000, policyRevision: 1, phases: {} },
+  limits: { allowedOrigins: ["https://shop.test"], privateOrigins: {}, maxUsers: 5, requestBudget: 1000, policyRevision: 1, phases: { checking: CAPS, measurement: CAPS } },
   workload: { ...BINDING.workload, module: "j.ts", export: "go" },
   baseURL: "https://shop.test",
   binding: BINDING,
@@ -58,6 +59,10 @@ test("the claim reply decoder refuses anything malformed, and passes a refusal t
   };
   for (const [name, f] of [
     ["not hex planHash", (x) => (x.planHash = "nope")],
+    ["an extra grant field", (x) => (x.stop = { mode: "now", reason: "user_stop" })],
+    ["a malformed run token", (x) => (x.runToken = "invalid")],
+    ["an extra lease field", (x) => (x.lease.lease = "lost")],
+    ["a non-hash workload digest", (x) => (x.workload.digest = "invalid")],
     ["lease seq 1", (x) => (x.lease.seq = 1)],
     ["negative ceiling", (x) => (x.lease.ceiling = -1)],
     ["missing binding", (x) => delete x.binding],

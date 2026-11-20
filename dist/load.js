@@ -81,6 +81,7 @@ var EVENTS_REFUSALS = ["auth", "expired", "malformed", "hash", "stream", "gap", 
 var STOP_REASONS = ["load_testing_off", "policy_changed", "environment_changed", "user_stop", "scope_deleted", "identity_conflict"];
 var member = (list) => (v2) => typeof v2 === "string" && list.includes(v2);
 var isClaimRefusal = member(CLAIM_REFUSALS);
+var isRenewRefusal = member(RENEW_REFUSALS);
 var isStopReason = member(STOP_REASONS);
 
 // src/load/control-port.ts
@@ -108,6 +109,8 @@ var text = (v2, max = 512) => typeof v2 === "string" && v2.length > 0 && v2.leng
 var whole = (v2) => typeof v2 === "number" && Number.isSafeInteger(v2) && v2 >= 0;
 var finite = (v2) => typeof v2 === "number" && Number.isFinite(v2);
 var texts = (v2, max) => Array.isArray(v2) && v2.length <= max && v2.every((x) => text(x, 2048));
+var CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var LOAD_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 var SHA = /^[0-9a-f]{64}$/;
 var COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 var sha = (v2) => typeof v2 === "string" && SHA.test(v2);
@@ -127,42 +130,31 @@ function decodeBinding(v2) {
   };
 }
 function decodePhase(v2) {
-  if (v2 === void 0) return void 0;
-  if (!isObj(v2)) return false;
-  const out = {};
-  for (const key of ["ratePerSecond", "burst", "maxUsers", "total"]) {
-    const x = v2[key];
-    if (x === void 0) continue;
-    if (key === "ratePerSecond" ? !(finite(x) && x > 0) : !whole(x)) return false;
-    out[key] = x;
-  }
-  return out;
+  if (!isObj(v2) || !only(v2, ["ratePerSecond", "burst", "maxUsers", "total"])) return;
+  const { ratePerSecond, burst, maxUsers, total } = v2;
+  if (!whole(ratePerSecond) || ratePerSecond === 0 || !whole(burst) || burst === 0 || !whole(maxUsers) || !whole(total)) return;
+  return { ratePerSecond, burst, maxUsers, total };
 }
 function decodeClaimReply(raw) {
   const bad = { ok: false, refused: "malformed" };
   if (!isObj(raw)) return bad;
   if (raw.refused !== void 0) return { ok: false, refused: isClaimRefusal(raw.refused) ? raw.refused : "unknown" };
+  if (!only(raw, ["claimId", "epoch", "runToken", "eventsToken", "planHash", "plan", "workload", "limits", "lease", "maxRunMs", "graceMs", "hardEndServerMs", "baseURL", "binding"])) return bad;
   const { limits: l, lease: s, workload: w } = raw;
-  if (!text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.runToken, 4096) || !text(raw.eventsToken, 4096) || !text(raw.planHash, 64) || !SHA.test(raw.planHash)) return bad;
+  if (typeof raw.claimId !== "string" || !CLAIM_ID.test(raw.claimId) || !whole(raw.epoch) || typeof raw.runToken !== "string" || !LOAD_TOKEN.test(raw.runToken) || typeof raw.eventsToken !== "string" || !LOAD_TOKEN.test(raw.eventsToken) || !sha(raw.planHash)) return bad;
   if (!isObj(raw.plan) || !text(raw.baseURL, 2048)) return bad;
-  if (!isObj(w) || !text(w.path, 1024) || !text(w.digest, 128) || !text(w.module, 1024) || !text(w.export, 256)) return bad;
-  if (!isObj(l) || !texts(l.allowedOrigins, 20) || !isObj(l.privateOrigins) || !Object.values(l.privateOrigins).every((v2) => texts(v2, 20)) || Object.keys(l.privateOrigins).length > 20 || !whole(l.maxUsers) || !whole(l.requestBudget) || !whole(l.policyRevision) || !isObj(l.phases)) return bad;
+  if (!isObj(w) || !only(w, ["path", "digest", "module", "export"]) || !text(w.path, 1024) || !sha(w.digest) || !text(w.module, 1024) || !text(w.export, 256)) return bad;
+  if (!isObj(l) || !only(l, ["allowedOrigins", "privateOrigins", "maxUsers", "requestBudget", "policyRevision", "phases"])) return bad;
+  if (!texts(l.allowedOrigins, 20) || !isObj(l.privateOrigins) || !Object.values(l.privateOrigins).every((v2) => texts(v2, 20)) || Object.keys(l.privateOrigins).length > 20 || !whole(l.maxUsers) || !whole(l.requestBudget) || !whole(l.policyRevision)) return bad;
+  if (!isObj(l.phases) || !only(l.phases, ["checking", "measurement"])) return bad;
   const checking = decodePhase(l.phases.checking);
   const measurement = decodePhase(l.phases.measurement);
-  if (checking === false || measurement === false) return bad;
-  let originCaps;
-  if (l.originCaps !== void 0) {
-    if (!isObj(l.originCaps)) return bad;
-    originCaps = {};
-    for (const [k, n] of Object.entries(l.originCaps)) {
-      if (!whole(n)) return bad;
-      originCaps[k] = n;
-    }
-  }
-  if (!isObj(s) || s.seq !== 0 || !text(s.nonce, 256) || !finite(s.ttlMs) || !(finite(s.renewEveryMs) && s.renewEveryMs > 0) || !whole(s.ceiling) || !finite(s.leaseUntilServerMs) || !finite(s.serverNowMs)) return bad;
+  if (!checking || !measurement) return bad;
+  if (!isObj(s) || !only(s, ["seq", "nonce", "ttlMs", "renewEveryMs", "ceiling", "leaseUntilServerMs", "serverNowMs"])) return bad;
+  if (s.seq !== 0 || !text(s.nonce, 256) || !finite(s.ttlMs) || !(finite(s.renewEveryMs) && s.renewEveryMs > 0) || !whole(s.ceiling) || !finite(s.leaseUntilServerMs) || !finite(s.serverNowMs)) return bad;
   if (!whole(raw.maxRunMs) || !whole(raw.graceMs) || !finite(raw.hardEndServerMs)) return bad;
   const binding = decodeBinding(raw.binding);
-  if (!binding) return bad;
+  if (!binding || w.path !== binding.workload.path || w.digest !== binding.workload.digest) return bad;
   return {
     ok: true,
     grant: {
@@ -179,8 +171,7 @@ function decodeClaimReply(raw) {
         maxUsers: l.maxUsers,
         requestBudget: l.requestBudget,
         policyRevision: l.policyRevision,
-        phases: { ...checking ? { checking } : {}, ...measurement ? { measurement } : {} },
-        ...originCaps ? { originCaps } : {}
+        phases: { checking, measurement }
       },
       lease: { seq: 0, nonce: s.nonce, ttlMs: s.ttlMs, renewEveryMs: s.renewEveryMs, ceiling: s.ceiling, leaseUntilServerMs: s.leaseUntilServerMs, serverNowMs: s.serverNowMs },
       maxRunMs: raw.maxRunMs,
@@ -192,6 +183,7 @@ function decodeClaimReply(raw) {
   };
 }
 function decodeRenewReply(raw) {
+  if (isObj(raw) && "refused" in raw) return { kind: isRenewRefusal(raw.refused) ? "unaddressed" : "unknown_refusal" };
   if (!isObj(raw) || !text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.planHash, 64) || !whole(raw.seq) || !text(raw.nonce, 256)) return { kind: "unaddressed" };
   const num = (v2) => finite(v2) ? v2 : Number.NaN;
   let stop;
@@ -235,7 +227,7 @@ var OIDC_TOKEN_MAX_CHARS = 8 * 1024;
 var OIDC_ATTEMPTS = 5;
 var GITHUB_OIDC_HOSTS = [".actions.githubusercontent.com"];
 var REFUSALS = /* @__PURE__ */ new Set([...CLAIM_REFUSALS, ...RENEW_REFUSALS]);
-var CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var CLAIM_ID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var EVENT_REASONS = new Set(EVENTS_REFUSALS);
 var ControlHttpError = class extends Error {
   constructor(op, code, status, detail) {
@@ -305,7 +297,7 @@ var HttpControlPort = class {
           continue;
         }
         const reply = reduceRefusal(answer);
-        if (isObj2(reply) && !("refused" in reply) && !(typeof reply.claimId === "string" && CLAIM_ID.test(reply.claimId))) throw new ControlHttpError("claim", "malformed", answer.status);
+        if (isObj2(reply) && !("refused" in reply) && !(typeof reply.claimId === "string" && CLAIM_ID2.test(reply.claimId))) throw new ControlHttpError("claim", "malformed", answer.status);
         return reply;
       } catch (error) {
         if (!(error instanceof ControlHttpError) || !error.transient || signal.aborted) throw signal.aborted ? new ControlHttpError("claim", "aborted") : error;
@@ -856,24 +848,47 @@ function claimBodyProblem(body) {
   return void 0;
 }
 var runHostTool = (file, args) => new Promise((resolve) => {
-  (0, import_node_child_process.execFile)(file, args, { env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" }, timeout: 2e3, maxBuffer: 16 * 1024, killSignal: "SIGKILL" }, (error, stdout) => resolve(error ? void 0 : String(stdout)));
+  (0, import_node_child_process.execFile)(file, args, { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" }, timeout: 2e3, maxBuffer: 16 * 1024, killSignal: "SIGKILL" }, (error, stdout) => resolve(error ? void 0 : String(stdout)));
 });
-var printable = (text2) => text2.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
-var firstLine = (out) => out === void 0 ? "unavailable" : printable(out.split("\n")[0] ?? "") || "unavailable";
+function kernelRelease() {
+  try {
+    return KERNEL_RELEASE.exec(import_node_os.default.release())?.[0] ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+function versionLine(out, pattern) {
+  const line = out?.split("\n", 1)[0];
+  return line && pattern.test(line) ? line : "unavailable";
+}
+var IMAGE_VERSION = /^[0-9]{8}\.[0-9]{1,5}\.[0-9]{1,5}$/;
+var KERNEL_RELEASE = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:-[0-9]{1,6}-(?:azure|generic))?/;
+var SYSTEMD_VERSION = /^systemd [0-9]{1,4}(?: \([0-9]{1,4}\.[0-9]{1,4}-[0-9]{1,4}ubuntu[0-9]{0,4}(?:\.[0-9]{1,4}){0,3}\))?$/;
+var UNSHARE_VERSION = /^unshare from util-linux [0-9]{1,4}\.[0-9]{1,4}(?:\.[0-9]{1,4})?$/;
+var CLOCK_OFFSET = /^[0-9]{1,8}\.[0-9]{1,9} seconds (?:fast|slow) of NTP time$/;
+var LEAP_STATUS = /* @__PURE__ */ new Set(["normal", "insert second", "delete second", "not synchronised"]);
 async function hostLabels(env = process.env, run = runHostTool) {
+  const read = async (file, args) => {
+    try {
+      return await run(file, args);
+    } catch {
+      return void 0;
+    }
+  };
   const [systemd, unshare, tracking] = await Promise.all([
-    run("/usr/bin/systemd-run", ["--version"]),
-    run("/usr/bin/unshare", ["--version"]),
-    run("/usr/bin/chronyc", ["-n", "tracking"])
+    read("/usr/bin/systemd-run", ["--version"]),
+    read("/usr/bin/unshare", ["--version"]),
+    read("/usr/bin/chronyc", ["-n", "tracking"])
   ]);
-  const field = (name2) => tracking?.split("\n").find((l) => l.startsWith(name2))?.split(":").slice(1).join(":").trim();
-  const leap = field("Leap status");
+  const field = (name2) => tracking?.split("\n").find((line) => line.split(":", 1)[0]?.trimEnd() === name2)?.split(":").slice(1).join(":").trim();
+  const leap = field("Leap status")?.toLowerCase();
   const offset = field("System time");
+  const { ImageOS: imageOS, ImageVersion: imageVersion } = env;
   return {
-    image: env.ImageOS && env.ImageVersion ? printable(`${env.ImageOS} ${env.ImageVersion}`) : "unknown",
-    kernel: printable(import_node_os.default.release()) || "unknown",
-    tools: `${firstLine(systemd)}; ${firstLine(unshare)}`,
-    chrony: leap ? printable(`${leap.toLowerCase()}${offset ? `, ${offset}` : ""}`) : "unavailable"
+    image: (imageOS === "ubuntu22" || imageOS === "ubuntu24") && imageVersion && IMAGE_VERSION.test(imageVersion) ? `${imageOS} ${imageVersion}` : "unknown",
+    kernel: kernelRelease(),
+    tools: clip(`${versionLine(systemd, SYSTEMD_VERSION)}; ${versionLine(unshare, UNSHARE_VERSION)}`, MAX_LABEL),
+    chrony: leap && LEAP_STATUS.has(leap) ? `${leap}${offset && CLOCK_OFFSET.test(offset) ? `, ${offset}` : ""}` : "unavailable"
   };
 }
 
@@ -2667,6 +2682,9 @@ function headerValues(raw, name2) {
 var import_node_crypto5 = require("node:crypto");
 function batchHash(batch) {
   return (0, import_node_crypto5.createHash)("sha256").update(JSON.stringify([batch.streamId, batch.seq, batch.payload, batch.final?.watermark ?? null])).digest("hex");
+}
+function eventsBody(streamId, seq2, batch, final) {
+  return { streamId, seq: seq2, batch, ...final ? { final } : {}, payloadHash: batchHash({ streamId, seq: seq2, payload: batch, final }) };
 }
 
 // src/load/install.ts
@@ -4822,6 +4840,10 @@ var LoadRun = class {
       }
       if (signal.aborted) return;
       const decoded = decodeRenewReply(raw);
+      if (decoded.kind === "unknown_refusal") {
+        lease.abandon();
+        return this.onExpiry();
+      }
       if (decoded.kind === "unaddressed") {
         if (!await again()) return;
         continue;
@@ -5463,8 +5485,7 @@ var LoadRun = class {
     if (!this.fits(payload)) return this.latchIncomplete({ reason: "oversized", record: { kind: String(payload.kind), index: 0 } });
     const seq2 = ++this.evidenceSeq;
     const batch = JSON.stringify(payload);
-    const payloadHash = batchHash({ streamId: this.streamId, seq: seq2, payload: batch, final });
-    this.evidenceQueue.push({ body: { streamId: this.streamId, seq: seq2, payloadHash, batch, ...final ? { final } : {} } });
+    this.evidenceQueue.push({ body: eventsBody(this.streamId, seq2, batch, final) });
     this.startEvidence();
   }
   startEvidence() {

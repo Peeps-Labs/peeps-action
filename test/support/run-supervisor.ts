@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import type { TestContext } from "node:test";
 import { sharedClocks } from "../../src/load/clocks";
 import type { Binding } from "../../src/load/control-port";
+import { engineBudgets } from "../../src/load/engine-limits";
+import { validatePlanInput } from "../../src/load/plan-input";
 import type { Clocks } from "../../src/load/gate/admission";
 import { canonicalOrigin } from "../../src/load/gate/normalize";
 import type { Dial } from "../../src/load/gate/proxy";
@@ -178,9 +180,15 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
   const plan = o.plan ?? smallPlan({ exportName: o.exportName ?? "get" });
   const binding: Binding = await bindingOf(ws, WORKLOAD_PATH);
   o.afterBinding?.(ws);
+  const limits = { allowedOrigins: [origin], maxUsers: 10, requestBudget: 100_000, policyRevision: 1 };
+  const input = validatePlanInput({ plan, limits });
+  assert.ok(input.ok);
+  const engine = engineBudgets(input.value);
+  const caps = ({ ratePerSecond, burst, users, totalRequests }: typeof engine.checking) =>
+    ({ ratePerSecond, burst, maxUsers: users, total: totalRequests });
   const setup: FakeSetup = {
     plan,
-    limits: { allowedOrigins: [origin], privateOrigins: { [origin]: ["127.0.0.0/8"] }, maxUsers: 10, requestBudget: 100_000, policyRevision: 1, phases: {}, ...o.limits },
+    limits: { ...limits, privateOrigins: { [origin]: ["127.0.0.0/8"] }, phases: { checking: caps(engine.checking), measurement: caps(engine.measurement) }, ...o.limits },
     workload: { path: WORKLOAD_PATH, digest: binding.workload.digest, module: plan.journey.module, export: plan.journey.export },
     baseURL: origin,
     binding,

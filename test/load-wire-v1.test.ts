@@ -5,12 +5,15 @@
  * pinned by the same root hash: the sha256 of MANIFEST without its first, status, line, so A5's
  * freeze does not change it. Editing the copy fails here.
  *
- * Every vector runs through the action's own encoders and decoders: the canonical JSON and the
- * renew, batch and plan hashes; the strict claim body (built by `claimBody`, checked by
- * `claimBodyProblem`, which refuses exactly the bodies Peeps refuses for their shape); every
- * whole grant through `decodeClaimReply` and prepare's checks; every renew reply and `closed`
- * receipt through `decodeRenewReply` and `decodeClosedReceipt`; and every refusal code and
- * events answer through the HTTP port.
+ * Every vector the runner can produce or read runs through the action's own production code: the
+ * canonical JSON and the renew, batch and plan hashes; the strict claim body (built by `claimBody`,
+ * checked by `claimBodyProblem`, which refuses exactly the bodies Peeps refuses for their shape);
+ * every whole grant through `decodeClaimReply` and prepare's checks; every `phase-caps.json`
+ * vector through `engineBudgets` and `runLimits`; every renew reply and `closed` receipt through
+ * `decodeRenewReply` and `decodeClosedReceipt`; and the claim, renew and events requests (built by
+ * `claimBody`, `renewBody` and `eventsBody`) and every refusal code and events answer through the
+ * HTTP port, byte for byte. Request bytes the runner cannot produce (Peeps' parser vectors) are
+ * Peeps' corpus tests' business; here only their refusal replies apply.
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -19,12 +22,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { claimBody, claimBodyProblem, hostLabels } from "../src/load/claim-body";
-import { canonical, decodeClaimReply, decodeClosedReceipt, decodeRenewReply, planHashOf, PROTOCOL, renewBody, sha256, type ClaimRequest, type Grant, type RenewFields } from "../src/load/control-port";
-import { OUTSTANDING_PER_TURN, runLimits } from "../src/load/engine-limits";
-import { batchHash } from "../src/load/gate/reconcile";
+import { canonical, decodeClaimReply, decodeClosedReceipt, decodeRenewReply, planHashOf, PROTOCOL, renewBody, sha256, type ClaimRequest, type EventsBody, type Grant, type RenewFields } from "../src/load/control-port";
+import { engineBudgets, OUTSTANDING_PER_TURN, runLimits } from "../src/load/engine-limits";
+import { batchHash, eventsBody } from "../src/load/gate/reconcile";
 import { HttpControlPort } from "../src/load/http-control-port";
 import { MAX_REMAINING_MS } from "../src/load/lease";
-import { validatePlanInput } from "../src/load/plan-input";
+import { validatePlanInput, type PlanInput } from "../src/load/plan-input";
 import { SUPERVISOR_CONSTANTS } from "../src/load/supervisor";
 import { CLAIM_BODY_MAX_BYTES, CLAIM_REFUSALS, EVENTS_BATCH_MAX_BYTES, EVENTS_BODY_MAX_BYTES, EVENTS_REFUSALS, PHASES, RENEW_BODY_MAX_BYTES, RENEW_REFUSALS, STOP_REASONS } from "../src/load/wire";
 import { json, jwt, loopbackLookup, startTestServer, type Responder, type TestServer } from "./support/control-server";
@@ -140,6 +143,37 @@ test("every whole grant decodes, and passes prepare's plan, hash, limits and bas
     const base = new URL(g.baseURL);
     assert.equal(base.protocol, "https:");
     assert.ok(limits.value.approved.has(`${base.protocol}//${base.host}`.replace(/:443$/, "")), name);
+  }
+});
+
+test("every phase-caps vector: the engine's own phase numbers are Peeps', the grant carries them, and the gate runs them", () => {
+  const { cases } = read<{ cases: (PlanInput & { name: string; phases: Grant["limits"]["phases"]; requestBudget: number; allowance: number; maxRunMs: number })[] }>("phase-caps.json");
+  const grants = read<{ cases: { name: string; grant: GrantWire }[] }>("grant-accepts.json").cases;
+  assert.deepEqual(cases.map((c) => c.name), grants.map((g) => g.name), "one whole grant per phase-caps vector");
+  for (const { name, plan, limits, phases, requestBudget, allowance, maxRunMs } of cases) {
+    assert.deepEqual(plan, readCommon(`${name}.plan.json`), `${name}: the corpus plan`);
+    const input = validatePlanInput({ plan, limits });
+    assert.ok(input.ok, `${name}: ${JSON.stringify(!input.ok && input.errors)}`);
+    const budgets = engineBudgets(input.value);
+    for (const phase of ["checking", "measurement"] as const) {
+      const { ratePerSecond, burst, users, totalRequests } = budgets[phase];
+      assert.deepEqual({ ratePerSecond, burst, maxUsers: users, total: totalRequests }, phases[phase], `${name}: ${phase}`);
+    }
+    const reply = decodeClaimReply(grants.find((c) => c.name === name)!.grant);
+    assert.ok(reply.ok, name);
+    const grant = reply.grant;
+    assert.deepEqual(grant.limits.phases, phases, `${name}: the grant's phases`);
+    assert.equal(grant.limits.requestBudget, requestBudget, name);
+    assert.equal(grant.lease.ceiling, allowance, name);
+    assert.equal(grant.maxRunMs, maxRunMs, name);
+    // As prepare reads the grant: its plan against its own limits (the vector's requestBudget is
+    // the plan's ceiling; the grant's adds Checking's total).
+    const granted = validatePlanInput({ plan: grant.plan, limits: { allowedOrigins: grant.limits.allowedOrigins, maxUsers: grant.limits.maxUsers, requestBudget: grant.limits.requestBudget, policyRevision: grant.limits.policyRevision } });
+    assert.ok(granted.ok, name);
+    const gate = runLimits(granted.value, grant.limits, { parallel: OUTSTANDING_PER_TURN });
+    assert.ok(gate.ok, name);
+    assert.deepEqual({ checking: gate.value.checking, measurement: gate.value.measurement }, phases, `${name}: the gate runs Peeps' caps`);
+    assert.equal(gate.value.gate.runTotal, requestBudget, name);
   }
 });
 
@@ -307,57 +341,90 @@ const signal = () => AbortSignal.timeout(5000);
 const CLAIM_ID = "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f";
 
 test("every claim refusal code passes through the port and the decoder; any other reads unknown", async (t) => {
+  const request = claimBody(inputsOf(claim.request));
+  assert.ok(request.ok);
   let answer: unknown;
   const h = await port(t, (_a, res) => json(res, 409, answer));
   for (const refused of CLAIM_REFUSALS) {
     answer = { refused };
-    const got = await h.port.claim(claim.request, signal());
+    const got = await h.port.claim(request.body, signal());
     assert.deepEqual(got, { refused });
     assert.deepEqual(decodeClaimReply(got), { ok: false, refused });
   }
   for (const refused of ["matrix", "owner", "Rerun"]) {
     answer = { refused };
-    const got = await h.port.claim(claim.request, signal());
+    const got = await h.port.claim(request.body, signal());
     assert.deepEqual(got, { refused: "unknown" }, refused);
     assert.deepEqual(decodeClaimReply(got), { ok: false, refused: "unknown" });
   }
   // A renew code is a refusal the port names, but never a claim's.
   answer = { refused: "gap" };
-  assert.deepEqual(decodeClaimReply(await h.port.claim(claim.request, signal())), { ok: false, refused: "unknown" });
+  assert.deepEqual(decodeClaimReply(await h.port.claim(request.body, signal())), { ok: false, refused: "unknown" });
   assert.equal(h.peeps.arrivals[0]!.body, canonical(claim.request), "the port sends the canonical body");
+});
+
+test("each well-formed claim vector sends its mapped request and decodes its reply", async (t) => {
+  let answer: { status: number; body: unknown } = { status: 200, body: {} };
+  const h = await port(t, (_a, res) => json(res, answer.status, answer.body));
+  const { grant } = read<{ cases: { grant: GrantWire }[] }>("grant-accepts.json").cases[0]!;
+  for (const vector of claim.cases) {
+    if (vector.body) continue; // Claim parser vectors are covered above without a network request.
+    const expected = { ...claim.request, ...vector.requestPatch } as ClaimRequest;
+    const request = claimBody(inputsOf(expected));
+    assert.ok(request.ok, vector.name);
+    if ("granted" in vector.expect) {
+      const { lease, hardEndServerMs, binding } = vector.expect.granted;
+      answer = { status: 200, body: { ...grant, lease, hardEndServerMs, binding } };
+    } else {
+      answer = { status: 409, body: vector.expect };
+    }
+    const reply = decodeClaimReply(await h.port.claim(request.body, signal()));
+    assert.deepEqual(reply, "granted" in vector.expect ? { ok: true, grant: answer.body } : { ok: false, ...vector.expect }, vector.name);
+    assert.equal(h.peeps.arrivals.at(-1)!.body, canonical(expected), vector.name);
+  }
 });
 
 test("every renew refusal and reply in renew.json passes through the port unchanged", async (t) => {
   let answer: { status: number; body: unknown } = { status: 200, body: {} };
   const h = await port(t, (_a, res) => json(res, answer.status, answer.body));
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   for (const x of renew.cases) {
     for (const step of x.steps) {
       if (step.stamp) continue;
+      const expected = typeof step.body === "string" ? step.body : utf8.decode(bytesOf(step.body));
+      const request = step.fields && !("extra" in step.fields) ? renewBody(step.fields).body : expected;
       const e = step.expect;
       const body = "refused" in e ? e : "reply" in e ? e.reply : JSON.parse(e.receipt);
       answer = { status: "refused" in e ? 409 : 200, body };
-      assert.deepEqual(await h.port.renew(CLAIM_ID, "RUNTOKEN", typeof step.body === "string" ? step.body : "{}", signal()), body, x.name);
+      assert.deepEqual(await h.port.renew(CLAIM_ID, "RUNTOKEN", request, signal()), body, x.name);
+      assert.deepEqual(Buffer.from(h.peeps.arrivals.at(-1)!.body), Buffer.from(expected), x.name);
     }
   }
 });
 
-test("every events answer in events.json passes through the port unchanged, and the action's batch hash matches Peeps'", async (t) => {
+test("event vectors use the production envelope builder and transport", async (t) => {
   let answer: unknown;
   const h = await port(t, (_a, res) => json(res, 200, answer));
   const events = read<EventsFile>("events.json");
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  const sample = eventsBody("3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090", 1, "");
   for (const x of events.cases) {
     for (const step of x.steps) {
       answer = step.expect;
-      const body = { streamId: "3f2c1b0a-9e8d-4c7b-a6f5-e4d3c2b1a090", seq: 1, payloadHash: "0".repeat(64), batch: "" };
-      assert.deepEqual(await h.port.events(CLAIM_ID, "EVTOKEN", body, signal()), step.expect, x.name);
-      if (step.expect.ok === false && (step.expect.reason === "hash" || step.expect.reason === "malformed")) continue;
-      let sent: { streamId: string; seq: number; batch: string; payloadHash: string; final?: { watermark: number } };
-      try {
-        sent = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytesOf(step.body)));
-      } catch {
+      if (!step.expect.ok && step.expect.reason === "malformed") {
+        // These are Peeps request-parser vectors; only their refusal shape applies to the runner.
+        assert.deepEqual(await h.port.events(CLAIM_ID, "EVTOKEN", sample, signal()), step.expect, x.name);
         continue;
       }
-      assert.equal(batchHash({ streamId: sent.streamId, seq: sent.seq, payload: sent.batch, final: sent.final }), sent.payloadHash, x.name);
+      const expected = bytesOf(step.body);
+      const fixture = JSON.parse(utf8.decode(expected)) as EventsBody;
+      const body = eventsBody(fixture.streamId, fixture.seq, fixture.batch, fixture.final);
+      if (!step.expect.ok && step.expect.reason === "hash") {
+        assert.notEqual(body.payloadHash, fixture.payloadHash, x.name);
+        body.payloadHash = fixture.payloadHash;
+      }
+      assert.deepEqual(await h.port.events(CLAIM_ID, "EVTOKEN", body, signal()), step.expect, x.name);
+      assert.deepEqual(Buffer.from(h.peeps.arrivals.at(-1)!.body), Buffer.from(expected), x.name);
     }
   }
 });
