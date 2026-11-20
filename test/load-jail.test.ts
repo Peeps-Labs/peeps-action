@@ -399,7 +399,7 @@ test("row 11: a postinstall that writes a marker and runs curl fails the install
   }
 });
 
-test("the rebuild runs as the runner's uid in the overlay, with no upstream traffic; root install and postinstall run, preinstall and prepare do not", options, async () => {
+test("the rebuild runs as the runner's uid in the overlay, with no upstream traffic; root preinstall, install and postinstall run (npm 11), prepare does not", options, async () => {
   const hook = (name: string) => `echo HOOK ${name} $(id -u) && echo x > .peeps-${name}`;
   const ws = workspaceWith({
     "package.json": JSON.stringify({ name: "hooks", version: "1.0.0", scripts: Object.fromEntries(["preinstall", "install", "postinstall", "prepare"].map((n) => [n, hook(n)])) }),
@@ -412,7 +412,7 @@ test("the rebuild runs as the runner's uid in the overlay, with no upstream traf
     assert.equal((await handle.start(() => ticketFor(s))).code, 0, out());
     await new Promise((r) => setTimeout(r, 300));
     const ran = [...out().matchAll(/HOOK (\w+) (\d+)/g)].map((m) => [m[1], Number(m[2])]);
-    assert.deepEqual(ran, [["install", process.getuid!()], ["postinstall", process.getuid!()]], out());
+    assert.deepEqual(ran, [["preinstall", process.getuid!()], ["install", process.getuid!()], ["postinstall", process.getuid!()]], out());
     for (const n of ["preinstall", "install", "postinstall", "prepare"]) assert.equal(existsSync(path.join(ws, `.peeps-${n}`)), false, n);
     assert.equal(seen.connections, 0, "the rebuild sent nothing upstream");
     assert.ok((await handle.end()).clean);
