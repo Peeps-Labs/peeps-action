@@ -38,6 +38,8 @@ export interface SupervisorConstants {
   loadedMs: number;
   /** Settlement and the evidence flush, after terminate. */
   reportingMs: number;
+  /** The same after a hard cancel: inside the runner's 2.5 s from SIGTERM to SIGKILL. */
+  hardReportingMs: number;
   /** Interval length for accounting and evidence. */
   intervalMs: number;
   /** The measurement tick. */
@@ -53,6 +55,7 @@ export interface SupervisorConstants {
 export const SUPERVISOR_CONSTANTS: SupervisorConstants = {
   loadedMs: 60_000,
   reportingMs: 10_000,
+  hardReportingMs: 2_000,
   intervalMs: 10_000,
   tickMs: 50,
   renewAttemptMs: 1_000,
@@ -76,6 +79,8 @@ export interface LoadRunOptions {
   runAttempt?: number;
   checkRunId?: number;
   signal?: AbortSignal;
+  /** A hard cancel (the runner's SIGTERM, 2.5 s before its SIGKILL): cancels, resets every upstream, skips the draining renewals and shortens the reporting. */
+  hardSignal?: AbortSignal;
   observer?: (event: LoadEvent) => void;
 }
 
@@ -233,6 +238,8 @@ class LoadRun {
   private jailEnded: Promise<{ clean: boolean }> | undefined;
   private gateClosed = false;
   private outcomeWaiters = new Set<() => void>();
+  private hard = false;
+  private hardDeadline: (() => void) | undefined;
 
   // Evidence: one ordered stream, one batch in flight.
   private readonly streamId = randomUUID();
@@ -261,6 +268,9 @@ class LoadRun {
   async run(): Promise<LoadResult> {
     const onAbort = () => this.terminate("cancelled");
     this.signal.addEventListener("abort", onAbort, { once: true });
+    const onHard = () => this.hardCancel();
+    if (this.o.hardSignal?.aborted) onHard();
+    else this.o.hardSignal?.addEventListener("abort", onHard, { once: true });
     try {
       const report = await (this.s.probe ? this.s.probe() : this.realProbe());
       if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures.join("; "));
@@ -281,7 +291,11 @@ class LoadRun {
       this.signal.removeEventListener("abort", onAbort);
     }
     await this.terminated;
-    return this.finish();
+    try {
+      return await this.finish();
+    } finally {
+      this.o.hardSignal?.removeEventListener("abort", onHard);
+    }
   }
 
   private throwIfDone(): void {
@@ -754,6 +768,17 @@ class LoadRun {
 
   // ---------------------------------------------------------------- terminate, settle, report
 
+  /** Cancels (if nothing has ended the run yet) and drops the draining: the lease is abandoned and the reporting is cut short. */
+  private hardCancel(): void {
+    this.hard = true;
+    this.terminate("cancelled");
+    this.lease?.abandon();
+    this.renewing = false;
+    clearTimeout(this.renewTimer);
+    this.renewController.abort();
+    this.hardDeadline?.();
+  }
+
   /** Synchronous and idempotent: one reason, latched. */
   private terminate(trigger: string, status?: LoadStatus, detail?: string): void {
     if (this.reason !== undefined) return;
@@ -776,7 +801,7 @@ class LoadRun {
     this.proxyClosed = this.proxy ? this.proxy.close() : Promise.resolve();
     this.jailEnded = this.jail ? this.jail.end() : Promise.resolve({ clean: true });
     this.jailEnded.catch(() => undefined);
-    const keepRenewing = this.lease !== undefined && !(reason === "lease_lost" || reason.startsWith("executor_") || this.phase === "starting");
+    const keepRenewing = this.lease !== undefined && !this.hard && !(reason === "lease_lost" || reason.startsWith("executor_") || this.phase === "starting");
     if (!keepRenewing) {
       this.lease?.abandon();
       this.renewing = false;
@@ -792,6 +817,14 @@ class LoadRun {
 
   private async finish(): Promise<LoadResult> {
     const deadline = delayResolve(this.k.reportingMs);
+    // A hard cancel, before or during the reporting, leaves it hardReportingMs from then.
+    let short: ReturnType<typeof delayResolve> | undefined;
+    const shorten = () => {
+      short ??= delayResolve(this.k.hardReportingMs);
+      void short.then(deadline.finish);
+    };
+    if (this.hard) shorten();
+    else this.hardDeadline = shorten;
     // Settlement: the proxy has closed every upstream and owned work, and no renewal is in flight.
     const settled = (async () => {
       await this.proxyClosed;
@@ -822,6 +855,8 @@ class LoadRun {
     jailWait.cancel();
     if (this.caDir) rmSync(this.caDir, { recursive: true, force: true });
     deadline.cancel();
+    short?.cancel();
+    this.hardDeadline = undefined;
     return {
       status: this.status!,
       reason: this.reason!,
@@ -925,9 +960,17 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function delayResolve(ms: number): Promise<void> & { cancel(): void } {
+function delayResolve(ms: number): Promise<void> & { cancel(): void; finish(): void } {
   let timer!: NodeJS.Timeout;
-  const p = new Promise<void>((resolve) => (timer = setTimeout(resolve, ms))) as Promise<void> & { cancel(): void };
+  let done!: () => void;
+  const p = new Promise<void>((resolve) => {
+    done = resolve;
+    timer = setTimeout(resolve, ms);
+  }) as Promise<void> & { cancel(): void; finish(): void };
   p.cancel = () => clearTimeout(timer);
+  p.finish = () => {
+    clearTimeout(timer);
+    done();
+  };
   return p;
 }

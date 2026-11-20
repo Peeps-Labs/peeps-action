@@ -127,6 +127,8 @@ export interface RigOptions {
   /** Wraps the fixture dial. */
   dial?: (inner: Dial) => Dial;
   signal?: AbortSignal;
+  /** The hard cancel (SIGTERM). */
+  hardSignal?: AbortSignal;
   /** Runs with every event, in order. */
   observer?: (e: LoadEvent, rig: Rig) => void;
   /** Shifts the supervisor's clocks before the run starts. */
@@ -184,7 +186,7 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
   const events: LoadEvent[] = [];
   const self = { ws, sink, port, seam, events, jails, origin } as Rig;
   self.result = runLoad(
-    { runId: `t${Math.random().toString(36).slice(2, 10)}`, workspace: ws, workloadPath: WORKLOAD_PATH, nodeDir: path.dirname(path.dirname(process.execPath)), actionDir: path.join(REPO, "dist"), port, signal: o.signal, observer: (e) => {
+    { runId: `t${Math.random().toString(36).slice(2, 10)}`, workspace: ws, workloadPath: WORKLOAD_PATH, nodeDir: path.dirname(path.dirname(process.execPath)), actionDir: path.join(REPO, "dist"), port, signal: o.signal, hardSignal: o.hardSignal, observer: (e) => {
       events.push(e);
       o.observer?.(e, self);
     } },

@@ -10,7 +10,7 @@ import type { Dial } from "../src/load/gate/proxy";
 import type { LoadEvent, LoadResult } from "../src/load/supervisor";
 import { respond as fixtureRespond } from "./support/e4-fixtures";
 import type { PortScript } from "./support/fake-control-port";
-import { invariants, rig, smallPlan, WORKLOAD_PATH, type Rig, type RigOptions } from "./support/run-supervisor";
+import { FAST, invariants, rig, smallPlan, WORKLOAD_PATH, type Rig, type RigOptions } from "./support/run-supervisor";
 
 const SCRIPTED = path.resolve(__dirname, "fixtures/load-engine/e4/scripted-executor.js");
 const scripted = (env: Record<string, string>): RigOptions["jail"] => ({ command: [process.execPath, SCRIPTED], env });
@@ -424,6 +424,56 @@ describe("load supervisor", { concurrency: 4 }, () => {
     const res = await r.result;
     assert.equal(res.reason, "startup_failed", why(r, res));
     assert.deepEqual(res.failures, [{ message: "load jail: no systemd here", location: null }]);
+  });
+
+  test("a hard cancel (SIGTERM) mid-measurement: cancelled, no draining renewal, the gate closes and the final goes, cleanup clean", async (t) => {
+    const soft = new AbortController();
+    const hard = new AbortController();
+    const r = await rig(t, {
+      signal: soft.signal,
+      hardSignal: hard.signal,
+      plan: smallPlan({ exportName: "get", durationMs: 30_000 }),
+      observer: (e) => {
+        if (e.type === "phase" && e.phase === "measurement") setTimeout(() => {
+          soft.abort();
+          hard.abort();
+        }, 1_000);
+      },
+    });
+    const res = await r.result;
+    assert.equal(res.status, "cancelled", JSON.stringify({ reason: res.reason }));
+    assert.equal(res.renewals.afterTerminate, 0, "no draining after a hard cancel");
+    assert.equal(r.port.renewals.filter((x) => x.fields.state === "draining").length, 0);
+    assert.equal(res.cleanup, "clean");
+    assert.equal(res.gateClosed, true);
+    assert.notEqual(res.final, "missing");
+    invariants(r, res);
+  });
+
+  test("a hard cancel during a soft cancel's reporting cuts the reporting short", async (t) => {
+    const soft = new AbortController();
+    const hard = new AbortController();
+    let hardAt = 0;
+    const r = await rig(t, {
+      signal: soft.signal,
+      hardSignal: hard.signal,
+      plan: smallPlan({ exportName: "get", durationMs: 30_000 }),
+      // Evidence never gets through, so only the deadline ends the reporting: a minute, unless cut.
+      script: { eventsBlocked: true },
+      seams: { constants: { ...FAST, reportingMs: 60_000 } },
+      observer: (e) => {
+        if (e.type === "phase" && e.phase === "measurement") setTimeout(() => soft.abort(), 500);
+        if (e.type === "terminate") setTimeout(() => {
+          hardAt = Date.now();
+          hard.abort();
+        }, 500);
+      },
+    });
+    const res = await r.result;
+    const after = Date.now() - hardAt;
+    assert.equal(res.status, "cancelled");
+    assert.equal(res.final, "missing");
+    assert.ok(after < 15_000, `reporting went on ${after} ms after the hard cancel`);
   });
 });
 
