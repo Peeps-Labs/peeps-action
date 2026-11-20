@@ -164,6 +164,16 @@ test("a claim answer read after the 4.5 s window is a timeout, even before the t
   });
   assert.equal((await failure(h.port.claim(CLAIM, signal(30_000)))).code, "timeout");
   assert.equal(h.peeps.arrivals.length, 1, "nothing is sent after the window");
+
+  // After an earlier 503, the late grant is still reported as a timeout, not as the 503.
+  h.peeps.answer((_a, res) => {
+    if (h.peeps.arrivals.length === 2) return json(res, 503, {});
+    skewMs += 1_501;
+    json(res, 200, GRANT);
+  });
+  const late = await failure(h.port.claim(CLAIM, signal(30_000)));
+  assert.equal(late.code, "timeout");
+  assert.equal(h.peeps.arrivals.length, 3);
 });
 
 test("a permanent claim answer is not retried", async (t) => {
@@ -249,6 +259,20 @@ test("an answer that is not 2xx is a refusal or nothing: a success-shaped 4xx ne
   // A refusal at 4xx still resolves as its code.
   h.peeps.answer((_a, res) => json(res, 409, { ok: false, reason: "gap" }));
   assert.deepEqual(await h.port.events("claim-1", EVENTS_TOKEN, EVENTS, signal()), { ok: false, reason: "gap" });
+});
+
+test("a 2xx events acknowledgement needs a boolean replay and no refusal beside it", async (t) => {
+  const h = await harness(t);
+  for (const reply of [{ ok: true, replay: false, refused: "budget" }, { ok: true, replay: true, reason: "conflict" }, { ok: true }, { ok: true, replay: "false" }]) {
+    h.peeps.answer((_a, res) => json(res, 200, reply));
+    const error = await failure(h.port.events("claim-1", EVENTS_TOKEN, EVENTS, signal()));
+    assert.equal(error.message, "load control events: malformed 200", JSON.stringify(reply));
+    assert.ok(error.transient === false);
+  }
+  for (const replay of [false, true]) {
+    h.peeps.answer((_a, res) => json(res, 200, { ok: true, replay }));
+    assert.deepEqual(await h.port.events("claim-1", EVENTS_TOKEN, EVENTS, signal()), { ok: true, replay });
+  }
 });
 
 test("a grant whose claim id is not a UUID rejects typed, and carries nothing it echoed", async (t) => {
@@ -369,6 +393,23 @@ test("an abort reason that throws when read still rejects typed", async (t) => {
   await wait(50);
   during.abort(hostile);
   assert.equal((await failure(pending)).message, "load control renew: aborted");
+});
+
+test("a live request aborts typed under a DOMException with a throwing name or a Proxy reason", async (t) => {
+  const h = await harness(t);
+  const trap = (): never => {
+    throw new Error(RUN_TOKEN);
+  };
+  const dom = new DOMException("", "AbortError");
+  Object.defineProperty(dom, "name", { get: trap });
+  const proxy = new Proxy({}, { getPrototypeOf: trap });
+  for (const reason of [dom, proxy]) {
+    const controller = new AbortController();
+    h.peeps.answer(() => controller.abort(reason));
+    const error = await failure(h.port.renew("claim-1", RUN_TOKEN, RENEW, controller.signal));
+    assert.equal(error.message, "load control renew: aborted");
+  }
+  assert.equal(h.peeps.arrivals.length, 2);
 });
 
 test("a hung answer is cut at the signal", async (t) => {
@@ -540,7 +581,7 @@ test("the job's proxy and TLS environment are ignored", async (t) => {
     NODE_TLS_REJECT_UNAUTHORIZED: "0",
     NODE_EXTRA_CA_CERTS: path.join(dir, "extra.pem"),
     // The job's TLS defaults: a cipher list no server shares, and TLS 1.2 at most.
-    NODE_OPTIONS: "--tls-cipher-list=NOT_A_CIPHER --tls-max-v1.2",
+    NODE_OPTIONS: "--tls-cipher-list=NOT_A_CIPHER --tls-max-v1.2 --trace-tls",
   };
   const { code, stdout, stderr } = await runChild(env);
   assert.equal(code, 0, `child failed: ${stdout}${stderr}`);
@@ -552,6 +593,7 @@ test("the job's proxy and TLS environment are ignored", async (t) => {
     untrusted: { ok: false, code: "network" },
     extraCa: { ok: false, code: "network" },
   });
+  assert.doesNotMatch(stderr, /ClientHello|ServerHello/, "the job's --trace-tls traced none of the port's handshakes");
   assert.equal(proxied, 0, "nothing went through the job's proxy");
   assert.equal(rogue.arrivals.length, 0, "an untrusted certificate is refused despite NODE_TLS_REJECT_UNAUTHORIZED and NODE_EXTRA_CA_CERTS");
   assert.equal(h.oidc.arrivals.length, 1);
@@ -580,16 +622,23 @@ test("Node's diagnostics that would print a request or write TLS keys refuse the
     ["NODE_DEBUG=https", { NODE_DEBUG: "https" }],
     ["NODE_DEBUG, any case, among others", { NODE_DEBUG: "fs,hTtP" }],
     ["NODE_DEBUG=*", { NODE_DEBUG: "*" }],
+    // Readable streams log each chunk's first 50 bytes as hex.
+    ["NODE_DEBUG=stream", { NODE_DEBUG: "stream" }],
     ["--tls-keylog", { NODE_OPTIONS: `--tls-keylog=${keylog}` }],
     ["--tls-keylog, quoted", { NODE_OPTIONS: `--t"ls-keylog"="${keylog}"` }],
   ];
   for (const [name, diagnostic] of cases) {
     await t.test(name, async (t) => {
-      const h = await harness(t);
+      // The events token within the first 50 bytes of the grant, where a stream's debug line shows it.
+      const h = await harness(t, (_a, res) => json(res, 200, { eventsToken: EVENTS_TOKEN, claimId: CLAIM_ID, epoch: 1, runToken: RUN_TOKEN }));
       const config = { peepsUrl: h.peeps.url, rogueUrl: h.peeps.url, oidcUrl: `${h.oidc.url}/idtoken`, oidcHost: "oidc.test", requestToken: REQUEST_TOKEN, ca: h.seams.ca, claim: CLAIM };
       const { NODE_DEBUG: _d, NODE_OPTIONS: _o, ...base } = process.env;
       const { code, stdout, stderr } = await runChild({ ...base, ...diagnostic, PEEPS_TEST_CHILD_CONFIG: JSON.stringify(config) });
-      for (const sentinel of SENTINELS) assert.ok(!(stdout + stderr).includes(sentinel), `a token was printed: ${sentinel.slice(0, 8)}…`);
+      for (const sentinel of SENTINELS) {
+        assert.ok(!(stdout + stderr).includes(sentinel), `a token was printed: ${sentinel.slice(0, 8)}…`);
+        const hex = Buffer.from(sentinel.slice(0, 16)).toString("hex").match(/../g)!.join(" ");
+        assert.ok(!(stdout + stderr).includes(hex), `a token was printed as hex: ${sentinel.slice(0, 8)}…`);
+      }
       assert.ok(!existsSync(keylog), "no TLS keys were written");
       assert.equal(code, 1, `${stdout}${stderr}`);
       assert.deepEqual(JSON.parse(stdout.trim()), { failed: "diagnostics" });

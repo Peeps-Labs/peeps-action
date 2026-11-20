@@ -29,8 +29,9 @@
  *   - Nothing here prints. Errors are `ControlHttpError`: the operation, a typed code, the HTTP
  *     status and at most an errno code. Never a header, a body, a URL or a token. Headers are set
  *     on the request, never in the options the agent passes on. The port refuses to be built when
- *     Node's own diagnostics would print a request (`NODE_DEBUG` naming http, https, net or tls)
- *     or write TLS traffic keys (`--tls-keylog`).
+ *     Node's own diagnostics would print a request or an answer (`NODE_DEBUG` naming http, https,
+ *     net, stream or tls) or write TLS traffic keys (`--tls-keylog`); `--trace-tls` is turned off
+ *     on its agents.
  */
 import { constants as cryptoConstants } from "node:crypto";
 import { validateHeaderValue } from "node:http";
@@ -156,6 +157,7 @@ export class HttpControlPort implements ControlPort {
       minVersion: "TLSv1.2" as const,
       maxVersion: "TLSv1.3" as const,
       ciphers: cryptoConstants.defaultCoreCipherList,
+      enableTrace: false,
       ALPNProtocols: ["http/1.1"],
       ...(seams.lookup ? { lookup: seams.lookup } : {}),
     };
@@ -182,8 +184,11 @@ export class HttpControlPort implements ControlPort {
       try {
         const answer = await this.send("claim", this.renewAgent, "/api/v1/load/claims", idToken, bytes, CLAIM_ANSWER_MAX_BYTES, attempt);
         // Read after the window: the timer had not fired yet, but the supervisor's lease is anchored
-        // at the call, so this answer is late however it decodes.
-        if (monoNow() >= deadline) throw new ControlHttpError("claim", "timeout");
+        // at the call, so this answer is late however it decodes, and that is the failure reported.
+        if (monoNow() >= deadline) {
+          last = new ControlHttpError("claim", "timeout");
+          continue;
+        }
         const reply = reduceRefusal(answer);
         if (isObj(reply) && !("refused" in reply) && !(typeof reply.claimId === "string" && CLAIM_ID.test(reply.claimId))) throw new ControlHttpError("claim", "malformed", answer.status);
         return reply;
@@ -205,7 +210,11 @@ export class HttpControlPort implements ControlPort {
   async events(claimId: string, eventsToken: string, body: EventsBody, signal: AbortSignal): Promise<unknown> {
     const answer = await this.send("events", this.eventsAgent, claimPath(claimId, "events"), eventsToken, JSON.stringify(body), ANSWER_MAX_BYTES, signal);
     const json = answer.json;
-    if (isObj(json) && json.ok === true && answer.status < 300) return { ok: true, replay: json.replay === true };
+    if (isObj(json) && json.ok === true && answer.status < 300) {
+      // P1's acknowledgement is `{ok: true, replay: boolean}`; anything else delivers nothing.
+      if ("refused" in json || "reason" in json || typeof json.replay !== "boolean") throw new ControlHttpError("events", "malformed", answer.status);
+      return { ok: true, replay: json.replay };
+    }
     if (isObj(json) && json.ok === false) return { ok: false, reason: typeof json.reason === "string" && EVENT_REASONS.has(json.reason) ? json.reason : "unknown" };
     return reduceRefusal(answer);
   }
@@ -315,7 +324,7 @@ export class HttpControlPort implements ControlPort {
 
 /** `NODE_DEBUG` is read once, at startup, as `debuglog` reads it; `--tls-keylog` from either source. */
 function diagnosticsOn(): boolean {
-  if (["http", "https", "net", "tls"].some((section) => debuglog(section).enabled)) return true;
+  if (["http", "https", "net", "stream", "tls"].some((section) => debuglog(section).enabled)) return true;
   const nodeOptions = (process.env.NODE_OPTIONS ?? "").replace(/["\\]/g, "");
   return [nodeOptions, ...process.execArgv].some((arg) => /--tls[-_]keylog\b/.test(arg));
 }
@@ -367,10 +376,17 @@ function errnoCode(e: NodeJS.ErrnoException): string | undefined {
   return typeof e.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(e.code) ? e.code : undefined;
 }
 
+const domExceptionName = Object.getOwnPropertyDescriptor(DOMException.prototype, "name")!.get!;
+
 function abortError(op: ControlOp, signal: AbortSignal): ControlHttpError {
-  // The reason is the caller's: only a timeout's own `DOMException` is read.
-  const timedOut = signal.reason instanceof DOMException && signal.reason.name === "TimeoutError";
-  return new ControlHttpError(op, timedOut ? "timeout" : "aborted");
+  // The reason is the caller's. The built-in getter checks the brand itself, so no own property,
+  // getter or Proxy trap of the reason runs; anything else is an abort.
+  try {
+    if (domExceptionName.call(signal.reason) === "TimeoutError") return new ControlHttpError(op, "timeout");
+  } catch {
+    // Not a DOMException.
+  }
+  return new ControlHttpError(op, "aborted");
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
