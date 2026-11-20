@@ -473,6 +473,15 @@ export class GateProxy {
         upstream.reset();
         return this.cutUnsent(res, permit, "pin", 502);
       }
+      // The write waits for the handoff's rate token (the target never sees more than the
+      // burst at once); liveness is checked again by `handoff` itself, on a fresh sample.
+      for (let wait = gate.handoffWait(this.clocks()); wait > 0; wait = gate.handoffWait(this.clocks())) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(wait, 50)).unref());
+        if (this.closed || tunnel.revoked || res.destroyed || this.closedTurns.has(turn)) {
+          upstream.reset();
+          return this.cutUnsent(res, permit, this.closed ? "stopped" : this.closedTurns.has(turn) ? "turn_closed" : "revoked");
+        }
+      }
       try {
         return this.send(tunnel, n, upstream, res, permit, address);
       } catch (error) {

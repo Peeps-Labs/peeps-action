@@ -266,7 +266,9 @@ export class Gate {
   permit(r: PreparedRequest, t: Clocks): Permitted {
     const d = this.check(r, t);
     if (!("turn" in d)) return d;
-    const denied = this.rateDenial(this.milliTokens.permit);
+    // A boundary that ran into debt holds new permits back until it has refilled: each
+    // boundary's sustained rate stays the phase's, and no debited request is cut for rate.
+    const denied = this.rateDenial(Math.min(...RATE_BOUNDARIES.map((b) => this.milliTokens[b])));
     if (denied) return denied;
     this.milliTokens.permit -= MILLI;
     const turn = d.turn;
@@ -283,7 +285,7 @@ export class Gate {
   }
 
   /**
-   * At TCP and at TLS start: liveness and that boundary's rate token. Totals, the ceiling and
+   * At TCP and at TLS start: liveness, and that boundary's rate token spent (into debt if need be). Totals, the ceiling and
    * outstanding are not rechecked: this permit is already counted. With no boundary (before the
    * dial starts), liveness only.
    */
@@ -294,6 +296,13 @@ export class Gate {
   /** Immediately before the write, on a fresh sample: liveness and the handoff's rate token. */
   handoff(p: Permit, t: Clocks): Denied | undefined {
     return this.recheck(p, t, "handoff");
+  }
+
+  /** How long until the handoff's rate token is there: 0 when it is. */
+  handoffWait(t: Clocks): number {
+    this.refill(t.monoMs);
+    const denied = this.rateDenial(this.milliTokens.handoff);
+    return denied?.reason === "rate" ? Math.max(1, denied.retryInMs ?? 1) : 0;
   }
 
   /** The permit's dial or handoff failed: its debit stays (unattempted), its exchange ends. */
@@ -307,8 +316,13 @@ export class Gate {
     if (!("turn" in d)) return d;
     if (!boundary) return;
     this.refill(t.monoMs);
-    const denied = this.rateDenial(this.milliTokens[boundary]);
-    if (denied) return denied;
+    if (boundary === "handoff") {
+      // The proxy waits for this token first (`handoffWait`), so a write is never cut for rate.
+      const denied = this.rateDenial(this.milliTokens.handoff);
+      if (denied) return denied;
+    }
+    // TCP and TLS spend theirs and are never refused: the request is already debited, so a
+    // boundary that bunches goes into debt, which the next permit waits out.
     this.milliTokens[boundary] -= MILLI;
   }
 

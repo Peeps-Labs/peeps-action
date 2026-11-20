@@ -1301,12 +1301,16 @@ for (const holdAt of ["before TCP", "after TLS"] as const) {
     } finally {
       release();
     }
-    const [firstResult, secondResult] = await Promise.all([first, second]);
+    const firstResult = await first;
     assert.equal(statusOf(firstResult.response), 200);
-    assert.equal(r.sink.stats.connections, holdAt === "before TCP" ? 1 : 2);
-    assert.deepEqual(r.sink.arrivals.map((arrival) => arrival.url), ["/first"]);
-    assert.equal(cutOf(secondResult.response), "rate", "paced at its dial or handoff: a cut, its debit kept");
+    // The clock is frozen: the second write waits for the handoff's token, its debit kept.
+    for (let i = 0; i < 20 && r.sink.stats.connections < 2; i++) await sleep(10);
+    await sleep(100);
+    assert.deepEqual(r.sink.arrivals.map((arrival) => arrival.url), ["/first"], "one write per token: burst 1 at the target");
     assert.equal(r.gate.admitted, 2);
+    r.clock.monoMs += 1000;
+    assert.equal(statusOf((await second).response), 200, "paced, not cut");
+    assert.deepEqual(r.sink.arrivals.map((arrival) => arrival.url), ["/first", "/second"]);
 
     r.clock.monoMs += 1000;
     assert.equal(statusOf((await exchange(r, get(r, "/after-refill"))).response), 200);

@@ -399,6 +399,25 @@ test("each boundary has its own rate token", () => {
   assert.equal(reason(g.handoff(r.permit, at(200))), "rate", "a second handoff on the same token is paced");
 });
 
+test("TCP and TLS spend into debt, never refused; the debt holds the next permit; the handoff waits for its token", () => {
+  const { g, req } = gate({}, { burst: 1, ratePerSecond: 10 });
+  const a = g.permit(req(), at(0));
+  const b = g.permit(req(), at(100));
+  assert.ok(a.ok && b.ok);
+  for (const p of [a.permit, b.permit]) {
+    assert.equal(g.checkDial(p, at(100), "tcp"), undefined, "a debited request is never cut for rate at TCP");
+    assert.equal(g.checkDial(p, at(100), "tls"), undefined);
+  }
+  assert.equal(g.handoffWait(at(100)), 0);
+  assert.equal(g.handoff(a.permit, at(100)), undefined);
+  assert.equal(g.handoffWait(at(100)), 100, "the next write waits for the refill");
+  assert.equal(g.handoffWait(at(150)), 50);
+  assert.equal(g.handoffWait(at(200)), 0);
+  assert.equal(reason(g.permit(req(), at(200))), "rate", "the permit bucket has refilled, but TCP and TLS are still in debt: no new permit");
+  assert.equal(g.handoff(b.permit, at(200)), undefined);
+  assert.ok(g.permit(req(), at(400)).ok, "debt repaid");
+});
+
 test("turn_total: two sequential requests on a cap-one turn", () => {
   const { g, req } = gate({ maxRequestsPerTurn: 1 });
   const a = sendOk(g, req(), at(1));
