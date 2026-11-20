@@ -588,6 +588,77 @@ describe("load supervisor", { concurrency: 4 }, () => {
     invariants(r, res);
   });
 
+  test("a hard cancel's deadline includes a pending probe", async (t) => {
+    const hard = new AbortController();
+    let probeReturned = false;
+    let fallback: NodeJS.Timeout | undefined;
+    let release!: () => void;
+    const probe = new Promise<void>((resolve) => { release = resolve; });
+    const r = await rig(t, {
+      hardSignal: hard.signal,
+      seams: {
+        constants: { ...FAST, hardReportingMs: 50 },
+        probe: async () => {
+          hard.abort();
+          fallback = setTimeout(release, 500);
+          await probe;
+          probeReturned = true;
+          return { passed: true, failures: [], seen: null };
+        },
+      },
+    });
+    try {
+      const res = await r.result;
+      assert.equal(res.status, "cancelled", why(r, res));
+      assert.equal(probeReturned, false, "the run returned while the probe was still cleaning up");
+      assert.equal(r.port.claims.length, 0);
+    } finally {
+      clearTimeout(fallback);
+      release();
+    }
+  });
+
+  test("a hard cancel reports pending jail creation dirty and ends a late handle without using it", async (t) => {
+    const hard = new AbortController();
+    let release!: () => void;
+    let ended!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const cleanup = new Promise<void>((resolve) => { ended = resolve; });
+    const jails = fakeJail();
+    let launchReturned = false;
+    let listenLate!: () => Promise<unknown>;
+    let fallback: NodeJS.Timeout | undefined;
+    const r = await rig(t, {
+      hardSignal: hard.signal,
+      seams: { constants: { ...FAST, hardReportingMs: 50 } },
+      launch: async (spec, options, signal) => {
+        const handle = await jails.launch(spec, options, signal);
+        listenLate = () => options.listenProxy(path.join(spec.workspace, "late.sock"));
+        hard.abort();
+        fallback = setTimeout(release, 500);
+        await pending;
+        launchReturned = true;
+        return { ...handle, end: async () => {
+          const result = await handle.end();
+          ended();
+          return result;
+        } };
+      },
+    });
+    try {
+      const res = await r.result;
+      assert.equal(res.status, "cancelled", why(r, res));
+      assert.equal(launchReturned, false, "the run did not wait past the budget for jail creation");
+      assert.equal(res.cleanup, "dirty");
+      await assert.rejects(listenLate, /proxy is closed/);
+    } finally {
+      clearTimeout(fallback);
+      release();
+      await cleanup;
+    }
+    assert.deepEqual(jails.made[0]!.tickets, [], "no startup ticket was minted after the cutoff");
+  });
+
   test("a hard cancel bounds the result even when jail cleanup is still pending", async (t) => {
     const hard = new AbortController();
     let release!: () => void;

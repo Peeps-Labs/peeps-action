@@ -240,10 +240,13 @@ class LoadRun {
   private resolveTerminated!: () => void;
   private proxyClosed: Promise<void> | undefined;
   private jailEnded: Promise<{ clean: boolean }> | undefined;
+  private jailLaunchPending = false;
   private gateClosed = false;
   private outcomeWaiters = new Set<() => void>();
   private hard = false;
-  private hardDeadline: (() => void) | undefined;
+  private hardTimer: NodeJS.Timeout | undefined;
+  private resolveHardLimit!: () => void;
+  private readonly hardLimit = new Promise<void>((resolve) => { this.resolveHardLimit = resolve; });
 
   // Evidence: one ordered stream, one batch in flight.
   private readonly streamId = randomUUID();
@@ -278,6 +281,18 @@ class LoadRun {
     if (this.o.hardSignal?.aborted) onHard();
     else this.o.hardSignal?.addEventListener("abort", onHard, { once: true });
     try {
+      await Promise.race([this.execute(), this.hardLimit]);
+      await this.terminated;
+      return await this.finish();
+    } finally {
+      clearTimeout(this.hardTimer);
+      this.signal.removeEventListener("abort", onAbort);
+      this.o.hardSignal?.removeEventListener("abort", onHard);
+    }
+  }
+
+  private async execute(): Promise<void> {
+    try {
       this.throwIfDone();
       const report = await (this.s.probe ? this.s.probe() : this.realProbe());
       this.throwIfDone();
@@ -295,14 +310,6 @@ class LoadRun {
       else if (error instanceof NoTicket) this.terminate("didnt_start", "didnt_start");
       else if (error instanceof TicketRefused) this.terminate(error.reason === "stale_ticket" ? "didnt_start" : "executor_protocol", error.reason === "stale_ticket" ? "didnt_start" : "failed");
       else if (this.reason === undefined) this.terminate("startup_failed", "failed", (error as Error).message);
-    } finally {
-      this.signal.removeEventListener("abort", onAbort);
-    }
-    await this.terminated;
-    try {
-      return await this.finish();
-    } finally {
-      this.o.hardSignal?.removeEventListener("abort", onHard);
     }
   }
 
@@ -589,7 +596,13 @@ class LoadRun {
     };
     const proxy = this.proxy;
     const launch = this.s.launch ?? startJail;
-    const handle = await launch(spec, { listenProxy: (p) => proxy.listen(p).then(() => proxy.server) }, this.signal);
+    this.jailLaunchPending = true;
+    let handle: JailHandle;
+    try {
+      handle = await launch(spec, { listenProxy: (p) => proxy.listen(p).then(() => proxy.server) }, this.signal);
+    } finally {
+      this.jailLaunchPending = false;
+    }
     this.jail = handle;
     if (this.reason !== undefined) {
       this.jailEnded = handle.end();
@@ -814,13 +827,14 @@ class LoadRun {
 
   /** Cancels (if nothing has ended the run yet) and drops the draining: the lease is abandoned and the reporting is cut short. */
   private hardCancel(): void {
+    if (this.hard) return;
     this.hard = true;
+    this.hardTimer = setTimeout(this.resolveHardLimit, this.k.hardReportingMs);
     this.terminate("cancelled");
     this.lease?.abandon();
     this.renewing = false;
     clearTimeout(this.renewTimer);
     this.renewController.abort();
-    this.hardDeadline?.();
   }
 
   /** Synchronous and idempotent: one reason, latched. */
@@ -861,14 +875,8 @@ class LoadRun {
 
   private async finish(): Promise<LoadResult> {
     const deadline = delayResolve(this.k.reportingMs);
-    // A hard cancel, before or during the reporting, leaves it hardReportingMs from then.
-    let short: ReturnType<typeof delayResolve> | undefined;
-    const shorten = () => {
-      short ??= delayResolve(this.k.hardReportingMs);
-      void short.then(deadline.finish);
-    };
-    if (this.hard) shorten();
-    else this.hardDeadline = shorten;
+    // The same SIGTERM deadline bounds startup, settlement, reporting and cleanup.
+    void this.hardLimit.then(deadline.finish);
     // Settlement: the proxy has closed every upstream and owned work, and no renewal is in flight.
     const settled = (async () => {
       await this.proxyClosed;
@@ -900,8 +908,6 @@ class LoadRun {
     ]).catch(() => null);
     if (this.caDir) rmSync(this.caDir, { recursive: true, force: true });
     deadline.cancel();
-    short?.cancel();
-    this.hardDeadline = undefined;
     return {
       status: this.status!,
       reason: this.reason!,
@@ -914,7 +920,7 @@ class LoadRun {
       gateClosed: this.gateClosed,
       final: this.finalSent ?? "missing",
       renewals: this.renewals,
-      cleanup: this.jail ? (jailEnd?.clean ? "clean" : "dirty") : "not_started",
+      cleanup: this.jail ? (jailEnd?.clean ? "clean" : "dirty") : this.jailLaunchPending ? "dirty" : "not_started",
       duplicateOutcomes: this.duplicateOutcomes,
       failures: this.failures,
     };

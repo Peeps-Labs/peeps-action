@@ -220,6 +220,7 @@ export class GateProxy {
 
   /** Listen on the proxy's Unix socket. */
   listen(path: string): Promise<void> {
+    if (this.closed) return Promise.reject(new Error("load gate: proxy is closed"));
     return new Promise((resolve, reject) => {
       this.server.once("error", reject);
       this.server.listen(path, () => {
