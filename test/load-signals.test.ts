@@ -5,7 +5,7 @@
  * cancels it hard (every upstream reset at once, no draining).
  *
  * F5b and F5c send them to a supervisor in its own process; fake jail everywhere, the real jail
- * with LOAD_JAIL_TESTS=1 (ci.yml `load-jail`). Counts are asserted, times only logged.
+ * with LOAD_JAIL_TESTS=1 (ci.yml `load-jail`). The forced-kill timer bounds the hard-cancel test.
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -66,12 +66,19 @@ interface Child {
   sink: Sink;
   facts: Record<string, unknown>[];
   exited: Promise<NodeJS.Signals | number | null>;
-  stalling: boolean;
 }
 
 async function startChild(t: TestContext, real: boolean, slowReporting: boolean): Promise<Child> {
-  const self = { facts: [], stalling: false } as unknown as Child;
-  self.sink = await startSink({ host: SINK_HOST, respond: fixtureRespond, stall: () => self.stalling });
+  const self = { facts: [] } as unknown as Child;
+  let checked = false;
+  self.sink = await startSink({
+    host: SINK_HOST,
+    respond: (arrival, response) => {
+      checked = true;
+      fixtureRespond(arrival, response);
+    },
+    stall: () => checked,
+  });
   t.after(() => self.sink.close());
   let ws: string;
   if (real) {
@@ -109,10 +116,12 @@ async function jailGoneWithin(jail: Record<string, unknown>, cgroup: string | un
     if (typeof jail.pid === "number") {
       try {
         process.kill(jail.pid, 0);
-      } catch {
-        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+        throw error;
       }
     } else {
+      assert.ok(cgroup, "the real jail had a cgroup before the cutoff");
       const file = `/sys/fs/cgroup${cgroup}/cgroup.events`;
       if (!existsSync(file) || /^populated 0$/m.test(readFileSync(file, "utf8"))) return true;
     }
@@ -121,8 +130,17 @@ async function jailGoneWithin(jail: Record<string, unknown>, cgroup: string | un
   return false;
 }
 
-const cgroupOf = (jail: Record<string, unknown>) =>
-  typeof jail.unit === "string" ? execFileSync("systemctl", ["show", "-p", "ControlGroup", "--value", `${jail.unit}.service`], { encoding: "utf8" }).trim() : undefined;
+function cgroupOf(jail: Record<string, unknown>): string | undefined {
+  if (typeof jail.unit !== "string") {
+    assert.ok(typeof jail.pid === "number", "the fake jail had a live executor before cutoff");
+    process.kill(jail.pid, 0);
+    return;
+  }
+  const cgroup = execFileSync("systemctl", ["show", "-p", "ControlGroup", "--value", `${jail.unit}.service`], { encoding: "utf8" }).trim();
+  assert.match(cgroup, /^\/.+/, "the unit had a cgroup before cutoff");
+  assert.match(readFileSync(`/sys/fs/cgroup${cgroup}/cgroup.events`, "utf8"), /^populated 1$/m);
+  return cgroup;
+}
 
 for (const jail of JAILS) {
   test(`F5b (${jail.name}): the runner's SIGINT (handler held up 2 s), SIGTERM at 7.5 s, SIGKILL at 10 s: the stalled POST is reset, never flushed`, jail.options, async (t) => {
@@ -132,8 +150,9 @@ for (const jail of JAILS) {
     const unit = fact(c, "jail")!;
     const cgroup = cgroupOf(unit);
     const before = uploads(c.sink);
-    c.stalling = true;
-    await until("the POST's connection is stalled at the sink", () => c.sink.stats.stalled >= 1);
+    await until("the POST is queued at the sender", () =>
+      c.sink.stats.stalled >= 1 && c.facts.some((f) => Number(f.queuedBytes) >= 1024 * 1024 - 4096));
+    const bytesBefore = c.sink.stats.requestBytes;
     // Held for 2 s: inside the lease (at most 6 s, renewed every 0.5 s), so only the signals end the run.
     c.proc.stdin!.write("block 2000\n");
     await until("the child's event loop is blocked", () => fact(c, "blocking") !== undefined);
@@ -146,6 +165,8 @@ for (const jail of JAILS) {
     c.sink.resumeStalled();
     await until("the stalled connection ends at the sink", () => c.sink.stats.aborted + c.sink.stats.socketErrors.length >= 1 || uploads(c.sink) > before, 10_000);
     t.diagnostic(`child ended by ${how}; facts ${JSON.stringify(c.facts.filter((f) => !("jail" in f)))}`);
+    assert.equal(how, 0, "hard cancellation finished before the fallback SIGKILL");
+    assert.equal(c.sink.stats.requestBytes, bytesBefore, "queued HTTP bytes did not flush");
     assert.deepEqual(c.facts.filter((f) => "signal" in f).map((f) => f.signal), ["SIGINT", "SIGTERM"], "both handlers ran, in order");
     assert.deepEqual(c.facts.find((f) => (f.event as { terminate?: string } | undefined)?.terminate)?.event, { terminate: "cancelled" });
     assert.equal(uploads(c.sink), before, "the stalled POST never completed at the target");
@@ -158,10 +179,9 @@ for (const jail of JAILS) {
     const unit = fact(c, "jail")!;
     const cgroup = cgroupOf(unit);
     const before = uploads(c.sink);
-    c.stalling = true;
     await until("the POST's connection is stalled at the sink", () => c.sink.stats.stalled >= 1);
-    c.proc.kill("SIGKILL");
-    await c.exited;
+    assert.ok(c.proc.kill("SIGKILL"), "the supervisor was alive at the kill");
+    assert.equal(await c.exited, "SIGKILL");
     assert.ok(await jailGoneWithin(unit, cgroup, 5_000), "the jail ended within 5 s");
     c.sink.resumeStalled();
     await until("the stalled connection ends at the sink", () => c.sink.stats.aborted + c.sink.stats.socketErrors.length >= 1 || uploads(c.sink) > before, 10_000);

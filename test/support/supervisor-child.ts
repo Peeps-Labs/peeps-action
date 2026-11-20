@@ -10,6 +10,7 @@
  * executor's pid or the real unit), `{ event }` (phase and terminate), `{ signal }` and
  * `{ result }`. A stdin line `block <ms>` blocks the event loop that long (handlers wait).
  */
+import type { Upstream } from "../../src/load/gate/resolve";
 import type { TestContext } from "node:test";
 import { startJail } from "../../src/load/jail";
 import { unitName } from "../../src/load/jail/spec";
@@ -32,6 +33,9 @@ const say = (fact: object) => process.stdout.write(`${JSON.stringify(fact)}\n`);
 const signals = loadSignals();
 for (const name of ["SIGINT", "SIGTERM"] as const) process.on(name, () => say({ signal: name }));
 
+const uploadBytes = 1024 * 1024 - 4096;
+let measuring = false;
+let queued: Upstream | undefined;
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk: string) => {
@@ -69,6 +73,21 @@ void (async () => {
     hardSignal: signals.hard,
     setup: { ttlMs: config.ttlMs },
     ...(config.slowReporting ? { script: { eventsBlocked: true } } : {}),
+    dial: (inner) => async (...args) => {
+      const upstream = await inner(...args);
+      if (config.slowReporting && measuring && !queued) {
+        queued = upstream;
+        upstream.socket.cork();
+        const timer = setInterval(() => {
+          if (upstream.socket.writableLength >= uploadBytes) {
+            clearInterval(timer);
+            say({ queuedBytes: upstream.socket.writableLength });
+          }
+        }, 10);
+        void upstream.closed.then(() => clearInterval(timer));
+      }
+      return upstream;
+    },
     plan: smallPlan({ exportName: "bigPost", users: 1, durationMs: 60_000, perJourneyMax: 1, allowedRequests: [{ method: "POST", path: "/upload" }] }),
     seams: {
       constants: { ...FAST, ...(config.real ? { loadedMs: 120_000, checkingDeadlineMs: 60_000 } : {}), ...(config.slowReporting ? { reportingMs: 60_000 } : {}) },
@@ -83,10 +102,14 @@ void (async () => {
     },
     observer: (e, x) => {
       if (e.type === "phase") {
+        if (e.phase === "measurement") measuring = true;
         if (!config.real && e.phase === "checking") say({ jail: { pid: x.jails.made[0]?.child?.pid } });
         say({ event: { phase: e.phase } });
       }
-      if (e.type === "terminate") say({ event: { terminate: e.reason } });
+      if (e.type === "terminate") {
+        say({ event: { terminate: e.reason } });
+        setImmediate(() => queued?.socket.uncork());
+      }
     },
   });
   const res = await r.result;

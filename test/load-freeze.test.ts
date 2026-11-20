@@ -17,6 +17,7 @@ import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { encodeHandoffs, type Journal } from "../src/load/gate/journal";
 import type { Dial } from "../src/load/gate/proxy";
+import type { Upstream } from "../src/load/gate/resolve";
 import type { LoadResult } from "../src/load/supervisor";
 import { arrivedSeqs } from "./support/load-sink";
 import { FAST, installedWorkspace, invariants, rig, smallPlan, type Rig, type RigOptions } from "./support/run-supervisor";
@@ -198,7 +199,7 @@ for (const jail of JAILS) {
           if (e.type !== "phase" || e.phase !== "measurement") return;
           holding = true;
           arrivalsAtHold = x.sink.arrivals.length;
-          void until("the gate's handshake is held", () => hold.stats.accepted >= 1).then(() => {
+          void until("the gate sent a TLS ClientHello", () => hold.stats.bytes > 0).then(() => {
             if (clock === "monotonic") x.seam.monoShift = 600_000;
             else x.seam.wallShift = 600_000;
           });
@@ -208,74 +209,77 @@ for (const jail of JAILS) {
       assert.equal(res.status, "lease_lost", why(r, res));
       await until("every held connection closed", () => hold.stats.ended + hold.stats.reset === hold.stats.accepted, 10_000);
       assert.ok(hold.stats.accepted >= 1);
+      assert.equal(hold.stats.reset, hold.stats.accepted, "each connected handshake was reset");
       assert.equal(r.sink.arrivals.length, arrivalsAtHold, "zero requests after the hold");
       t.diagnostic(`held ${hold.stats.accepted}: ended ${hold.stats.ended}, reset ${hold.stats.reset}`);
       invariants(r, res);
     });
   }
 
-  test(`F4 (${jail.name}): a stalled 1 MiB POST at the cutoff: late receipts stay within the attempted set at terminate`, jail.options, async (t) => {
-    let stalling = false;
-    const r = await start(t, jail.real, {
-      plan: smallPlan({ exportName: "bigPost", users: 1, durationMs: 60_000, perJourneyMax: 1, allowedRequests: [{ method: "POST", path: "/upload" }] }),
-      stall: () => stalling,
-      observer: (e, x) => {
-        if (e.type === "phase" && e.phase === "measurement") {
-          stalling = true;
-          void until("the POST's connection is stalled at the sink", () => x.sink.stats.stalled >= 1).then(() => setTimeout(() => (x.seam.wallShift = 600_000), 300));
+  for (const trial of ["expiry", "control", "SIGINT"] as const) {
+    const label = trial === "SIGINT" ? "F5a" : "F4";
+    test(`${label} (${jail.name}, ${trial}): a queued POST ${trial === "control" ? "is delivered without cutoff" : "is dropped at cutoff"}`, jail.options, async (t) => {
+      const cancel = new AbortController();
+      const cutoff = trial !== "control";
+      const uploadBytes = 1024 * 1024 - 4096;
+      let measuring = false;
+      let queued: Upstream | undefined;
+      let terminated!: () => void;
+      const termination = new Promise<void>((resolve) => { terminated = resolve; });
+      const r = await start(t, jail.real, {
+        signal: cancel.signal,
+        plan: smallPlan({
+          exportName: "bigPost", users: 1, durationMs: cutoff ? 60_000 : 1_000, perJourneyMax: 1,
+          allowedRequests: [{ method: "POST", path: "/upload" }],
+        }),
+        dial: (inner) => async (...args) => {
+          const upstream = await inner(...args);
+          if (measuring && !queued) {
+            queued = upstream;
+            // Force actual sender-side backpressure even where loopback can absorb 1 MiB.
+            upstream.socket.cork();
+          }
+          return upstream;
+        },
+        stall: () => measuring,
+        observer: (e) => {
+          if (e.type === "phase" && e.phase === "measurement") measuring = true;
+          if (e.type === "terminate") terminated();
+        },
+      });
+      await until("the measured POST is queued in the sender", () =>
+        r.sink.stats.stalled === 1 && (queued?.socket.writableLength ?? 0) >= uploadBytes, 10_000);
+      const bytesBefore = r.sink.stats.requestBytes;
+      if (cutoff) {
+        if (trial === "expiry") r.seam.wallShift = 600_000;
+        else cancel.abort();
+        await termination;
+      }
+      // After cutoff, try to release the very same bytes that the positive control delivers.
+      queued!.socket.uncork();
+      r.sink.resumeStalled();
+      const res = await r.result;
+      const uploads = r.sink.arrivals.filter((a) => a.url === "/upload" && a.body.length === uploadBytes);
+      assert.equal(res.checking.success, 1, why(r, res));
+      if (cutoff) {
+        assert.equal(res.status, trial === "expiry" ? "lease_lost" : "cancelled", why(r, res));
+        const snap = r.events.find((e) => e.type === "snapshot")!;
+        assert.ok(snap.journal.attempted > res.checking.success, "the upload reached the write boundary");
+        boundaryHolds(r, res, snap.handoffs);
+        assert.equal(r.sink.stats.requestBytes, bytesBefore, "queued bytes did not flush");
+        assert.equal(uploads.length, res.checking.success);
+        // The reset, as the target sees it: the connection ends early (Linux reads it as an early EOF).
+        await until("the target saw the upload end early", () => r.sink.stats.aborted + r.sink.stats.socketErrors.length >= 1, 10_000);
+        if (trial === "SIGINT") {
+          assert.equal(res.gateClosed, true);
+          assert.deepEqual(res.final, { watermark: res.journal!.debited });
+          assert.equal(res.cleanup, "clean");
         }
-        if (e.type === "terminate") setTimeout(() => x.sink.resumeStalled(), 200);
-      },
+      } else {
+        assert.equal(res.status, "completed", why(r, res));
+        assert.equal(uploads.length, res.checking.success + 1);
+      }
+      invariants(r, res);
     });
-    const res = await r.result;
-    assert.equal(res.status, "lease_lost", why(r, res));
-    const snap = r.events.find((e) => e.type === "snapshot")!;
-    await until("the stalled connection ends at the sink", () => r.sink.arrivals.length + r.sink.stats.aborted + r.sink.stats.socketErrors.length > res.checking.success, 10_000);
-    boundaryHolds(r, res, (snap as { handoffs: { debited: number; unattempted: number[] } }).handoffs);
-    t.diagnostic(`uploads ${r.sink.arrivals.filter((a) => a.url === "/upload").length}, aborted ${r.sink.stats.aborted}, socket errors ${JSON.stringify(r.sink.stats.socketErrors)}`);
-    invariants(r, res);
-  });
-
-  test(`F4 control (${jail.name}): the same stalled POST, resumed with no cutoff, is delivered`, jail.options, async (t) => {
-    let stalling = false;
-    const r = await start(t, jail.real, {
-      plan: smallPlan({ exportName: "bigPost", users: 1, durationMs: 1_000, perJourneyMax: 1, allowedRequests: [{ method: "POST", path: "/upload" }] }),
-      stall: () => stalling,
-      observer: (e, x) => {
-        if (e.type === "phase" && e.phase === "measurement") {
-          stalling = true;
-          void until("the POST's connection is stalled at the sink", () => x.sink.stats.stalled >= 1).then(() => setTimeout(() => x.sink.resumeStalled(), 300));
-        }
-      },
-    });
-    const res = await r.result;
-    assert.equal(res.status, "completed", why(r, res));
-    assert.equal(r.sink.arrivals.filter((a) => a.url === "/upload" && a.body.length === 1024 * 1024 - 4096).length, res.checking.success + 1);
-    invariants(r, res);
-  });
-
-  test(`F5a (${jail.name}): cancelled with a 1 MiB POST in flight: the upstream is reset, the final batch goes, cleanup clean`, jail.options, async (t) => {
-    const ac = new AbortController();
-    let stalling = false;
-    const r = await start(t, jail.real, {
-      signal: ac.signal,
-      plan: smallPlan({ exportName: "bigPost", users: 1, durationMs: 60_000, perJourneyMax: 1, allowedRequests: [{ method: "POST", path: "/upload" }] }),
-      stall: () => stalling,
-      observer: (e, x) => {
-        if (e.type === "phase" && e.phase === "measurement") {
-          stalling = true;
-          void until("the POST's connection is stalled at the sink", () => x.sink.stats.stalled >= 1).then(() => setTimeout(() => ac.abort(), 300));
-        }
-        if (e.type === "terminate") setTimeout(() => x.sink.resumeStalled(), 200);
-      },
-    });
-    const res = await r.result;
-    assert.equal(res.status, "cancelled", why(r, res));
-    await until("the stalled connection ends at the sink", () => r.sink.arrivals.length + r.sink.stats.aborted + r.sink.stats.socketErrors.length > res.checking.success, 10_000);
-    t.diagnostic(`uploads ${r.sink.arrivals.filter((a) => a.url === "/upload").length}, aborted ${r.sink.stats.aborted}, socket errors ${JSON.stringify(r.sink.stats.socketErrors)}`);
-    assert.equal(res.gateClosed, true);
-    assert.deepEqual(res.final, { watermark: res.journal!.debited });
-    assert.equal(res.cleanup, "clean");
-    invariants(r, res);
-  });
+  }
 }
