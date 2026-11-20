@@ -63,6 +63,10 @@ export interface JailSpec {
   /** The executor's uid and gid inside the jail: the runner's own (E0: lifecycle scripts must write their package folders). */
   executorUid: number;
   executorGid: number;
+  /** The claim this jail serves: init refuses tickets for any other. */
+  claimId: string;
+  /** The in-jail install (`npm rebuild --foreground-scripts`), run after the start ticket, before launch. */
+  install?: string[];
   /** The executor's command, with paths as the jail sees them. */
   command: string[];
   /** Extra environment for the executor, by name. Nothing else reaches it. */
@@ -84,6 +88,8 @@ export interface InitConfig {
   nodeInJail: string;
   executorUid: number;
   executorGid: number;
+  claimId: string;
+  install?: string[];
   command: string[];
   env: Record<string, string>;
 }
@@ -135,6 +141,8 @@ export function specProblems(spec: JailSpec): string[] {
   if (!Number.isInteger(spec.executorUid) || spec.executorUid <= 0 || spec.executorUid === RELAY_UID) problems.push("executorUid must be a non-root uid other than the relay's");
   if (!Number.isInteger(spec.executorGid) || spec.executorGid <= 0 || spec.executorGid === RELAY_UID) problems.push("executorGid must be a non-root gid other than the relay's");
   if (spec.command.length === 0 || spec.command.some((arg) => arg.includes("\0"))) problems.push("command must be non-empty, without NUL");
+  if (spec.install && (spec.install.length === 0 || spec.install.some((arg) => arg.includes("\0")))) problems.push("install must be non-empty, without NUL");
+  if (typeof spec.claimId !== "string" || !/^[\x21-\x7e]{1,256}$/.test(spec.claimId)) problems.push("claimId must be 1-256 printable characters");
   for (const [name, value] of Object.entries(spec.env)) {
     if (!ENV_NAME.test(name) || RESERVED_ENV.has(name)) problems.push(`env ${name} is not allowed`);
     if (/[\0\n]/.test(value)) problems.push(`env ${name} has a newline or NUL`);
@@ -159,6 +167,8 @@ export function initConfig(spec: JailSpec): InitConfig {
     nodeInJail: `${IN_JAIL.node}/${spec.node.slice(spec.nodeDir.length + 1)}`,
     executorUid: spec.executorUid,
     executorGid: spec.executorGid,
+    claimId: spec.claimId,
+    ...(spec.install ? { install: spec.install } : {}),
     command: spec.command,
     env: spec.env,
   };
@@ -204,6 +214,28 @@ export function executorEnv(config: InitConfig): string[] {
     `HOME=${IN_JAIL.home}`,
     ...(config.caPem ? [`NODE_EXTRA_CA_CERTS=${IN_JAIL.ca}`] : []),
     ...Object.entries(config.env).map(([name, value]) => `${name}=${value}`),
+  ];
+}
+
+/**
+ * The in-jail install's environment: offline, the public registry named, no git, a cache in
+ * the jail's own home, and nothing from the job or the journey. Scripts run (that is what the
+ * rebuild is for), as the executor's uid, in the overlay, with no route out.
+ */
+export function rebuildEnv(config: InitConfig): string[] {
+  return [
+    `PATH=${dirOf(config.nodeInJail)}:/usr/bin:/bin`,
+    `HOME=${IN_JAIL.home}`,
+    "npm_config_offline=true",
+    "npm_config_registry=https://registry.npmjs.org/",
+    `npm_config_userconfig=${IN_JAIL.home}/.npmrc-none`,
+    `npm_config_globalconfig=${IN_JAIL.home}/.npmrc-global-none`,
+    "npm_config_git=/bin/false",
+    `npm_config_cache=${IN_JAIL.home}/.npm`,
+    "npm_config_install_links=false",
+    "npm_config_audit=false",
+    "npm_config_fund=false",
+    "npm_config_update_notifier=false",
   ];
 }
 
