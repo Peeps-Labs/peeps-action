@@ -26,7 +26,7 @@ import type { Ahead, Clocks, Denied, DialTicket, Gate } from "./admission";
 import type { RunCa } from "./ca";
 import type { Journal } from "./journal";
 import { MAX_BODY_BYTES, MAX_HEADERS, normalize, parseAuthority, validatePolicy, type Authority, type RequestPolicy } from "./normalize";
-import { boundedLookup, canonical, checkedAddresses, connectVerified, DialRefused, reachable, untilAbort, type ApprovedOrigin, type DialOptions, type Upstream } from "./resolve";
+import { boundedLookup, canonical, checkedAddresses, connectVerified, DialRefused, reachable, untilAbort, type ApprovedOrigin, type DialOptions, type DialReady, type Upstream } from "./resolve";
 import { ResponseReader, ResponseTooLarge } from "./response";
 
 /** The header that names why the gate answered instead of the target. */
@@ -38,8 +38,8 @@ export const RETRY_HEADER = "x-peeps-load-retry-after-ms";
 const HOP_HEADERS = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade", "content-length"]);
 
 /** Dial `origin`; `pinned`, when set, is the only address to use. */
-/** `ready` is asked just before the TCP connect; false abandons the dial with nothing sent. */
-export type Dial = (origin: ApprovedOrigin, signal: AbortSignal, pinned: string | undefined, ready?: () => boolean) => Promise<Upstream>;
+/** TCP and TLS must each call `ready` at their start boundary. */
+export type Dial = (origin: ApprovedOrigin, signal: AbortSignal, pinned: string | undefined, ready?: DialReady) => Promise<Upstream>;
 
 export interface ProxyLimits {
   /** Tunnels open at once, per turn and for the run. */
@@ -409,13 +409,15 @@ export class GateProxy {
       this.pending.turn.set(turn, turnDials + 1);
       this.pending.origin.set(n.origin, (this.pending.origin.get(n.origin) ?? 0) + 1);
       let upstream: Upstream;
-      let lapsed: Denied | undefined;
+      let dialDenial: Denied | undefined;
       try {
         const request = { turn, origin: n.origin, method: n.method };
-        const ready = () => {
+        const ready: DialReady = (boundary) => {
           if (this.closed || tunnel.revoked || res.destroyed) return false;
-          lapsed = gate.whyNot(request, this.clocks());
-          return lapsed === undefined;
+          const { run, turn: pendingForTurn, origin: pendingForOrigin } = this.ahead(turn, n.origin);
+          // Exclude this dial from the pending totals used to recheck its grant.
+          dialDenial = gate.checkDial(request, this.clocks(), { run: run - 1, turn: pendingForTurn - 1, origin: pendingForOrigin - 1 }, boundary);
+          return dialDenial === undefined;
         };
         while (!this.pins.has(n.origin)) {
           const first = this.firstDials.get(n.origin);
@@ -435,7 +437,7 @@ export class GateProxy {
         this.trackWork(upstream.closed);
       } catch {
         // The gate refused just before the connect: say why, as admit would have.
-        if (lapsed && !this.closed && !tunnel.revoked) return this.denied(res, lapsed);
+        if (dialDenial && !this.closed && !tunnel.revoked) return this.denied(res, dialDenial);
         return this.refuse(res, controller.signal.aborted ? 503 : 502, this.closed ? "stopped" : tunnel.revoked ? "revoked" : timedOut ? "dial_timeout" : "dial");
       } finally {
         clearTimeout(timer);

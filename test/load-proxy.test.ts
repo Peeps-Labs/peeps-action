@@ -387,7 +387,7 @@ async function rig(t: import("node:test").TestContext, opts: RigOptions = {}): P
   const journal = new Journal();
   const ca = createRunCa({ hosts: ["sink.test"], nowMs: Date.now(), validForMs: 60 * 60 * 1000 });
   const dials: Rig["dials"] = { count: 0, pinned: [], signals: [], resets: 0 };
-  const real: Dial = (o, signal) => connectVerified("127.0.0.1", o, { ca: [sink.caPem], signal });
+  const real: Dial = (o, signal, _pin, ready) => connectVerified("127.0.0.1", o, { ca: [sink.caPem], signal, ready });
   const record = (inner: Dial): Dial => (o, signal, pinned, ready) => {
     dials.count += 1;
     dials.pinned.push(pinned);
@@ -1239,6 +1239,81 @@ test("a second request uses the address established by the first live dial", asy
   assert.deepEqual(r.dials.pinned, [undefined, "93.184.216.34"]);
 });
 
+for (const holdAt of ["before TCP", "after TLS"] as const) {
+  test(`first-dial queue preserves burst 1 when delayed ${holdAt}`, { timeout: 3000 }, async (t) => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const firstHeld = new Promise<void>((resolve) => { entered = resolve; });
+    const hold = () => {
+      entered();
+      return held;
+    };
+    const r = await rig(t, {
+      phase: { ratePerSecond: 1, burst: 1 },
+      dial: (inner) => async (origin, signal, pin, ready) => {
+        if (pin === undefined && holdAt === "before TCP") await hold();
+        const upstream = await inner(origin, signal, pin, ready);
+        if (pin === undefined && holdAt === "after TLS") await hold();
+        return upstream;
+      },
+    });
+    const first = exchange(r, get(r, "/first"));
+    await firstHeld;
+    r.clock.monoMs = 1000; // Refill the reservation bucket, then freeze time.
+    const second = exchange(r, get(r, "/second"));
+    try {
+      for (let i = 0; i < 100 && r.proxy.pendingDials < 2; i++) await sleep(5);
+      assert.equal(r.proxy.pendingDials, 2);
+    } finally {
+      release();
+    }
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    assert.equal(statusOf(firstResult.response), 200);
+    assert.equal(r.sink.stats.connections, holdAt === "before TCP" ? 1 : 2);
+    assert.deepEqual(r.sink.arrivals.map((arrival) => arrival.url), ["/first"]);
+    assert.equal(deniedOf(secondResult.response), "rate");
+    assert.equal(r.gate.admitted, 1);
+
+    r.clock.monoMs += 1000;
+    assert.equal(statusOf((await exchange(r, get(r, "/after-refill"))).response), 200);
+  });
+}
+
+test("queued dials recheck the number of places left under a lower lease ceiling", { timeout: 3000 }, async (t) => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const firstHeld = new Promise<void>((resolve) => { entered = resolve; });
+  const r = await rig(t, {
+    dial: (inner) => async (...args) => {
+      const upstream = await inner(...args);
+      if (args[2] === undefined) {
+        entered();
+        await held;
+      }
+      return upstream;
+    },
+  });
+  const first = exchange(r, get(r, "/first"));
+  await firstHeld;
+  const later = [exchange(r, get(r, "/second")), exchange(r, get(r, "/third"))];
+  try {
+    for (let i = 0; i < 100 && r.proxy.pendingDials < 3; i++) await sleep(5);
+    assert.equal(r.proxy.pendingDials, 3);
+    r.gate.applyLease({ seq: 2, monoUntil: 10_000, wallUntil: r.clock.wallMs + 10_000, ceiling: 2 });
+  } finally {
+    release();
+  }
+  assert.equal(statusOf((await first).response), 200);
+  const results = await Promise.all(later);
+  assert.equal(r.sink.stats.connections, 2);
+  assert.equal(r.sink.stats.handshakes, 2);
+  assert.deepEqual(results.map(({ response }) => statusOf(response)).sort(), [200, 503]);
+  assert.equal(results.filter(({ response }) => deniedOf(response) === "ceiling").length, 1);
+  assert.equal(r.gate.admitted, 2);
+});
+
 test("a canceled DNS waiter leaves the underlying lookup charged until it settles", async () => {
   let answer!: (a: { address: string; family: number }[]) => void;
   const held = new Promise<{ address: string; family: number }[]>((resolve) => { answer = resolve; });
@@ -1284,14 +1359,17 @@ test("the verified connector checks the grant again before starting TLS", { time
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const port = (server.address() as AddressInfo).port;
   const origin = { host: "sink.test", port, privateCidrs: [] };
-  let checks = 0;
-  const ready = () => ++checks === 1;
+  const checks: (string | undefined)[] = [];
+  const ready = (boundary?: "tcp" | "tls") => {
+    checks.push(boundary);
+    return boundary === "tcp";
+  };
   const controller = new AbortController();
   const pending = connectVerified("127.0.0.1", origin, { signal: controller.signal, ready });
   const timeout = setTimeout(() => controller.abort(), 250);
   try {
     assert.equal(await refusal(pending), "aborted");
-    assert.equal(checks, 2, "TCP start and TLS start each check the grant");
+    assert.deepEqual(checks, ["tcp", "tls"], "TCP start and TLS start each check the grant");
     await closed;
     assert.equal(bytes, 0);
   } finally {

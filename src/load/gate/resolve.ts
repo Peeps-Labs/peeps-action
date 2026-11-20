@@ -307,6 +307,9 @@ export async function connectFirst(
   throw last ?? new DialRefused("resolve", `${origin.host}: no address`);
 }
 
+/** Omit the boundary to recheck liveness without starting traffic. */
+export type DialReady = (boundary?: "tcp" | "tls") => boolean;
+
 /**
  * TLS to a literal, already-checked address, verified as `origin.host`.
  * The same grant must be live immediately before both TCP and TLS start.
@@ -314,14 +317,13 @@ export async function connectFirst(
 export function connectVerified(
   address: string,
   origin: ApprovedOrigin,
-  options: Pick<DialOptions, "ca" | "signal"> & { ready?: () => boolean } = {},
+  options: Pick<DialOptions, "ca" | "signal"> & { ready?: DialReady } = {},
 ): Promise<Upstream> {
   const { signal, ready } = options;
   if (signal?.aborted) return Promise.reject(new DialRefused("aborted", origin.host));
   const family = isIP(address);
   if (!family || isIP(origin.host)) return Promise.reject(new DialRefused("address", origin.host));
   const secureContext = options.ca ? createSecureContext({ ca: [...options.ca], minVersion: "TLSv1.2" }) : bundledRoots();
-  const live = () => !signal?.aborted && (ready?.() ?? true);
   const tcp = new Socket();
   const closed = new Promise<void>((resolve) => tcp.once("close", () => resolve()));
   let connected = false;
@@ -349,7 +351,7 @@ export function connectVerified(
       connected = true;
       let tls: TLSSocket;
       try {
-        if (!live()) return abort();
+        if (signal?.aborted || ready?.("tls") === false) return abort();
         tls = connect({
           socket: tcp,
           servername: origin.host,
@@ -383,7 +385,7 @@ export function connectVerified(
         // Node defers the literal-host form to nextTick. This resolver returns only
         // the checked literal and enters Node's single-address connect synchronously.
         lookup: (_name, _options, resolved) => {
-          if (!live()) return abort();
+          if (signal?.aborted || ready?.("tcp") === false) return abort();
           resolved(null, address, family);
         },
       });
