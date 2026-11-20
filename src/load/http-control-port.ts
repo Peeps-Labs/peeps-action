@@ -13,12 +13,13 @@
  *   - Bodies: the claim is `canonical(body)`; the renew body is the given text, byte for byte;
  *     events are `JSON.stringify(body)`. A retry of the claim sends the same bytes with the same
  *     OIDC token.
- *   - Answers: a 2xx or 4xx with `application/json` resolves to the parsed JSON for the decoders
- *     to judge (a refusal is reduced to its enumerated code). A 5xx, 408, 429, a network error, a
+ *   - Answers: a 2xx with `application/json` resolves to the parsed JSON for the decoders to
+ *     judge; a 4xx resolves only as a refusal (reduced to its enumerated code, `unknown` when it
+ *     carries none). A grant's claim id must be a UUID. A 5xx, 408, 429, a network error, a
  *     timeout, a redirect, another content type, a body that does not parse or one past its cap
  *     (2 MiB for the claim, whose answer carries the plan; 64 KiB otherwise) rejects.
  *   - The claim is retried on a transient failure with identical bytes, and only for 4.5 s from
- *     the call (`CLAIM_RETRY_MS`): the supervisor samples its clocks right before calling, and
+ *     the call (`CLAIM_RETRY_MS`; an answer read past it, by the monotonic clock, is a timeout): the supervisor samples its clocks right before calling, and
  *     anchors the lease there, so an answer read later than that could only be discarded after
  *     consuming the grant (e5 plan v3 §4, minor 1 of the round-2 review).
  *   - The OIDC token (audience `peeps-load`) is minted inside `claim` only, from an
@@ -26,11 +27,17 @@
  *     host set; anything else is refused when the port is built, before the request token goes
  *     anywhere.
  *   - Nothing here prints. Errors are `ControlHttpError`: the operation, a typed code, the HTTP
- *     status and at most an errno code. Never a header, a body, a URL or a token.
+ *     status and at most an errno code. Never a header, a body, a URL or a token. Headers are set
+ *     on the request, never in the options the agent passes on. The port refuses to be built when
+ *     Node's own diagnostics would print a request (`NODE_DEBUG` naming http, https, net or tls)
+ *     or write TLS traffic keys (`--tls-keylog`).
  */
+import { constants as cryptoConstants } from "node:crypto";
+import { validateHeaderValue } from "node:http";
 import { Agent, request, type RequestOptions } from "node:https";
 import type { LookupFunction } from "node:net";
 import { rootCertificates } from "node:tls";
+import { debuglog } from "node:util";
 import { canonical, type ClaimRequest, type ControlPort, type EventsBody } from "./control-port";
 
 export const LOAD_OIDC_AUDIENCE = "peeps-load";
@@ -57,9 +64,10 @@ export const GITHUB_OIDC_HOSTS: readonly string[] = [".actions.githubusercontent
  * fixtures replace this list.
  */
 const REFUSALS = new Set([
-  "auth", "unknown_grant", "wrong_workflow", "wrong_commit", "binding", "rerun", "duplicate_claim", "self_hosted", "fence_unverified", "expired", "stopped", "not_enabled", "environment_changed", "unsupported_protocol", "malformed", "claim_superseded", "identity", "matrix",
+  "auth", "unknown_grant", "wrong_workflow", "wrong_commit", "binding", "rerun", "duplicate_claim", "self_hosted", "fence_unverified", "expired", "stopped", "not_enabled", "policy_changed", "environment_changed", "outside_harness", "unsupported_protocol", "malformed", "claim_superseded", "identity", "matrix",
   "hash", "epoch", "gap", "changed_payload", "debited", "closed",
 ]);
+const CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EVENT_REASONS = new Set(["stream", "gap", "conflict", "after_final", "malformed", "hash", "expired", "auth", "budget"]);
 
 export type ControlOp = "claim" | "renew" | "events" | "oidc" | "config";
@@ -71,14 +79,16 @@ export type ControlFailure =
   /** The caller's signal. */
   | "aborted"
   | "redirect"
-  /** A 5xx, 408 or 429; or, from the OIDC service, any non-200. */
+  /** A 5xx, 408 or 429 (sent again); or, from the OIDC service, any other non-200 (not). */
   | "status"
   | "content_type"
   | "too_large"
   /** The body is not JSON, or the OIDC answer carries no usable token. */
   | "malformed"
   /** The port was built with a URL it refuses. */
-  | "url";
+  | "url"
+  /** Node's diagnostics would print a request or write TLS traffic keys. */
+  | "diagnostics";
 
 export class ControlHttpError extends Error {
   constructor(
@@ -93,7 +103,8 @@ export class ControlHttpError extends Error {
 
   /** Worth sending the same bytes again. */
   get transient(): boolean {
-    return this.code === "network" || this.code === "timeout" || this.code === "status";
+    if (this.code === "status") return this.status !== undefined && (this.status >= 500 || this.status === 408 || this.status === 429);
+    return this.code === "network" || this.code === "timeout";
   }
 }
 
@@ -132,12 +143,22 @@ export class HttpControlPort implements ControlPort {
   private readonly oidcAgent: Agent;
 
   constructor(options: HttpControlPortOptions, seams: HttpControlSeams = {}) {
+    if (diagnosticsOn()) throw new ControlHttpError("config", "diagnostics");
     this.origin = peepsOrigin(options.peepsUrl);
     this.oidcUrl = oidcRequestUrl(options.oidc.requestUrl, seams.oidcHosts ?? GITHUB_OIDC_HOSTS);
     this.requestToken = options.oidc.requestToken;
     this.userAgent = options.userAgent ?? "peeps-action-load";
     this.lookup = seams.lookup;
-    const tls = { ca: seams.ca ?? [...rootCertificates], rejectUnauthorized: true, minVersion: "TLSv1.2" as const, ALPNProtocols: ["http/1.1"], ...(seams.lookup ? { lookup: seams.lookup } : {}) };
+    // Every TLS setting explicit, so none comes from the job's `NODE_OPTIONS` (cipher list, versions).
+    const tls = {
+      ca: seams.ca ?? [...rootCertificates],
+      rejectUnauthorized: true,
+      minVersion: "TLSv1.2" as const,
+      maxVersion: "TLSv1.3" as const,
+      ciphers: cryptoConstants.defaultCoreCipherList,
+      ALPNProtocols: ["http/1.1"],
+      ...(seams.lookup ? { lookup: seams.lookup } : {}),
+    };
     this.renewAgent = new Agent({ ...tls, keepAlive: true, maxSockets: 2, maxFreeSockets: 2, scheduling: "lifo" });
     this.eventsAgent = new Agent({ ...tls, keepAlive: true, maxSockets: 1, maxFreeSockets: 1 });
     this.oidcAgent = new Agent({ ...tls, keepAlive: false, maxSockets: 1 });
@@ -160,7 +181,12 @@ export class HttpControlPort implements ControlPort {
       const attempt = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, Math.ceil(Math.min(left, CLAIM_ATTEMPT_MS))))]);
       try {
         const answer = await this.send("claim", this.renewAgent, "/api/v1/load/claims", idToken, bytes, CLAIM_ANSWER_MAX_BYTES, attempt);
-        return reduceRefusal(answer.json);
+        // Read after the window: the timer had not fired yet, but the supervisor's lease is anchored
+        // at the call, so this answer is late however it decodes.
+        if (monoNow() >= deadline) throw new ControlHttpError("claim", "timeout");
+        const reply = reduceRefusal(answer);
+        if (isObj(reply) && !("refused" in reply) && !(typeof reply.claimId === "string" && CLAIM_ID.test(reply.claimId))) throw new ControlHttpError("claim", "malformed", answer.status);
+        return reply;
       } catch (error) {
         if (!(error instanceof ControlHttpError) || !error.transient || signal.aborted) throw signal.aborted ? new ControlHttpError("claim", "aborted") : error;
         // An attempt the window cut short says less than the failure before it.
@@ -172,16 +198,16 @@ export class HttpControlPort implements ControlPort {
   }
 
   async renew(claimId: string, runToken: string, body: string, signal: AbortSignal): Promise<unknown> {
-    const answer = await this.send("renew", this.renewAgent, `/api/v1/load/claims/${encodeURIComponent(claimId)}/renew`, runToken, body, ANSWER_MAX_BYTES, signal);
-    return reduceRefusal(answer.json);
+    const answer = await this.send("renew", this.renewAgent, claimPath(claimId, "renew"), runToken, body, ANSWER_MAX_BYTES, signal);
+    return reduceRefusal(answer);
   }
 
   async events(claimId: string, eventsToken: string, body: EventsBody, signal: AbortSignal): Promise<unknown> {
-    const answer = await this.send("events", this.eventsAgent, `/api/v1/load/claims/${encodeURIComponent(claimId)}/events`, eventsToken, JSON.stringify(body), ANSWER_MAX_BYTES, signal);
+    const answer = await this.send("events", this.eventsAgent, claimPath(claimId, "events"), eventsToken, JSON.stringify(body), ANSWER_MAX_BYTES, signal);
     const json = answer.json;
-    if (isObj(json) && json.ok === true) return { ok: true, replay: json.replay === true };
+    if (isObj(json) && json.ok === true && answer.status < 300) return { ok: true, replay: json.replay === true };
     if (isObj(json) && json.ok === false) return { ok: false, reason: typeof json.reason === "string" && EVENT_REASONS.has(json.reason) ? json.reason : "unknown" };
-    return reduceRefusal(json);
+    return reduceRefusal(answer);
   }
 
   /** Closes the kept-alive sockets. */
@@ -220,6 +246,12 @@ export class HttpControlPort implements ControlPort {
         headers["content-type"] = "application/json";
         headers["content-length"] = String(Buffer.byteLength(body));
       }
+      // A token no header can carry is refused here, before the agent opens or takes a socket.
+      try {
+        for (const [name, value] of Object.entries(headers)) validateHeaderValue(name, value);
+      } catch {
+        return reject(new ControlHttpError(op, "malformed"));
+      }
       const options: RequestOptions = {
         agent,
         protocol: "https:",
@@ -228,7 +260,6 @@ export class HttpControlPort implements ControlPort {
         servername: target.hostname,
         path,
         method: body === undefined ? "GET" : "POST",
-        headers,
         rejectUnauthorized: true,
         ...(this.lookup ? { lookup: this.lookup } : {}),
       };
@@ -274,8 +305,27 @@ export class HttpControlPort implements ControlPort {
           finish(undefined, { status, json });
         });
       });
+      // On the request, never in `options`: the agent hands its options to `createConnection`, and
+      // Node's https debug output prints them.
+      for (const [name, value] of Object.entries(headers)) req.setHeader(name, value);
       req.end(body);
     });
+  }
+}
+
+/** `NODE_DEBUG` is read once, at startup, as `debuglog` reads it; `--tls-keylog` from either source. */
+function diagnosticsOn(): boolean {
+  if (["http", "https", "net", "tls"].some((section) => debuglog(section).enabled)) return true;
+  const nodeOptions = (process.env.NODE_OPTIONS ?? "").replace(/["\\]/g, "");
+  return [nodeOptions, ...process.execArgv].some((arg) => /--tls[-_]keylog\b/.test(arg));
+}
+
+function claimPath(claimId: string, op: "renew" | "events"): string {
+  try {
+    return `/api/v1/load/claims/${encodeURIComponent(claimId)}/${op}`;
+  } catch {
+    // A lone surrogate: `encodeURIComponent` throws a `URIError`.
+    throw new ControlHttpError(op, "malformed");
   }
 }
 
@@ -306,10 +356,11 @@ function oidcRequestUrl(raw: string, hosts: readonly string[]): URL {
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** A refusal is its enumerated code and nothing else. */
-function reduceRefusal(json: unknown): unknown {
+/** A refusal is its enumerated code and nothing else; a 4xx that names none is `unknown`. */
+function reduceRefusal(answer: Answer): unknown {
+  const json = answer.json;
   if (isObj(json) && "refused" in json) return { refused: typeof json.refused === "string" && REFUSALS.has(json.refused) ? json.refused : "unknown" };
-  return json;
+  return answer.status < 300 ? json : { refused: "unknown" };
 }
 
 function errnoCode(e: NodeJS.ErrnoException): string | undefined {
@@ -317,8 +368,9 @@ function errnoCode(e: NodeJS.ErrnoException): string | undefined {
 }
 
 function abortError(op: ControlOp, signal: AbortSignal): ControlHttpError {
-  const reason = signal.reason as { name?: unknown } | undefined;
-  return new ControlHttpError(op, reason?.name === "TimeoutError" ? "timeout" : "aborted");
+  // The reason is the caller's: only a timeout's own `DOMException` is read.
+  const timedOut = signal.reason instanceof DOMException && signal.reason.name === "TimeoutError";
+  return new ControlHttpError(op, timedOut ? "timeout" : "aborted");
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

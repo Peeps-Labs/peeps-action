@@ -11,7 +11,7 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createTcpServer, type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -42,7 +42,8 @@ const CLAIM: ClaimRequest = {
   treeDigest: "c".repeat(64),
   workload: { path: "peeps/load/smoke.workload.yaml", digest: "d".repeat(64) },
 };
-const GRANT = { claimId: "claim-1", epoch: 1, runToken: RUN_TOKEN, eventsToken: EVENTS_TOKEN };
+const CLAIM_ID = "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f";
+const GRANT = { claimId: CLAIM_ID, epoch: 1, runToken: RUN_TOKEN, eventsToken: EVENTS_TOKEN };
 const RENEW = renewBody({ epoch: 1, seq: 1, nonce: "nonce-é", phase: "starting", debited: 0, unresolved: 0, inFlight: 0, state: "running", lagP99Ms: 0 }).body;
 const EVENTS = { streamId: "stream-1", seq: 1, payloadHash: "f".repeat(64), batch: '{"kind":"summary"}' };
 
@@ -147,6 +148,24 @@ test("the claim stops retrying 4.5 s after the call", async (t) => {
   assert.equal(h.peeps.arrivals.length - before, 3, "attempts of 2 s, 2 s and the rest");
 });
 
+test("a claim answer read after the 4.5 s window is a timeout, even before the timer fires", async (t) => {
+  const h = await harness(t);
+  const real = process.hrtime.bigint;
+  let skewMs = 0;
+  t.mock.method(process.hrtime, "bigint", () => real() + BigInt(skewMs) * 1_000_000n);
+  // The monotonic clock moves 3 s while the token is minted and 1.501 s while Peeps answers.
+  h.oidc.answer((_a, res) => {
+    skewMs += 3_000;
+    json(res, 200, { value: ID_TOKEN });
+  });
+  h.peeps.answer((_a, res) => {
+    skewMs += 1_501;
+    json(res, 200, GRANT);
+  });
+  assert.equal((await failure(h.port.claim(CLAIM, signal(30_000)))).code, "timeout");
+  assert.equal(h.peeps.arrivals.length, 1, "nothing is sent after the window");
+});
+
 test("a permanent claim answer is not retried", async (t) => {
   const h = await harness(t, (_a, res) => json(res, 409, { refused: "rerun" }));
   assert.deepEqual(decodeClaimReply(await h.port.claim(CLAIM, signal())), { ok: false, refused: "rerun" });
@@ -169,7 +188,9 @@ test("the caller's signal stops the claim at once", async (t) => {
   assert.equal(h.peeps.arrivals.length, 1, "nothing is sent after the abort");
 });
 
-test("a renewal sends the given text byte for byte, and its retry sends the same", async (t) => {
+// The supervisor's retry of a renewal (same bytes after a lost answer) is load-supervisor's "a hung
+// renew" case; the port sends what it is given, each time.
+test("a renewal sends the given text byte for byte, each time it is called", async (t) => {
   const h = await harness(t);
   await h.port.renew("claim-1", RUN_TOKEN, RENEW, signal());
   await h.port.renew("claim-1", RUN_TOKEN, RENEW, signal());
@@ -210,6 +231,36 @@ test("a refusal resolves as its code, and one the wire does not name as unknown"
   assert.deepEqual(await h.port.renew("claim-1", RUN_TOKEN, RENEW, signal()), { refused: "unknown" });
   h.peeps.answer((_a, res) => json(res, 409, { refused: { nested: true } }));
   assert.deepEqual(await h.port.claim(CLAIM, signal()), { refused: "unknown" });
+  // Claim refusals in P1's wire-v1 constants.json.
+  for (const refused of ["policy_changed", "outside_harness"]) {
+    h.peeps.answer((_a, res) => json(res, 409, { refused }));
+    assert.deepEqual(await h.port.claim(CLAIM, signal()), { refused });
+  }
+});
+
+test("an answer that is not 2xx is a refusal or nothing: a success-shaped 4xx never passes as one", async (t) => {
+  const h = await harness(t, (_a, res) => json(res, 403, GRANT));
+  assert.deepEqual(await h.port.claim(CLAIM, signal()), { refused: "unknown" });
+  const reply = { claimId: CLAIM_ID, epoch: 1, planHash: "p".repeat(64), seq: 1, nonce: "n", lease: "held", ttlMs: 5000, ceiling: 90, leaseUntilServerMs: 1, serverNowMs: 1 };
+  h.peeps.answer((_a, res) => json(res, 401, reply));
+  assert.deepEqual(decodeRenewReply(await h.port.renew("claim-1", RUN_TOKEN, RENEW, signal())), { kind: "unaddressed" });
+  h.peeps.answer((_a, res) => json(res, 401, { ok: true, replay: false }));
+  assert.notEqual((await h.port.events("claim-1", EVENTS_TOKEN, EVENTS, signal()) as { ok?: unknown }).ok, true);
+  // A refusal at 4xx still resolves as its code.
+  h.peeps.answer((_a, res) => json(res, 409, { ok: false, reason: "gap" }));
+  assert.deepEqual(await h.port.events("claim-1", EVENTS_TOKEN, EVENTS, signal()), { ok: false, reason: "gap" });
+});
+
+test("a grant whose claim id is not a UUID rejects typed, and carries nothing it echoed", async (t) => {
+  const h = await harness(t);
+  for (const claimId of [ID_TOKEN, `${CLAIM_ID}\n`, "claim-1", 7]) {
+    h.peeps.answer((_a, res) => json(res, 200, { ...GRANT, claimId }));
+    const error = await failure(h.port.claim(CLAIM, signal()));
+    assert.equal(error.code, "malformed");
+    assert.ok(!error.transient, "not sent again");
+    assert.ok(!inspect(error, { showHidden: true }).includes(ID_TOKEN));
+  }
+  assert.equal(h.peeps.arrivals.length, 4);
 });
 
 test("redirects are never followed", async (t) => {
@@ -247,7 +298,7 @@ test("answers past their cap reject, with or without a declared length", async (
   for (const declared of [true, false]) {
     h.peeps.answer(send(padded(CLAIM_ANSWER_MAX_BYTES), declared));
     assert.equal(Buffer.byteLength(padded(CLAIM_ANSWER_MAX_BYTES)), CLAIM_ANSWER_MAX_BYTES);
-    assert.equal(((await h.port.claim(CLAIM, signal())) as { claimId: string }).claimId, "claim-1", "a plan up to the cap rides in the claim");
+    assert.equal(((await h.port.claim(CLAIM, signal())) as { claimId: string }).claimId, CLAIM_ID, "a plan up to the cap rides in the claim");
     h.peeps.answer(send(padded(CLAIM_ANSWER_MAX_BYTES + 1), declared));
     assert.equal((await failure(h.port.claim(CLAIM, signal()))).code, "too_large");
     h.peeps.answer(send(padded(ANSWER_MAX_BYTES + 1), declared));
@@ -278,7 +329,46 @@ test("only a JSON answer below 500 resolves", async (t) => {
     assert.equal(error.transient, code === "status" || code === "network");
   }
   h.peeps.answer((_a, res) => json(res, 404, { error: "not_found" }));
-  assert.deepEqual(await h.port.renew("claim-1", RUN_TOKEN, RENEW, signal()), { error: "not_found" }, "a 4xx is for the decoder to judge");
+  assert.deepEqual(await h.port.renew("claim-1", RUN_TOKEN, RENEW, signal()), { refused: "unknown" }, "a 4xx without a refusal is an unknown one");
+});
+
+test("a token no header can carry, or a claim id no path can, rejects typed before any connection", async (t) => {
+  const h = await harness(t);
+  const badRequestToken = new HttpControlPort({ peepsUrl: h.peeps.url, oidc: { requestUrl: `${h.oidc.url}/x`, requestToken: `${REQUEST_TOKEN}\r\n` } }, h.seams);
+  t.after(() => badRequestToken.close());
+  const cases: [string, () => Promise<unknown>][] = [
+    ["renew", () => h.port.renew("claim-1", `${RUN_TOKEN}\nx`, RENEW, signal(1000))],
+    ["events", () => h.port.events("claim-1", `${EVENTS_TOKEN}\u2603`, EVENTS, signal(1000))],
+    ["renew", () => h.port.renew("claim-1\ud800", RUN_TOKEN, RENEW, signal(1000))],
+    ["events", () => h.port.events("claim-1\udfff", EVENTS_TOKEN, EVENTS, signal(1000))],
+  ];
+  for (let i = 0; i < 3; i++) {
+    for (const [op, call] of cases) {
+      const error = await failure(call());
+      assert.equal(error.message, `load control ${op}: malformed`);
+      assert.equal(error.cause, undefined);
+      for (const sentinel of SENTINELS) assert.ok(!inspect(error, { showHidden: true }).includes(sentinel));
+    }
+  }
+  const oidc = await failure(badRequestToken.claim(CLAIM, signal(1000)));
+  assert.equal(oidc.message, "load control oidc: malformed");
+  assert.equal(h.peeps.stats.connections + h.oidc.stats.connections, 0, "nothing was opened");
+  // Both of the renewals agent's sockets are still free.
+  await Promise.all([1, 2].map(() => h.port.renew("claim-1", RUN_TOKEN, RENEW, signal(1000))));
+  assert.equal(h.peeps.arrivals.length, 2);
+});
+
+test("an abort reason that throws when read still rejects typed", async (t) => {
+  const h = await harness(t, () => undefined);
+  const hostile = { get name(): string { throw new Error(RUN_TOKEN); } };
+  const before = new AbortController();
+  before.abort(hostile);
+  assert.equal((await failure(h.port.renew("claim-1", RUN_TOKEN, RENEW, before.signal))).message, "load control renew: aborted");
+  const during = new AbortController();
+  const pending = h.port.renew("claim-1", RUN_TOKEN, RENEW, during.signal);
+  await wait(50);
+  during.abort(hostile);
+  assert.equal((await failure(pending)).message, "load control renew: aborted");
 });
 
 test("a hung answer is cut at the signal", async (t) => {
@@ -349,19 +439,29 @@ test("the OIDC service's 5xx is retried; a 4xx or an answer without a token fail
   assert.equal(h.peeps.arrivals.length, 1);
   const cases: [Responder, string, number | undefined][] = [
     [(_a, res) => json(res, 403, { message: REQUEST_TOKEN }), "status", 403],
+    [(_a, res) => json(res, 404, {}), "status", 404],
+    [(_a, res) => json(res, 201, { value: ID_TOKEN }), "status", 201],
     [(_a, res) => json(res, 200, { value: "not-a-jwt" }), "malformed", undefined],
     [(_a, res) => json(res, 200, { value: `${ID_TOKEN}.${"x".repeat(9000)}` }), "malformed", undefined],
+    // A well-formed token one character past the 8 KiB cap: only the cap refuses it.
+    [(_a, res) => json(res, 200, { value: `${"a".repeat(8 * 1024 - 3)}.b.c` }), "malformed", undefined],
     [(_a, res) => json(res, 200, {}), "malformed", undefined],
     [(_a, res) => json(res, 200, { value: "x".repeat(20_000) }), "too_large", 200],
   ];
   for (const [responder, code, status] of cases) {
     h.oidc.answer(responder);
+    const before: number = h.oidc.arrivals.length;
     const error = await failure(h.port.claim(CLAIM, signal()));
+    assert.equal(h.oidc.arrivals.length - before, 1, `${code} ${status ?? ""}: asked once, not retried`);
     assert.equal(error.op, "oidc");
     assert.equal(error.code, code);
     assert.equal(error.status, status);
   }
   assert.equal(h.peeps.arrivals.length, 1, "nothing reaches Peeps without a token");
+  const atCap = `${"a".repeat(8 * 1024 - 4)}.b.c`;
+  h.oidc.answer((_a, res) => json(res, 200, { value: atCap }));
+  assert.deepEqual(await h.port.claim(CLAIM, signal()), GRANT);
+  assert.ok(h.peeps.arrivals[1]!.headers.authorization === `Bearer ${atCap}`, "a token at the cap is sent");
 });
 
 test("no token reaches an error, a log or the output", async (t) => {
@@ -439,13 +539,10 @@ test("the job's proxy and TLS environment are ignored", async (t) => {
     NO_PROXY: "",
     NODE_TLS_REJECT_UNAUTHORIZED: "0",
     NODE_EXTRA_CA_CERTS: path.join(dir, "extra.pem"),
+    // The job's TLS defaults: a cipher list no server shares, and TLS 1.2 at most.
+    NODE_OPTIONS: "--tls-cipher-list=NOT_A_CIPHER --tls-max-v1.2",
   };
-  const child = spawn(process.execPath, ["--import", "tsx", path.resolve(__dirname, "support/http-control-child.ts")], { env, stdio: ["ignore", "pipe", "pipe"] });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (d: Buffer) => (stdout += d));
-  child.stderr.on("data", (d: Buffer) => (stderr += d));
-  const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+  const { code, stdout, stderr } = await runChild(env);
   assert.equal(code, 0, `child failed: ${stdout}${stderr}`);
   const result = JSON.parse(stdout.trim()) as Record<string, unknown>;
   assert.deepEqual(result, {
@@ -461,9 +558,49 @@ test("the job's proxy and TLS environment are ignored", async (t) => {
   for (const sentinel of SENTINELS) assert.ok(!(stdout + stderr).includes(sentinel));
 });
 
+/** Runs `support/http-control-child.ts` with `env`, killed after 20 s so a stuck child fails here. */
+async function runChild(env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, ["--import", "tsx", path.resolve(__dirname, "support/http-control-child.ts")], { env, stdio: ["ignore", "pipe", "pipe"], timeout: 20_000 });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d: Buffer) => (stdout += d));
+  child.stderr.on("data", (d: Buffer) => (stderr += d));
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  return { code, stdout, stderr };
+}
+
+test("Node's diagnostics that would print a request or write TLS keys refuse the port before it connects", async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "peeps-wire-diag-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const keylog = path.join(dir, "tls-keys");
+  const cases: [string, NodeJS.ProcessEnv][] = [
+    ["NODE_DEBUG=https", { NODE_DEBUG: "https" }],
+    ["NODE_DEBUG, any case, among others", { NODE_DEBUG: "fs,hTtP" }],
+    ["NODE_DEBUG=*", { NODE_DEBUG: "*" }],
+    ["--tls-keylog", { NODE_OPTIONS: `--tls-keylog=${keylog}` }],
+    ["--tls-keylog, quoted", { NODE_OPTIONS: `--t"ls-keylog"="${keylog}"` }],
+  ];
+  for (const [name, diagnostic] of cases) {
+    await t.test(name, async (t) => {
+      const h = await harness(t);
+      const config = { peepsUrl: h.peeps.url, rogueUrl: h.peeps.url, oidcUrl: `${h.oidc.url}/idtoken`, oidcHost: "oidc.test", requestToken: REQUEST_TOKEN, ca: h.seams.ca, claim: CLAIM };
+      const { NODE_DEBUG: _d, NODE_OPTIONS: _o, ...base } = process.env;
+      const { code, stdout, stderr } = await runChild({ ...base, ...diagnostic, PEEPS_TEST_CHILD_CONFIG: JSON.stringify(config) });
+      for (const sentinel of SENTINELS) assert.ok(!(stdout + stderr).includes(sentinel), `a token was printed: ${sentinel.slice(0, 8)}…`);
+      assert.ok(!existsSync(keylog), "no TLS keys were written");
+      assert.equal(code, 1, `${stdout}${stderr}`);
+      assert.deepEqual(JSON.parse(stdout.trim()), { failed: "diagnostics" });
+      assert.equal(h.oidc.stats.connections + h.peeps.stats.connections, 0);
+    });
+  }
+});
+
 test("through the fake Peeps: the grant, renewals and events decode and apply", async (t) => {
   const limits: GrantLimits = { allowedOrigins: ["https://sink.test"], privateOrigins: {}, maxUsers: 1, requestBudget: 1000, policyRevision: 1, phases: { checking: { ratePerSecond: 5, burst: 5 }, measurement: { ratePerSecond: 5, burst: 5 } } };
-  const fake = new FakeControlPort({ plan: { protocolVersion: 1 }, limits, workload: { path: CLAIM.workload.path, digest: CLAIM.workload.digest, module: "journeys.ts", export: "smoke" }, baseURL: "https://sink.test", binding: { checkoutSha: CLAIM.checkoutSha, lockDigests: CLAIM.lockDigests, treeDigest: CLAIM.treeDigest, workload: CLAIM.workload } });
+  const fake = new FakeControlPort({ claimId: CLAIM_ID, plan: { protocolVersion: 1 }, limits, workload: { path: CLAIM.workload.path, digest: CLAIM.workload.digest, module: "journeys.ts", export: "smoke" }, baseURL: "https://sink.test", binding: { checkoutSha: CLAIM.checkoutSha, lockDigests: CLAIM.lockDigests, treeDigest: CLAIM.treeDigest, workload: CLAIM.workload } });
   const h = await harness(t, (a, res) => {
     const m = /^\/api\/v1\/load\/claims(?:\/([^/]+)\/(renew|events))?$/.exec(a.url);
     const bearer = String(a.headers.authorization).replace(/^Bearer /, "");
@@ -503,5 +640,7 @@ function tx2(epoch: number): string {
 
 test("mode: load stays unwired: nothing outside test/ builds the HTTP port yet", () => {
   const src = path.resolve(__dirname, "../src");
-  for (const file of ["main.ts", "load/supervisor.ts"]) assert.doesNotMatch(readFileSync(path.join(src, file), "utf8"), /http-control-port|HttpControlPort/, file);
+  const files = (readdirSync(src, { recursive: true }) as string[]).filter((f) => /\.[cm]?[jt]s$/.test(f) && f !== path.join("load", "http-control-port.ts"));
+  assert.ok(files.includes("main.ts") && files.includes(path.join("load", "supervisor.ts")));
+  for (const file of files) assert.doesNotMatch(readFileSync(path.join(src, file), "utf8"), /http-control-port|HttpControlPort/, file);
 });
