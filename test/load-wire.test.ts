@@ -687,9 +687,9 @@ function tx2(epoch: number): string {
   return renewBody({ epoch, seq: 4, nonce: "x", phase: "starting", debited: 3, unresolved: 0, inFlight: 0, state: "running", lagP99Ms: 0 }).body;
 }
 
-test("mode: load stays unwired: nothing outside test/ builds the HTTP port yet", () => {
+test("mode: load stays unwired: only the direct entry (dist/load.js) builds the HTTP port", () => {
   const src = path.resolve(__dirname, "../src");
-  const files = (readdirSync(src, { recursive: true }) as string[]).filter((f) => /\.[cm]?[jt]s$/.test(f) && f !== path.join("load", "http-control-port.ts"));
+  const files = (readdirSync(src, { recursive: true }) as string[]).filter((f) => /\.[cm]?[jt]s$/.test(f) && f !== path.join("load", "http-control-port.ts") && f !== path.join("load", "main.ts"));
   assert.ok(files.includes("main.ts") && files.includes(path.join("load", "supervisor.ts")));
   for (const file of files) assert.doesNotMatch(readFileSync(path.join(src, file), "utf8"), /http-control-port|HttpControlPort/, file);
 });

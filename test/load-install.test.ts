@@ -15,6 +15,9 @@ import {
   checkoutHead,
   installEnv,
   installProblems,
+  netnsPrefix,
+  offlineInstallArgv,
+  offlinePreinstall,
   preinstall,
   readWorkspace,
   satisfies,
@@ -426,3 +429,74 @@ test("cancelling a running preinstall kills npm and waits for it to close", asyn
   await cancelled;
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 });
+
+// ---------------------------------------------------------------- the offline preinstall (e5 plan v3 §2.10)
+
+const ids = { uid: 1001, gid: 118 };
+
+test("the load path's install is npm ci offline from the recipe cache, in a fresh network namespace, as the runner's user", (t) => {
+  const tc: Toolchain = { nodeDir: "/opt/hostedtoolcache/node/24.22.3/x64", node: "/opt/hostedtoolcache/node/24.22.3/x64/bin/node", npmCli: "/opt/hostedtoolcache/node/24.22.3/x64/lib/node_modules/npm/bin/npm-cli.js", nodeVersion: "24.22.3", npmVersion: "11.19.1" };
+  const scratch = tmp(t);
+  const { file, args } = offlineInstallArgv(tc, "/home/runner/recipe/npm-cache", scratch, ids);
+  assert.equal(file, "/usr/bin/sudo");
+  const envAt = args.indexOf("/usr/bin/env");
+  assert.deepEqual(args.slice(0, envAt + 2), ["-n", "/usr/bin/unshare", "--net", "--", "/usr/bin/setpriv", "--reuid=1001", "--regid=118", "--init-groups", "/usr/bin/env", "-i"]);
+  assert.deepEqual(netnsPrefix(ids), ["/usr/bin/sudo", ...args.slice(0, envAt + 2)]);
+  const rest = args.slice(envAt + 2);
+  const nodeAt = rest.indexOf(tc.node);
+  const env = Object.fromEntries(rest.slice(0, nodeAt).map((kv) => [kv.slice(0, kv.indexOf("=")), kv.slice(kv.indexOf("=") + 1)]));
+  assert.deepEqual(rest.slice(nodeAt), [tc.node, tc.npmCli, "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache", "/home/runner/recipe/npm-cache"]);
+  assert.equal(env.npm_config_offline, "true");
+  assert.equal(env.npm_config_cache, "/home/runner/recipe/npm-cache");
+  assert.equal(env.npm_config_ignore_scripts, "true");
+  assert.equal(env.npm_config_git, "/bin/false");
+  assert.ok(env.npm_config_logs_dir!.startsWith(scratch), "npm writes its logs to the scratch folder, not the cache");
+  for (const key of Object.keys(env)) assert.match(key, /^(PATH|HOME|npm_config_[a-z_]+)$/, key);
+});
+
+test("a missing recipe cache is refused before npm runs", async (t) => {
+  const ws = workspace(t);
+  await assert.rejects(offlinePreinstall(ws, localToolchainOrFake(), tmp(t), { cache: path.join(tmp(t), "absent"), ...ids }), /install_unsupported: .*npm cache/);
+});
+
+const canUnshare = (() => {
+  if (process.platform !== "linux") return false;
+  try {
+    execFileSync("/usr/bin/sudo", ["-n", "/usr/bin/unshare", "--net", "--", "/bin/true"], { stdio: "ignore", timeout: 10_000 });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+const self = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+
+test("the namespace the install runs in has no route out: a connection to a listener on the host fails", { skip: canUnshare ? false : "needs passwordless sudo and unshare (hosted Ubuntu, S0)" }, async (t) => {
+  const server = await markerServer(t);
+  const port = new URL(server.url).port;
+  const [file, ...prefix] = netnsPrefix(self);
+  const out = execFileSync(file!, [...prefix, process.execPath, "-e", `require("node:net").connect(${port}, "127.0.0.1").on("connect", () => console.log("connected")).on("error", (e) => console.log(e.code))`], { encoding: "utf8", timeout: 20_000 });
+  assert.notEqual(out.trim(), "connected");
+  assert.deepEqual(server.hits, []);
+});
+
+test("a cache miss is refused, and the install reached nothing", { skip: canUnshare && hasLocalNpm ? false : "needs passwordless sudo, unshare and npm beside this Node" }, async (t) => {
+  const ws = workspace(t, { manifest: { name: "app", version: "1.0.0", dependencies: { "left-pad": "^1.3.0" } }, lock: { name: "app", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "app", version: "1.0.0", dependencies: { "left-pad": "^1.3.0" } }, "node_modules/left-pad": { version: "1.3.0", resolved: `${REG}/left-pad/-/left-pad-1.3.0.tgz`, integrity: INTEGRITY } } } });
+  const cache = tmp(t);
+  chmodSync(cache, 0o755);
+  await assert.rejects(offlinePreinstall(ws, localToolchain(), tmp(t), { cache, ...self }), /install_failed/);
+  assert.equal(existsSync(path.join(ws, "node_modules/left-pad")), false);
+});
+
+test("an offline install from a cache holding every locked package installs with no lifecycle script", { skip: canUnshare && hasLocalNpm ? false : "needs passwordless sudo, unshare and npm beside this Node" }, async (t) => {
+  const marker = path.join(tmp(t), "script-ran");
+  const manifest = { name: "app", version: "1.0.0", scripts: { preinstall: `touch ${marker}`, postinstall: `touch ${marker}` } };
+  const lock = { name: "app", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "app", version: "1.0.0" } } };
+  const ws = workspace(t, { manifest, lock });
+  const digests = await offlinePreinstall(ws, localToolchain(), tmp(t), { cache: tmp(t), ...self });
+  assert.equal(existsSync(marker), false, "a lifecycle script ran");
+  assert.equal(digests.tree, await treeDigest(ws));
+});
+
+function localToolchainOrFake(): Toolchain {
+  return hasLocalNpm ? localToolchain() : { nodeDir: path.dirname(path.dirname(process.execPath)), node: process.execPath, npmCli: "/nonexistent/npm-cli.js", nodeVersion: process.versions.node, npmVersion: "0.0.0" };
+}

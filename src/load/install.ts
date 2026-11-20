@@ -8,8 +8,12 @@
  * The checkout is then recorded: `treeDigest` over everything that will be mounted, and
  * `checkoutHead` read from `.git` as files, so no git binary reads the checkout's own config.
  *
- * Not in E4 (PQA-3580): a network fence for the install that does not depend on npm, private
- * registries, other package managers.
+ * The load path installs offline (e5 plan v3 §2.10): `npm ci --offline` from the recipe's
+ * tarball cache, which npm checks against the lockfile's integrity, in a fresh network namespace
+ * with no interface up, as the runner's own user; a cache miss is refused, never fetched.
+ * `preinstall` (with the registry) is `mode: check`'s only.
+ *
+ * Not in E4 (PQA-3580): private registries, other package managers.
  */
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -639,8 +643,66 @@ export async function preinstall(ws: string, tc: Toolchain, scratch: string, tim
   const problems = installProblems(readWorkspace(ws));
   if (problems.length > 0) throw new InstallRefused(problems);
   const env = installEnv(tc, scratch);
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(tc.node, [tc.npmCli, "ci", "--ignore-scripts"], { cwd: ws, env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL", signal });
+  await runNpm(tc.node, [tc.npmCli, "ci", "--ignore-scripts"], { cwd: ws, env }, timeoutMs, signal);
+  return digestsOf(ws, signal);
+}
+
+export interface OfflineInstall {
+  /** The recipe's npm cache: every tarball the lockfile names, which npm checks by integrity. */
+  cache: string;
+  /** The runner's user: the install drops back to it inside the namespace. */
+  uid: number;
+  gid: number;
+}
+
+/** Runs the rest of the argv in a new network namespace (only a loopback, down) as `uid:gid`, with an empty environment. */
+export function netnsPrefix(o: { uid: number; gid: number }): string[] {
+  if (!Number.isSafeInteger(o.uid) || o.uid < 0 || !Number.isSafeInteger(o.gid) || o.gid < 0) throw new InstallRefused(["the runner's uid and gid must be whole numbers"]);
+  return ["/usr/bin/sudo", "-n", "/usr/bin/unshare", "--net", "--", "/usr/bin/setpriv", `--reuid=${o.uid}`, `--regid=${o.gid}`, "--init-groups", "/usr/bin/env", "-i"];
+}
+
+/** The offline install's command: the namespace prefix, npm's whole environment as arguments, then npm ci offline. */
+export function offlineInstallArgv(tc: Toolchain, cache: string, scratch: string, o: { uid: number; gid: number }): { file: string; args: string[]; env: Record<string, string> } {
+  const env = { ...installEnv(tc, scratch), npm_config_cache: cache, npm_config_offline: "true", npm_config_logs_dir: path.join(scratch, "logs") };
+  const [file, ...prefix] = netnsPrefix(o);
+  const vars = Object.entries(env).map(([k, v]) => `${k}=${v}`);
+  return { file: file!, args: [...prefix, ...vars, tc.node, tc.npmCli, "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache", cache], env };
+}
+
+/**
+ * The load path's pre-claim install: validated as `preinstall` is, then `npm ci --offline` from
+ * the recipe cache with no network interface. A cache miss fails `install_failed`; nothing is
+ * fetched. Refuses with `install_unsupported` before npm runs.
+ */
+export async function offlinePreinstall(ws: string, tc: Toolchain, scratch: string, o: OfflineInstall, timeoutMs = INSTALL_MS, signal?: AbortSignal): Promise<InstallDigests> {
+  signal?.throwIfAborted();
+  let cache: string;
+  try {
+    cache = realpathSync(o.cache);
+    if (!statSync(cache).isDirectory()) throw new Error("not a directory");
+  } catch {
+    throw new InstallRefused(["the recipe's npm cache is missing"]);
+  }
+  const problems = installProblems(readWorkspace(ws));
+  if (problems.length > 0) throw new InstallRefused(problems);
+  const { file, args } = offlineInstallArgv(tc, cache, scratch, o);
+  await runNpm(file, args, { cwd: ws, env: { PATH: "/usr/bin:/bin" } }, timeoutMs, signal);
+  return digestsOf(ws, signal);
+}
+
+async function digestsOf(ws: string, signal?: AbortSignal): Promise<InstallDigests> {
+  signal?.throwIfAborted();
+  return {
+    lock: await sha256File(path.join(ws, "package-lock.json"), signal),
+    hiddenLock: existsSync(path.join(ws, "node_modules/.package-lock.json")) ? await sha256File(path.join(ws, "node_modules/.package-lock.json"), signal) : "",
+    tree: await treeDigest(ws, signal),
+  };
+}
+
+/** Runs npm (or its wrapper), its output neutralized onto stderr; rejects `install_failed` on a non-zero exit. */
+function runNpm(file: string, args: string[], o: { cwd: string; env: Record<string, string> }, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(file, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL", signal });
     for (const stream of [child.stdout!, child.stderr!]) {
       stream.setEncoding("utf8");
       let pending = "";
@@ -660,12 +722,6 @@ export async function preinstall(ws: string, tc: Toolchain, scratch: string, tim
       else reject(new Error(`install_failed: npm ci exited ${code ?? exitSignal}`));
     });
   });
-  signal?.throwIfAborted();
-  return {
-    lock: await sha256File(path.join(ws, "package-lock.json"), signal),
-    hiddenLock: existsSync(path.join(ws, "node_modules/.package-lock.json")) ? await sha256File(path.join(ws, "node_modules/.package-lock.json"), signal) : "",
-    tree: await treeDigest(ws, signal),
-  };
 }
 
 /**

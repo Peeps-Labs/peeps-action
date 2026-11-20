@@ -8,24 +8,37 @@
  *   (minted and sent in one synchronous step) → launch ticket → `init` → Checking (a barrier on
  *   per-turn gate evidence) → measurement → one terminal `terminate(reason)` → draining renewals
  *   until the gate has settled, then a local `gate_closed` → ordered evidence, with a finite
- *   deadline → teardown.
+ *   deadline, beside the proof that the jail is empty → the release-bearing `closed` renewal →
+ *   teardown.
  *
- * No `closed` renewal is ever sent: that is E5's.
+ * `closed` (e5 plan §2.4, v2 §4) is sent once, and only after settlement: the proxy has closed
+ * every upstream, no renewal is outstanding, no request is in flight, and the jail ended with its
+ * cgroup proven empty (or no launch was ever attempted). It carries the same final debit as the
+ * evidence's final watermark, and is retried with identical bytes until a matching receipt or the
+ * reporting deadline. Its answer reopens nothing. Without that proof no `closed` is sent, and
+ * Peeps releases on the job's completion instead.
+ *
+ * The evidence also carries every renewal's latency (first send to the applied answer), the
+ * event loop's delay, and each renewal reports the scheduler's p99 start lag (`lagP99Ms`) over
+ * the last interval. The evidence stream drops a batch only on `{ok: true}`; a transport failure
+ * is retried with the same bytes after a growing pause; any refusal, or a record that cannot fit
+ * a batch, latches the evidence `incomplete`, and no final follows.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import os from "node:os";
 import path from "node:path";
 import { CUT_REASONS, DENY_REASONS, Accounting, requestDelta, zeroCounts, type IntervalRecord, type CohortRecord } from "./accounting";
 import { sharedClocks } from "./clocks";
-import { decodeClaimReply, decodeRenewReply, planHashOf, renewBody, type Binding, type ClaimRequest, type ControlPort, type Grant, type RenewState } from "./control-port";
+import { decodeClaimReply, decodeClosedReceipt, decodeRenewReply, planHashOf, renewBody, type Binding, type ClaimRequest, type ControlPort, type Grant, type RenewState } from "./control-port";
 import { DIALS_PER_TURN, ENGINE_LIMITS, OUTSTANDING_PER_TURN, runLimits, type EngineConstants, type RunLimits } from "./engine-limits";
 import { Gate, type Clocks } from "./gate/admission";
 import { createRunCa } from "./gate/ca";
 import { encodeHandoffs, Journal, type JournalSnapshot } from "./gate/journal";
 import { GateProxy, makeDial, type Dial, type DialSeams } from "./gate/proxy";
 import { batchHash } from "./gate/reconcile";
-import { checkoutHead, preinstall as realPreinstall, treeDigest, trustedToolchain, type InstallDigests } from "./install";
+import { checkoutHead, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests } from "./install";
 import { NoTicket, probe as realProbe, startJail, TicketRefused, type JailHandle, type ProbeReport, type StartJailOptions } from "./jail";
 import type { CtlFrame, Ticket } from "./jail/ctl";
 import type { JailSpec } from "./jail/spec";
@@ -47,9 +60,14 @@ export interface SupervisorConstants {
   /** One renew attempt, before it is sent again (identical bytes). */
   renewAttemptMs: number;
   /** After a turn's deadline, how long its outcome may take before the executor is unresponsive. */
-  stopGraceMs: number;
-  /** Largest evidence batch, in bytes. */
+  outcomeTimeoutMs: number;
+  /** Largest evidence batch, in bytes (P1: 256 KiB of UTF-8). */
   maxBatchBytes: number;
+  /** Largest encoded events body, in bytes (P1: 300 KiB). */
+  maxEventsBodyBytes: number;
+  /** The first pause before an evidence batch or the closed renewal is sent again; it doubles to the max. */
+  retryMs: number;
+  retryMaxMs: number;
 }
 
 export const SUPERVISOR_CONSTANTS: SupervisorConstants = {
@@ -59,8 +77,11 @@ export const SUPERVISOR_CONSTANTS: SupervisorConstants = {
   intervalMs: 10_000,
   tickMs: 50,
   renewAttemptMs: 1_000,
-  stopGraceMs: 5_000,
+  outcomeTimeoutMs: 5_000,
   maxBatchBytes: 256 * 1024,
+  maxEventsBodyBytes: 300 * 1024,
+  retryMs: 100,
+  retryMaxMs: 2_000,
 };
 
 export interface LoadRunOptions {
@@ -75,6 +96,12 @@ export interface LoadRunOptions {
   /** The action's dist folder. */
   actionDir: string;
   port: ControlPort;
+  /** The dispatch's grant reference, sent with the claim. */
+  grantRef?: string;
+  /** The recipe's npm cache, for the offline pre-claim install. Without it the real install refuses. */
+  npmCache?: string;
+  /** When set, every origin the grant allows must be on one of these hosts (E5's harness: the sink only). */
+  harnessHosts?: string[];
   actionVersion?: string;
   runAttempt?: number;
   checkRunId?: number;
@@ -112,7 +139,48 @@ export type LoadEvent =
   | { type: "outcome"; turn: number; kind: string }
   | { type: "terminate"; reason: string; status: LoadStatus }
   | { type: "gate_closed"; debited: number }
+  | { type: "closed"; seq: number; outcome: ClosedOutcome["state"] }
   | { type: "snapshot"; at: "terminate"; handoffs: { debited: number; unattempted: number[] }; journal: JournalSnapshot; monoMs: number; leaseMonoUntil: number };
+
+/** What became of the release-bearing `closed` renewal. */
+export interface ClosedOutcome {
+  /** `acked`: a matching receipt came back; `withheld`: settlement was not proven, so none was sent. */
+  state: "acked" | "refused" | "unanswered" | "withheld" | "none";
+  /** Why it was withheld or refused. */
+  reason?: string;
+  seq?: number;
+  /** The final debit it carried: the evidence's final watermark too. */
+  debited?: number;
+  attempts: number;
+  /** First send to the receipt, on the monotonic clock. */
+  latencyMs: number | null;
+}
+
+/**
+ * Every renewal allocated, in seq order, as `[seq, attempts, ms, outcome]`: `ms` runs from its
+ * first send to the answer applied (retries included, on the monotonic clock), null when no
+ * answer was applied. Percentiles are nearest-rank over every renewal, an unanswered one counted
+ * above any answered one (null when the rank lands on it).
+ */
+export interface RenewalLatency {
+  records: [number, number, number | null, string][];
+  count: number;
+  unanswered: number;
+  p50Ms: number | null;
+  p99Ms: number | null;
+  p999Ms: number | null;
+  maxMs: number | null;
+}
+
+/** `complete`: the final was acknowledged with no hole before it. */
+export interface EvidenceState {
+  state: "complete" | "incomplete" | "missing";
+  /** The first seq Peeps did not accept, when it refused one. */
+  seq?: number;
+  reason?: string;
+  /** The record that could not fit a batch: its kind and index. */
+  record?: { kind: string; index: number };
+}
 
 export interface LoadResult {
   status: LoadStatus;
@@ -128,6 +196,11 @@ export interface LoadResult {
   /** The evidence stream's final watermark, or missing when the deadline passed first. */
   final: { watermark: number } | "missing";
   renewals: { sent: number; states: RenewState[]; afterTerminate: number };
+  latency: RenewalLatency;
+  /** The event loop's delay over the run, from `monitorEventLoopDelay`. */
+  eventLoop: { p99Ms: number; maxMs: number };
+  closed: ClosedOutcome;
+  evidence: EvidenceState;
   cleanup: "clean" | "dirty" | "not_started";
   duplicateOutcomes: number;
   failures: { message: string; location: string | null }[];
@@ -222,6 +295,15 @@ class LoadRun {
   private watchTimer: NodeJS.Timeout | undefined;
   private tickTimer: NodeJS.Timeout | undefined;
   private graceEnd: Clocks | undefined;
+  /** How long a drain may take: the grant's grace, never longer than a measured turn's deadline (also how long a cohort waits to be sealed). */
+  private drainGraceMs = 0;
+  /** Per allocated renewal: its attempts, the ms from first send to the applied answer, and the outcome. */
+  private readonly latency = new Map<number, { attempts: number; ms: number | null; outcome: string }>();
+  /** Measured starts' lag behind their due tick, on the plan's clock, for `lagP99Ms`. */
+  private readonly startLags: { atMs: number; lagMs: number }[] = [];
+  private readonly loopDelay = monitorEventLoopDelay({ resolution: 10 });
+  private closedOutcome: ClosedOutcome = { state: "none", attempts: 0, latencyMs: null };
+  private readonly closedCancel = new AbortController();
 
   private readonly credentials = new Map<string, number>();
   private readonly turns = new Map<number, TurnState>();
@@ -241,6 +323,8 @@ class LoadRun {
   private proxyClosed: Promise<void> | undefined;
   private jailEnded: Promise<{ clean: boolean }> | undefined;
   private jailLaunchPending = false;
+  /** The launch was attempted: from then on only an ended, clean jail proves nothing of this run is left. */
+  private launchCalled = false;
   private gateClosed = false;
   private outcomeWaiters = new Set<() => void>();
   private hard = false;
@@ -254,6 +338,8 @@ class LoadRun {
   private readonly evidenceQueue: { body: { streamId: string; seq: number; payloadHash: string; batch: string; final?: { watermark: number } } }[] = [];
   private evidenceRunning: Promise<void> | undefined;
   private evidenceStopped = false;
+  private readonly evidenceCancel = new AbortController();
+  private incomplete: Omit<EvidenceState, "state"> | undefined;
   private finalSent: { watermark: number } | undefined;
 
   constructor(private readonly o: LoadRunOptions, private readonly s: LoadSeams) {
@@ -280,11 +366,13 @@ class LoadRun {
     const onHard = () => this.hardCancel();
     if (this.o.hardSignal?.aborted) onHard();
     else this.o.hardSignal?.addEventListener("abort", onHard, { once: true });
+    this.loopDelay.enable();
     try {
       await Promise.race([this.execute(), this.hardLimit]);
       await this.terminated;
       return await this.finish();
     } finally {
+      this.loopDelay.disable();
       clearTimeout(this.hardTimer);
       this.signal.removeEventListener("abort", onAbort);
       this.o.hardSignal?.removeEventListener("abort", onHard);
@@ -326,11 +414,13 @@ class LoadRun {
     );
   }
 
+  /** Offline, from the recipe's npm cache, with no network interface (e5 plan v3 §2.10). */
   private async realPreinstall(): Promise<InstallDigests> {
     this.signal.throwIfAborted();
+    if (!this.o.npmCache) throw new Refused("didnt_start", "install_unsupported", "no recipe npm cache");
     const scratch = mkdtempSync(path.join(os.tmpdir(), "peeps-load-install-"));
     try {
-      return await realPreinstall(this.o.workspace, trustedToolchain(this.o.nodeDir, this.o.workspace), scratch, undefined, this.signal);
+      return await offlinePreinstall(this.o.workspace, trustedToolchain(this.o.nodeDir, this.o.workspace), scratch, { cache: this.o.npmCache, uid: process.getuid!(), gid: process.getgid!() }, undefined, this.signal);
     } catch (error) {
       throw new Refused("didnt_start", "install_unsupported", (error as Error).message);
     } finally {
@@ -343,6 +433,7 @@ class LoadRun {
   private async claim(binding: Binding, report: ProbeReport): Promise<void> {
     const body: ClaimRequest = {
       protocol: 1,
+      ...(this.o.grantRef !== undefined ? { grantRef: this.o.grantRef } : {}),
       actionVersion: this.o.actionVersion ?? "0.0.0",
       idempotencyKey: randomUUID(),
       runAttempt: this.o.runAttempt ?? 1,
@@ -393,8 +484,18 @@ class LoadRun {
       unresolved: gate?.unresolved ?? 0,
       inFlight: gate?.inFlight ?? 0,
       state: this.renewState,
-      lagP99Ms: 0,
+      lagP99Ms: this.lagP99Ms(),
     });
+  }
+
+  /** The p99 (nearest rank) of measured starts' lag behind their due tick over the last interval, in whole ms. */
+  private lagP99Ms(): number {
+    if (this.phase !== "measurement" || this.startLags.length === 0) return 0;
+    const since = this.clocks().monoMs - this.measureStartMono - this.k.intervalMs;
+    while (this.startLags.length && this.startLags[0]!.atMs < since) this.startLags.shift();
+    const lags = this.startLags.map((x) => x.lagMs).sort((a, b) => a - b);
+    const p = nearestRank(lags, 0.99);
+    return p === undefined ? 0 : Math.max(0, Math.ceil(p));
   }
 
   /** One renewal, retried with identical bytes to its answer while the lease it was sent under holds. */
@@ -411,6 +512,8 @@ class LoadRun {
     this.renewals.sent += 1;
     this.renewals.states.push(state);
     if (this.reason !== undefined) this.renewals.afterTerminate += 1;
+    const record = { attempts: 0, ms: null as number | null, outcome: "none" };
+    this.latency.set(tx.seq, record);
     const signal = this.renewController.signal;
     // Before every retry: a pause, so a port that fails or answers at once never holds the event
     // loop (and the signal handlers, the watch and the proxy with it) for the rest of the lease;
@@ -426,6 +529,7 @@ class LoadRun {
       if (signal.aborted) return;
       const attempt = AbortSignal.any([signal, AbortSignal.timeout(this.k.renewAttemptMs)]);
       let raw: unknown;
+      record.attempts += 1;
       try {
         raw = await this.o.port.renew(g.claimId, g.runToken, tx.body, attempt);
       } catch {
@@ -445,6 +549,8 @@ class LoadRun {
         if (!(await again())) return;
         continue;
       }
+      record.ms = Math.max(0, now.monoMs - tx.firstSendMono);
+      record.outcome = d.kind === "lease" ? "held" : d.kind;
       if (d.kind === "lost") {
         if (d.stop?.mode === "now") {
           this.stopNowLive = true;
@@ -483,7 +589,7 @@ class LoadRun {
   private startDrain(): void {
     if (this.graceEnd === undefined) {
       const t = this.clocks();
-      this.graceEnd = { monoMs: t.monoMs + this.k.stopGraceMs, wallMs: t.wallMs + this.k.stopGraceMs };
+      this.graceEnd = { monoMs: t.monoMs + this.drainGraceMs, wallMs: t.wallMs + this.drainGraceMs };
       this.gate!.drain(this.graceEnd);
     }
     this.armWatch();
@@ -532,6 +638,11 @@ class LoadRun {
     const limits = runLimits(input.value, g.limits, { parallel: OUTSTANDING_PER_TURN, constants: this.engine });
     if (!limits.ok) throw new Refused("didnt_start", limits.reason, limits.detail);
     this.limits = limits.value;
+    this.drainGraceMs = Math.min(g.graceMs, limits.value.budgets.measurement.turnDeadlineMs);
+    if (this.o.harnessHosts) {
+      const allowed = new Set(this.o.harnessHosts.map((h) => h.toLowerCase()));
+      for (const a of limits.value.approved.values()) if (!allowed.has(a.host.toLowerCase())) throw new Refused("didnt_start", "outside_harness");
+    }
     let base: URL;
     try {
       base = new URL(g.baseURL);
@@ -597,6 +708,7 @@ class LoadRun {
     const proxy = this.proxy;
     const launch = this.s.launch ?? startJail;
     this.jailLaunchPending = true;
+    this.launchCalled = true;
     let handle: JailHandle;
     try {
       handle = await launch(spec, { listenProxy: (p) => proxy.listen(p).then(() => proxy.server) }, this.signal);
@@ -696,7 +808,7 @@ class LoadRun {
     this.jail!.send({ type: "cancel", turn: state.turn });
     state.timers.push(setTimeout(() => {
       if (state.outcome === undefined && this.reason === undefined) this.terminate("executor_unresponsive", "failed");
-    }, this.k.stopGraceMs));
+    }, this.k.outcomeTimeoutMs));
   }
 
   private onFrame(f: CtlFrame): void {
@@ -801,6 +913,7 @@ class LoadRun {
           continue;
         }
         this.measurement.started += 1;
+        this.startLags.push({ atMs: planNow, lagMs: Math.max(0, planNow - st.dueMs) });
         this.accounting.start(id, planNow, st.stage, planNow + this.limits!.budgets.measurement.turnDeadlineMs);
       }
     }
@@ -889,25 +1002,30 @@ class LoadRun {
     this.renewing = false;
     clearTimeout(this.renewTimer);
     this.renewController.abort();
+    // One final debit, shared by the final watermark and `closed`.
+    const finalDebit = this.gate?.admitted ?? 0;
     if (ok && this.gate) {
       this.gateClosed = true;
-      this.emit({ type: "gate_closed", debited: this.gate.admitted });
+      this.emit({ type: "gate_closed", debited: finalDebit });
     }
     if (this.journal) {
       const planNow = this.phase === "measurement" ? this.clocks().monoMs - this.measureStartMono : 0;
       this.countRequests(Math.max(0, planNow));
       this.publishIntervals(Math.max(0, planNow), true);
       this.queueHandoffs();
-      if (this.gateClosed) this.queueFinal(this.gate!.admitted);
+      if (this.gateClosed) this.queueFinal(finalDebit);
     }
-    await Promise.race([this.flushEvidence(), deadline]);
+    // Proof collection runs beside the evidence: `closed` never waits for an upload.
+    const cleanup = this.cleanupProof(deadline);
+    const closing = cleanup.then((c) => this.close(ok, c, finalDebit, deadline));
+    await Promise.race([Promise.all([this.flushEvidence(), closing]), deadline]);
     this.evidenceStopped = true;
-    const jailEnd = await Promise.race([
-      this.jailEnded ?? Promise.resolve(null),
-      deadline.then(() => null),
-    ]).catch(() => null);
+    this.evidenceCancel.abort();
+    this.closedCancel.abort();
+    const jailEnd = await Promise.race([cleanup, deadline.then(() => "dirty" as const)]);
     if (this.caDir) rmSync(this.caDir, { recursive: true, force: true });
     deadline.cancel();
+    const loop = this.loopDelay;
     return {
       status: this.status!,
       reason: this.reason!,
@@ -920,10 +1038,98 @@ class LoadRun {
       gateClosed: this.gateClosed,
       final: this.finalSent ?? "missing",
       renewals: this.renewals,
-      cleanup: this.jail ? (jailEnd?.clean ? "clean" : "dirty") : this.jailLaunchPending ? "dirty" : "not_started",
+      latency: this.latencySummary(true),
+      eventLoop: { p99Ms: loop.count ? round(loop.percentile(99) / 1e6) : 0, maxMs: loop.count ? round(loop.max / 1e6) : 0 },
+      closed: this.closedOutcome,
+      evidence: this.finalSent ? { state: "complete" } : this.incomplete ? { state: "incomplete", ...this.incomplete } : { state: "missing" },
+      cleanup: jailEnd,
       duplicateOutcomes: this.duplicateOutcomes,
       failures: this.failures,
     };
+  }
+
+  /**
+   * Whether nothing of this run can be left: `clean` when the jail ended with its cgroup proven
+   * empty, or when no launch was ever attempted (`not_started`). A launch still pending, one that
+   * failed, or an end that is not clean or not back by the deadline is `dirty`.
+   */
+  private async cleanupProof(deadline: Promise<void>): Promise<"clean" | "dirty" | "not_started"> {
+    if (!this.launchCalled) return "not_started";
+    if (this.jailLaunchPending || !this.jail || !this.jailEnded) return "dirty";
+    const end = await Promise.race([this.jailEnded.catch(() => null), deadline.then(() => null)]);
+    return end?.clean ? "clean" : "dirty";
+  }
+
+  /**
+   * The release-bearing `closed` renewal: once, only with settlement proven, retried with
+   * identical bytes until a matching receipt, a refusal or the reporting deadline.
+   */
+  private async close(settled: boolean, cleanup: "clean" | "dirty" | "not_started", debited: number, deadline: Promise<void>): Promise<void> {
+    const lease = this.lease;
+    const g = this.grant;
+    if (!lease || !g) return;
+    const inFlight = this.gate?.inFlight ?? 0;
+    const withheld = !settled ? "unsettled" : cleanup === "dirty" ? "dirty" : inFlight !== 0 ? "in_flight" : undefined;
+    if (withheld) {
+      this.closedOutcome = { state: "withheld", reason: withheld, attempts: 0, latencyMs: null };
+      return;
+    }
+    const t0 = this.clocks();
+    const tx = lease.beginClosed(t0, randomBytes(16).toString("hex"), (seq, nonce) =>
+      renewBody({ epoch: g.epoch, seq, nonce, phase: this.phase, debited, unresolved: this.gate?.unresolved ?? 0, inFlight: 0, state: "closed", lagP99Ms: this.lagP99Ms() }),
+    );
+    if (!tx) return;
+    const out: ClosedOutcome = { state: "unanswered", seq: tx.seq, debited, attempts: 0, latencyMs: null };
+    this.closedOutcome = out;
+    const stop = AbortSignal.any([this.closedCancel.signal, this.hardSignalOr()]);
+    void deadline.then(() => this.closedCancel.abort());
+    let pause = this.k.retryMs;
+    while (!stop.aborted) {
+      out.attempts += 1;
+      let raw: unknown;
+      let answered = true;
+      try {
+        raw = await this.o.port.renew(g.claimId, g.runToken, tx.body, AbortSignal.any([stop, AbortSignal.timeout(this.k.renewAttemptMs)]));
+      } catch {
+        answered = false;
+      }
+      if (answered) {
+        const receipt = decodeClosedReceipt(raw);
+        if (receipt && lease.ackClosed(receipt)) {
+          out.state = "acked";
+          out.latencyMs = round(this.clocks().monoMs - tx.firstSendMono);
+          break;
+        }
+        const refused = isObj(raw) && typeof raw.refused === "string" ? raw.refused.slice(0, 64) : undefined;
+        if (refused !== undefined) {
+          out.state = "refused";
+          out.reason = refused;
+          break;
+        }
+      }
+      // No answer, or one that is not this receipt: the same bytes again, after a pause.
+      await delay(pause, stop).catch(() => undefined);
+      pause = Math.min(pause * 2, this.k.retryMaxMs);
+    }
+    this.emit({ type: "closed", seq: tx.seq, outcome: out.state });
+  }
+
+  /** The closed retries stop with the hard limit too. */
+  private hardSignalOr(): AbortSignal {
+    const ac = new AbortController();
+    void this.hardLimit.then(() => ac.abort());
+    return ac.signal;
+  }
+
+  /** The renewal latency record; `withRecords` keeps every allocation's entry. */
+  private latencySummary(withRecords: boolean): RenewalLatency {
+    const records: RenewalLatency["records"] = [...this.latency.entries()].sort((a, b) => a[0] - b[0]).map(([seq, r]) => [seq, r.attempts, r.ms === null ? null : round(r.ms), r.outcome]);
+    const values = records.map((r) => (r[2] === null ? Number.POSITIVE_INFINITY : r[2])).sort((a, b) => a - b);
+    const at = (q: number) => {
+      const v = nearestRank(values, q);
+      return v === undefined || !Number.isFinite(v) ? null : v;
+    };
+    return { records: withRecords ? records : [], count: records.length, unanswered: records.filter((r) => r[2] === null).length, p50Ms: at(0.5), p99Ms: at(0.99), p999Ms: at(0.999), maxMs: at(1) };
   }
 
   // ---------------------------------------------------------------- evidence
@@ -931,59 +1137,94 @@ class LoadRun {
   private publishIntervals(planNow: number, force: boolean): void {
     if (!this.journal || this.phase !== "measurement") return;
     const intervals: IntervalRecord[] = force ? this.accounting.closeIntervals(Math.ceil((planNow + 1) / this.k.intervalMs) * this.k.intervalMs) : this.accounting.closeIntervals(planNow);
-    const cohorts: CohortRecord[] = this.accounting.sealCohorts(planNow, this.k.stopGraceMs, force);
-    if (intervals.length || cohorts.length) this.queue({ kind: "intervals", intervals, cohorts });
+    const cohorts: CohortRecord[] = this.accounting.sealCohorts(planNow, this.drainGraceMs, force);
+    if (!intervals.length && !cohorts.length) return;
+    if (this.fits({ kind: "intervals", intervals, cohorts })) this.queue({ kind: "intervals", intervals, cohorts });
+    else {
+      this.queueRecords("intervals", "intervals", intervals, { cohorts: [] });
+      this.queueRecords("intervals", "cohorts", cohorts, { intervals: [] });
+    }
   }
 
-  /** The handoffs, in batches under the byte limit. */
+  /** The handoffs, the renewal latencies and the summary, each split to fit a batch. */
   private queueHandoffs(): void {
     const h = encodeHandoffs(this.journal!.handoffs());
-    const per = Math.max(1, Math.floor((this.k.maxBatchBytes - 1024) / 17));
-    for (let i = 0; i === 0 || i < h.unattempted.length; i += per) {
-      this.queue({ kind: "handoffs", debited: h.debited, unattempted: h.unattempted.slice(i, i + per), part: Math.floor(i / per) });
-    }
-    this.queue({ kind: "summary", journal: this.journal!.snapshot(), checking: this.checking, measurement: this.measurement, reason: this.reason, playwright: this.playwright, failures: this.failures.slice(0, 20), denyReasons: DENY_REASONS.length, cutReasons: CUT_REASONS.length, zero: zeroCounts().debited });
+    this.queueRecords("handoffs", "unattempted", h.unattempted, { debited: h.debited });
+    const latency = this.latencySummary(true);
+    this.queueRecords("renewals", "records", latency.records, {});
+    const { records: _records, ...latencyStats } = latency;
+    const loop = this.loopDelay;
+    this.queue({ kind: "summary", journal: this.journal!.snapshot(), checking: this.checking, measurement: this.measurement, reason: this.reason, playwright: this.playwright, failures: this.failures.slice(0, 20), denyReasons: DENY_REASONS.length, cutReasons: CUT_REASONS.length, zero: zeroCounts().debited, latency: latencyStats, eventLoop: { p99Ms: loop.count ? round(loop.percentile(99) / 1e6) : 0, maxMs: loop.count ? round(loop.max / 1e6) : 0 } });
   }
 
   private queueFinal(watermark: number): void {
+    // No complete final follows a record that could not be sent.
+    if (this.incomplete) return;
     this.queue({ kind: "final" }, { watermark });
+  }
+
+  /** Whether `payload` fits one batch and one events body. */
+  private fits(payload: Record<string, unknown>): boolean {
+    const batch = JSON.stringify(payload);
+    return Buffer.byteLength(batch) <= this.k.maxBatchBytes && Buffer.byteLength(JSON.stringify(batch)) + 512 <= this.k.maxEventsBodyBytes;
+  }
+
+  /** `records` under `key`, split to fit before any seq is allocated (`splitToFit`). */
+  private queueRecords(kind: string, key: string, records: readonly unknown[], extra: Record<string, unknown>): void {
+    const split = splitToFit(kind, key, records, extra, (p) => this.fits(p));
+    for (const payload of split.payloads) this.queue(payload);
+    if (split.oversized !== undefined) this.latchIncomplete({ reason: "oversized", record: { kind, index: split.oversized } });
+  }
+
+  private latchIncomplete(why: Omit<EvidenceState, "state">): void {
+    this.incomplete ??= why;
   }
 
   private queue(payload: Record<string, unknown>, final?: { watermark: number }): void {
     if (!this.grant || this.evidenceStopped) return;
+    if (!this.fits(payload)) return this.latchIncomplete({ reason: "oversized", record: { kind: String(payload.kind), index: 0 } });
     const seq = ++this.evidenceSeq;
-    let batch = JSON.stringify(payload);
-    if (Buffer.byteLength(batch) > this.k.maxBatchBytes) batch = JSON.stringify({ kind: payload.kind, truncated: true });
+    const batch = JSON.stringify(payload);
     const payloadHash = batchHash({ streamId: this.streamId, seq, payload: batch, final });
     this.evidenceQueue.push({ body: { streamId: this.streamId, seq, payloadHash, batch, ...(final ? { final } : {}) } });
     this.evidenceRunning ??= this.pump().finally(() => (this.evidenceRunning = undefined));
   }
 
-  /** One batch in flight, retried with identical bytes until its answer. */
+  /**
+   * One batch in flight. Dropped only on `{ok: true}`. A transport failure (a 5xx or 429 too) or
+   * an answer that does not decode sends the same bytes again after a pause that doubles up to
+   * `retryMaxMs`. Any refusal latches the evidence `incomplete` at that seq and stops the
+   * stream, so nothing after a hole is sent and no final is acknowledged past one.
+   */
   private async pump(): Promise<void> {
     const g = this.grant!;
+    let pause = this.k.retryMs;
     while (this.evidenceQueue.length && !this.evidenceStopped) {
       const head = this.evidenceQueue[0]!;
       let answer: unknown;
+      let answered = true;
       try {
-        answer = await this.o.port.events(g.claimId, g.eventsToken, head.body, AbortSignal.timeout(this.k.renewAttemptMs * 2));
+        answer = await this.o.port.events(g.claimId, g.eventsToken, head.body, AbortSignal.any([this.evidenceCancel.signal, AbortSignal.timeout(this.k.renewAttemptMs * 2)]));
       } catch {
-        await delay(50).catch(() => undefined);
-        continue;
+        answered = false;
       }
-      const a = answer as { ok?: boolean; reason?: string } | null;
-      if (a?.ok === false && a.reason === "conflict") {
-        // A conflicting replay: Peeps holds other bytes at this seq. Nothing more is sent.
-        this.evidenceStopped = true;
-        continue;
+      if (this.evidenceStopped) return;
+      if (answered && isObj(answer)) {
+        if (answer.ok === true) {
+          this.evidenceQueue.shift();
+          if (head.body.final) this.finalSent = head.body.final;
+          pause = this.k.retryMs;
+          continue;
+        }
+        const refusal = answer.ok === false ? answer.reason : answer.refused;
+        if (answer.ok === false || typeof answer.refused === "string") {
+          this.latchIncomplete({ seq: head.body.seq, reason: typeof refusal === "string" ? refusal.slice(0, 64) : "unknown" });
+          this.evidenceStopped = true;
+          return;
+        }
       }
-      if (a?.ok === true || a?.ok === false) {
-        this.evidenceQueue.shift();
-        if (a.ok && head.body.final) this.finalSent = head.body.final;
-        continue;
-      }
-      // An answer that does not decode is no answer (control-port.ts): the same bytes go again.
-      await delay(50).catch(() => undefined);
+      await delay(pause, this.evidenceCancel.signal).catch(() => undefined);
+      pause = Math.min(pause * 2, this.k.retryMaxMs);
     }
   }
 
@@ -999,6 +1240,36 @@ function statusOf(reason: string): LoadStatus {
   if (reason === "lease_lost") return "lease_lost";
   if (reason === "didnt_start") return "didnt_start";
   return "failed";
+}
+
+const round = (ms: number) => Math.round(ms * 10) / 10;
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * `records` under `key` as batches that each fit: `{kind, ...extra, first, [key]}`, halved until
+ * they do, in order, with `first` the index of a part's first record. A single record that cannot
+ * fit is never sent: `oversized` is the first such index, and nothing after it is batched.
+ */
+export function splitToFit(kind: string, key: string, records: readonly unknown[], extra: Record<string, unknown>, fits: (payload: Record<string, unknown>) => boolean): { payloads: Record<string, unknown>[]; oversized?: number } {
+  const payloads: Record<string, unknown>[] = [];
+  let oversized: number | undefined;
+  const go = (part: readonly unknown[], first: number): void => {
+    if (oversized !== undefined) return;
+    const payload = { kind, ...extra, first, [key]: part };
+    if (fits(payload)) return void payloads.push(payload);
+    if (part.length <= 1) return void (oversized = first);
+    const half = Math.ceil(part.length / 2);
+    go(part.slice(0, half), first);
+    go(part.slice(half), first + half);
+  };
+  go(records, 0);
+  return oversized === undefined ? { payloads } : { payloads, oversized };
+}
+
+/** Nearest-rank: the value at rank ⌈q·n⌉ of the sorted values (q = 1: the largest). */
+export function nearestRank(sorted: readonly number[], q: number): number | undefined {
+  if (sorted.length === 0) return undefined;
+  return sorted[Math.min(sorted.length, Math.max(1, Math.ceil(q * sorted.length))) - 1];
 }
 
 function pick<T extends object>(o: T | undefined, keys: string[]): Partial<T> {

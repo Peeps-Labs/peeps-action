@@ -8,6 +8,11 @@
  *     re-evaluated against stop and expiry, never extended; a changed payload, a seq gap or a
  *     falling `debited` is refused; `ceiling = min(requestBudget, debited + allowance)`;
  *     `leaseUntil = min(now + ttl, hardEnd)`, and the grace end while draining;
+ *   - closed (e5 plan §2.4, P1's renew.json): accepted at any seq above the last applied one
+ *     (a gap is allowed only for closed), with the epoch, the hash, no falling `debited` and
+ *     `inFlight` 0 (else `malformed`), whether or not the lease is still held; it answers an
+ *     immutable receipt, a replay of the closed seq gets the same receipt, and every later
+ *     renewal is refused `closed`;
  *   - events: one stream per claim, in order, through `EventLedger`.
  *
  * Refusals answer `{refused}`, which the runner cannot match to a renewal, so it is no answer.
@@ -40,6 +45,12 @@ export interface PortScript {
   eventsBlocked?: boolean;
   /** Events: this seq is answered as a conflicting replay. */
   conflictSeq?: number;
+  /** The closed renewal never answers (`silentAfterMs` leaves it answered, so a silent Peeps' run still reports quickly). */
+  closedSilent?: boolean;
+  /** Events: answered with a transport failure (as a 5xx would be) this many times in all. */
+  eventsFailures?: number;
+  /** Events: from this seq on, answered with this refusal instead. */
+  eventsRefuseFrom?: { seq: number; answer: unknown };
 }
 
 export interface FakeSetup {
@@ -91,6 +102,11 @@ export class FakeControlPort implements ControlPort {
   private last: Stored | undefined;
   private lastSeq = 0;
   private lastDebited = 0;
+  private highestCeiling = 0;
+  private leaseUntil = 0;
+  /** The accepted closed: its seq, body, receipt text and Peeps' time. */
+  closed: { seq: number; body: string; receipt: string; atServerMs: number; debited: number } | undefined;
+  eventsCalls = 0;
   private drainingSince: number | undefined;
   private hardEndServerMs = 0;
   private readonly ackLost = new Set<number>();
@@ -132,6 +148,8 @@ export class FakeControlPort implements ControlPort {
     const maxRunMs = this.setup.maxRunMs ?? 120_000;
     const graceMs = this.setup.graceMs ?? 5_000;
     this.hardEndServerMs = now + maxRunMs;
+    this.highestCeiling = this.ceilingFor(0);
+    this.leaseUntil = Math.min(now + this.ttlMs, this.hardEndServerMs);
     this.claimAnswer = {
       claimId: this.claimId,
       epoch: this.epoch,
@@ -163,7 +181,8 @@ export class FakeControlPort implements ControlPort {
     const record: RenewRecord = { seq: -1, hash: "", fields: {}, body, atServerMs: this.now(), answered: false };
     this.renewals.push(record);
     const answer = this.decide(claimId, runToken, body, record);
-    if (answer === "hang" || (this.script.silentAfterMs !== undefined && this.since() >= this.script.silentAfterMs)) return this.forever(signal);
+    const closing = record.fields.state === "closed";
+    if (answer === "hang" || (closing && this.script.closedSilent) || (!closing && this.script.silentAfterMs !== undefined && this.since() >= this.script.silentAfterMs)) return this.forever(signal);
     if (this.script.delayMs) await sleep(this.script.delayMs, signal);
     signal.throwIfAborted();
     record.answered = true;
@@ -188,8 +207,13 @@ export class FakeControlPort implements ControlPort {
     record.hash = String(requestHash);
     record.fields = fields;
     if (requestHash !== sha256(canonical(fields))) return refuse("hash");
-    if (fields.state === "closed") return refuse("closed_reserved");
     if (fields.epoch !== this.epoch) return refuse("epoch");
+    if (this.closed) {
+      // The receipt is immutable: a replay of the closed seq gets it byte for byte.
+      if (record.seq === this.closed.seq && body === this.closed.body) return JSON.parse(this.closed.receipt) as Record<string, unknown>;
+      return refuse("closed");
+    }
+    if (fields.state === "closed") return this.close(fields, String(requestHash), body, record);
     if (this.script.hangSeq === record.seq) return "hang";
     const seq = record.seq;
     if (this.last && seq === this.lastSeq) {
@@ -204,6 +228,7 @@ export class FakeControlPort implements ControlPort {
     if (fields.state === "draining" && this.drainingSince === undefined) this.drainingSince = now;
     let until = Math.min(now + this.ttlMs, this.hardEndServerMs);
     if (this.drainingSince !== undefined) until = Math.min(until, this.drainingSince + (this.setup.graceMs ?? 5000));
+    const ceiling = Math.max(this.ceilingFor(debited), this.highestCeiling);
     const answer: Record<string, unknown> = {
       claimId: this.claimId,
       epoch: this.epoch,
@@ -212,14 +237,34 @@ export class FakeControlPort implements ControlPort {
       nonce: fields.nonce,
       lease: "held",
       ttlMs: this.ttlMs,
-      ceiling: this.ceilingFor(debited),
+      ceiling,
       leaseUntilServerMs: until,
       serverNowMs: now,
     };
+    this.highestCeiling = ceiling;
+    this.leaseUntil = until;
     this.lastSeq = seq;
     this.lastDebited = debited;
     this.last = { hash: String(requestHash), body, answer };
     return this.reevaluate(answer);
+  }
+
+  private close(fields: Record<string, unknown>, requestHash: string, body: string, record: RenewRecord): Record<string, unknown> {
+    const refuse = (why: string) => {
+      record.refused = why;
+      return { refused: why };
+    };
+    if (fields.inFlight !== 0) return refuse("malformed");
+    if (!(record.seq > this.lastSeq)) return refuse("gap");
+    const debited = Number(fields.debited);
+    if (!Number.isSafeInteger(debited) || debited < this.lastDebited) return refuse("debited");
+    const now = this.now();
+    const receipt = canonical({ ceiling: this.highestCeiling, claimId: this.claimId, closed: true, epoch: this.epoch, lease: "lost", leaseUntilServerMs: Math.min(this.leaseUntil, now), nonce: fields.nonce, planHash: this.planHash, seq: record.seq, serverNowMs: now, ttlMs: 0 });
+    this.closed = { seq: record.seq, body, receipt, atServerMs: now, debited };
+    this.lastSeq = record.seq;
+    this.lastDebited = debited;
+    void requestHash;
+    return JSON.parse(receipt) as Record<string, unknown>;
   }
 
   private reevaluate(stored: Record<string, unknown>): Record<string, unknown> {
@@ -233,7 +278,17 @@ export class FakeControlPort implements ControlPort {
   }
 
   async events(claimId: string, eventsToken: string, body: EventsBody, signal: AbortSignal): Promise<unknown> {
+    this.eventsCalls += 1;
     if (this.script.eventsBlocked) return this.forever(signal);
+    if (this.script.eventsFailures !== undefined && this.script.eventsFailures > 0) {
+      this.script.eventsFailures -= 1;
+      throw new Error("load control events: status 503");
+    }
+    const refuseFrom = this.script.eventsRefuseFrom;
+    if (refuseFrom && body.seq >= refuseFrom.seq) {
+      this.posted.push({ ...structuredClone(body), refused: "scripted" });
+      return refuseFrom.answer;
+    }
     if (this.script.conflictSeq === body.seq) {
       this.posted.push({ ...structuredClone(body), refused: "conflict" });
       return { ok: false, reason: "conflict" };

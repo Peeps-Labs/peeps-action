@@ -99,7 +99,14 @@ test("the fake refuses a changed payload, a seq gap and a falling debited; an ex
   assert.deepEqual(await port.renew(grant.claimId, "wrong", renewBody(fields({ seq: 3, nonce: "n3" })).body, signal), { refused: "auth" });
   const forged = JSON.stringify({ ...fields({ seq: 3, nonce: "n3", debited: 9 }), requestHash: renewBody(fields({ seq: 3, nonce: "n3", debited: 1 })).requestHash });
   assert.deepEqual(await port.renew(grant.claimId, grant.runToken, forged, signal), { refused: "hash" });
-  assert.deepEqual(await send({ ...fields({ seq: 3, nonce: "n3", debited: 9 }), state: "closed" as never }), { refused: "closed_reserved" });
+  const closedBody = renewBody(fields({ seq: 5, nonce: "n5", debited: 9, state: "closed" })).body;
+  const receipt = (await port.renew(grant.claimId, grant.runToken, closedBody, signal)) as Record<string, unknown>;
+  assert.equal(receipt.closed, true, "closed is accepted at any seq above the last applied one");
+  assert.equal(receipt.seq, 5);
+  assert.equal(receipt.lease, "lost");
+  assert.equal(receipt.ttlMs, 0);
+  assert.deepEqual(await port.renew(grant.claimId, grant.runToken, closedBody, signal), receipt, "a replay of closed gets the same receipt");
+  assert.deepEqual(await send(fields({ seq: 6, nonce: "n6", debited: 9 })), { refused: "closed" });
 });
 
 // ---------------------------------------------------------------- replies through the runner's lease

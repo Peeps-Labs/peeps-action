@@ -30,7 +30,7 @@ test("acceptance: 60 s, 100 users with a ramp, about 200 requests a second, on l
   const o: RigOptions = {
     plan: plan() as never,
     limits: { maxUsers: 100, requestBudget: 1_000_000 },
-    setup: { maxRunMs: 300_000, ttlMs: 10_000, renewEveryMs: 2_000 },
+    setup: { maxRunMs: 300_000, ttlMs: 10_000, renewEveryMs: 2_000, graceMs: 10_000 },
     respond: (a, res) => {
       at.push(Date.now());
       res.writeHead(200, { "content-type": "text/plain" });

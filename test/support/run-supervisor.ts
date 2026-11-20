@@ -153,6 +153,7 @@ export const FAST = {
   turnDeadlineMs: 5_000,
   checkingDeadlineMs: 15_000,
   stopGraceMs: 1_500,
+  outcomeTimeoutMs: 1_500,
   startSlackMs: 1_000,
   reportingMs: 4_000,
   loadedMs: 30_000,
@@ -176,6 +177,7 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
     binding,
     ttlMs: 3000,
     renewEveryMs: 500,
+    graceMs: 1_500,
     ...o.setup,
   };
   const port = new FakeControlPort(setup, o.script);
@@ -212,7 +214,54 @@ export function invariants(r: Rig, res: LoadResult): void {
     assert.deepEqual(res.handoffs.unattempted, snap.handoffs.unattempted, "no attempt after terminate");
     assert.ok(r.sink.arrivals.length <= res.handoffs.debited - res.handoffs.unattempted.length, "arrivals ≤ attempted");
   }
-  for (const rec of r.port.renewals) assert.notEqual(rec.fields.state, "closed", "no closed renewal");
+  closedInvariants(r, res);
   assert.equal(r.events.filter((e) => e.type === "terminate").length, 1, "one terminal reason");
 }
 
+/**
+ * `closed` (e5 plan §2.4): at most one seq, every send the same bytes, after `gate_closed`, only
+ * when cleanup was proven, carrying the final debit, after every other renewal, and acknowledged
+ * when Peeps accepted it.
+ */
+export function closedInvariants(r: Rig, res: LoadResult): void {
+  const closed = r.port.renewals.filter((x) => x.fields.state === "closed");
+  if (closed.length === 0) {
+    assert.ok(res.closed.state !== "acked" && res.closed.state !== "refused", res.closed.state);
+    return;
+  }
+  assert.equal(new Set(closed.map((x) => x.body)).size, 1, "one closed, identical bytes on every send");
+  assert.equal(res.cleanup === "clean" || res.cleanup === "not_started", true, `closed only with cleanup proven (${res.cleanup})`);
+  const gateClosedAt = r.events.findIndex((e) => e.type === "gate_closed");
+  const closedAt = r.events.findIndex((e) => e.type === "closed");
+  if (r.events.some((e) => e.type === "gate_closed")) assert.ok(gateClosedAt < closedAt || closedAt < 0, "closed after gate_closed");
+  const first = r.port.renewals.indexOf(closed[0]!);
+  assert.ok(r.port.renewals.slice(first).every((x) => x.fields.state === "closed"), "no renewal after closed");
+  const seqs = r.port.renewals.filter((x) => x.fields.state !== "closed").map((x) => x.seq);
+  assert.ok(closed[0]!.seq > Math.max(0, ...seqs), "closed follows every renewal sent");
+  assert.equal(closed[0]!.fields.inFlight, 0);
+  if (res.handoffs) assert.equal(closed[0]!.fields.debited, res.handoffs.debited, "closed carries the final debit");
+  if (res.final !== "missing") assert.equal(closed[0]!.fields.debited, res.final.watermark, "closed and the final watermark share one debit");
+  if (res.closed.state === "acked") assert.ok(r.port.closed, "acknowledged only what Peeps accepted");
+}
+
+
+const SCRIPTED = path.resolve(__dirname, "../fixtures/load-engine/e4/scripted-executor.js");
+/** The scripted executor (test/fixtures/load-engine/e4), told what to do by its environment. */
+export const scripted = (env: Record<string, string>): RigOptions["jail"] => ({ command: [process.execPath, SCRIPTED], env });
+
+export function why(r: Rig, res: LoadResult): string {
+  return JSON.stringify({ status: res.status, reason: res.reason, failures: res.failures.slice(0, 3), checking: res.checking, stderr: r.jails.made[0]?.stderr().slice(-2000) });
+}
+
+/** An observer that acts once the run enters `phase`. */
+export const onPhase = (phase: "checking" | "measurement", act: (r: Rig) => void) => (e: LoadEvent, r: Rig) => {
+  if (e.type === "phase" && e.phase === phase) act(r);
+};
+
+/** Resolves once Peeps has seen a draining renewal. */
+export async function waitDraining(r: Rig): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (r.port.renewals.some((x) => x.fields.state === "draining" && x.answered)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}

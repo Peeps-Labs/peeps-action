@@ -44,6 +44,16 @@ export interface RenewReply extends ServerLease {
   stop?: { mode: "graceful" | "now"; reason: string };
 }
 
+/** What acknowledges a `closed` renewal: its address and `closed: true`, nothing else. */
+export interface ClosedReceipt {
+  claimId: string;
+  epoch: number;
+  planHash: string;
+  seq: number;
+  nonce: string;
+  closed: true;
+}
+
 /** One renewal in flight: its seq, hash and bytes are fixed once, and every retry sends those bytes. */
 export interface Outstanding {
   readonly seq: number;
@@ -79,8 +89,12 @@ export class RunnerLease {
   private remainingMs: number;
   private lastServerNowMs: number;
   private lastSeq = 0;
+  /** The highest seq allocated, answered or not: a `closed` goes after it, never on it. */
+  private allocated = 0;
   private inFlight: Outstanding | undefined;
   private lostFlag = false;
+  private closedTx: Outstanding | undefined;
+  private closedAckedFlag = false;
 
   /**
    * `sent` and `received` are the claim request's send and reply times. The wall offset and
@@ -113,6 +127,15 @@ export class RunnerLease {
     return this.inFlight;
   }
 
+  get lastAllocatedSeq(): number {
+    return this.allocated;
+  }
+
+  /** A matching receipt acknowledged the `closed` renewal. */
+  get closedAcked(): boolean {
+    return this.closedAckedFlag;
+  }
+
   /** Whether the lease is still running at `t`. Once either clock passes its deadline it is lost for good. */
   held(t: Clocks): boolean {
     if (this.lostFlag) return false;
@@ -126,11 +149,39 @@ export class RunnerLease {
    * The seq, the hash and the body are allocated together and stored once (frozen).
    */
   begin(t: Clocks, nonce: string, build: BuildRenewal): Outstanding | null {
-    if (this.lostFlag || this.inFlight || !this.held(t)) return null;
+    if (this.lostFlag || this.inFlight || this.closedTx || !this.held(t)) return null;
     const seq = this.lastSeq + 1;
+    this.allocated = Math.max(this.allocated, seq);
     const { requestHash, body } = build(seq, nonce);
     this.inFlight = Object.freeze({ seq, nonce, requestHash, body: String(body), firstSendMono: t.monoMs, firstSendWall: t.wallMs });
     return this.inFlight;
+  }
+
+  /**
+   * The release-bearing `closed` renewal (e5 plan §2.4): allowed whether or not the lease is
+   * held, once. Its seq follows the last one allocated, so an abandoned seq (which Peeps may or
+   * may not have seen) is skipped, never reused. The lease is over on the runner from here: a
+   * renewal still outstanding is dropped, and no renewal follows. Its deadline is the caller's
+   * (the reporting deadline), not the lease's.
+   */
+  beginClosed(t: Clocks, nonce: string, build: BuildRenewal): Outstanding | null {
+    if (this.closedTx) return null;
+    this.inFlight = undefined;
+    if (!this.lostFlag) this.lose();
+    const seq = this.allocated + 1;
+    this.allocated = seq;
+    const { requestHash, body } = build(seq, nonce);
+    this.closedTx = Object.freeze({ seq, nonce, requestHash, body: String(body), firstSendMono: t.monoMs, firstSendWall: t.wallMs });
+    return this.closedTx;
+  }
+
+  /** Whether `receipt` acknowledges the `closed` renewal sent. It is read only as that: it changes no deadline. */
+  ackClosed(receipt: ClosedReceipt): boolean {
+    const tx = this.closedTx;
+    const b = this.binding;
+    if (!tx || receipt.closed !== true || receipt.claimId !== b.claimId || receipt.epoch !== b.epoch || receipt.planHash !== b.planHash || receipt.seq !== tx.seq || receipt.nonce !== tx.nonce) return false;
+    this.closedAckedFlag = true;
+    return true;
   }
 
   /** Whether the in-flight renewal may be sent again (identical bytes): only inside the lease it was first sent under. */
