@@ -48,6 +48,43 @@ var import_node_util = require("node:util");
 
 // src/load/control-port.ts
 var import_node_crypto = require("node:crypto");
+
+// src/load/wire.ts
+var WIRE_PROTOCOL = 1;
+var CLAIM_BODY_MAX_BYTES = 16 * 1024;
+var RENEW_BODY_MAX_BYTES = 4 * 1024;
+var EVENTS_BODY_MAX_BYTES = 300 * 1024;
+var EVENTS_BATCH_MAX_BYTES = 256 * 1024;
+var CLAIM_REFUSALS = [
+  "auth",
+  "unknown_grant",
+  "wrong_workflow",
+  "wrong_commit",
+  "binding",
+  "rerun",
+  "duplicate_claim",
+  "claim_superseded",
+  "identity",
+  "self_hosted",
+  "fence_unverified",
+  "expired",
+  "stopped",
+  "not_enabled",
+  "policy_changed",
+  "environment_changed",
+  "outside_harness",
+  "unsupported_protocol",
+  "malformed"
+];
+var RENEW_REFUSALS = ["auth", "epoch", "hash", "gap", "changed_payload", "debited", "closed", "malformed"];
+var EVENTS_REFUSALS = ["auth", "expired", "malformed", "hash", "stream", "gap", "conflict", "after_final", "budget"];
+var STOP_REASONS = ["load_testing_off", "policy_changed", "environment_changed", "user_stop", "scope_deleted", "identity_conflict"];
+var member = (list) => (v2) => typeof v2 === "string" && list.includes(v2);
+var isClaimRefusal = member(CLAIM_REFUSALS);
+var isRenewRefusal = member(RENEW_REFUSALS);
+var isStopReason = member(STOP_REASONS);
+
+// src/load/control-port.ts
 function canonical(value) {
   if (value === null || typeof value !== "object") {
     if (typeof value === "number" && !Number.isFinite(value)) throw new Error("canonical: a number must be finite");
@@ -72,55 +109,52 @@ var text = (v2, max = 512) => typeof v2 === "string" && v2.length > 0 && v2.leng
 var whole = (v2) => typeof v2 === "number" && Number.isSafeInteger(v2) && v2 >= 0;
 var finite = (v2) => typeof v2 === "number" && Number.isFinite(v2);
 var texts = (v2, max) => Array.isArray(v2) && v2.length <= max && v2.every((x) => text(x, 2048));
+var CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var LOAD_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 var SHA = /^[0-9a-f]{64}$/;
+var COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+var sha = (v2) => typeof v2 === "string" && SHA.test(v2);
+var only = (v2, keys) => Object.keys(v2).length === keys.length && keys.every((k) => Object.hasOwn(v2, k));
 function decodeBinding(v2) {
-  if (!isObj(v2) || !text(v2.checkoutSha, 64) || !text(v2.treeDigest, 128) || !isObj(v2.lockDigests) || !isObj(v2.workload)) return;
-  const lockDigests = {};
-  for (const [k, d] of Object.entries(v2.lockDigests)) {
-    if (!text(d, 128)) return;
-    lockDigests[k] = d;
-  }
-  const w = v2.workload;
-  if (!text(w.path, 1024) || !text(w.digest, 128)) return;
-  return { checkoutSha: v2.checkoutSha, lockDigests, treeDigest: v2.treeDigest, workload: { path: w.path, digest: w.digest } };
+  if (!isObj(v2) || !only(v2, ["checkoutSha", "lockDigests", "observed", "workload"])) return;
+  const { lockDigests: l, observed: o, workload: w } = v2;
+  if (typeof v2.checkoutSha !== "string" || !COMMIT.test(v2.checkoutSha)) return;
+  if (!isObj(l) || !only(l, ["package-lock.json"]) || !sha(l["package-lock.json"])) return;
+  if (!isObj(o) || !only(o, ["treeDigest", "generatedLockDigest"]) || !sha(o.treeDigest) || !sha(o.generatedLockDigest)) return;
+  if (!isObj(w) || !only(w, ["path", "digest"]) || !text(w.path, 1024) || !sha(w.digest)) return;
+  return {
+    checkoutSha: v2.checkoutSha,
+    lockDigests: { "package-lock.json": l["package-lock.json"] },
+    observed: { treeDigest: o.treeDigest, generatedLockDigest: o.generatedLockDigest },
+    workload: { path: w.path, digest: w.digest }
+  };
 }
 function decodePhase(v2) {
-  if (v2 === void 0) return void 0;
-  if (!isObj(v2)) return false;
-  const out = {};
-  for (const key of ["ratePerSecond", "burst", "maxUsers", "total"]) {
-    const x = v2[key];
-    if (x === void 0) continue;
-    if (key === "ratePerSecond" ? !(finite(x) && x > 0) : !whole(x)) return false;
-    out[key] = x;
-  }
-  return out;
+  if (!isObj(v2) || !only(v2, ["ratePerSecond", "burst", "maxUsers", "total"])) return;
+  const { ratePerSecond, burst, maxUsers, total } = v2;
+  if (!whole(ratePerSecond) || ratePerSecond === 0 || !whole(burst) || burst === 0 || !whole(maxUsers) || !whole(total)) return;
+  return { ratePerSecond, burst, maxUsers, total };
 }
 function decodeClaimReply(raw) {
   const bad = { ok: false, refused: "malformed" };
   if (!isObj(raw)) return bad;
-  if (raw.refused !== void 0) return text(raw.refused, 64) ? { ok: false, refused: raw.refused } : bad;
+  if (raw.refused !== void 0) return { ok: false, refused: isClaimRefusal(raw.refused) ? raw.refused : "unknown" };
+  if (!only(raw, ["claimId", "epoch", "runToken", "eventsToken", "planHash", "plan", "workload", "limits", "lease", "maxRunMs", "graceMs", "hardEndServerMs", "baseURL", "binding"])) return bad;
   const { limits: l, lease: s, workload: w } = raw;
-  if (!text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.runToken, 4096) || !text(raw.eventsToken, 4096) || !text(raw.planHash, 64) || !SHA.test(raw.planHash)) return bad;
+  if (typeof raw.claimId !== "string" || !CLAIM_ID.test(raw.claimId) || !whole(raw.epoch) || typeof raw.runToken !== "string" || !LOAD_TOKEN.test(raw.runToken) || typeof raw.eventsToken !== "string" || !LOAD_TOKEN.test(raw.eventsToken) || !sha(raw.planHash)) return bad;
   if (!isObj(raw.plan) || !text(raw.baseURL, 2048)) return bad;
-  if (!isObj(w) || !text(w.path, 1024) || !text(w.digest, 128) || !text(w.module, 1024) || !text(w.export, 256)) return bad;
-  if (!isObj(l) || !texts(l.allowedOrigins, 20) || !isObj(l.privateOrigins) || !Object.values(l.privateOrigins).every((v2) => texts(v2, 20)) || Object.keys(l.privateOrigins).length > 20 || !whole(l.maxUsers) || !whole(l.requestBudget) || !whole(l.policyRevision) || !isObj(l.phases)) return bad;
+  if (!isObj(w) || !only(w, ["path", "digest", "module", "export"]) || !text(w.path, 1024) || !sha(w.digest) || !text(w.module, 1024) || !text(w.export, 256)) return bad;
+  if (!isObj(l) || !only(l, ["allowedOrigins", "privateOrigins", "maxUsers", "requestBudget", "policyRevision", "phases"])) return bad;
+  if (!texts(l.allowedOrigins, 20) || !isObj(l.privateOrigins) || !Object.values(l.privateOrigins).every((v2) => texts(v2, 20)) || Object.keys(l.privateOrigins).length > 20 || !whole(l.maxUsers) || !whole(l.requestBudget) || !whole(l.policyRevision)) return bad;
+  if (!isObj(l.phases) || !only(l.phases, ["checking", "measurement"])) return bad;
   const checking = decodePhase(l.phases.checking);
   const measurement = decodePhase(l.phases.measurement);
-  if (checking === false || measurement === false) return bad;
-  let originCaps;
-  if (l.originCaps !== void 0) {
-    if (!isObj(l.originCaps)) return bad;
-    originCaps = {};
-    for (const [k, n] of Object.entries(l.originCaps)) {
-      if (!whole(n)) return bad;
-      originCaps[k] = n;
-    }
-  }
-  if (!isObj(s) || s.seq !== 0 || !text(s.nonce, 256) || !finite(s.ttlMs) || !(finite(s.renewEveryMs) && s.renewEveryMs > 0) || !whole(s.ceiling) || !finite(s.leaseUntilServerMs) || !finite(s.serverNowMs)) return bad;
+  if (!checking || !measurement) return bad;
+  if (!isObj(s) || !only(s, ["seq", "nonce", "ttlMs", "renewEveryMs", "ceiling", "leaseUntilServerMs", "serverNowMs"])) return bad;
+  if (s.seq !== 0 || !text(s.nonce, 256) || !finite(s.ttlMs) || !(finite(s.renewEveryMs) && s.renewEveryMs > 0) || !whole(s.ceiling) || !finite(s.leaseUntilServerMs) || !finite(s.serverNowMs)) return bad;
   if (!whole(raw.maxRunMs) || !whole(raw.graceMs) || !finite(raw.hardEndServerMs)) return bad;
   const binding = decodeBinding(raw.binding);
-  if (!binding) return bad;
+  if (!binding || w.path !== binding.workload.path || w.digest !== binding.workload.digest) return bad;
   return {
     ok: true,
     grant: {
@@ -137,8 +171,7 @@ function decodeClaimReply(raw) {
         maxUsers: l.maxUsers,
         requestBudget: l.requestBudget,
         policyRevision: l.policyRevision,
-        phases: { ...checking ? { checking } : {}, ...measurement ? { measurement } : {} },
-        ...originCaps ? { originCaps } : {}
+        phases: { checking, measurement }
       },
       lease: { seq: 0, nonce: s.nonce, ttlMs: s.ttlMs, renewEveryMs: s.renewEveryMs, ceiling: s.ceiling, leaseUntilServerMs: s.leaseUntilServerMs, serverNowMs: s.serverNowMs },
       maxRunMs: raw.maxRunMs,
@@ -150,13 +183,14 @@ function decodeClaimReply(raw) {
   };
 }
 function decodeRenewReply(raw) {
+  if (isObj(raw) && "refused" in raw) return { kind: isRenewRefusal(raw.refused) ? "unaddressed" : "unknown_refusal" };
   if (!isObj(raw) || !text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.planHash, 64) || !whole(raw.seq) || !text(raw.nonce, 256)) return { kind: "unaddressed" };
   const num = (v2) => finite(v2) ? v2 : Number.NaN;
   let stop;
   let lease = raw.lease === "held" || raw.lease === "lost" ? raw.lease : "lost";
   if (raw.stop !== void 0) {
     const st = raw.stop;
-    if (isObj(st) && (st.mode === "graceful" || st.mode === "now") && typeof st.reason === "string" && st.reason.length <= 256) stop = { mode: st.mode, reason: st.reason };
+    if (isObj(st) && (st.mode === "graceful" || st.mode === "now") && isStopReason(st.reason)) stop = { mode: st.mode, reason: st.reason };
     else lease = "lost";
   }
   return {
@@ -192,36 +226,9 @@ var OIDC_ANSWER_MAX_BYTES = 16 * 1024;
 var OIDC_TOKEN_MAX_CHARS = 8 * 1024;
 var OIDC_ATTEMPTS = 5;
 var GITHUB_OIDC_HOSTS = [".actions.githubusercontent.com"];
-var REFUSALS = /* @__PURE__ */ new Set([
-  "auth",
-  "unknown_grant",
-  "wrong_workflow",
-  "wrong_commit",
-  "binding",
-  "rerun",
-  "duplicate_claim",
-  "self_hosted",
-  "fence_unverified",
-  "expired",
-  "stopped",
-  "not_enabled",
-  "policy_changed",
-  "environment_changed",
-  "outside_harness",
-  "unsupported_protocol",
-  "malformed",
-  "claim_superseded",
-  "identity",
-  "matrix",
-  "hash",
-  "epoch",
-  "gap",
-  "changed_payload",
-  "debited",
-  "closed"
-]);
-var CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var EVENT_REASONS = /* @__PURE__ */ new Set(["stream", "gap", "conflict", "after_final", "malformed", "hash", "expired", "auth", "budget"]);
+var REFUSALS = /* @__PURE__ */ new Set([...CLAIM_REFUSALS, ...RENEW_REFUSALS]);
+var CLAIM_ID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var EVENT_REASONS = new Set(EVENTS_REFUSALS);
 var ControlHttpError = class extends Error {
   constructor(op, code, status, detail) {
     super(`load control ${op}: ${code}${status !== void 0 ? ` ${status}` : ""}${detail ? ` (${detail})` : ""}`);
@@ -290,7 +297,7 @@ var HttpControlPort = class {
           continue;
         }
         const reply = reduceRefusal(answer);
-        if (isObj2(reply) && !("refused" in reply) && !(typeof reply.claimId === "string" && CLAIM_ID.test(reply.claimId))) throw new ControlHttpError("claim", "malformed", answer.status);
+        if (isObj2(reply) && !("refused" in reply) && !(typeof reply.claimId === "string" && CLAIM_ID2.test(reply.claimId))) throw new ControlHttpError("claim", "malformed", answer.status);
         return reply;
       } catch (error) {
         if (!(error instanceof ControlHttpError) || !error.transient || signal.aborted) throw signal.aborted ? new ControlHttpError("claim", "aborted") : error;
@@ -343,6 +350,7 @@ var HttpControlPort = class {
     return new Promise((resolve, reject) => {
       if (signal.aborted) return reject(abortError(op, signal));
       let settled = false;
+      let renewRefusalStatus;
       const headers = { accept: "application/json", authorization: `Bearer ${bearer}`, "user-agent": this.userAgent };
       if (body !== void 0) {
         headers["content-type"] = "application/json";
@@ -371,7 +379,11 @@ var HttpControlPort = class {
         signal.removeEventListener("abort", onAbort);
         if (error) {
           req.destroy();
-          reject(error);
+          if (renewRefusalStatus !== void 0 && error.code !== "aborted") {
+            resolve({ status: renewRefusalStatus, json: void 0 });
+          } else {
+            reject(error);
+          }
         } else resolve(answer);
       };
       const onAbort = () => finish(abortError(op, signal));
@@ -382,6 +394,7 @@ var HttpControlPort = class {
         if (status >= 300 && status < 400) return finish(new ControlHttpError(op, "redirect", status));
         if (status >= 500 || status === 408 || status === 429) return finish(new ControlHttpError(op, "status", status));
         if (status < 200) return finish(new ControlHttpError(op, "status", status));
+        if (op === "renew" && status >= 400 && status < 500) renewRefusalStatus = status;
         if (!/^application\/json\s*(;|$)/i.test(String(res.headers["content-type"] ?? ""))) return finish(new ControlHttpError(op, "content_type", status));
         const declared = Number(res.headers["content-length"]);
         if (Number.isFinite(declared) && declared > cap) return finish(new ControlHttpError(op, "too_large", status));
@@ -441,7 +454,7 @@ function oidcRequestUrl(raw, hosts) {
     throw new ControlHttpError("config", "url", void 0, "ACTIONS_ID_TOKEN_REQUEST_URL");
   }
   const host = url.hostname.toLowerCase();
-  const allowed = hosts.some((h) => h.startsWith(".") ? host.endsWith(h) && host.length > h.length : host === h);
+  const allowed = hosts.some((h) => h.startsWith(".") ? url.port === "" && host.endsWith(h) && host.length > h.length : url.host.toLowerCase() === h);
   if (url.protocol !== "https:" || url.username || url.password || url.hash || !allowed) throw new ControlHttpError("config", "url", void 0, "ACTIONS_ID_TOKEN_REQUEST_URL");
   return url;
 }
@@ -508,7 +521,7 @@ function loadSignals(proc = process) {
 var import_node_crypto8 = require("node:crypto");
 var import_node_fs3 = require("node:fs");
 var import_node_perf_hooks = require("node:perf_hooks");
-var import_node_os3 = __toESM(require("node:os"));
+var import_node_os4 = __toESM(require("node:os"));
 var import_node_path2 = __toESM(require("node:path"));
 
 // src/load/accounting.ts
@@ -739,6 +752,158 @@ function sharedClocks() {
   return { monoMs: Number(process.hrtime.bigint()) / 1e6, wallMs: Date.now() };
 }
 
+// src/load/claim-body.ts
+var import_node_child_process = require("node:child_process");
+var import_node_os = __toESM(require("node:os"));
+var MAX_FAILURES = 20;
+var MAX_FAILURE = 256;
+var MAX_LABEL = 128;
+function claimBody(i) {
+  const b = i.binding;
+  const body = {
+    protocol: WIRE_PROTOCOL,
+    actionVersion: i.actionVersion,
+    grantRef: i.grantRef,
+    idempotencyKey: i.idempotencyKey,
+    checkoutSha: b.checkoutSha,
+    workload: { path: b.workload.path, digest: b.workload.digest },
+    lockDigests: { "package-lock.json": b.lockDigests["package-lock.json"] },
+    observed: { treeDigest: b.observed.treeDigest, generatedLockDigest: b.observed.generatedLockDigest },
+    runAttempt: i.runAttempt,
+    checkRunId: i.checkRunId,
+    fence: {
+      kind: "netns",
+      probe: {
+        passed: i.probe.passed,
+        failures: i.probe.failures.slice(0, MAX_FAILURES).map((f) => clip(f, MAX_FAILURE)),
+        image: clip(i.labels.image, MAX_LABEL),
+        kernel: clip(i.labels.kernel, MAX_LABEL),
+        tools: clip(i.labels.tools, MAX_LABEL),
+        chrony: clip(i.labels.chrony, MAX_LABEL)
+      }
+    }
+  };
+  const problem = claimBodyProblem(canonical(body));
+  return problem === void 0 ? { ok: true, body } : { ok: false, problem };
+}
+function clip(text2, max) {
+  if (text2.length <= max) return text2;
+  let out = "";
+  for (const ch of text2) {
+    if (out.length + ch.length > max) break;
+    out += ch;
+  }
+  return out;
+}
+var SHA256_HEX = /^[0-9a-f]{64}$/;
+var COMMIT2 = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+var GRANT_REF = /^[A-Za-z0-9_-]{22}$/;
+var UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+var utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+var isObj3 = (v2) => typeof v2 === "object" && v2 !== null && !Array.isArray(v2);
+var whole2 = (v2, min = 0) => typeof v2 === "number" && Number.isSafeInteger(v2) && v2 >= min;
+var str = (v2, min, max) => typeof v2 === "string" && v2.length >= min && v2.length <= max;
+var match = (v2, re) => typeof v2 === "string" && re.test(v2);
+function exactly(v2, at, keys) {
+  if (!isObj3(v2)) return at;
+  for (const k of Object.keys(v2)) if (!keys.includes(k)) return `${at}.${k}`;
+  for (const k of keys) if (!Object.hasOwn(v2, k)) return `${at}.${k}`;
+  return void 0;
+}
+function claimBodyProblem(body) {
+  const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
+  if (bytes.byteLength > CLAIM_BODY_MAX_BYTES) return "size";
+  let raw;
+  try {
+    raw = JSON.parse(utf8.decode(bytes));
+  } catch {
+    return "json";
+  }
+  if (isObj3(raw) && typeof raw.protocol === "number" && raw.protocol !== WIRE_PROTOCOL) return "unsupported_protocol";
+  const top = exactly(raw, "body", ["protocol", "actionVersion", "grantRef", "idempotencyKey", "checkoutSha", "workload", "lockDigests", "observed", "runAttempt", "checkRunId", "fence"]);
+  if (top) return top;
+  const r = raw;
+  if (r.protocol !== WIRE_PROTOCOL) return "protocol";
+  if (!str(r.actionVersion, 1, 64)) return "actionVersion";
+  if (!match(r.grantRef, GRANT_REF)) return "grantRef";
+  if (!match(r.idempotencyKey, UUID_V4)) return "idempotencyKey";
+  if (!match(r.checkoutSha, COMMIT2)) return "checkoutSha";
+  const w = exactly(r.workload, "workload", ["path", "digest"]);
+  if (w) return w;
+  if (!str(r.workload.path, 1, 1024)) return "workload.path";
+  if (!match(r.workload.digest, SHA256_HEX)) return "workload.digest";
+  const l = exactly(r.lockDigests, "lockDigests", ["package-lock.json"]);
+  if (l) return l;
+  if (!match(r.lockDigests["package-lock.json"], SHA256_HEX)) return "lockDigests.package-lock.json";
+  const o = exactly(r.observed, "observed", ["treeDigest", "generatedLockDigest"]);
+  if (o) return o;
+  if (!match(r.observed.treeDigest, SHA256_HEX)) return "observed.treeDigest";
+  if (!match(r.observed.generatedLockDigest, SHA256_HEX)) return "observed.generatedLockDigest";
+  if (!whole2(r.runAttempt, 1)) return "runAttempt";
+  if (!whole2(r.checkRunId)) return "checkRunId";
+  const f = exactly(r.fence, "fence", ["kind", "probe"]);
+  if (f) return f;
+  const fence = r.fence;
+  if (fence.kind !== "netns") return "fence.kind";
+  const p = exactly(fence.probe, "fence.probe", ["passed", "failures", "image", "kernel", "tools", "chrony"]);
+  if (p) return p;
+  const probe2 = fence.probe;
+  if (typeof probe2.passed !== "boolean") return "fence.probe.passed";
+  if (!Array.isArray(probe2.failures) || probe2.failures.length > MAX_FAILURES || !probe2.failures.every((x) => str(x, 0, MAX_FAILURE))) return "fence.probe.failures";
+  for (const k of ["image", "kernel", "tools", "chrony"]) if (!str(probe2[k], 0, MAX_LABEL)) return `fence.probe.${k}`;
+  return void 0;
+}
+var runHostTool = (file, args) => new Promise((resolve) => {
+  (0, import_node_child_process.execFile)(file, args, { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" }, timeout: 2e3, maxBuffer: 16 * 1024, killSignal: "SIGKILL" }, (error, stdout) => resolve(error ? void 0 : String(stdout)));
+});
+function imageLabel(env) {
+  try {
+    const image = env.ImageOS;
+    return image === "ubuntu22" || image === "ubuntu24" ? image : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+function kernelRelease() {
+  try {
+    return KERNEL_RELEASE.exec(import_node_os.default.release())?.[0] ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+function versionLine(out, pattern) {
+  const line = out?.split("\n", 1)[0];
+  return line && pattern.test(line) ? line : "unavailable";
+}
+var KERNEL_RELEASE = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:-[0-9]{1,6}-(?:azure|generic))?/;
+var SYSTEMD_VERSION = /^systemd [0-9]{1,4}(?: \([0-9]{1,4}\.[0-9]{1,4}-[0-9]{1,4}ubuntu[0-9]{0,4}(?:\.[0-9]{1,4}){0,3}\))?$/;
+var UNSHARE_VERSION = /^unshare from util-linux [0-9]{1,4}\.[0-9]{1,4}(?:\.[0-9]{1,4})?$/;
+var CLOCK_OFFSET = /^[0-9]{1,8}\.[0-9]{1,9} seconds (?:fast|slow) of NTP time$/;
+var LEAP_STATUS = /* @__PURE__ */ new Set(["normal", "insert second", "delete second", "not synchronised"]);
+async function hostLabels(env = process.env, run = runHostTool) {
+  const read = async (file, args) => {
+    try {
+      return await run(file, args);
+    } catch {
+      return void 0;
+    }
+  };
+  const [systemd, unshare, tracking] = await Promise.all([
+    read("/usr/bin/systemd-run", ["--version"]),
+    read("/usr/bin/unshare", ["--version"]),
+    read("/usr/bin/chronyc", ["-n", "tracking"])
+  ]);
+  const field = (name2) => tracking?.split("\n").find((line) => line.split(":", 1)[0]?.trimEnd() === name2)?.split(":").slice(1).join(":").trim();
+  const leap = field("Leap status")?.toLowerCase();
+  const offset = field("System time");
+  return {
+    image: imageLabel(env),
+    kernel: kernelRelease(),
+    tools: clip(`${versionLine(systemd, SYSTEMD_VERSION)}; ${versionLine(unshare, UNSHARE_VERSION)}`, MAX_LABEL),
+    chrony: leap && LEAP_STATUS.has(leap) ? `${leap}${offset && CLOCK_OFFSET.test(offset) ? `, ${offset}` : ""}` : "unavailable"
+  };
+}
+
 // src/load/gate/ca.ts
 var import_node_crypto3 = require("node:crypto");
 
@@ -756,7 +921,7 @@ var seq = (...items) => tlv(48, Buffer.concat(items));
 var set = (...items) => tlv(49, Buffer.concat(items));
 var octets = (b) => tlv(4, b);
 var bool = (v2) => tlv(1, Buffer.from([v2 ? 255 : 0]));
-var utf8 = (s) => tlv(12, Buffer.from(s, "utf8"));
+var utf82 = (s) => tlv(12, Buffer.from(s, "utf8"));
 var explicit = (n, content) => tlv(160 | n, content);
 var implicit = (n, content) => tlv(128 | n, content);
 var implicitSeq = (n, ...items) => tlv(160 | n, Buffer.concat(items));
@@ -867,7 +1032,7 @@ function issueLeaf(o) {
   return { certPem: pem(der), key: pair.privateKey };
 }
 function name(commonName) {
-  return seq(set(seq(oid(OID.commonName), utf8(commonName))));
+  return seq(set(seq(oid(OID.commonName), utf82(commonName))));
 }
 function keyId(spki) {
   return (0, import_node_crypto3.createHash)("sha1").update(spki).digest();
@@ -1562,7 +1727,7 @@ var import_node_tls3 = require("node:tls");
 var import_node_crypto4 = require("node:crypto");
 var import_promises = require("node:dns/promises");
 var import_node_net = require("node:net");
-var import_node_os = require("node:os");
+var import_node_os2 = require("node:os");
 var import_node_tls2 = require("node:tls");
 var METADATA_V4 = /* @__PURE__ */ new Set(["169.254.169.254", "168.63.129.16"]);
 function classify(address) {
@@ -1641,7 +1806,7 @@ function canonical2(address) {
 }
 function ownAddresses() {
   return new Set(
-    Object.values((0, import_node_os.networkInterfaces)()).flat().filter((i) => i !== void 0).map((i) => canonical2(i.address))
+    Object.values((0, import_node_os2.networkInterfaces)()).flat().filter((i) => i !== void 0).map((i) => canonical2(i.address))
   );
 }
 function reachable(address, origin, own = ownAddresses()) {
@@ -2530,9 +2695,12 @@ var import_node_crypto5 = require("node:crypto");
 function batchHash(batch) {
   return (0, import_node_crypto5.createHash)("sha256").update(JSON.stringify([batch.streamId, batch.seq, batch.payload, batch.final?.watermark ?? null])).digest("hex");
 }
+function eventsBody(streamId, seq2, batch, final) {
+  return { streamId, seq: seq2, batch, ...final ? { final } : {}, payloadHash: batchHash({ streamId, seq: seq2, payload: batch, final }) };
+}
 
 // src/load/install.ts
-var import_node_child_process = require("node:child_process");
+var import_node_child_process2 = require("node:child_process");
 var import_node_crypto6 = require("node:crypto");
 var import_node_fs = require("node:fs");
 var import_promises3 = require("node:fs/promises");
@@ -3149,7 +3317,7 @@ function trustedToolchain(nodeDir, ws, supported = SUPPORTED_TOOLCHAIN, toolCach
     if (inside(file, root) || inside(root, file)) fail(`${label} must not come from the workspace (${file})`);
     if (!inside(file, dir)) fail(`${label} must sit inside ${dir} (${file})`);
   }
-  const nodeVersion = (0, import_node_child_process.execFileSync)(node, ["--version"], { encoding: "utf8", env: {}, timeout: 1e4 }).trim().replace(/^v/, "");
+  const nodeVersion = (0, import_node_child_process2.execFileSync)(node, ["--version"], { encoding: "utf8", env: {}, timeout: 1e4 }).trim().replace(/^v/, "");
   const npmVersion = String(JSON.parse((0, import_node_fs.readFileSync)(npmPkg, "utf8")).version);
   if (import_node_path.default.basename(import_node_path.default.dirname(dir)) !== nodeVersion) fail(`node ${nodeVersion} disagrees with its pinned toolcache directory`);
   if (!supported.some((s) => s.node === nodeVersion && s.npm === npmVersion)) fail(`npm ${npmVersion} with node ${nodeVersion} is not a supported toolchain`);
@@ -3222,7 +3390,7 @@ async function digestsOf(ws, signal) {
 }
 function runNpm(file, args, o, timeoutMs, signal) {
   return new Promise((resolve, reject) => {
-    const child = (0, import_node_child_process.spawn)(file, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL", signal });
+    const child = (0, import_node_child_process2.spawn)(file, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL", signal });
     for (const stream of [child.stdout, child.stderr]) {
       stream.setEncoding("utf8");
       let pending = "";
@@ -3286,24 +3454,24 @@ function checkoutHead(ws) {
   if (!ref || !REF.test(ref) || ref.split("/").some((part) => part === ".." || part === "." || part === "")) throw new Error(`checkout_changed: HEAD is not a ref this action reads (${head.slice(0, 100)})`);
   const loose = import_node_path.default.join(git, ref);
   if ((0, import_node_fs.existsSync)(loose)) {
-    const sha = (0, import_node_fs.readFileSync)(loose, "utf8").trim();
-    if (SHA2.test(sha)) return sha;
+    const sha2 = (0, import_node_fs.readFileSync)(loose, "utf8").trim();
+    if (SHA2.test(sha2)) return sha2;
     throw new Error(`checkout_changed: ${ref} does not hold a commit`);
   }
   const packed = (0, import_node_fs.existsSync)(import_node_path.default.join(git, "packed-refs")) ? (0, import_node_fs.readFileSync)(import_node_path.default.join(git, "packed-refs"), "utf8").split("\n") : [];
   for (const line of packed) {
-    const [sha, name2] = line.split(" ");
-    if (name2 === ref && sha && SHA2.test(sha)) return sha;
+    const [sha2, name2] = line.split(" ");
+    if (name2 === ref && sha2 && SHA2.test(sha2)) return sha2;
   }
   throw new Error(`checkout_changed: ${ref} is not found`);
 }
 
 // src/load/jail.ts
-var import_node_child_process2 = require("node:child_process");
+var import_node_child_process3 = require("node:child_process");
 var import_node_crypto7 = require("node:crypto");
 var import_node_fs2 = require("node:fs");
 var import_promises4 = require("node:fs/promises");
-var import_node_os2 = __toESM(require("node:os"));
+var import_node_os3 = __toESM(require("node:os"));
 var import_node_stream = require("node:stream");
 var import_node_string_decoder = require("node:string_decoder");
 var import_node_net3 = __toESM(require("node:net"));
@@ -3422,7 +3590,7 @@ function sameNonce(a, b) {
 }
 
 // src/load/jail.ts
-var exec = (0, import_node_util2.promisify)(import_node_child_process2.execFile);
+var exec = (0, import_node_util2.promisify)(import_node_child_process3.execFile);
 var HOST_ENV = { PATH: "/usr/sbin:/usr/bin:/sbin:/bin" };
 var HEARTBEAT_MS = 1e3;
 var STOP_GRACE_MS = 2e3;
@@ -3481,7 +3649,7 @@ async function startJail(spec, options, signal) {
   const gate = proxy;
   const ctl = acceptCtl(ctlServer, nonce);
   ctl.catch(() => void 0);
-  const child = (0, import_node_child_process2.spawn)("/usr/bin/sudo", ["-n", ...systemdRunArgs(spec)], { env: HOST_ENV, stdio: ["pipe", "pipe", "pipe"] });
+  const child = (0, import_node_child_process3.spawn)("/usr/bin/sudo", ["-n", ...systemdRunArgs(spec)], { env: HOST_ENV, stdio: ["pipe", "pipe", "pipe"] });
   const stdout = neutralized(child.stdout);
   const stderr = neutralized(child.stderr);
   if (options.stdout !== "pipe") stdout.pipe(process.stdout);
@@ -3709,7 +3877,7 @@ async function probe(base, runId, signal) {
   return { passed: failures.length === 0, failures, seen };
 }
 function nonLoopbackIPv4() {
-  for (const list of Object.values(import_node_os2.default.networkInterfaces())) {
+  for (const list of Object.values(import_node_os3.default.networkInterfaces())) {
     for (const a of list ?? []) if (a.family === "IPv4" && !a.internal) return a.address;
   }
   throw new Error("load jail probe: no non-loopback IPv4 address");
@@ -4369,8 +4537,8 @@ var SUPERVISOR_CONSTANTS = {
   tickMs: 50,
   renewAttemptMs: 1e3,
   outcomeTimeoutMs: 5e3,
-  maxBatchBytes: 256 * 1024,
-  maxEventsBodyBytes: 300 * 1024,
+  maxBatchBytes: EVENTS_BATCH_MAX_BYTES,
+  maxEventsBodyBytes: EVENTS_BODY_MAX_BYTES,
   retryMs: 100,
   retryMaxMs: 2e3
 };
@@ -4388,11 +4556,11 @@ var sha256Of = (file) => (0, import_node_crypto8.createHash)("sha256").update((0
 async function bindingOf(workspace, workloadPath, tree, signal) {
   signal?.throwIfAborted();
   const lock = import_node_path2.default.join(workspace, "package-lock.json");
-  const hidden = import_node_path2.default.join(workspace, "node_modules/.package-lock.json");
+  const generated = import_node_path2.default.join(workspace, "node_modules/.package-lock.json");
   return {
     checkoutSha: checkoutHead(workspace),
-    lockDigests: { "package-lock.json": (0, import_node_fs3.existsSync)(lock) ? sha256Of(lock) : "", "node_modules/.package-lock.json": (0, import_node_fs3.existsSync)(hidden) ? sha256Of(hidden) : "" },
-    treeDigest: tree ?? await treeDigest(workspace, signal),
+    lockDigests: { "package-lock.json": (0, import_node_fs3.existsSync)(lock) ? sha256Of(lock) : "" },
+    observed: { treeDigest: tree ?? await treeDigest(workspace, signal), generatedLockDigest: (0, import_node_fs3.existsSync)(generated) ? sha256Of(generated) : "" },
     workload: { path: workloadPath, digest: sha256Of(import_node_path2.default.resolve(workspace, workloadPath)) }
   };
 }
@@ -4563,7 +4731,7 @@ var LoadRun = class {
   async realPreinstall() {
     this.signal.throwIfAborted();
     if (!this.o.npmCache) throw new Refused("didnt_start", "install_unsupported", "no recipe npm cache");
-    const scratch = (0, import_node_fs3.mkdtempSync)(import_node_path2.default.join(import_node_os3.default.tmpdir(), "peeps-load-install-"));
+    const scratch = (0, import_node_fs3.mkdtempSync)(import_node_path2.default.join(import_node_os4.default.tmpdir(), "peeps-load-install-"));
     try {
       return await offlinePreinstall(this.o.workspace, trustedToolchain(this.o.nodeDir, this.o.workspace), scratch, { cache: this.o.npmCache, uid: process.getuid(), gid: process.getgid() }, void 0, this.signal);
     } catch (error) {
@@ -4574,16 +4742,20 @@ var LoadRun = class {
   }
   // ---------------------------------------------------------------- claim and the lease controller
   async claim(binding, report) {
-    const body = {
-      protocol: 1,
-      ...this.o.grantRef !== void 0 ? { grantRef: this.o.grantRef } : {},
+    const labels = await (this.s.labels ? this.s.labels() : hostLabels());
+    this.throwIfDone();
+    const built = claimBody({
+      grantRef: this.o.grantRef,
       actionVersion: this.o.actionVersion ?? "0.0.0",
       idempotencyKey: (0, import_node_crypto8.randomUUID)(),
       runAttempt: this.o.runAttempt ?? 1,
       checkRunId: this.o.checkRunId ?? 0,
-      fence: { kind: "netns", probe: { passed: report.passed, failures: report.failures } },
-      ...binding
-    };
+      binding,
+      probe: { passed: report.passed, failures: report.failures },
+      labels
+    });
+    if (!built.ok) throw new Refused("didnt_start", "claim_invalid", built.problem);
+    const body = built.body;
     const sent = this.clocks();
     const raw = await this.o.port.claim(body, this.signal);
     const received = this.clocks();
@@ -4680,6 +4852,12 @@ var LoadRun = class {
       }
       if (signal.aborted) return;
       const decoded = decodeRenewReply(raw);
+      if (decoded.kind === "unknown_refusal") {
+        this.emit({ type: "renewal", seq: tx.seq, state, decision: "unknown_refusal" });
+        record.outcome = "refused";
+        lease.abandon();
+        return this.onExpiry();
+      }
       if (decoded.kind === "unaddressed") {
         if (!await again()) return;
         continue;
@@ -4820,7 +4998,7 @@ var LoadRun = class {
     const hosts = [...limits.value.approved.values()].map((a) => a.host);
     const nowWall = Date.now();
     const ca = createRunCa({ hosts, nowMs: nowWall, validForMs: g.maxRunMs + g.graceMs + 36e5 });
-    this.caDir = (0, import_node_fs3.mkdtempSync)(import_node_path2.default.join(import_node_os3.default.tmpdir(), "peeps-load-ca-"));
+    this.caDir = (0, import_node_fs3.mkdtempSync)(import_node_path2.default.join(import_node_os4.default.tmpdir(), "peeps-load-ca-"));
     const caFile = import_node_path2.default.join(this.caDir, "ca.pem");
     (0, import_node_fs3.writeFileSync)(caFile, ca.certPem, { mode: 384 });
     const journal = new Journal();
@@ -4865,7 +5043,7 @@ var LoadRun = class {
       command: this.s.command ?? [node, "/run/peeps/action/load-executor.js"],
       env: {},
       // The clocks read fractional milliseconds; systemd and the spec take whole ones.
-      limits: { maxRunMs: Math.ceil(15 * 6e4 + 6e4 + Math.max(0, this.runEndMono - this.clocks().monoMs) + g.graceMs), memoryMax: "2G", tasksMax: 512, cpuQuotaPercent: Math.max(100, (import_node_os3.default.availableParallelism() - 1) * 100) }
+      limits: { maxRunMs: Math.ceil(15 * 6e4 + 6e4 + Math.max(0, this.runEndMono - this.clocks().monoMs) + g.graceMs), memoryMax: "2G", tasksMax: 512, cpuQuotaPercent: Math.max(100, (import_node_os4.default.availableParallelism() - 1) * 100) }
     };
     const proxy = this.proxy;
     const launch = this.s.launch ?? startJail;
@@ -4918,11 +5096,11 @@ var LoadRun = class {
     if (f.type === "loaded") this.playwright = sanitize(f.playwright, 64);
   }
   /** The next frame matching, or null at the time limit or the run's end. */
-  nextFrame(match, ms2) {
+  nextFrame(match2, ms2) {
     return new Promise((resolve) => {
       const timer = setTimeout(() => done(null), ms2);
       const off = this.jail.onFrame((f) => {
-        if (match(f)) done(f);
+        if (match2(f)) done(f);
       });
       const onEnd = () => done(null);
       void this.terminated.then(onEnd);
@@ -5246,7 +5424,7 @@ var LoadRun = class {
           out.latencyMs = round(this.clocks().monoMs - tx.firstSendMono);
           break;
         }
-        const refused = isObj3(raw) && typeof raw.refused === "string" ? raw.refused.slice(0, 64) : void 0;
+        const refused = isObj4(raw) && typeof raw.refused === "string" ? raw.refused.slice(0, 64) : void 0;
         if (refused !== void 0) {
           out.state = "refused";
           out.reason = refused;
@@ -5321,8 +5499,7 @@ var LoadRun = class {
     if (!this.fits(payload)) return this.latchIncomplete({ reason: "oversized", record: { kind: String(payload.kind), index: 0 } });
     const seq2 = ++this.evidenceSeq;
     const batch = JSON.stringify(payload);
-    const payloadHash = batchHash({ streamId: this.streamId, seq: seq2, payload: batch, final });
-    this.evidenceQueue.push({ body: { streamId: this.streamId, seq: seq2, payloadHash, batch, ...final ? { final } : {} } });
+    this.evidenceQueue.push({ body: eventsBody(this.streamId, seq2, batch, final) });
     this.startEvidence();
   }
   startEvidence() {
@@ -5347,7 +5524,7 @@ var LoadRun = class {
         answered = false;
       }
       if (this.evidenceStopped) return;
-      if (answered && isObj3(answer)) {
+      if (answered && isObj4(answer)) {
         if (answer.ok === true && typeof answer.replay === "boolean" && !("reason" in answer) && !("refused" in answer)) {
           this.evidenceQueue.shift();
           if (head.body.final) this.finalSent = head.body.final;
@@ -5380,7 +5557,7 @@ function statusOf(reason) {
   return "failed";
 }
 var round = (ms2) => Math.round(ms2 * 10) / 10;
-var isObj3 = (v2) => typeof v2 === "object" && v2 !== null && !Array.isArray(v2);
+var isObj4 = (v2) => typeof v2 === "object" && v2 !== null && !Array.isArray(v2);
 function splitToFit(kind, key, records, extra, fits) {
   const payloads = [];
   let oversized;
@@ -5439,7 +5616,7 @@ function delayResolve(ms2) {
 }
 
 // src/load/main.ts
-var GRANT_REF = /^[A-Za-z0-9_-]{22}$/;
+var GRANT_REF2 = /^[A-Za-z0-9_-]{22}$/;
 var DIGITS = /^[1-9][0-9]{0,18}$/;
 var HOST2 = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 var VERSION = /^[A-Za-z0-9._-]{1,64}$/;
@@ -5453,7 +5630,7 @@ function readLoadInputs(env, actionDir, execPath = process.execPath) {
   const peepsUrl = need("PEEPS_URL");
   if (!peepsUrl) return bad("PEEPS_URL");
   const grantRef = need("PEEPS_LOAD_GRANT");
-  if (!grantRef || !GRANT_REF.test(grantRef)) return bad("PEEPS_LOAD_GRANT");
+  if (!grantRef || !GRANT_REF2.test(grantRef)) return bad("PEEPS_LOAD_GRANT");
   const requestUrl = need("ACTIONS_ID_TOKEN_REQUEST_URL");
   const requestToken = need("ACTIONS_ID_TOKEN_REQUEST_TOKEN");
   if (!requestUrl || !requestToken) return bad("ACTIONS_ID_TOKEN_REQUEST_URL");

@@ -1,0 +1,75 @@
+{
+  "about": "The wire's numbers and closed vocabularies.",
+  "protocol": 1,
+  "bytes": {
+    "claimBody": 16384,
+    "renewBody": 4096,
+    "eventsBody": 307200,
+    "eventsBatch": 262144
+  },
+  "lease": {
+    "ttlMs": 5000,
+    "renewEveryMs": 1500,
+    "maxRemainingMs": 6000,
+    "graceMs": 30000,
+    "claimDeadlineMs": 1800000,
+    "reportingWindowMs": 600000
+  },
+  "refusals": {
+    "claim": [
+      "auth",
+      "unknown_grant",
+      "wrong_workflow",
+      "wrong_commit",
+      "binding",
+      "rerun",
+      "duplicate_claim",
+      "claim_superseded",
+      "identity",
+      "self_hosted",
+      "fence_unverified",
+      "expired",
+      "stopped",
+      "not_enabled",
+      "policy_changed",
+      "environment_changed",
+      "outside_harness",
+      "unsupported_protocol",
+      "malformed"
+    ],
+    "renew": [
+      "auth",
+      "epoch",
+      "hash",
+      "gap",
+      "changed_payload",
+      "debited",
+      "closed",
+      "malformed"
+    ],
+    "events": [
+      "auth",
+      "expired",
+      "malformed",
+      "hash",
+      "stream",
+      "gap",
+      "conflict",
+      "after_final",
+      "budget"
+    ]
+  },
+  "stopReasons": [
+    "load_testing_off",
+    "policy_changed",
+    "environment_changed",
+    "user_stop",
+    "scope_deleted",
+    "identity_conflict"
+  ],
+  "phases": [
+    "starting",
+    "checking",
+    "measurement"
+  ]
+}

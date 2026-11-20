@@ -10,35 +10,42 @@
  *   - a renew body is `RenewFields` plus `requestHash` (over the canonical fields);
  *   - `state: "closed"` is the release-bearing last renewal (e5 plan §2.4): sent once, after
  *     settlement, and acknowledged by a receipt that echoes its address with `closed: true`;
- *   - the claim carries the dispatch's `grantRef` when the entry has one (A1 makes it required,
- *     with the strict claim schema).
+ *   - A1 (e5 plan v3 §2.3–§2.4) adopts P1's wire-v1 corpus: the claim has one strict schema,
+ *     built only by `claim-body.ts`, with the dispatch's `grantRef` required; the grant's
+ *     `binding` is P1's (`lockDigests` with `package-lock.json` alone, and `observed` with the
+ *     tree and generated lockfile digests), decoded strictly; a stop's reason is one of
+ *     `STOP_REASONS`, and a claim refusal one of `CLAIM_REFUSALS` (`wire.ts`).
  *
  * Pure: no clock, no timer, no I/O.
  */
 import { createHash } from "node:crypto";
 import type { ClosedReceipt, RenewReply } from "./lease";
+import { isClaimRefusal, isRenewRefusal, isStopReason, WIRE_PROTOCOL } from "./wire";
 
-export const PROTOCOL = 1;
+export const PROTOCOL = WIRE_PROTOCOL;
 
+/** What a claim binds (P1's `GrantBinding`): the checkout, its lockfile, what the install left, the workload. */
 export interface Binding {
   checkoutSha: string;
-  /** File → sha256, for `package-lock.json` and `node_modules/.package-lock.json`. */
-  lockDigests: Record<string, string>;
-  treeDigest: string;
+  /** sha256 of `package-lock.json`. */
+  lockDigests: { "package-lock.json": string };
+  /** After the offline pre-claim install: the tree, and npm's record of what it installed (`node_modules/.package-lock.json`). */
+  observed: { treeDigest: string; generatedLockDigest: string };
   workload: { path: string; digest: string };
 }
 
+/** The claim body (seq 0). Built only by `claimBody` in `claim-body.ts`. */
 export interface ClaimRequest extends Binding {
-  protocol: 1;
-  grantRef?: string;
+  protocol: typeof WIRE_PROTOCOL;
   actionVersion: string;
+  grantRef: string;
   idempotencyKey: string;
   runAttempt: number;
   checkRunId: number;
-  fence: { kind: "netns"; probe: { passed: boolean; failures: string[] } };
+  fence: { kind: "netns"; probe: { passed: boolean; failures: string[]; image: string; kernel: string; tools: string; chrony: string } };
 }
 
-/** Per-phase caps the grant may lower; any field may be absent. */
+/** Engine cap overrides. The P1 grant decoder requires all four fields per phase. */
 export interface GrantPhaseCaps {
   ratePerSecond?: number;
   burst?: number;
@@ -152,59 +159,62 @@ const text = (v: unknown, max = 512): v is string => typeof v === "string" && v.
 const whole = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const texts = (v: unknown, max: number): v is string[] => Array.isArray(v) && v.length <= max && v.every((x) => text(x, 2048));
+const CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LOAD_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const SHA = /^[0-9a-f]{64}$/;
+const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const sha = (v: unknown): v is string => typeof v === "string" && SHA.test(v);
+const only = (v: Obj, keys: readonly string[]) => Object.keys(v).length === keys.length && keys.every((k) => Object.hasOwn(v, k));
 
+/** The grant's binding, strictly in P1's shape: exactly these keys at every depth. */
 function decodeBinding(v: unknown): Binding | undefined {
-  if (!isObj(v) || !text(v.checkoutSha, 64) || !text(v.treeDigest, 128) || !isObj(v.lockDigests) || !isObj(v.workload)) return;
-  const lockDigests: Record<string, string> = {};
-  for (const [k, d] of Object.entries(v.lockDigests)) {
-    if (!text(d, 128)) return;
-    lockDigests[k] = d;
-  }
-  const w = v.workload;
-  if (!text(w.path, 1024) || !text(w.digest, 128)) return;
-  return { checkoutSha: v.checkoutSha, lockDigests, treeDigest: v.treeDigest, workload: { path: w.path, digest: w.digest } };
+  if (!isObj(v) || !only(v, ["checkoutSha", "lockDigests", "observed", "workload"])) return;
+  const { lockDigests: l, observed: o, workload: w } = v;
+  if (typeof v.checkoutSha !== "string" || !COMMIT.test(v.checkoutSha)) return;
+  if (!isObj(l) || !only(l, ["package-lock.json"]) || !sha(l["package-lock.json"])) return;
+  if (!isObj(o) || !only(o, ["treeDigest", "generatedLockDigest"]) || !sha(o.treeDigest) || !sha(o.generatedLockDigest)) return;
+  if (!isObj(w) || !only(w, ["path", "digest"]) || !text(w.path, 1024) || !sha(w.digest)) return;
+  return {
+    checkoutSha: v.checkoutSha,
+    lockDigests: { "package-lock.json": l["package-lock.json"] },
+    observed: { treeDigest: o.treeDigest, generatedLockDigest: o.generatedLockDigest },
+    workload: { path: w.path, digest: w.digest },
+  };
 }
 
-function decodePhase(v: unknown): GrantPhaseCaps | undefined | false {
-  if (v === undefined) return undefined;
-  if (!isObj(v)) return false;
-  const out: GrantPhaseCaps = {};
-  for (const key of ["ratePerSecond", "burst", "maxUsers", "total"] as const) {
-    const x = v[key];
-    if (x === undefined) continue;
-    if (key === "ratePerSecond" ? !(finite(x) && x > 0) : !whole(x)) return false;
-    out[key] = x as number;
-  }
-  return out;
+function decodePhase(v: unknown): GrantPhaseCaps | undefined {
+  if (!isObj(v) || !only(v, ["ratePerSecond", "burst", "maxUsers", "total"])) return;
+  const { ratePerSecond, burst, maxUsers, total } = v;
+  if (!whole(ratePerSecond) || ratePerSecond === 0 || !whole(burst) || burst === 0 || !whole(maxUsers) || !whole(total)) return;
+  return { ratePerSecond, burst, maxUsers, total };
 }
 
-/** A claim reply, untrusted. Anything that does not decode is refused `malformed`. */
+/**
+ * A claim reply, untrusted. Anything that does not decode is refused `malformed`; a refusal
+ * outside `CLAIM_REFUSALS` reads `unknown`, as the HTTP port reduces it.
+ */
 export function decodeClaimReply(raw: unknown): ClaimReply {
   const bad = { ok: false as const, refused: "malformed" };
   if (!isObj(raw)) return bad;
-  if (raw.refused !== undefined) return text(raw.refused, 64) ? { ok: false, refused: raw.refused } : bad;
+  if (raw.refused !== undefined) return { ok: false, refused: isClaimRefusal(raw.refused) ? raw.refused : "unknown" };
+  if (!only(raw, ["claimId", "epoch", "runToken", "eventsToken", "planHash", "plan", "workload", "limits", "lease", "maxRunMs", "graceMs", "hardEndServerMs", "baseURL", "binding"])) return bad;
   const { limits: l, lease: s, workload: w } = raw;
-  if (!text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.runToken, 4096) || !text(raw.eventsToken, 4096) || !text(raw.planHash, 64) || !SHA.test(raw.planHash)) return bad;
+  if (typeof raw.claimId !== "string" || !CLAIM_ID.test(raw.claimId) || !whole(raw.epoch) ||
+      typeof raw.runToken !== "string" || !LOAD_TOKEN.test(raw.runToken) ||
+      typeof raw.eventsToken !== "string" || !LOAD_TOKEN.test(raw.eventsToken) || !sha(raw.planHash)) return bad;
   if (!isObj(raw.plan) || !text(raw.baseURL, 2048)) return bad;
-  if (!isObj(w) || !text(w.path, 1024) || !text(w.digest, 128) || !text(w.module, 1024) || !text(w.export, 256)) return bad;
-  if (!isObj(l) || !texts(l.allowedOrigins, 20) || !isObj(l.privateOrigins) || !Object.values(l.privateOrigins).every((v) => texts(v, 20)) || Object.keys(l.privateOrigins).length > 20 || !whole(l.maxUsers) || !whole(l.requestBudget) || !whole(l.policyRevision) || !isObj(l.phases)) return bad;
+  if (!isObj(w) || !only(w, ["path", "digest", "module", "export"]) || !text(w.path, 1024) || !sha(w.digest) || !text(w.module, 1024) || !text(w.export, 256)) return bad;
+  if (!isObj(l) || !only(l, ["allowedOrigins", "privateOrigins", "maxUsers", "requestBudget", "policyRevision", "phases"])) return bad;
+  if (!texts(l.allowedOrigins, 20) || !isObj(l.privateOrigins) || !Object.values(l.privateOrigins).every((v) => texts(v, 20)) || Object.keys(l.privateOrigins).length > 20 || !whole(l.maxUsers) || !whole(l.requestBudget) || !whole(l.policyRevision)) return bad;
+  if (!isObj(l.phases) || !only(l.phases, ["checking", "measurement"])) return bad;
   const checking = decodePhase(l.phases.checking);
   const measurement = decodePhase(l.phases.measurement);
-  if (checking === false || measurement === false) return bad;
-  let originCaps: Record<string, number> | undefined;
-  if (l.originCaps !== undefined) {
-    if (!isObj(l.originCaps)) return bad;
-    originCaps = {};
-    for (const [k, n] of Object.entries(l.originCaps)) {
-      if (!whole(n)) return bad;
-      originCaps[k] = n;
-    }
-  }
-  if (!isObj(s) || s.seq !== 0 || !text(s.nonce, 256) || !finite(s.ttlMs) || !(finite(s.renewEveryMs) && s.renewEveryMs > 0) || !whole(s.ceiling) || !finite(s.leaseUntilServerMs) || !finite(s.serverNowMs)) return bad;
+  if (!checking || !measurement) return bad;
+  if (!isObj(s) || !only(s, ["seq", "nonce", "ttlMs", "renewEveryMs", "ceiling", "leaseUntilServerMs", "serverNowMs"])) return bad;
+  if (s.seq !== 0 || !text(s.nonce, 256) || !finite(s.ttlMs) || !(finite(s.renewEveryMs) && s.renewEveryMs > 0) || !whole(s.ceiling) || !finite(s.leaseUntilServerMs) || !finite(s.serverNowMs)) return bad;
   if (!whole(raw.maxRunMs) || !whole(raw.graceMs) || !finite(raw.hardEndServerMs)) return bad;
   const binding = decodeBinding(raw.binding);
-  if (!binding) return bad;
+  if (!binding || w.path !== binding.workload.path || w.digest !== binding.workload.digest) return bad;
   return {
     ok: true,
     grant: {
@@ -221,8 +231,7 @@ export function decodeClaimReply(raw: unknown): ClaimReply {
         maxUsers: l.maxUsers,
         requestBudget: l.requestBudget,
         policyRevision: l.policyRevision,
-        phases: { ...(checking ? { checking } : {}), ...(measurement ? { measurement } : {}) },
-        ...(originCaps ? { originCaps } : {}),
+        phases: { checking, measurement },
       },
       lease: { seq: 0, nonce: s.nonce, ttlMs: s.ttlMs, renewEveryMs: s.renewEveryMs, ceiling: s.ceiling, leaseUntilServerMs: s.leaseUntilServerMs, serverNowMs: s.serverNowMs },
       maxRunMs: raw.maxRunMs,
@@ -237,23 +246,28 @@ export function decodeClaimReply(raw: unknown): ClaimReply {
 export type DecodedRenew =
   /** Not addressed to any renewal: ignore it. */
   | { kind: "unaddressed" }
+  /** The control endpoint sent a refusal outside the renew vocabulary. */
+  | { kind: "unknown_refusal" }
   /**
    * Addressed: claim, epoch, plan, seq and nonce all read. A lease number that does not read is
    * NaN, which `RunnerLease.apply` rejects (the old grant stays and runs out) unless the reply
-   * carries a stop or a readable shorter lease. An unreadable `lease` state or `stop` reads as
-   * `lost`: its effect on authorization cannot be established, so it fails closed.
+   * carries a stop or a readable shorter lease. An unreadable `lease` state or `stop` (a stop
+   * reason outside `STOP_REASONS` included) reads as `lost`, with no stop: its effect on
+   * authorization cannot be established, so it fails closed.
    */
   | { kind: "reply"; reply: RenewReply };
 
 /** A renew reply, untrusted. */
 export function decodeRenewReply(raw: unknown): DecodedRenew {
+  if (isObj(raw) && "refused" in raw) return { kind: isRenewRefusal(raw.refused) ? "unaddressed" : "unknown_refusal" };
   if (!isObj(raw) || !text(raw.claimId, 256) || !whole(raw.epoch) || !text(raw.planHash, 64) || !whole(raw.seq) || !text(raw.nonce, 256)) return { kind: "unaddressed" };
   const num = (v: unknown) => (finite(v) ? v : Number.NaN);
   let stop: RenewReply["stop"];
   let lease: RenewReply["lease"] = raw.lease === "held" || raw.lease === "lost" ? raw.lease : "lost";
   if (raw.stop !== undefined) {
     const st = raw.stop;
-    if (isObj(st) && (st.mode === "graceful" || st.mode === "now") && typeof st.reason === "string" && st.reason.length <= 256) stop = { mode: st.mode, reason: st.reason };
+    // A reason outside the six is a malformed answer (e5 plan v3 §2.4): it fails closed.
+    if (isObj(st) && (st.mode === "graceful" || st.mode === "now") && isStopReason(st.reason)) stop = { mode: st.mode, reason: st.reason };
     else lease = "lost";
   }
   return {

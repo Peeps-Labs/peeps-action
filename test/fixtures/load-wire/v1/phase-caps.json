@@ -1,0 +1,269 @@
+{
+  "about": "Per plan (v1/common) with limitsFor(policy.json): the grant's phases, budget, allowance and maxRunMs. The action's engineBudgets must give the same phase numbers.",
+  "cases": [
+    {
+      "name": "starter",
+      "plan": {
+        "protocolVersion": 1,
+        "journey": {
+          "module": "tests/shared/search.ts",
+          "export": "searchCatalogue"
+        },
+        "cohort": {
+          "kind": "protocol",
+          "demand": "users",
+          "pacingEveryMs": 5000,
+          "stages": [
+            {
+              "name": "Warm up",
+              "kind": "ramp",
+              "startMs": 0,
+              "durationMs": 20000,
+              "fromUsers": 0,
+              "toUsers": 2,
+              "plannedStarts": 2
+            },
+            {
+              "name": "Hold",
+              "kind": "hold",
+              "startMs": 20000,
+              "durationMs": 60000,
+              "fromUsers": 2,
+              "toUsers": 2,
+              "plannedStarts": 24
+            },
+            {
+              "name": "Wind down",
+              "kind": "ramp",
+              "startMs": 80000,
+              "durationMs": 20000,
+              "fromUsers": 2,
+              "toUsers": 0,
+              "plannedStarts": 2
+            }
+          ]
+        },
+        "durationMs": 100000,
+        "peakUsers": 2,
+        "plannedStarts": 28,
+        "requests": {
+          "perJourneyMax": 20,
+          "ceiling": 560
+        },
+        "allowedRequests": [],
+        "onReduced": "refuse"
+      },
+      "limits": {
+        "allowedOrigins": [
+          "https://staging.example.com",
+          "https://auth.staging.example.com"
+        ],
+        "maxUsers": 50,
+        "requestBudget": 560,
+        "policyRevision": 2
+      },
+      "phases": {
+        "checking": {
+          "ratePerSecond": 8,
+          "burst": 40,
+          "maxUsers": 2,
+          "total": 40
+        },
+        "measurement": {
+          "ratePerSecond": 8,
+          "burst": 40,
+          "maxUsers": 2,
+          "total": 560
+        }
+      },
+      "requestBudget": 600,
+      "allowance": 60,
+      "maxRunMs": 1270000
+    },
+    {
+      "name": "spec-example",
+      "plan": {
+        "protocolVersion": 1,
+        "journey": {
+          "module": "tests/shared/search.ts",
+          "export": "searchCatalogue"
+        },
+        "cohort": {
+          "kind": "protocol",
+          "demand": "users",
+          "pacingEveryMs": 5000,
+          "stages": [
+            {
+              "name": "Warm up",
+              "kind": "ramp",
+              "startMs": 0,
+              "durationMs": 20000,
+              "fromUsers": 0,
+              "toUsers": 4,
+              "plannedStarts": 6
+            },
+            {
+              "name": "Hold",
+              "kind": "hold",
+              "startMs": 20000,
+              "durationMs": 60000,
+              "fromUsers": 4,
+              "toUsers": 4,
+              "plannedStarts": 48
+            },
+            {
+              "name": "Wind down",
+              "kind": "ramp",
+              "startMs": 80000,
+              "durationMs": 20000,
+              "fromUsers": 4,
+              "toUsers": 0,
+              "plannedStarts": 6
+            }
+          ]
+        },
+        "durationMs": 100000,
+        "peakUsers": 4,
+        "plannedStarts": 60,
+        "requests": {
+          "perJourneyMax": 20,
+          "ceiling": 1200
+        },
+        "allowedRequests": [],
+        "onReduced": "refuse"
+      },
+      "limits": {
+        "allowedOrigins": [
+          "https://staging.example.com",
+          "https://auth.staging.example.com"
+        ],
+        "maxUsers": 50,
+        "requestBudget": 1200,
+        "policyRevision": 2
+      },
+      "phases": {
+        "checking": {
+          "ratePerSecond": 16,
+          "burst": 50,
+          "maxUsers": 4,
+          "total": 80
+        },
+        "measurement": {
+          "ratePerSecond": 16,
+          "burst": 50,
+          "maxUsers": 4,
+          "total": 1200
+        }
+      },
+      "requestBudget": 1280,
+      "allowance": 90,
+      "maxRunMs": 1270000
+    },
+    {
+      "name": "monorepo",
+      "plan": {
+        "protocolVersion": 1,
+        "journey": {
+          "module": "tools/e2e/src/journeys/checkout-quote.ts",
+          "export": "quoteCheckout"
+        },
+        "cohort": {
+          "kind": "protocol",
+          "demand": "users",
+          "pacingEveryMs": 4000,
+          "stages": [
+            {
+              "name": "Ramp",
+              "kind": "ramp",
+              "startMs": 0,
+              "durationMs": 30000,
+              "fromUsers": 0,
+              "toUsers": 3,
+              "plannedStarts": 8
+            },
+            {
+              "name": "Hold",
+              "kind": "hold",
+              "startMs": 30000,
+              "durationMs": 120000,
+              "fromUsers": 3,
+              "toUsers": 3,
+              "plannedStarts": 90
+            },
+            {
+              "name": "Step up",
+              "kind": "ramp",
+              "startMs": 150000,
+              "durationMs": 10000,
+              "fromUsers": 3,
+              "toUsers": 5,
+              "plannedStarts": 10
+            },
+            {
+              "name": "Peak",
+              "kind": "hold",
+              "startMs": 160000,
+              "durationMs": 60000,
+              "fromUsers": 5,
+              "toUsers": 5,
+              "plannedStarts": 75
+            },
+            {
+              "name": "Stage 5",
+              "kind": "ramp",
+              "startMs": 220000,
+              "durationMs": 15000,
+              "fromUsers": 5,
+              "toUsers": 0,
+              "plannedStarts": 7
+            }
+          ]
+        },
+        "durationMs": 235000,
+        "peakUsers": 5,
+        "plannedStarts": 190,
+        "requests": {
+          "perJourneyMax": 6,
+          "ceiling": 1140
+        },
+        "allowedRequests": [
+          {
+            "method": "POST",
+            "path": "/auth/token"
+          },
+          {
+            "method": "POST",
+            "path": "/api/quotes"
+          }
+        ],
+        "onReduced": "refuse"
+      },
+      "limits": {
+        "allowedOrigins": [
+          "https://staging.example.com",
+          "https://auth.staging.example.com"
+        ],
+        "maxUsers": 50,
+        "requestBudget": 1140,
+        "policyRevision": 2
+      },
+      "phases": {
+        "checking": {
+          "ratePerSecond": 8,
+          "burst": 30,
+          "maxUsers": 5,
+          "total": 30
+        },
+        "measurement": {
+          "ratePerSecond": 8,
+          "burst": 30,
+          "maxUsers": 5,
+          "total": 1140
+        }
+      },
+      "requestBudget": 1170,
+      "allowance": 50,
+      "maxRunMs": 1405000
+    }
+  ]
+}

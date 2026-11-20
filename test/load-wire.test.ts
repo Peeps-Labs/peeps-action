@@ -3,9 +3,8 @@
  * and §4). `HttpControlPort` against local HTTPS servers with per-test CAs: one stands in for
  * Peeps' load routes, one for GitHub's OIDC service.
  *
- * The conformance half (shared wire fixtures, byte-identical requests, hash vectors) is A1's,
- * and lands here when P1's fixtures exist. Until then these cases build their answers locally,
- * and the refusal codes the port enumerates are a draft that A1's fixtures replace.
+ * The conformance half (the shared wire-v1 fixtures, byte-identical requests, hash vectors) is
+ * `load-wire-v1.test.ts`; these cases build their answers locally.
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -23,6 +22,7 @@ import { ANSWER_MAX_BYTES, CLAIM_ANSWER_MAX_BYTES, CLAIM_RETRY_MS, ControlHttpEr
 import { RunnerLease } from "../src/load/lease";
 import { json, jwt, loopbackLookup, startTestServer, type Responder, type TestServer } from "./support/control-server";
 import { FakeControlPort } from "./support/fake-control-port";
+import { invariants, onPhase, rig, smallPlan, why } from "./support/run-supervisor";
 
 const REQUEST_TOKEN = `REQTOKEN-${randomBytes(12).toString("hex")}`;
 const ID_TOKEN = jwt(`IDTOKEN-${randomBytes(12).toString("hex")}`);
@@ -33,13 +33,14 @@ const SENTINELS = [REQUEST_TOKEN, ID_TOKEN, ID_TOKEN.split(".")[2]!, RUN_TOKEN, 
 const CLAIM: ClaimRequest = {
   protocol: 1,
   actionVersion: "0.0.0-test",
+  grantRef: "q2Jx7Vf0bH1kR8sTzW4uYg",
   idempotencyKey: "4b0d5a52-7c1e-4b8f-9e3a-2f6c1d0e9a77",
   runAttempt: 1,
   checkRunId: 42,
-  fence: { kind: "netns", probe: { passed: true, failures: [] } },
+  fence: { kind: "netns", probe: { passed: true, failures: [], image: "ubuntu24 20261116.376.1", kernel: "6.8.0", tools: "systemd 255; unshare 2.39.3", chrony: "normal" } },
   checkoutSha: "a".repeat(40),
   lockDigests: { "package-lock.json": "b".repeat(64) },
-  treeDigest: "c".repeat(64),
+  observed: { treeDigest: "c".repeat(64), generatedLockDigest: "e".repeat(64) },
   workload: { path: "peeps/load/smoke.workload.yaml", digest: "d".repeat(64) },
 };
 const CLAIM_ID = "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f";
@@ -61,7 +62,7 @@ const peepsDefault: Responder = (a, res) => (a.url.endsWith("/claims") ? json(re
 async function harness(t: TestContext, peepsResponder: Responder = peepsDefault): Promise<Harness> {
   const peeps = await startTestServer("peeps.test", peepsResponder);
   const oidc = await startTestServer("oidc.test", (_a, res) => json(res, 200, { count: 1, value: ID_TOKEN }));
-  const seams: HttpControlSeams = { ca: [peeps.caPem, oidc.caPem], lookup: loopbackLookup, oidcHosts: ["oidc.test"] };
+  const seams: HttpControlSeams = { ca: [peeps.caPem, oidc.caPem], lookup: loopbackLookup, oidcHosts: [`oidc.test:${oidc.port}`] };
   const ports: HttpControlPort[] = [];
   const build = (extra: Partial<HttpControlSeams> = {}) => {
     const p = new HttpControlPort({ peepsUrl: peeps.url, oidc: { requestUrl: `${oidc.url}/_apis/idtoken?api-version=2.0`, requestToken: REQUEST_TOKEN } }, { ...seams, ...extra });
@@ -253,12 +254,48 @@ test("an answer that is not 2xx is a refusal or nothing: a success-shaped 4xx ne
   assert.deepEqual(await h.port.claim(CLAIM, signal()), { refused: "unknown" });
   const reply = { claimId: CLAIM_ID, epoch: 1, planHash: "p".repeat(64), seq: 1, nonce: "n", lease: "held", ttlMs: 5000, ceiling: 90, leaseUntilServerMs: 1, serverNowMs: 1 };
   h.peeps.answer((_a, res) => json(res, 401, reply));
-  assert.deepEqual(decodeRenewReply(await h.port.renew("claim-1", RUN_TOKEN, RENEW, signal())), { kind: "unaddressed" });
+  assert.deepEqual(decodeRenewReply(await h.port.renew("claim-1", RUN_TOKEN, RENEW, signal())), { kind: "unknown_refusal" });
   h.peeps.answer((_a, res) => json(res, 401, { ok: true, replay: false }));
   assert.notEqual((await h.port.events("claim-1", EVENTS_TOKEN, EVENTS, signal()) as { ok?: unknown }).ok, true);
   // A refusal at 4xx still resolves as its code.
   h.peeps.answer((_a, res) => json(res, 409, { ok: false, reason: "gap" }));
   assert.deepEqual(await h.port.events("claim-1", EVENTS_TOKEN, EVENTS, signal()), { ok: false, reason: "gap" });
+});
+
+test("a permanent renewal 4xx with an unreadable body is an unknown refusal", async (t) => {
+  const h = await harness(t);
+  const unreadable: [string, Responder][] = [
+    ["plain text", (_a, res) => res.writeHead(403, { "content-type": "text/plain" }).end("Forbidden")],
+    ["empty JSON", (_a, res) => res.writeHead(401, { "content-type": "application/json" }).end()],
+    ["oversized JSON", (_a, res) => res.writeHead(400, { "content-type": "application/json", "content-length": ANSWER_MAX_BYTES + 1 }).end()],
+    ["stalled JSON", (_a, res) => res.writeHead(401, { "content-type": "application/json" }).flushHeaders()],
+  ];
+  for (const [name, responder] of unreadable) {
+    await t.test(name, async () => {
+      h.peeps.answer(responder);
+      const raw = await h.port.renew(CLAIM_ID, RUN_TOKEN, RENEW, signal(name === "stalled JSON" ? 750 : 5000));
+      assert.deepEqual(decodeRenewReply(raw), { kind: "unknown_refusal" });
+    });
+  }
+  h.peeps.answer((_a, res) => json(res, 401, { refused: "auth" }));
+  assert.deepEqual(await h.port.renew(CLAIM_ID, RUN_TOKEN, RENEW, signal()), { refused: "auth" });
+});
+
+test("a plain-text renewal 403 revokes a measuring run after one request", async (t) => {
+  const h = await harness(t, (_a, res) => res.writeHead(403, { "content-type": "text/plain" }).end("Forbidden"));
+  const r = await rig(t, {
+    plan: smallPlan({ exportName: "get", durationMs: 20_000 }),
+    observer: onPhase("measurement", ({ port }) => {
+      const fakeRenew = port.renew.bind(port);
+      port.renew = (claimId, token, body, renewSignal) => JSON.parse(body).state === "closed"
+        ? fakeRenew(claimId, token, body, renewSignal)
+        : h.port.renew(claimId, token, body, renewSignal);
+    }),
+  });
+  const result = await r.result;
+  assert.equal(result.reason, "lease_lost", why(r, result));
+  assert.equal(h.peeps.arrivals.length, 1);
+  invariants(r, result);
 });
 
 test("a 2xx events acknowledgement needs a boolean replay and no refusal beside it", async (t) => {
@@ -333,7 +370,7 @@ test("answers past their cap reject, with or without a declared length", async (
   }
 });
 
-test("only a JSON answer below 500 resolves", async (t) => {
+test("unreadable successful renewals and transient transport failures reject", async (t) => {
   const h = await harness(t);
   const cases: [Responder, string, number | undefined][] = [
     [(_a, res) => (res.writeHead(200, { "content-type": "text/html" }), res.end("<html></html>")), "content_type", 200],
@@ -459,6 +496,11 @@ test("Peeps' URL and the OIDC request URL are checked before anything is sent", 
     [build(h.peeps.url, "https://actions.githubusercontent.com.evil.test/idtoken", [".actions.githubusercontent.com"]), "ACTIONS_ID_TOKEN_REQUEST_URL"],
     [build(h.peeps.url, "https://evilactions.githubusercontent.com/idtoken", [".actions.githubusercontent.com"]), "ACTIONS_ID_TOKEN_REQUEST_URL"],
     [build(h.peeps.url, "https://actions.githubusercontent.com/idtoken", [".actions.githubusercontent.com"]), "ACTIONS_ID_TOKEN_REQUEST_URL"],
+    // S0: no explicit port on GitHub's host set.
+    [build(h.peeps.url, "https://run-actions-3-azure-eastus.actions.githubusercontent.com:8443/1/idtoken", [".actions.githubusercontent.com"]), "ACTIONS_ID_TOKEN_REQUEST_URL"],
+    // An exact entry names its port: the OIDC test server's, not another.
+    [build(h.peeps.url, `https://oidc.test:${h.oidc.port + 1}/idtoken`), "ACTIONS_ID_TOKEN_REQUEST_URL"],
+    [build(h.peeps.url, good, ["oidc.test"]), "ACTIONS_ID_TOKEN_REQUEST_URL"],
   ];
   for (const [make, which] of refused) {
     assert.throws(make, (e: unknown) => e instanceof ControlHttpError && e.code === "url" && e.detail === which && !inspect(e).includes(REQUEST_TOKEN));
@@ -466,6 +508,8 @@ test("Peeps' URL and the OIDC request URL are checked before anything is sent", 
   // The default host set: GitHub-hosted runners' token service.
   assert.doesNotThrow(() => new HttpControlPort({ peepsUrl: "https://app.peepsai.com", oidc: { requestUrl: "https://pipelinesghubeus6.actions.githubusercontent.com/abc/_apis/distributedtask/hubs/Actions/plans/x/jobs/y/idtoken?api-version=2.0", requestToken: REQUEST_TOKEN } }).close());
   assert.doesNotThrow(() => new HttpControlPort({ peepsUrl: "https://app.peepsai.com/", oidc: { requestUrl: "https://run-actions-1-azure-eastus.actions.githubusercontent.com/1/idtoken", requestToken: REQUEST_TOKEN } }).close());
+  // The default port, written out, is no port at all.
+  assert.doesNotThrow(() => new HttpControlPort({ peepsUrl: "https://app.peepsai.com/", oidc: { requestUrl: "https://run-actions-3-azure-eastus.actions.githubusercontent.com:443/1/idtoken?api-version=2.0", requestToken: REQUEST_TOKEN } }).close());
   assert.equal(recorder.stats.connections, 0);
   assert.equal(h.oidc.stats.connections, 0);
   assert.equal(h.peeps.stats.connections, 0);
@@ -546,7 +590,7 @@ test("no token reaches an error, a log or the output", async (t) => {
   const errors = [...seen, ...events].filter((e) => e instanceof Error);
   assert.ok(errors.length >= 10);
   const refusals = [...seen.filter((e) => typeof e === "object" && e !== null && "refused" in e), ...events.filter((e) => !(e instanceof Error))];
-  assert.equal(refusals.length, 4);
+  assert.equal(refusals.length, 5, "including the plain-text renewal refusal");
   const text = [...errors.map((e) => `${e.message}\n${e.stack}\n${inspect(e, { depth: 8, showHidden: true })}\n${JSON.stringify(e)}`), ...refusals.map((r) => JSON.stringify(r)), ...written].join("\n");
   for (const sentinel of SENTINELS) assert.ok(!text.includes(sentinel), `a token leaked: ${sentinel.slice(0, 8)}…`);
   const source = readFileSync(path.resolve(__dirname, "../src/load/http-control-port.ts"), "utf8").replace(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gm, "");
@@ -568,7 +612,7 @@ test("the job's proxy and TLS environment are ignored", async (t) => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "peeps-wire-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(path.join(dir, "extra.pem"), rogue.caPem);
-  const config = { peepsUrl: h.peeps.url, rogueUrl: rogue.url, oidcUrl: `${h.oidc.url}/idtoken`, oidcHost: "oidc.test", requestToken: REQUEST_TOKEN, ca: h.seams.ca, claim: CLAIM };
+  const config = { peepsUrl: h.peeps.url, rogueUrl: rogue.url, oidcUrl: `${h.oidc.url}/idtoken`, oidcHost: `oidc.test:${h.oidc.port}`, requestToken: REQUEST_TOKEN, ca: h.seams.ca, claim: CLAIM };
   const env = {
     ...process.env,
     PEEPS_TEST_CHILD_CONFIG: JSON.stringify(config),
@@ -631,7 +675,7 @@ test("Node's diagnostics that would print a request or write TLS keys refuse the
     await t.test(name, async (t) => {
       // The events token within the first 50 bytes of the grant, where a stream's debug line shows it.
       const h = await harness(t, (_a, res) => json(res, 200, { eventsToken: EVENTS_TOKEN, claimId: CLAIM_ID, epoch: 1, runToken: RUN_TOKEN }));
-      const config = { peepsUrl: h.peeps.url, rogueUrl: h.peeps.url, oidcUrl: `${h.oidc.url}/idtoken`, oidcHost: "oidc.test", requestToken: REQUEST_TOKEN, ca: h.seams.ca, claim: CLAIM };
+      const config = { peepsUrl: h.peeps.url, rogueUrl: h.peeps.url, oidcUrl: `${h.oidc.url}/idtoken`, oidcHost: `oidc.test:${h.oidc.port}`, requestToken: REQUEST_TOKEN, ca: h.seams.ca, claim: CLAIM };
       const { NODE_DEBUG: _d, NODE_OPTIONS: _o, ...base } = process.env;
       const { code, stdout, stderr } = await runChild({ ...base, ...diagnostic, PEEPS_TEST_CHILD_CONFIG: JSON.stringify(config) });
       for (const sentinel of SENTINELS) {
@@ -648,8 +692,8 @@ test("Node's diagnostics that would print a request or write TLS keys refuse the
 });
 
 test("through the fake Peeps: the grant, renewals and events decode and apply", async (t) => {
-  const limits: GrantLimits = { allowedOrigins: ["https://sink.test"], privateOrigins: {}, maxUsers: 1, requestBudget: 1000, policyRevision: 1, phases: { checking: { ratePerSecond: 5, burst: 5 }, measurement: { ratePerSecond: 5, burst: 5 } } };
-  const fake = new FakeControlPort({ claimId: CLAIM_ID, plan: { protocolVersion: 1 }, limits, workload: { path: CLAIM.workload.path, digest: CLAIM.workload.digest, module: "journeys.ts", export: "smoke" }, baseURL: "https://sink.test", binding: { checkoutSha: CLAIM.checkoutSha, lockDigests: CLAIM.lockDigests, treeDigest: CLAIM.treeDigest, workload: CLAIM.workload } });
+  const limits: GrantLimits = { allowedOrigins: ["https://sink.test"], privateOrigins: {}, maxUsers: 1, requestBudget: 1000, policyRevision: 1, phases: { checking: { ratePerSecond: 5, burst: 5, maxUsers: 1, total: 5 }, measurement: { ratePerSecond: 5, burst: 5, maxUsers: 1, total: 1000 } } };
+  const fake = new FakeControlPort({ claimId: CLAIM_ID, plan: { protocolVersion: 1 }, limits, workload: { path: CLAIM.workload.path, digest: CLAIM.workload.digest, module: "journeys.ts", export: "smoke" }, baseURL: "https://sink.test", binding: { checkoutSha: CLAIM.checkoutSha, lockDigests: CLAIM.lockDigests, observed: CLAIM.observed, workload: CLAIM.workload } });
   const h = await harness(t, (a, res) => {
     const m = /^\/api\/v1\/load\/claims(?:\/([^/]+)\/(renew|events))?$/.exec(a.url);
     const bearer = String(a.headers.authorization).replace(/^Bearer /, "");

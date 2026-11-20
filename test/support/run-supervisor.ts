@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import type { TestContext } from "node:test";
 import { sharedClocks } from "../../src/load/clocks";
 import type { Binding } from "../../src/load/control-port";
+import { engineBudgets } from "../../src/load/engine-limits";
+import { validatePlanInput } from "../../src/load/plan-input";
 import type { Clocks } from "../../src/load/gate/admission";
 import { canonicalOrigin } from "../../src/load/gate/normalize";
 import type { Dial } from "../../src/load/gate/proxy";
@@ -29,6 +31,9 @@ export const SINK_HOST = "sink.test";
 const FLOOR_DIR = process.env.PEEPS_LOAD_PLAYWRIGHT_DIR;
 const REPO = path.resolve(__dirname, "../..");
 export const WORKLOAD_PATH = "peeps/load/smoke.workload.yaml";
+/** The dispatch's grant reference every rig claims with. */
+export const GRANT_REF = "q2Jx7Vf0bH1kR8sTzW4uYg";
+const LABELS = { image: "test", kernel: "test", tools: "test", chrony: "test" };
 
 /** A plan of `users` users, one start per user per `pacingMs`, for `durationMs`. */
 export function smallPlan(o: { exportName: string; users?: number; durationMs?: number; pacingMs?: number; perJourneyMax?: number; allowedRequests?: { method: string; path: string }[] }) {
@@ -62,6 +67,8 @@ export function workspace(t: TestContext): string {
   if (FLOOR_DIR) {
     mkdirSync(path.join(dir, "node_modules"));
     symlinkSync(path.join(FLOOR_DIR, "node_modules/playwright-core"), path.join(dir, "node_modules/playwright-core"));
+    // npm's record of the install, which the claim binds.
+    writeFileSync(path.join(dir, "node_modules/.package-lock.json"), '{"lockfileVersion":3}\n');
   } else symlinkSync(path.join(REPO, "node_modules"), path.join(dir, "node_modules"));
   return dir;
 }
@@ -131,6 +138,8 @@ export interface RigOptions {
   hardSignal?: AbortSignal;
   /** The hosts a grant may name (the direct entry's PEEPS_LOAD_SINK_HOSTS). */
   harnessHosts?: string[];
+  /** The dispatch's grant reference; `GRANT_REF` by default. */
+  grantRef?: string;
   /** Runs with every event, in order. */
   observer?: (e: LoadEvent, rig: Rig) => void;
   /** Shifts the supervisor's clocks before the run starts. */
@@ -171,9 +180,15 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
   const plan = o.plan ?? smallPlan({ exportName: o.exportName ?? "get" });
   const binding: Binding = await bindingOf(ws, WORKLOAD_PATH);
   o.afterBinding?.(ws);
+  const limits = { allowedOrigins: [origin], maxUsers: 10, requestBudget: 100_000, policyRevision: 1 };
+  const input = validatePlanInput({ plan, limits });
+  assert.ok(input.ok);
+  const engine = engineBudgets(input.value);
+  const caps = ({ ratePerSecond, burst, users, totalRequests }: typeof engine.checking) =>
+    ({ ratePerSecond, burst, maxUsers: users, total: totalRequests });
   const setup: FakeSetup = {
     plan,
-    limits: { allowedOrigins: [origin], privateOrigins: { [origin]: ["127.0.0.0/8"] }, maxUsers: 10, requestBudget: 100_000, policyRevision: 1, phases: {}, ...o.limits },
+    limits: { ...limits, privateOrigins: { [origin]: ["127.0.0.0/8"] }, phases: { checking: caps(engine.checking), measurement: caps(engine.measurement) }, ...o.limits },
     workload: { path: WORKLOAD_PATH, digest: binding.workload.digest, module: plan.journey.module, export: plan.journey.export },
     baseURL: origin,
     binding,
@@ -190,14 +205,15 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
   const events: LoadEvent[] = [];
   const self = { ws, sink, port, seam, events, jails, origin } as Rig;
   self.result = runLoad(
-    { runId: `t${Math.random().toString(36).slice(2, 10)}`, workspace: ws, workloadPath: WORKLOAD_PATH, nodeDir: path.dirname(path.dirname(process.execPath)), actionDir: path.join(REPO, "dist"), port, signal: o.signal, hardSignal: o.hardSignal, harnessHosts: o.harnessHosts, observer: (e) => {
+    { runId: `t${Math.random().toString(36).slice(2, 10)}`, grantRef: o.grantRef ?? GRANT_REF, workspace: ws, workloadPath: WORKLOAD_PATH, nodeDir: path.dirname(path.dirname(process.execPath)), actionDir: path.join(REPO, "dist"), port, signal: o.signal, hardSignal: o.hardSignal, harnessHosts: o.harnessHosts, observer: (e) => {
       events.push(e);
       o.observer?.(e, self);
     } },
     {
       clocks: seam.clocks,
       // The real jail's callers install before the run (as the action's pre-claim step would); the digest is read here.
-      preinstall: async (w: string) => ({ lock: "", hiddenLock: "", tree: (await bindingOf(w, WORKLOAD_PATH)).treeDigest }),
+      preinstall: async (w: string) => ({ lock: "", hiddenLock: "", tree: (await bindingOf(w, WORKLOAD_PATH)).observed.treeDigest }),
+      labels: async () => LABELS,
       ...(o.real ? {} : { launch: o.launch ?? jails.launch, probe: async () => ({ passed: true, failures: [], seen: null }) }),
       dial: o.dial ? o.dial(real) : real,
       seqHeader: SEQ_HEADER,

@@ -31,9 +31,9 @@ function nothingRan(r: Rig, marker: string): void {
 test("a refused claim loads no customer code", async (t) => {
   const ws = workspace(t);
   const marker = trap(ws);
-  const r = await rig(t, { ws, script: { claimRefused: "matrix" } });
+  const r = await rig(t, { ws, script: { claimRefused: "rerun" } });
   const res = await r.result;
-  assert.equal(res.reason, "claim_matrix");
+  assert.equal(res.reason, "claim_rerun");
   nothingRan(r, marker);
 });
 

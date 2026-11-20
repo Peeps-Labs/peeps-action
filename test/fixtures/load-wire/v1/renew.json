@@ -1,0 +1,2788 @@
+{
+  "about": "Renewals after the claim in claim.json's `granted` case (`start` is that next state, at T0). Steps run in order; a `stamp` is a stop stamped by Peeps (`stampStop`). A step with `fields` sends `body`, which is `renewBody(fields)` byte for byte. `expect` is `decideRenew`'s answer: `refused` (409, nothing written), `reply` (200), or `receipt` (200, the exact `closed` acknowledgement text). `next` is the claim row after the step.",
+  "terms": {
+    "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+    "epoch": 1,
+    "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+    "repositoryId": "900001",
+    "workflowPath": ".github/workflows/peeps-load.yml",
+    "dispatchRef": "refs/heads/main",
+    "workflowSha": "b0b1b2b3b4b5b6b7b8b9c0c1c2c3c4c5c6c7c8c9",
+    "appActorId": "41898282",
+    "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+    "workload": {
+      "path": "peeps/load/search.workload.yaml",
+      "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+    },
+    "packageLockDigest": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409",
+    "reservedHosts": [
+      "auth.staging.example.com",
+      "staging.example.com"
+    ],
+    "policyRevision": 2,
+    "routingRevision": 3,
+    "requestBudget": 1280,
+    "allowance": 90,
+    "graceMs": 30000,
+    "maxRunMs": 1270000,
+    "claimDeadlineMs": 1800001800000
+  },
+  "start": {
+    "leaseState": "held",
+    "dispatchState": "bound",
+    "ghRunId": "18000000001",
+    "ghRunAttempt": 1,
+    "quarantinedAtMs": null,
+    "claimedAtMs": 1800000000000,
+    "idempotencyKey": "0b5e4a6c-7d1f-4e2a-8b3c-9d4e5f6a7b8c",
+    "claimRequestHash": "1e790c57fe69907dcd2e8c232aabd40ae24d82e95afba756f976aa95198e0ed8",
+    "claimLease": {
+      "seq": 0,
+      "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "ttlMs": 5000,
+      "renewEveryMs": 1500,
+      "ceiling": 90,
+      "leaseUntilServerMs": 1800000005000,
+      "serverNowMs": 1800000000000
+    },
+    "checkRunId": 52000000001,
+    "observed": {
+      "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+      "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+    },
+    "lastSeq": 0,
+    "lastBodySha256": null,
+    "lastAnswer": null,
+    "lastDebited": 0,
+    "highestCeiling": 90,
+    "phase": "starting",
+    "leaseUntilMs": 1800000005000,
+    "hardEndMs": 1800001270000,
+    "highWaterServerMs": 1800000000000,
+    "drainStartMs": null,
+    "stop": null,
+    "closedAtMs": null,
+    "closedDebited": null,
+    "closedReceipt": null
+  },
+  "cases": [
+    {
+      "name": "held: the first renewal",
+      "steps": [
+        {
+          "clockMs": 1800000001500,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 40,
+            "unresolved": 2,
+            "inFlight": 3,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":40,\"epoch\":1,\"inFlight\":3,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"b6a131f8a5325fe1d961fee6b8adc5c280c86e81163d583cf9ed676c8bf55bc2\",\"seq\":1,\"state\":\"running\",\"unresolved\":2}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 130,
+              "leaseUntilServerMs": 1800000006500,
+              "serverNowMs": 1800000001500
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 40,
+            "highestCeiling": 130,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001500,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "held, then checking to measurement",
+      "steps": [
+        {
+          "clockMs": 1800000001500,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000006500,
+              "serverNowMs": 1800000001500
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001500,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000003000,
+          "fields": {
+            "epoch": 1,
+            "seq": 2,
+            "nonce": "5eed0002",
+            "phase": "measurement",
+            "debited": 20,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":20,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0002\",\"phase\":\"measurement\",\"requestHash\":\"898807f679ffdb6ba4b36637b825d39bfb35a1c0b712c63c96275b87512e6cbb\",\"seq\":2,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 2,
+              "nonce": "5eed0002",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 110,
+              "leaseUntilServerMs": 1800000008000,
+              "serverNowMs": 1800000003000
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 2,
+            "lastDebited": 20,
+            "highestCeiling": 110,
+            "phase": "measurement",
+            "leaseUntilMs": 1800000008000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000003000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "replay: the answer at T, again at T+3000 (unchanged) and at T+5001 (lost)",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000006000,
+              "serverNowMs": 1800000001000
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000004000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "serverNowMs": 1800000001000,
+              "leaseUntilServerMs": 1800000006000
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000006001,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "lost",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "serverNowMs": 1800000001000,
+              "leaseUntilServerMs": 1800000006000
+            }
+          },
+          "next": {
+            "leaseState": "lost",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000006001,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "changed_payload: other bytes at the same seq",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000006000,
+              "serverNowMs": 1800000001000
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000001100,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 4
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":4,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"846802699f512d1a304b35898d8798d26ad28ebedea2488514cfbcd892a481a5\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "refused": "changed_payload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "gap",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 2,
+            "nonce": "5eed0002",
+            "phase": "checking",
+            "debited": 20,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":20,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0002\",\"phase\":\"checking\",\"requestHash\":\"bae0faace58430209f088d6a0bca06c06a455704f71d621015530679d26225e5\",\"seq\":2,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "refused": "gap"
+          }
+        }
+      ]
+    },
+    {
+      "name": "debited: falling below the last debit",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 30,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":30,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"4e0876e050d7e63520bebd7621514a6aabc5dab0e849584ade5ab045b6ba43b5\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 120,
+              "leaseUntilServerMs": 1800000006000,
+              "serverNowMs": 1800000001000
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 30,
+            "highestCeiling": 120,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000002000,
+          "fields": {
+            "epoch": 1,
+            "seq": 2,
+            "nonce": "5eed0002",
+            "phase": "checking",
+            "debited": 29,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":29,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0002\",\"phase\":\"checking\",\"requestHash\":\"9c9987687f23d0f4a274ebd8418d1e3208af19fd14ff012499b3fbc1d272502a\",\"seq\":2,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "refused": "debited"
+          }
+        }
+      ]
+    },
+    {
+      "name": "debited: above the highest ceiling",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 91,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":91,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"465b2b468ac0406786bcfd606812356d6db6eafe1e7e52ab87b149676fee31b9\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "refused": "debited"
+          }
+        }
+      ]
+    },
+    {
+      "name": "epoch",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 2,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":2,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"b882d78245a800caecbf5f1fdf9593a6c40a4321c0924fcfcf3dcce2e4624dc5\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "refused": "epoch"
+          }
+        }
+      ]
+    },
+    {
+      "name": "hash: a request hash that does not match its fields",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "body": {
+            "text": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}"
+          },
+          "expect": {
+            "refused": "hash"
+          }
+        }
+      ]
+    },
+    {
+      "name": "auth",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "tokenValid": false,
+          "expect": {
+            "refused": "auth"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: not canonical bytes",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "body": {
+            "text": "{\"epoch\":1,\"seq\":1,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"debited\":10,\"unresolved\":0,\"inFlight\":0,\"state\":\"running\",\"lagP99Ms\":0,\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\"}"
+          },
+          "expect": {
+            "refused": "malformed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: a byte order mark before canonical bytes",
+      "steps": [
+        {
+          "clockMs": 1800000001500,
+          "body": {
+            "base64": "77u/eyJkZWJpdGVkIjo0MCwiZXBvY2giOjEsImluRmxpZ2h0IjozLCJsYWdQOTlNcyI6MCwibm9uY2UiOiI1ZWVkMDAwMSIsInBoYXNlIjoiY2hlY2tpbmciLCJyZXF1ZXN0SGFzaCI6ImI2YTEzMWY4YTUzMjVmZTFkOTYxZmVlNmI4YWRjNWMyODBjODZlODExNjNkNTgzY2Y5ZWQ2NzZjOGJmNTViYzIiLCJzZXEiOjEsInN0YXRlIjoicnVubmluZyIsInVucmVzb2x2ZWQiOjJ9"
+          },
+          "expect": {
+            "refused": "malformed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: an unknown key",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0,
+            "extra": 1
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"extra\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"1bdc79446b3880df0c17e2d09d0cf5173579777d030fc367394ea3f408ece59c\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "refused": "malformed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: over 4 KiB",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "body": {
+            "text": "                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 "
+          },
+          "expect": {
+            "refused": "malformed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed: the phase moves back",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "measurement",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"measurement\",\"requestHash\":\"e50c8ef997b02bf36fc54980beed0ba4a16d7b426e98e2a829ed08b8564c0ce9\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000006000,
+              "serverNowMs": 1800000001000
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "measurement",
+            "leaseUntilMs": 1800000006000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000002000,
+          "fields": {
+            "epoch": 1,
+            "seq": 2,
+            "nonce": "5eed0002",
+            "phase": "checking",
+            "debited": 20,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":20,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0002\",\"phase\":\"checking\",\"requestHash\":\"bae0faace58430209f088d6a0bca06c06a455704f71d621015530679d26225e5\",\"seq\":2,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "refused": "malformed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "lost: the lease ran out (an equal time counts as expired)",
+      "steps": [
+        {
+          "clockMs": 1800000005000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "lost",
+              "ttlMs": 0,
+              "ceiling": 90,
+              "leaseUntilServerMs": 1800000005000,
+              "serverNowMs": 1800000005000
+            }
+          },
+          "next": {
+            "leaseState": "lost",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 90,
+            "phase": "starting",
+            "leaseUntilMs": 1800000005000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000005000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000005001,
+          "fields": {
+            "epoch": 1,
+            "seq": 2,
+            "nonce": "5eed0002",
+            "phase": "checking",
+            "debited": 20,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":20,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0002\",\"phase\":\"checking\",\"requestHash\":\"bae0faace58430209f088d6a0bca06c06a455704f71d621015530679d26225e5\",\"seq\":2,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 2,
+              "nonce": "5eed0002",
+              "lease": "lost",
+              "ttlMs": 0,
+              "ceiling": 90,
+              "leaseUntilServerMs": 1800000005000,
+              "serverNowMs": 1800000005001
+            }
+          },
+          "next": {
+            "leaseState": "lost",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 2,
+            "lastDebited": 20,
+            "highestCeiling": 90,
+            "phase": "starting",
+            "leaseUntilMs": 1800000005000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000005001,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "lost, latched: a fresh seq below the high-water mark",
+      "steps": [
+        {
+          "clockMs": 1800000001500,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000006500,
+              "serverNowMs": 1800000001500
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001500,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000001400,
+          "fields": {
+            "epoch": 1,
+            "seq": 2,
+            "nonce": "5eed0002",
+            "phase": "checking",
+            "debited": 20,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":20,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0002\",\"phase\":\"checking\",\"requestHash\":\"bae0faace58430209f088d6a0bca06c06a455704f71d621015530679d26225e5\",\"seq\":2,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 2,
+              "nonce": "5eed0002",
+              "lease": "lost",
+              "ttlMs": 0,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000001500,
+              "serverNowMs": 1800000001500
+            }
+          },
+          "next": {
+            "leaseState": "lost",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 2,
+            "lastDebited": 20,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001500,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000003000,
+          "fields": {
+            "epoch": 1,
+            "seq": 3,
+            "nonce": "5eed0003",
+            "phase": "checking",
+            "debited": 30,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":30,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0003\",\"phase\":\"checking\",\"requestHash\":\"5a7222364e3b308aa8fedff752f89a450a79b2dff8b6dca762266818adad6dc8\",\"seq\":3,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 3,
+              "nonce": "5eed0003",
+              "lease": "lost",
+              "ttlMs": 0,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000003000,
+              "serverNowMs": 1800000003000
+            }
+          },
+          "next": {
+            "leaseState": "lost",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 3,
+            "lastDebited": 30,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000003000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "stop now",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000006000,
+              "serverNowMs": 1800000001000
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "stamp": {
+            "mode": "now",
+            "reason": "user_stop",
+            "clockMs": 1800000001200
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "now",
+              "reason": "user_stop",
+              "atMs": 1800000001200
+            },
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000001200,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001200,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000001300,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "lost",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "serverNowMs": 1800000001000,
+              "leaseUntilServerMs": 1800000001200,
+              "stop": {
+                "mode": "now",
+                "reason": "user_stop"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "lost",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "now",
+              "reason": "user_stop",
+              "atMs": 1800000001200
+            },
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000001200,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001300,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000002500,
+          "fields": {
+            "epoch": 1,
+            "seq": 2,
+            "nonce": "5eed0002",
+            "phase": "checking",
+            "debited": 20,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":20,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0002\",\"phase\":\"checking\",\"requestHash\":\"bae0faace58430209f088d6a0bca06c06a455704f71d621015530679d26225e5\",\"seq\":2,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 2,
+              "nonce": "5eed0002",
+              "lease": "lost",
+              "ttlMs": 0,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000001200,
+              "serverNowMs": 1800000002500,
+              "stop": {
+                "mode": "now",
+                "reason": "user_stop"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "lost",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "now",
+              "reason": "user_stop",
+              "atMs": 1800000001200
+            },
+            "lastSeq": 2,
+            "lastDebited": 20,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000001200,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000002500,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "routing moved: stop now (environment_changed)",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"687f88fc0b96b7cc2520b8d400a21710d5c9e216e87a8684f3d0c605db6e3589\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "routingRevision": 4,
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "lost",
+              "ttlMs": 0,
+              "ceiling": 90,
+              "leaseUntilServerMs": 1800000001000,
+              "serverNowMs": 1800000001000,
+              "stop": {
+                "mode": "now",
+                "reason": "environment_changed"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "lost",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "now",
+              "reason": "environment_changed",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 90,
+            "phase": "starting",
+            "leaseUntilMs": 1800000001000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "graceful stop: renewed every 1.5 s, held until the stamp plus grace, then lost",
+      "steps": [
+        {
+          "stamp": {
+            "mode": "graceful",
+            "reason": "load_testing_off",
+            "clockMs": 1800000001000
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 0,
+            "lastDebited": 0,
+            "highestCeiling": 90,
+            "phase": "starting",
+            "leaseUntilMs": 1800000005000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000001500,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"9bb793147c1c1b94c02cedf28af790a12c27b1c0be7d6dbab0a5491a5247730e\",\"seq\":1,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000006500,
+              "serverNowMs": 1800000001500,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000003000,
+          "fields": {
+            "epoch": 1,
+            "seq": 2,
+            "nonce": "5eed0002",
+            "phase": "checking",
+            "debited": 20,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":20,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0002\",\"phase\":\"checking\",\"requestHash\":\"ce8387e4c4d3ca51508a02da666933215756850c00930ac6490bd302c3c6949c\",\"seq\":2,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 2,
+              "nonce": "5eed0002",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 110,
+              "leaseUntilServerMs": 1800000008000,
+              "serverNowMs": 1800000003000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 2,
+            "lastDebited": 20,
+            "highestCeiling": 110,
+            "phase": "checking",
+            "leaseUntilMs": 1800000008000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000003000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000004500,
+          "fields": {
+            "epoch": 1,
+            "seq": 3,
+            "nonce": "5eed0003",
+            "phase": "checking",
+            "debited": 30,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":30,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0003\",\"phase\":\"checking\",\"requestHash\":\"523f6e4da6eb635c0e5751da4c880460d197a128001ff6e475ee5b69fe8a4b12\",\"seq\":3,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 3,
+              "nonce": "5eed0003",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 120,
+              "leaseUntilServerMs": 1800000009500,
+              "serverNowMs": 1800000004500,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 3,
+            "lastDebited": 30,
+            "highestCeiling": 120,
+            "phase": "checking",
+            "leaseUntilMs": 1800000009500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000004500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000006000,
+          "fields": {
+            "epoch": 1,
+            "seq": 4,
+            "nonce": "5eed0004",
+            "phase": "checking",
+            "debited": 40,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":40,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0004\",\"phase\":\"checking\",\"requestHash\":\"1ef9dd2b956d4586f4b7657ca1455f868342ee97ab205a53aee390b6597281d6\",\"seq\":4,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 4,
+              "nonce": "5eed0004",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 130,
+              "leaseUntilServerMs": 1800000011000,
+              "serverNowMs": 1800000006000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 4,
+            "lastDebited": 40,
+            "highestCeiling": 130,
+            "phase": "checking",
+            "leaseUntilMs": 1800000011000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000006000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000007500,
+          "fields": {
+            "epoch": 1,
+            "seq": 5,
+            "nonce": "5eed0005",
+            "phase": "checking",
+            "debited": 50,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":50,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0005\",\"phase\":\"checking\",\"requestHash\":\"095031c5f29e86811ad54d767c062445c7ed98b03b8d63b8b2dd8424f770c208\",\"seq\":5,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 5,
+              "nonce": "5eed0005",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 140,
+              "leaseUntilServerMs": 1800000012500,
+              "serverNowMs": 1800000007500,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 5,
+            "lastDebited": 50,
+            "highestCeiling": 140,
+            "phase": "checking",
+            "leaseUntilMs": 1800000012500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000007500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000009000,
+          "fields": {
+            "epoch": 1,
+            "seq": 6,
+            "nonce": "5eed0006",
+            "phase": "checking",
+            "debited": 60,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":60,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0006\",\"phase\":\"checking\",\"requestHash\":\"85ab87c88cfb9f4a84736266953583def81ad519ecbb97b0bcca322f80b137ef\",\"seq\":6,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 6,
+              "nonce": "5eed0006",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 150,
+              "leaseUntilServerMs": 1800000014000,
+              "serverNowMs": 1800000009000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 6,
+            "lastDebited": 60,
+            "highestCeiling": 150,
+            "phase": "checking",
+            "leaseUntilMs": 1800000014000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000009000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000010500,
+          "fields": {
+            "epoch": 1,
+            "seq": 7,
+            "nonce": "5eed0007",
+            "phase": "checking",
+            "debited": 70,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":70,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0007\",\"phase\":\"checking\",\"requestHash\":\"502bf4c57cdfbf8ba13c7d02f007ccd2a6ac136ef7a3ae1968cd5dd3458b64a4\",\"seq\":7,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 7,
+              "nonce": "5eed0007",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 160,
+              "leaseUntilServerMs": 1800000015500,
+              "serverNowMs": 1800000010500,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 7,
+            "lastDebited": 70,
+            "highestCeiling": 160,
+            "phase": "checking",
+            "leaseUntilMs": 1800000015500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000010500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000012000,
+          "fields": {
+            "epoch": 1,
+            "seq": 8,
+            "nonce": "5eed0008",
+            "phase": "checking",
+            "debited": 80,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":80,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0008\",\"phase\":\"checking\",\"requestHash\":\"53918a6a67a41c2fbf3af6c2fd8056ff72d9d9ecb41ea94f99502e759613a4ea\",\"seq\":8,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 8,
+              "nonce": "5eed0008",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 170,
+              "leaseUntilServerMs": 1800000017000,
+              "serverNowMs": 1800000012000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 8,
+            "lastDebited": 80,
+            "highestCeiling": 170,
+            "phase": "checking",
+            "leaseUntilMs": 1800000017000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000012000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000013500,
+          "fields": {
+            "epoch": 1,
+            "seq": 9,
+            "nonce": "5eed0009",
+            "phase": "checking",
+            "debited": 90,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":90,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0009\",\"phase\":\"checking\",\"requestHash\":\"3f3d743224e50909a6c820a7d2571038b4485ebe770cc013e11eef989628086e\",\"seq\":9,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 9,
+              "nonce": "5eed0009",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 180,
+              "leaseUntilServerMs": 1800000018500,
+              "serverNowMs": 1800000013500,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 9,
+            "lastDebited": 90,
+            "highestCeiling": 180,
+            "phase": "checking",
+            "leaseUntilMs": 1800000018500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000013500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000015000,
+          "fields": {
+            "epoch": 1,
+            "seq": 10,
+            "nonce": "5eed0010",
+            "phase": "checking",
+            "debited": 100,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":100,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0010\",\"phase\":\"checking\",\"requestHash\":\"cfba88c6309032f67fa19a8ed2643275a9679bf40115e8624939c314d97159a0\",\"seq\":10,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 10,
+              "nonce": "5eed0010",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 190,
+              "leaseUntilServerMs": 1800000020000,
+              "serverNowMs": 1800000015000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 10,
+            "lastDebited": 100,
+            "highestCeiling": 190,
+            "phase": "checking",
+            "leaseUntilMs": 1800000020000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000015000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000016500,
+          "fields": {
+            "epoch": 1,
+            "seq": 11,
+            "nonce": "5eed0011",
+            "phase": "checking",
+            "debited": 110,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":110,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0011\",\"phase\":\"checking\",\"requestHash\":\"e47fd215d872baa7914432878b6591dcf2eced594d7ec575fffdbdd858ac552b\",\"seq\":11,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 11,
+              "nonce": "5eed0011",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 200,
+              "leaseUntilServerMs": 1800000021500,
+              "serverNowMs": 1800000016500,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 11,
+            "lastDebited": 110,
+            "highestCeiling": 200,
+            "phase": "checking",
+            "leaseUntilMs": 1800000021500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000016500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000018000,
+          "fields": {
+            "epoch": 1,
+            "seq": 12,
+            "nonce": "5eed0012",
+            "phase": "checking",
+            "debited": 120,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":120,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0012\",\"phase\":\"checking\",\"requestHash\":\"56e0a58b6c8182bc822717f3572411883b7b28c71b38c321968cb71ab570793f\",\"seq\":12,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 12,
+              "nonce": "5eed0012",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 210,
+              "leaseUntilServerMs": 1800000023000,
+              "serverNowMs": 1800000018000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 12,
+            "lastDebited": 120,
+            "highestCeiling": 210,
+            "phase": "checking",
+            "leaseUntilMs": 1800000023000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000018000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000019500,
+          "fields": {
+            "epoch": 1,
+            "seq": 13,
+            "nonce": "5eed0013",
+            "phase": "checking",
+            "debited": 130,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":130,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0013\",\"phase\":\"checking\",\"requestHash\":\"c71def92f79a94e3fb4ab3a4c7ac881f2aee581ec8a2c99e6ebd0124bd158f67\",\"seq\":13,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 13,
+              "nonce": "5eed0013",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 220,
+              "leaseUntilServerMs": 1800000024500,
+              "serverNowMs": 1800000019500,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 13,
+            "lastDebited": 130,
+            "highestCeiling": 220,
+            "phase": "checking",
+            "leaseUntilMs": 1800000024500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000019500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000021000,
+          "fields": {
+            "epoch": 1,
+            "seq": 14,
+            "nonce": "5eed0014",
+            "phase": "checking",
+            "debited": 140,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":140,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0014\",\"phase\":\"checking\",\"requestHash\":\"08368455469aa7c9a537992cec772757aceddcc4a1bf645cbeb518438af850d3\",\"seq\":14,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 14,
+              "nonce": "5eed0014",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 230,
+              "leaseUntilServerMs": 1800000026000,
+              "serverNowMs": 1800000021000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 14,
+            "lastDebited": 140,
+            "highestCeiling": 230,
+            "phase": "checking",
+            "leaseUntilMs": 1800000026000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000021000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000022500,
+          "fields": {
+            "epoch": 1,
+            "seq": 15,
+            "nonce": "5eed0015",
+            "phase": "checking",
+            "debited": 150,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":150,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0015\",\"phase\":\"checking\",\"requestHash\":\"41f42d2e31f3492204817fbbb762fa7e5123b0c67d602dc4f148e7ab1979535b\",\"seq\":15,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 15,
+              "nonce": "5eed0015",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 240,
+              "leaseUntilServerMs": 1800000027500,
+              "serverNowMs": 1800000022500,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 15,
+            "lastDebited": 150,
+            "highestCeiling": 240,
+            "phase": "checking",
+            "leaseUntilMs": 1800000027500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000022500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000024000,
+          "fields": {
+            "epoch": 1,
+            "seq": 16,
+            "nonce": "5eed0016",
+            "phase": "checking",
+            "debited": 160,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":160,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0016\",\"phase\":\"checking\",\"requestHash\":\"ed9470009473da9ff89d39e4574fa1c5cc32d024f42b0aca2da3c3e42faa2640\",\"seq\":16,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 16,
+              "nonce": "5eed0016",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 250,
+              "leaseUntilServerMs": 1800000029000,
+              "serverNowMs": 1800000024000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 16,
+            "lastDebited": 160,
+            "highestCeiling": 250,
+            "phase": "checking",
+            "leaseUntilMs": 1800000029000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000024000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000025500,
+          "fields": {
+            "epoch": 1,
+            "seq": 17,
+            "nonce": "5eed0017",
+            "phase": "checking",
+            "debited": 170,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":170,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0017\",\"phase\":\"checking\",\"requestHash\":\"b2f704d6c172547e95116b5118c0453b82c23d5991bdb6be7b06633d5f340858\",\"seq\":17,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 17,
+              "nonce": "5eed0017",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 260,
+              "leaseUntilServerMs": 1800000030500,
+              "serverNowMs": 1800000025500,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 17,
+            "lastDebited": 170,
+            "highestCeiling": 260,
+            "phase": "checking",
+            "leaseUntilMs": 1800000030500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000025500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000027000,
+          "fields": {
+            "epoch": 1,
+            "seq": 18,
+            "nonce": "5eed0018",
+            "phase": "checking",
+            "debited": 180,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":180,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0018\",\"phase\":\"checking\",\"requestHash\":\"2311c367bc66e2c251164d60bc785d207ea7885aa8561fd5abfd05098c5a22cd\",\"seq\":18,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 18,
+              "nonce": "5eed0018",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 270,
+              "leaseUntilServerMs": 1800000031000,
+              "serverNowMs": 1800000027000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 18,
+            "lastDebited": 180,
+            "highestCeiling": 270,
+            "phase": "checking",
+            "leaseUntilMs": 1800000031000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000027000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000028500,
+          "fields": {
+            "epoch": 1,
+            "seq": 19,
+            "nonce": "5eed0019",
+            "phase": "checking",
+            "debited": 190,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":190,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0019\",\"phase\":\"checking\",\"requestHash\":\"d4b03b327067b2c6df4147f1bdbf617e366c02fea1a2bc77f784bf4c452c3208\",\"seq\":19,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 19,
+              "nonce": "5eed0019",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 280,
+              "leaseUntilServerMs": 1800000031000,
+              "serverNowMs": 1800000028500,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 19,
+            "lastDebited": 190,
+            "highestCeiling": 280,
+            "phase": "checking",
+            "leaseUntilMs": 1800000031000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000028500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000030000,
+          "fields": {
+            "epoch": 1,
+            "seq": 20,
+            "nonce": "5eed0020",
+            "phase": "checking",
+            "debited": 200,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":200,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0020\",\"phase\":\"checking\",\"requestHash\":\"aab23e8d49824e0f256ea516377a160fb5f56664960c8eb050802eb45c989988\",\"seq\":20,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 20,
+              "nonce": "5eed0020",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 290,
+              "leaseUntilServerMs": 1800000031000,
+              "serverNowMs": 1800000030000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 20,
+            "lastDebited": 200,
+            "highestCeiling": 290,
+            "phase": "checking",
+            "leaseUntilMs": 1800000031000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000030000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000031000,
+          "fields": {
+            "epoch": 1,
+            "seq": 21,
+            "nonce": "5eed0021",
+            "phase": "checking",
+            "debited": 210,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":210,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0021\",\"phase\":\"checking\",\"requestHash\":\"94fce18c0d20ecfb5017a19891bbc5901841f162ee3f183d9d9d714533e29ca5\",\"seq\":21,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 21,
+              "nonce": "5eed0021",
+              "lease": "lost",
+              "ttlMs": 0,
+              "ceiling": 290,
+              "leaseUntilServerMs": 1800000031000,
+              "serverNowMs": 1800000031000,
+              "stop": {
+                "mode": "graceful",
+                "reason": "load_testing_off"
+              }
+            }
+          },
+          "next": {
+            "leaseState": "lost",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": {
+              "mode": "graceful",
+              "reason": "load_testing_off",
+              "atMs": 1800000001000
+            },
+            "lastSeq": 21,
+            "lastDebited": 210,
+            "highestCeiling": 290,
+            "phase": "checking",
+            "leaseUntilMs": 1800000031000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000031000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "draining: latched at the first draining renewal; running cannot lift it",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 10,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "draining",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":10,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"9bb793147c1c1b94c02cedf28af790a12c27b1c0be7d6dbab0a5491a5247730e\",\"seq\":1,\"state\":\"draining\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 100,
+              "leaseUntilServerMs": 1800000006000,
+              "serverNowMs": 1800000001000
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 10,
+            "highestCeiling": 100,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001000,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000002500,
+          "fields": {
+            "epoch": 1,
+            "seq": 2,
+            "nonce": "5eed0002",
+            "phase": "checking",
+            "debited": 20,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":20,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0002\",\"phase\":\"checking\",\"requestHash\":\"bae0faace58430209f088d6a0bca06c06a455704f71d621015530679d26225e5\",\"seq\":2,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 2,
+              "nonce": "5eed0002",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 110,
+              "leaseUntilServerMs": 1800000007500,
+              "serverNowMs": 1800000002500
+            }
+          },
+          "next": {
+            "leaseState": "draining",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 2,
+            "lastDebited": 20,
+            "highestCeiling": 110,
+            "phase": "checking",
+            "leaseUntilMs": 1800000007500,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000002500,
+            "drainStartMs": 1800000001000,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "closed: acknowledged past a gap, replayed byte for byte, then refused",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 40,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":40,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"27925cfa046bad1a2f16612a349bea4c98f2349d0175e832394cf0184254e768\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "held",
+              "ttlMs": 5000,
+              "ceiling": 130,
+              "leaseUntilServerMs": 1800000006000,
+              "serverNowMs": 1800000001000
+            }
+          },
+          "next": {
+            "leaseState": "held",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 40,
+            "highestCeiling": 130,
+            "phase": "checking",
+            "leaseUntilMs": 1800000006000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000001000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000002000,
+          "fields": {
+            "epoch": 1,
+            "seq": 3,
+            "nonce": "5eed0003",
+            "phase": "checking",
+            "debited": 45,
+            "unresolved": 1,
+            "inFlight": 0,
+            "state": "closed",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":45,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0003\",\"phase\":\"checking\",\"requestHash\":\"5d62bac9f9d419d5796d35ca4693c105c5f8cb278815fe58cd07539d94409ed0\",\"seq\":3,\"state\":\"closed\",\"unresolved\":1}",
+          "expect": {
+            "receipt": "{\"ceiling\":130,\"claimId\":\"7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f\",\"closed\":true,\"epoch\":1,\"lease\":\"lost\",\"leaseUntilServerMs\":1800000002000,\"nonce\":\"5eed0003\",\"planHash\":\"5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33\",\"seq\":3,\"serverNowMs\":1800000002000,\"ttlMs\":0}"
+          },
+          "next": {
+            "leaseState": "closed",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 3,
+            "lastDebited": 45,
+            "highestCeiling": 130,
+            "phase": "checking",
+            "leaseUntilMs": 1800000002000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000002000,
+            "drainStartMs": null,
+            "closedAtMs": 1800000002000,
+            "closedDebited": 45
+          }
+        },
+        {
+          "clockMs": 1800000900000,
+          "fields": {
+            "epoch": 1,
+            "seq": 3,
+            "nonce": "5eed0003",
+            "phase": "checking",
+            "debited": 45,
+            "unresolved": 1,
+            "inFlight": 0,
+            "state": "closed",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":45,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0003\",\"phase\":\"checking\",\"requestHash\":\"5d62bac9f9d419d5796d35ca4693c105c5f8cb278815fe58cd07539d94409ed0\",\"seq\":3,\"state\":\"closed\",\"unresolved\":1}",
+          "expect": {
+            "receipt": "{\"ceiling\":130,\"claimId\":\"7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f\",\"closed\":true,\"epoch\":1,\"lease\":\"lost\",\"leaseUntilServerMs\":1800000002000,\"nonce\":\"5eed0003\",\"planHash\":\"5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33\",\"seq\":3,\"serverNowMs\":1800000002000,\"ttlMs\":0}"
+          },
+          "next": {
+            "leaseState": "closed",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 3,
+            "lastDebited": 45,
+            "highestCeiling": 130,
+            "phase": "checking",
+            "leaseUntilMs": 1800000002000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000002000,
+            "drainStartMs": null,
+            "closedAtMs": 1800000002000,
+            "closedDebited": 45
+          }
+        },
+        {
+          "clockMs": 1800000002100,
+          "fields": {
+            "epoch": 1,
+            "seq": 4,
+            "nonce": "5eed0004",
+            "phase": "checking",
+            "debited": 40,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":40,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0004\",\"phase\":\"checking\",\"requestHash\":\"6097c73ef60745ab82053d736988e31e649b4ab703abb7c4ea893a24211d043e\",\"seq\":4,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "refused": "closed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "closed after the lease was lost",
+      "steps": [
+        {
+          "clockMs": 1800000006000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 40,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "running",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":40,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"27925cfa046bad1a2f16612a349bea4c98f2349d0175e832394cf0184254e768\",\"seq\":1,\"state\":\"running\",\"unresolved\":0}",
+          "expect": {
+            "reply": {
+              "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+              "epoch": 1,
+              "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+              "seq": 1,
+              "nonce": "5eed0001",
+              "lease": "lost",
+              "ttlMs": 0,
+              "ceiling": 90,
+              "leaseUntilServerMs": 1800000005000,
+              "serverNowMs": 1800000006000
+            }
+          },
+          "next": {
+            "leaseState": "lost",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 1,
+            "lastDebited": 40,
+            "highestCeiling": 90,
+            "phase": "starting",
+            "leaseUntilMs": 1800000005000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000006000,
+            "drainStartMs": null,
+            "closedAtMs": null,
+            "closedDebited": null
+          }
+        },
+        {
+          "clockMs": 1800000007000,
+          "fields": {
+            "epoch": 1,
+            "seq": 2,
+            "nonce": "5eed0002",
+            "phase": "checking",
+            "debited": 44,
+            "unresolved": 0,
+            "inFlight": 0,
+            "state": "closed",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":44,\"epoch\":1,\"inFlight\":0,\"lagP99Ms\":0,\"nonce\":\"5eed0002\",\"phase\":\"checking\",\"requestHash\":\"1a0568785c1ee521743ae3c4ab73954164f3f04418e4edd54a8b720d8620712b\",\"seq\":2,\"state\":\"closed\",\"unresolved\":0}",
+          "expect": {
+            "receipt": "{\"ceiling\":90,\"claimId\":\"7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f\",\"closed\":true,\"epoch\":1,\"lease\":\"lost\",\"leaseUntilServerMs\":1800000005000,\"nonce\":\"5eed0002\",\"planHash\":\"5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33\",\"seq\":2,\"serverNowMs\":1800000007000,\"ttlMs\":0}"
+          },
+          "next": {
+            "leaseState": "closed",
+            "dispatchState": "bound",
+            "ghRunId": "18000000001",
+            "claimedAtMs": 1800000000000,
+            "quarantinedAtMs": null,
+            "stop": null,
+            "lastSeq": 2,
+            "lastDebited": 44,
+            "highestCeiling": 90,
+            "phase": "starting",
+            "leaseUntilMs": 1800000005000,
+            "hardEndMs": 1800001270000,
+            "highWaterServerMs": 1800000007000,
+            "drainStartMs": null,
+            "closedAtMs": 1800000007000,
+            "closedDebited": 44
+          }
+        }
+      ]
+    },
+    {
+      "name": "closed: refused with requests in flight",
+      "steps": [
+        {
+          "clockMs": 1800000001000,
+          "fields": {
+            "epoch": 1,
+            "seq": 1,
+            "nonce": "5eed0001",
+            "phase": "checking",
+            "debited": 5,
+            "unresolved": 0,
+            "inFlight": 1,
+            "state": "closed",
+            "lagP99Ms": 0
+          },
+          "body": "{\"debited\":5,\"epoch\":1,\"inFlight\":1,\"lagP99Ms\":0,\"nonce\":\"5eed0001\",\"phase\":\"checking\",\"requestHash\":\"bc8137d8f7852b2a47f53ede8bace23edba456415e96a464e8bc86fced7896c7\",\"seq\":1,\"state\":\"closed\",\"unresolved\":0}",
+          "expect": {
+            "refused": "malformed"
+          }
+        }
+      ]
+    }
+  ]
+}

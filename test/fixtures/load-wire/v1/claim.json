@@ -1,0 +1,1074 @@
+{
+  "about": "Seq 0. Each case patches the base request, token identity, context and state (`dispatched` unless `start` says otherwise: `claimed` is the granted case's next state, `renewed` that state after one renewal at T+1500, `none` no grant). `body` replaces the request bytes. `expect` is `decideClaim`'s answer: `refused` is the 409 body's code; `granted` is the lease, hard end and binding of the 200 grant (grant-accepts.json has whole grants).",
+  "terms": {
+    "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+    "epoch": 1,
+    "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33",
+    "repositoryId": "900001",
+    "workflowPath": ".github/workflows/peeps-load.yml",
+    "dispatchRef": "refs/heads/main",
+    "workflowSha": "b0b1b2b3b4b5b6b7b8b9c0c1c2c3c4c5c6c7c8c9",
+    "appActorId": "41898282",
+    "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+    "workload": {
+      "path": "peeps/load/search.workload.yaml",
+      "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+    },
+    "packageLockDigest": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409",
+    "reservedHosts": [
+      "auth.staging.example.com",
+      "staging.example.com"
+    ],
+    "policyRevision": 2,
+    "routingRevision": 3,
+    "requestBudget": 1280,
+    "allowance": 90,
+    "graceMs": 30000,
+    "maxRunMs": 1270000,
+    "claimDeadlineMs": 1800001800000
+  },
+  "identity": {
+    "repositoryId": "900001",
+    "repository": "Peeps-Labs/load-fixture",
+    "eventName": "workflow_dispatch",
+    "workflowRef": "Peeps-Labs/load-fixture/.github/workflows/peeps-load.yml@refs/heads/main",
+    "jobWorkflowRef": "Peeps-Labs/load-fixture/.github/workflows/peeps-load.yml@refs/heads/main",
+    "workflowSha": "b0b1b2b3b4b5b6b7b8b9c0c1c2c3c4c5c6c7c8c9",
+    "sha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+    "runId": "18000000001",
+    "runAttempt": 1,
+    "runnerEnvironment": "github-hosted",
+    "actorId": "41898282",
+    "checkRunId": 52000000001
+  },
+  "request": {
+    "protocol": 1,
+    "actionVersion": "1.18.0",
+    "grantRef": "q2Jx7Vf0bH1kR8sTzW4uYg",
+    "idempotencyKey": "0b5e4a6c-7d1f-4e2a-8b3c-9d4e5f6a7b8c",
+    "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+    "workload": {
+      "path": "peeps/load/search.workload.yaml",
+      "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+    },
+    "lockDigests": {
+      "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409"
+    },
+    "observed": {
+      "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+      "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+    },
+    "runAttempt": 1,
+    "checkRunId": 52000000001,
+    "fence": {
+      "kind": "netns",
+      "probe": {
+        "passed": true,
+        "failures": [],
+        "image": "ubuntu-24.04 20261116.1",
+        "kernel": "6.8.0-1017-azure",
+        "tools": "nft 1.0.9; ip 6.1.0",
+        "chrony": "synced, offset 0.000021 s"
+      }
+    }
+  },
+  "context": {
+    "clockMs": 1800000000000,
+    "flagOn": true,
+    "policyRevision": 2,
+    "routingRevision": 3,
+    "harness": {
+      "repositoryIds": [
+        "900001"
+      ],
+      "sinkHosts": [
+        "auth.staging.example.com",
+        "staging.example.com"
+      ]
+    },
+    "leaseNonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+  },
+  "dispatched": {
+    "dispatchState": "bound",
+    "ghRunId": "18000000001",
+    "ghRunAttempt": 1
+  },
+  "cases": [
+    {
+      "name": "granted",
+      "expect": {
+        "granted": {
+          "replay": false,
+          "lease": {
+            "seq": 0,
+            "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            "ttlMs": 5000,
+            "renewEveryMs": 1500,
+            "ceiling": 90,
+            "leaseUntilServerMs": 1800000005000,
+            "serverNowMs": 1800000000000
+          },
+          "hardEndServerMs": 1800001270000,
+          "binding": {
+            "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+            "lockDigests": {
+              "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409"
+            },
+            "observed": {
+              "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+              "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+            },
+            "workload": {
+              "path": "peeps/load/search.workload.yaml",
+              "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+            }
+          }
+        }
+      },
+      "next": {
+        "leaseState": "held",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": 1800000000000,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 90,
+        "phase": "starting",
+        "leaseUntilMs": 1800000005000,
+        "hardEndMs": 1800001270000,
+        "highWaterServerMs": 1800000000000,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "granted, binding the run from the token after a lost dispatch answer",
+      "statePatch": {
+        "dispatchState": "response_unknown",
+        "ghRunId": null,
+        "ghRunAttempt": null
+      },
+      "expect": {
+        "granted": {
+          "replay": false,
+          "lease": {
+            "seq": 0,
+            "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            "ttlMs": 5000,
+            "renewEveryMs": 1500,
+            "ceiling": 90,
+            "leaseUntilServerMs": 1800000005000,
+            "serverNowMs": 1800000000000
+          },
+          "hardEndServerMs": 1800001270000,
+          "binding": {
+            "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+            "lockDigests": {
+              "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409"
+            },
+            "observed": {
+              "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+              "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+            },
+            "workload": {
+              "path": "peeps/load/search.workload.yaml",
+              "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+            }
+          }
+        }
+      },
+      "next": {
+        "leaseState": "held",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": 1800000000000,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 90,
+        "phase": "starting",
+        "leaseUntilMs": 1800000005000,
+        "hardEndMs": 1800001270000,
+        "highWaterServerMs": 1800000000000,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "granted with no check_run_id in the token",
+      "requestPatch": {
+        "checkRunId": 0
+      },
+      "identityPatch": {
+        "checkRunId": null
+      },
+      "expect": {
+        "granted": {
+          "replay": false,
+          "lease": {
+            "seq": 0,
+            "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            "ttlMs": 5000,
+            "renewEveryMs": 1500,
+            "ceiling": 90,
+            "leaseUntilServerMs": 1800000005000,
+            "serverNowMs": 1800000000000
+          },
+          "hardEndServerMs": 1800001270000,
+          "binding": {
+            "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+            "lockDigests": {
+              "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409"
+            },
+            "observed": {
+              "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+              "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+            },
+            "workload": {
+              "path": "peeps/load/search.workload.yaml",
+              "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+            }
+          }
+        }
+      },
+      "next": {
+        "leaseState": "held",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": 1800000000000,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 90,
+        "phase": "starting",
+        "leaseUntilMs": 1800000005000,
+        "hardEndMs": 1800001270000,
+        "highWaterServerMs": 1800000000000,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "replay of seq 0 while current, 3 s later",
+      "start": "claimed",
+      "contextPatch": {
+        "clockMs": 1800000003000,
+        "leaseNonce": "ffffffffffffffffffffffffffffffff"
+      },
+      "expect": {
+        "granted": {
+          "replay": true,
+          "lease": {
+            "seq": 0,
+            "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            "ttlMs": 5000,
+            "renewEveryMs": 1500,
+            "ceiling": 90,
+            "leaseUntilServerMs": 1800000005000,
+            "serverNowMs": 1800000000000
+          },
+          "hardEndServerMs": 1800001270000,
+          "binding": {
+            "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+            "lockDigests": {
+              "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409"
+            },
+            "observed": {
+              "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+              "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+            },
+            "workload": {
+              "path": "peeps/load/search.workload.yaml",
+              "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+            }
+          }
+        }
+      },
+      "next": {
+        "leaseState": "held",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": 1800000000000,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 90,
+        "phase": "starting",
+        "leaseUntilMs": 1800000005000,
+        "hardEndMs": 1800001270000,
+        "highWaterServerMs": 1800000000000,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "claim_superseded after a renewal",
+      "start": "renewed",
+      "expect": {
+        "refused": "claim_superseded"
+      },
+      "next": {
+        "leaseState": "held",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": 1800000000000,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 1,
+        "lastDebited": 10,
+        "highestCeiling": 100,
+        "phase": "checking",
+        "leaseUntilMs": 1800000006500,
+        "hardEndMs": 1800001270000,
+        "highWaterServerMs": 1800000001500,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "expired: seq 0 replayed after its lease",
+      "start": "claimed",
+      "contextPatch": {
+        "clockMs": 1800000005000
+      },
+      "expect": {
+        "refused": "expired"
+      },
+      "next": {
+        "leaseState": "lost",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": 1800000000000,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 90,
+        "phase": "starting",
+        "leaseUntilMs": 1800000005000,
+        "hardEndMs": 1800001270000,
+        "highWaterServerMs": 1800000005000,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "duplicate_claim: another idempotency key",
+      "start": "claimed",
+      "requestPatch": {
+        "idempotencyKey": "1b5e4a6c-7d1f-4e2a-8b3c-9d4e5f6a7b8c"
+      },
+      "expect": {
+        "refused": "duplicate_claim"
+      },
+      "next": {
+        "leaseState": "held",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": 1800000000000,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 90,
+        "phase": "starting",
+        "leaseUntilMs": 1800000005000,
+        "hardEndMs": 1800001270000,
+        "highWaterServerMs": 1800000000000,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "unknown_grant: no grant has this reference",
+      "start": "none",
+      "expect": {
+        "refused": "unknown_grant"
+      }
+    },
+    {
+      "name": "unknown_grant: dispatch not yet sent",
+      "statePatch": {
+        "dispatchState": "sending",
+        "ghRunId": null,
+        "ghRunAttempt": null
+      },
+      "expect": {
+        "refused": "unknown_grant"
+      },
+      "next": {
+        "leaseState": "unclaimed",
+        "dispatchState": "sending",
+        "ghRunId": null,
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "unknown_grant: another repository",
+      "identityPatch": {
+        "repositoryId": "900002"
+      },
+      "expect": {
+        "refused": "unknown_grant"
+      },
+      "next": {
+        "leaseState": "unclaimed",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "stopped: a stop was stamped before the claim",
+      "statePatch": {
+        "leaseState": "revoked",
+        "dispatchState": "revoked",
+        "stop": {
+          "mode": "graceful",
+          "reason": "load_testing_off",
+          "atMs": 1799999999999
+        }
+      },
+      "expect": {
+        "refused": "stopped"
+      },
+      "next": {
+        "leaseState": "revoked",
+        "dispatchState": "revoked",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": {
+          "mode": "graceful",
+          "reason": "load_testing_off",
+          "atMs": 1799999999999
+        },
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "not_enabled",
+      "contextPatch": {
+        "flagOn": false
+      },
+      "expect": {
+        "refused": "not_enabled"
+      },
+      "next": {
+        "leaseState": "unclaimed",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "outside_harness",
+      "contextPatch": {
+        "harness": {
+          "repositoryIds": [
+            "900001"
+          ],
+          "sinkHosts": [
+            "staging.example.com"
+          ]
+        }
+      },
+      "expect": {
+        "refused": "outside_harness"
+      },
+      "next": {
+        "leaseState": "unclaimed",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "wrong_workflow: a reusable workflow",
+      "identityPatch": {
+        "jobWorkflowRef": "Peeps-Labs/shared/.github/workflows/load.yml@refs/heads/main"
+      },
+      "expect": {
+        "refused": "wrong_workflow"
+      },
+      "next": {
+        "leaseState": "revoked",
+        "dispatchState": "revoked",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "wrong_workflow: another event",
+      "identityPatch": {
+        "eventName": "push"
+      },
+      "expect": {
+        "refused": "wrong_workflow"
+      },
+      "next": {
+        "leaseState": "revoked",
+        "dispatchState": "revoked",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "identity: an actor other than the App bot",
+      "identityPatch": {
+        "actorId": "583231"
+      },
+      "expect": {
+        "refused": "identity"
+      },
+      "next": {
+        "leaseState": "unclaimed",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "rerun",
+      "requestPatch": {
+        "runAttempt": 2
+      },
+      "identityPatch": {
+        "runAttempt": 2
+      },
+      "expect": {
+        "refused": "rerun"
+      },
+      "next": {
+        "leaseState": "unclaimed",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "identity: another run presents a bound grant (stop now and quarantine)",
+      "identityPatch": {
+        "runId": "18000000002"
+      },
+      "expect": {
+        "refused": "identity"
+      },
+      "next": {
+        "leaseState": "revoked",
+        "dispatchState": "revoked",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": 1800000000000,
+        "stop": {
+          "mode": "now",
+          "reason": "identity_conflict",
+          "atMs": 1800000000000
+        },
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 1800000000000,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "self_hosted",
+      "identityPatch": {
+        "runnerEnvironment": "self-hosted"
+      },
+      "expect": {
+        "refused": "self_hosted"
+      },
+      "next": {
+        "leaseState": "revoked",
+        "dispatchState": "revoked",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "wrong_commit (revokes the grant)",
+      "identityPatch": {
+        "sha": "0000000000000000000000000000000000000000"
+      },
+      "expect": {
+        "refused": "wrong_commit"
+      },
+      "next": {
+        "leaseState": "revoked",
+        "dispatchState": "revoked",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "malformed: the body's attempt disagrees with the token",
+      "requestPatch": {
+        "runAttempt": 2
+      },
+      "expect": {
+        "refused": "malformed"
+      },
+      "next": {
+        "leaseState": "unclaimed",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "binding: another lockfile (revokes the grant)",
+      "requestPatch": {
+        "lockDigests": {
+          "package-lock.json": "fafaf5267cc04d3bf900715b87a59a8825b8a1881a3c7e0c47ae2645578cf983"
+        }
+      },
+      "expect": {
+        "refused": "binding"
+      },
+      "next": {
+        "leaseState": "revoked",
+        "dispatchState": "revoked",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "fence_unverified (revokes the grant)",
+      "requestPatch": {
+        "fence": {
+          "kind": "netns",
+          "probe": {
+            "passed": false,
+            "failures": [
+              "egress: reached 1.1.1.1:443"
+            ],
+            "image": "ubuntu-24.04 20261116.1",
+            "kernel": "6.8.0-1017-azure",
+            "tools": "nft 1.0.9; ip 6.1.0",
+            "chrony": "synced, offset 0.000021 s"
+          }
+        }
+      },
+      "expect": {
+        "refused": "fence_unverified"
+      },
+      "next": {
+        "leaseState": "revoked",
+        "dispatchState": "revoked",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "expired: past the claim deadline",
+      "contextPatch": {
+        "clockMs": 1800001800000
+      },
+      "expect": {
+        "refused": "expired"
+      },
+      "next": {
+        "leaseState": "unclaimed",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 1800001800000,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "policy_changed",
+      "contextPatch": {
+        "policyRevision": 3
+      },
+      "expect": {
+        "refused": "policy_changed"
+      },
+      "next": {
+        "leaseState": "unclaimed",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "environment_changed",
+      "contextPatch": {
+        "routingRevision": 4
+      },
+      "expect": {
+        "refused": "environment_changed"
+      },
+      "next": {
+        "leaseState": "unclaimed",
+        "dispatchState": "bound",
+        "ghRunId": "18000000001",
+        "claimedAtMs": null,
+        "quarantinedAtMs": null,
+        "stop": null,
+        "lastSeq": 0,
+        "lastDebited": 0,
+        "highestCeiling": 0,
+        "phase": "starting",
+        "leaseUntilMs": null,
+        "hardEndMs": null,
+        "highWaterServerMs": 0,
+        "drainStartMs": null,
+        "closedAtMs": null,
+        "closedDebited": null
+      }
+    },
+    {
+      "name": "unsupported_protocol",
+      "body": {
+        "json": {
+          "protocol": 2,
+          "actionVersion": "1.18.0",
+          "grantRef": "q2Jx7Vf0bH1kR8sTzW4uYg",
+          "idempotencyKey": "0b5e4a6c-7d1f-4e2a-8b3c-9d4e5f6a7b8c",
+          "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+          "workload": {
+            "path": "peeps/load/search.workload.yaml",
+            "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+          },
+          "lockDigests": {
+            "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409"
+          },
+          "observed": {
+            "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+            "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+          },
+          "runAttempt": 1,
+          "checkRunId": 52000000001,
+          "fence": {
+            "kind": "netns",
+            "probe": {
+              "passed": true,
+              "failures": [],
+              "image": "ubuntu-24.04 20261116.1",
+              "kernel": "6.8.0-1017-azure",
+              "tools": "nft 1.0.9; ip 6.1.0",
+              "chrony": "synced, offset 0.000021 s"
+            }
+          }
+        }
+      },
+      "expect": {
+        "refused": "unsupported_protocol"
+      }
+    },
+    {
+      "name": "malformed: an unknown key",
+      "body": {
+        "json": {
+          "protocol": 1,
+          "actionVersion": "1.18.0",
+          "grantRef": "q2Jx7Vf0bH1kR8sTzW4uYg",
+          "idempotencyKey": "0b5e4a6c-7d1f-4e2a-8b3c-9d4e5f6a7b8c",
+          "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+          "workload": {
+            "path": "peeps/load/search.workload.yaml",
+            "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+          },
+          "lockDigests": {
+            "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409"
+          },
+          "observed": {
+            "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+            "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+          },
+          "runAttempt": 1,
+          "checkRunId": 52000000001,
+          "fence": {
+            "kind": "netns",
+            "probe": {
+              "passed": true,
+              "failures": [],
+              "image": "ubuntu-24.04 20261116.1",
+              "kernel": "6.8.0-1017-azure",
+              "tools": "nft 1.0.9; ip 6.1.0",
+              "chrony": "synced, offset 0.000021 s"
+            }
+          },
+          "idToken": "eyJ..."
+        }
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "malformed: the old two-file lockDigests",
+      "body": {
+        "json": {
+          "protocol": 1,
+          "actionVersion": "1.18.0",
+          "grantRef": "q2Jx7Vf0bH1kR8sTzW4uYg",
+          "idempotencyKey": "0b5e4a6c-7d1f-4e2a-8b3c-9d4e5f6a7b8c",
+          "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+          "workload": {
+            "path": "peeps/load/search.workload.yaml",
+            "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+          },
+          "lockDigests": {
+            "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409",
+            "node_modules/.package-lock.json": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+          },
+          "observed": {
+            "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+            "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+          },
+          "runAttempt": 1,
+          "checkRunId": 52000000001,
+          "fence": {
+            "kind": "netns",
+            "probe": {
+              "passed": true,
+              "failures": [],
+              "image": "ubuntu-24.04 20261116.1",
+              "kernel": "6.8.0-1017-azure",
+              "tools": "nft 1.0.9; ip 6.1.0",
+              "chrony": "synced, offset 0.000021 s"
+            }
+          }
+        }
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "malformed: not UTF-8",
+      "body": {
+        "base64": "e/99"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "malformed: a valid claim but for one byte that is not UTF-8, inside a string",
+      "body": {
+        "base64": "eyJwcm90b2NvbCI6MSwiYWN0aW9uVmVyc2lvbiI6IjEuMTgu/yIsImdyYW50UmVmIjoicTJKeDdWZjBiSDFrUjhzVHpXNHVZZyIsImlkZW1wb3RlbmN5S2V5IjoiMGI1ZTRhNmMtN2QxZi00ZTJhLThiM2MtOWQ0ZTVmNmE3YjhjIiwiY2hlY2tvdXRTaGEiOiJjMGMxYzJjM2M0YzVjNmM3YzhjOWQwZDFkMmQzZDRkNWQ2ZDdkOGQ5Iiwid29ya2xvYWQiOnsicGF0aCI6InBlZXBzL2xvYWQvc2VhcmNoLndvcmtsb2FkLnlhbWwiLCJkaWdlc3QiOiJmMjc0OGEyMDM5ZGQwZjBmYjJhMmU0ZGY2NTE2N2Q4MDlhNWFhMzkyYmE4Y2RlZmJiYWZiMzNiNjMzNTNiYzBjIn0sImxvY2tEaWdlc3RzIjp7InBhY2thZ2UtbG9jay5qc29uIjoiZDQyYTRhZGEyNjhjOGM3MTU0NzE1ZDAyNmI3ZGJiZDU5MjgzM2JmY2E0MmRlYTZjN2I3MGY1NjcyMmNlZTQwOSJ9LCJvYnNlcnZlZCI6eyJ0cmVlRGlnZXN0IjoiZGM5YzVlZGI4YjJkNDc5ZTY5N2I0YjBiOGFiODc0ZjMyYjMyNTEzODU5OGNlOWU3Yjc1OWViODI5MjExMDYyMiIsImdlbmVyYXRlZExvY2tEaWdlc3QiOiI1ZTFlMDdjOTBjOGMxY2U3M2NmZDE2NjkyZWQxMWY2ZTU3YjkzOTRiMjhhODFjNGYwZmVkOGZmYjM2MzlmZGMxIn0sInJ1bkF0dGVtcHQiOjEsImNoZWNrUnVuSWQiOjUyMDAwMDAwMDAxLCJmZW5jZSI6eyJraW5kIjoibmV0bnMiLCJwcm9iZSI6eyJwYXNzZWQiOnRydWUsImZhaWx1cmVzIjpbXSwiaW1hZ2UiOiJ1YnVudHUtMjQuMDQgMjAyNjExMTYuMSIsImtlcm5lbCI6IjYuOC4wLTEwMTctYXp1cmUiLCJ0b29scyI6Im5mdCAxLjAuOTsgaXAgNi4xLjAiLCJjaHJvbnkiOiJzeW5jZWQsIG9mZnNldCAwLjAwMDAyMSBzIn19fQ=="
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "malformed: a byte order mark before the body",
+      "body": {
+        "base64": "77u/eyJwcm90b2NvbCI6MSwiYWN0aW9uVmVyc2lvbiI6IjEuMTguMCIsImdyYW50UmVmIjoicTJKeDdWZjBiSDFrUjhzVHpXNHVZZyIsImlkZW1wb3RlbmN5S2V5IjoiMGI1ZTRhNmMtN2QxZi00ZTJhLThiM2MtOWQ0ZTVmNmE3YjhjIiwiY2hlY2tvdXRTaGEiOiJjMGMxYzJjM2M0YzVjNmM3YzhjOWQwZDFkMmQzZDRkNWQ2ZDdkOGQ5Iiwid29ya2xvYWQiOnsicGF0aCI6InBlZXBzL2xvYWQvc2VhcmNoLndvcmtsb2FkLnlhbWwiLCJkaWdlc3QiOiJmMjc0OGEyMDM5ZGQwZjBmYjJhMmU0ZGY2NTE2N2Q4MDlhNWFhMzkyYmE4Y2RlZmJiYWZiMzNiNjMzNTNiYzBjIn0sImxvY2tEaWdlc3RzIjp7InBhY2thZ2UtbG9jay5qc29uIjoiZDQyYTRhZGEyNjhjOGM3MTU0NzE1ZDAyNmI3ZGJiZDU5MjgzM2JmY2E0MmRlYTZjN2I3MGY1NjcyMmNlZTQwOSJ9LCJvYnNlcnZlZCI6eyJ0cmVlRGlnZXN0IjoiZGM5YzVlZGI4YjJkNDc5ZTY5N2I0YjBiOGFiODc0ZjMyYjMyNTEzODU5OGNlOWU3Yjc1OWViODI5MjExMDYyMiIsImdlbmVyYXRlZExvY2tEaWdlc3QiOiI1ZTFlMDdjOTBjOGMxY2U3M2NmZDE2NjkyZWQxMWY2ZTU3YjkzOTRiMjhhODFjNGYwZmVkOGZmYjM2MzlmZGMxIn0sInJ1bkF0dGVtcHQiOjEsImNoZWNrUnVuSWQiOjUyMDAwMDAwMDAxLCJmZW5jZSI6eyJraW5kIjoibmV0bnMiLCJwcm9iZSI6eyJwYXNzZWQiOnRydWUsImZhaWx1cmVzIjpbXSwiaW1hZ2UiOiJ1YnVudHUtMjQuMDQgMjAyNjExMTYuMSIsImtlcm5lbCI6IjYuOC4wLTEwMTctYXp1cmUiLCJ0b29scyI6Im5mdCAxLjAuOTsgaXAgNi4xLjAiLCJjaHJvbnkiOiJzeW5jZWQsIG9mZnNldCAwLjAwMDAyMSBzIn19fQ=="
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    }
+  ]
+}

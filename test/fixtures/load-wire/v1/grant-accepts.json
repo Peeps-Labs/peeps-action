@@ -1,0 +1,383 @@
+{
+  "about": "Whole 200 grants, one per v1/common plan, claimed at T0. Each must pass the action's decodeClaimReply, validatePlanInput, planHashOf and runLimits (ok, never `reduced`), and its baseURL its origin check. Tokens are derived with a fixture key and grant nothing.",
+  "cases": [
+    {
+      "name": "starter",
+      "grant": {
+        "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+        "epoch": 1,
+        "runToken": "lBSCiVmOAJ0D5Ti4eU4wwGq9oRDWLF2fUmFGeXdkR-4",
+        "eventsToken": "42aFle9J9DfrQXFQH6rFgtcfMaEZmv-fGafbyLksGSY",
+        "plan": {
+          "protocolVersion": 1,
+          "journey": {
+            "module": "tests/shared/search.ts",
+            "export": "searchCatalogue"
+          },
+          "cohort": {
+            "kind": "protocol",
+            "demand": "users",
+            "pacingEveryMs": 5000,
+            "stages": [
+              {
+                "name": "Warm up",
+                "kind": "ramp",
+                "startMs": 0,
+                "durationMs": 20000,
+                "fromUsers": 0,
+                "toUsers": 2,
+                "plannedStarts": 2
+              },
+              {
+                "name": "Hold",
+                "kind": "hold",
+                "startMs": 20000,
+                "durationMs": 60000,
+                "fromUsers": 2,
+                "toUsers": 2,
+                "plannedStarts": 24
+              },
+              {
+                "name": "Wind down",
+                "kind": "ramp",
+                "startMs": 80000,
+                "durationMs": 20000,
+                "fromUsers": 2,
+                "toUsers": 0,
+                "plannedStarts": 2
+              }
+            ]
+          },
+          "durationMs": 100000,
+          "peakUsers": 2,
+          "plannedStarts": 28,
+          "requests": {
+            "perJourneyMax": 20,
+            "ceiling": 560
+          },
+          "allowedRequests": [],
+          "onReduced": "refuse"
+        },
+        "workload": {
+          "path": "peeps/load/search.workload.yaml",
+          "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c",
+          "module": "tests/shared/search.ts",
+          "export": "searchCatalogue"
+        },
+        "limits": {
+          "allowedOrigins": [
+            "https://staging.example.com",
+            "https://auth.staging.example.com"
+          ],
+          "privateOrigins": {},
+          "maxUsers": 50,
+          "requestBudget": 600,
+          "policyRevision": 2,
+          "phases": {
+            "checking": {
+              "ratePerSecond": 8,
+              "burst": 40,
+              "maxUsers": 2,
+              "total": 40
+            },
+            "measurement": {
+              "ratePerSecond": 8,
+              "burst": 40,
+              "maxUsers": 2,
+              "total": 560
+            }
+          }
+        },
+        "lease": {
+          "seq": 0,
+          "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          "ttlMs": 5000,
+          "renewEveryMs": 1500,
+          "ceiling": 60,
+          "leaseUntilServerMs": 1800000005000,
+          "serverNowMs": 1800000000000
+        },
+        "maxRunMs": 1270000,
+        "graceMs": 30000,
+        "hardEndServerMs": 1800001270000,
+        "baseURL": "https://staging.example.com",
+        "binding": {
+          "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+          "lockDigests": {
+            "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409"
+          },
+          "observed": {
+            "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+            "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+          },
+          "workload": {
+            "path": "peeps/load/search.workload.yaml",
+            "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+          }
+        },
+        "planHash": "8d49d8add31d533e30998fa4e01c6d3be741063b17b1eafc165e3402973187d4"
+      }
+    },
+    {
+      "name": "spec-example",
+      "grant": {
+        "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+        "epoch": 1,
+        "runToken": "lBSCiVmOAJ0D5Ti4eU4wwGq9oRDWLF2fUmFGeXdkR-4",
+        "eventsToken": "42aFle9J9DfrQXFQH6rFgtcfMaEZmv-fGafbyLksGSY",
+        "plan": {
+          "protocolVersion": 1,
+          "journey": {
+            "module": "tests/shared/search.ts",
+            "export": "searchCatalogue"
+          },
+          "cohort": {
+            "kind": "protocol",
+            "demand": "users",
+            "pacingEveryMs": 5000,
+            "stages": [
+              {
+                "name": "Warm up",
+                "kind": "ramp",
+                "startMs": 0,
+                "durationMs": 20000,
+                "fromUsers": 0,
+                "toUsers": 4,
+                "plannedStarts": 6
+              },
+              {
+                "name": "Hold",
+                "kind": "hold",
+                "startMs": 20000,
+                "durationMs": 60000,
+                "fromUsers": 4,
+                "toUsers": 4,
+                "plannedStarts": 48
+              },
+              {
+                "name": "Wind down",
+                "kind": "ramp",
+                "startMs": 80000,
+                "durationMs": 20000,
+                "fromUsers": 4,
+                "toUsers": 0,
+                "plannedStarts": 6
+              }
+            ]
+          },
+          "durationMs": 100000,
+          "peakUsers": 4,
+          "plannedStarts": 60,
+          "requests": {
+            "perJourneyMax": 20,
+            "ceiling": 1200
+          },
+          "allowedRequests": [],
+          "onReduced": "refuse"
+        },
+        "workload": {
+          "path": "peeps/load/search.workload.yaml",
+          "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c",
+          "module": "tests/shared/search.ts",
+          "export": "searchCatalogue"
+        },
+        "limits": {
+          "allowedOrigins": [
+            "https://staging.example.com",
+            "https://auth.staging.example.com"
+          ],
+          "privateOrigins": {},
+          "maxUsers": 50,
+          "requestBudget": 1280,
+          "policyRevision": 2,
+          "phases": {
+            "checking": {
+              "ratePerSecond": 16,
+              "burst": 50,
+              "maxUsers": 4,
+              "total": 80
+            },
+            "measurement": {
+              "ratePerSecond": 16,
+              "burst": 50,
+              "maxUsers": 4,
+              "total": 1200
+            }
+          }
+        },
+        "lease": {
+          "seq": 0,
+          "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          "ttlMs": 5000,
+          "renewEveryMs": 1500,
+          "ceiling": 90,
+          "leaseUntilServerMs": 1800000005000,
+          "serverNowMs": 1800000000000
+        },
+        "maxRunMs": 1270000,
+        "graceMs": 30000,
+        "hardEndServerMs": 1800001270000,
+        "baseURL": "https://staging.example.com",
+        "binding": {
+          "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+          "lockDigests": {
+            "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409"
+          },
+          "observed": {
+            "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+            "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+          },
+          "workload": {
+            "path": "peeps/load/search.workload.yaml",
+            "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+          }
+        },
+        "planHash": "5a9826b21a1234e18178bef6600b2429c965878968e710c8fb2c16baf7818e33"
+      }
+    },
+    {
+      "name": "monorepo",
+      "grant": {
+        "claimId": "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f",
+        "epoch": 1,
+        "runToken": "lBSCiVmOAJ0D5Ti4eU4wwGq9oRDWLF2fUmFGeXdkR-4",
+        "eventsToken": "42aFle9J9DfrQXFQH6rFgtcfMaEZmv-fGafbyLksGSY",
+        "plan": {
+          "protocolVersion": 1,
+          "journey": {
+            "module": "tools/e2e/src/journeys/checkout-quote.ts",
+            "export": "quoteCheckout"
+          },
+          "cohort": {
+            "kind": "protocol",
+            "demand": "users",
+            "pacingEveryMs": 4000,
+            "stages": [
+              {
+                "name": "Ramp",
+                "kind": "ramp",
+                "startMs": 0,
+                "durationMs": 30000,
+                "fromUsers": 0,
+                "toUsers": 3,
+                "plannedStarts": 8
+              },
+              {
+                "name": "Hold",
+                "kind": "hold",
+                "startMs": 30000,
+                "durationMs": 120000,
+                "fromUsers": 3,
+                "toUsers": 3,
+                "plannedStarts": 90
+              },
+              {
+                "name": "Step up",
+                "kind": "ramp",
+                "startMs": 150000,
+                "durationMs": 10000,
+                "fromUsers": 3,
+                "toUsers": 5,
+                "plannedStarts": 10
+              },
+              {
+                "name": "Peak",
+                "kind": "hold",
+                "startMs": 160000,
+                "durationMs": 60000,
+                "fromUsers": 5,
+                "toUsers": 5,
+                "plannedStarts": 75
+              },
+              {
+                "name": "Stage 5",
+                "kind": "ramp",
+                "startMs": 220000,
+                "durationMs": 15000,
+                "fromUsers": 5,
+                "toUsers": 0,
+                "plannedStarts": 7
+              }
+            ]
+          },
+          "durationMs": 235000,
+          "peakUsers": 5,
+          "plannedStarts": 190,
+          "requests": {
+            "perJourneyMax": 6,
+            "ceiling": 1140
+          },
+          "allowedRequests": [
+            {
+              "method": "POST",
+              "path": "/auth/token"
+            },
+            {
+              "method": "POST",
+              "path": "/api/quotes"
+            }
+          ],
+          "onReduced": "refuse"
+        },
+        "workload": {
+          "path": "peeps/load/search.workload.yaml",
+          "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c",
+          "module": "tools/e2e/src/journeys/checkout-quote.ts",
+          "export": "quoteCheckout"
+        },
+        "limits": {
+          "allowedOrigins": [
+            "https://staging.example.com",
+            "https://auth.staging.example.com"
+          ],
+          "privateOrigins": {},
+          "maxUsers": 50,
+          "requestBudget": 1170,
+          "policyRevision": 2,
+          "phases": {
+            "checking": {
+              "ratePerSecond": 8,
+              "burst": 30,
+              "maxUsers": 5,
+              "total": 30
+            },
+            "measurement": {
+              "ratePerSecond": 8,
+              "burst": 30,
+              "maxUsers": 5,
+              "total": 1140
+            }
+          }
+        },
+        "lease": {
+          "seq": 0,
+          "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          "ttlMs": 5000,
+          "renewEveryMs": 1500,
+          "ceiling": 50,
+          "leaseUntilServerMs": 1800000005000,
+          "serverNowMs": 1800000000000
+        },
+        "maxRunMs": 1405000,
+        "graceMs": 30000,
+        "hardEndServerMs": 1800001405000,
+        "baseURL": "https://staging.example.com",
+        "binding": {
+          "checkoutSha": "c0c1c2c3c4c5c6c7c8c9d0d1d2d3d4d5d6d7d8d9",
+          "lockDigests": {
+            "package-lock.json": "d42a4ada268c8c7154715d026b7dbbd592833bfca42dea6c7b70f56722cee409"
+          },
+          "observed": {
+            "treeDigest": "dc9c5edb8b2d479e697b4b0b8ab874f32b325138598ce9e7b759eb8292110622",
+            "generatedLockDigest": "5e1e07c90c8c1ce73cfd16692ed11f6e57b9394b28a81c4f0fed8ffb3639fdc1"
+          },
+          "workload": {
+            "path": "peeps/load/search.workload.yaml",
+            "digest": "f2748a2039dd0f0fb2a2e4df65167d809a5aa392ba8cdefbbafb33b63353bc0c"
+          }
+        },
+        "planHash": "30b4648001d0049dee59ef6ba1ef8b853165067c71fbde24e58885e1cb215893"
+      }
+    }
+  ]
+}

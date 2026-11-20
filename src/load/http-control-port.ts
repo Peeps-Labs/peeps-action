@@ -23,7 +23,7 @@
  *     anchors the lease there, so an answer read later than that could only be discarded after
  *     consuming the grant (e5 plan v3 §4, minor 1 of the round-2 review).
  *   - The OIDC token (audience `peeps-load`) is minted inside `claim` only, from an
- *     `ACTIONS_ID_TOKEN_REQUEST_URL` that must be https, carry no credentials and be on the GitHub
+ *     `ACTIONS_ID_TOKEN_REQUEST_URL` that must be https, carry no credentials or explicit port, and be on the GitHub
  *     host set; anything else is refused when the port is built, before the request token goes
  *     anywhere.
  *   - Nothing here prints. Errors are `ControlHttpError`: the operation, a typed code, the HTTP
@@ -40,6 +40,7 @@ import type { LookupFunction } from "node:net";
 import { rootCertificates } from "node:tls";
 import { debuglog } from "node:util";
 import { canonical, type ClaimRequest, type ControlPort, type EventsBody } from "./control-port";
+import { CLAIM_REFUSALS, EVENTS_REFUSALS, RENEW_REFUSALS } from "./wire";
 
 export const LOAD_OIDC_AUDIENCE = "peeps-load";
 /** The claim is retried for this long from the call, then rejects with its last failure. */
@@ -54,22 +55,19 @@ const OIDC_ANSWER_MAX_BYTES = 16 * 1024;
 const OIDC_TOKEN_MAX_CHARS = 8 * 1024;
 const OIDC_ATTEMPTS = 5;
 /**
- * Where GitHub-hosted runners mint OIDC tokens. A leading dot matches the name's subdomains.
- * Draft: S0 records the real set, and replaces this.
+ * Where GitHub-hosted runners mint OIDC tokens (S0, 2026-11-20: the host is per shard and region,
+ * `run-actions-<n>-azure-<region>.actions.githubusercontent.com`). A leading dot matches the
+ * name's subdomains, on the default port only; an exact entry matches its host and port.
  */
 export const GITHUB_OIDC_HOSTS: readonly string[] = [".actions.githubusercontent.com"];
 
 /**
- * The refusal codes the wire names (e5 plan §2.2, v2, v3). Anything else is reduced to
- * `unknown`, so a refusal that echoes a value can never carry it further. Draft: A1's shared
- * fixtures replace this list.
+ * The refusal codes the wire names (wire-v1's `constants.json`, through `wire.ts`). Anything else
+ * is reduced to `unknown`, so a refusal that echoes a value can never carry it further.
  */
-const REFUSALS = new Set([
-  "auth", "unknown_grant", "wrong_workflow", "wrong_commit", "binding", "rerun", "duplicate_claim", "self_hosted", "fence_unverified", "expired", "stopped", "not_enabled", "policy_changed", "environment_changed", "outside_harness", "unsupported_protocol", "malformed", "claim_superseded", "identity", "matrix",
-  "hash", "epoch", "gap", "changed_payload", "debited", "closed",
-]);
+const REFUSALS: ReadonlySet<string> = new Set([...CLAIM_REFUSALS, ...RENEW_REFUSALS]);
 const CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const EVENT_REASONS = new Set(["stream", "gap", "conflict", "after_final", "malformed", "hash", "expired", "auth", "budget"]);
+const EVENT_REASONS: ReadonlySet<string> = new Set(EVENTS_REFUSALS);
 
 export type ControlOp = "claim" | "renew" | "events" | "oidc" | "config";
 export type ControlFailure =
@@ -250,6 +248,7 @@ export class HttpControlPort implements ControlPort {
     return new Promise<Answer>((resolve, reject) => {
       if (signal.aborted) return reject(abortError(op, signal));
       let settled = false;
+      let renewRefusalStatus: number | undefined;
       const headers: Record<string, string> = { accept: "application/json", authorization: `Bearer ${bearer}`, "user-agent": this.userAgent };
       if (body !== undefined) {
         headers["content-type"] = "application/json";
@@ -279,7 +278,13 @@ export class HttpControlPort implements ControlPort {
         signal.removeEventListener("abort", onAbort);
         if (error) {
           req.destroy();
-          reject(error);
+          // A permanent renewal 4xx still denies the renewal if its body cannot be read.
+          // Keep explicit cancellation and failures before response headers on the error path.
+          if (renewRefusalStatus !== undefined && error.code !== "aborted") {
+            resolve({ status: renewRefusalStatus, json: undefined });
+          } else {
+            reject(error);
+          }
         } else resolve(answer!);
       };
       const onAbort = () => finish(abortError(op, signal));
@@ -290,6 +295,7 @@ export class HttpControlPort implements ControlPort {
         if (status >= 300 && status < 400) return finish(new ControlHttpError(op, "redirect", status));
         if (status >= 500 || status === 408 || status === 429) return finish(new ControlHttpError(op, "status", status));
         if (status < 200) return finish(new ControlHttpError(op, "status", status));
+        if (op === "renew" && status >= 400 && status < 500) renewRefusalStatus = status;
         if (!/^application\/json\s*(;|$)/i.test(String(res.headers["content-type"] ?? ""))) return finish(new ControlHttpError(op, "content_type", status));
         const declared = Number(res.headers["content-length"]);
         if (Number.isFinite(declared) && declared > cap) return finish(new ControlHttpError(op, "too_large", status));
@@ -357,7 +363,8 @@ function oidcRequestUrl(raw: string, hosts: readonly string[]): URL {
     throw new ControlHttpError("config", "url", undefined, "ACTIONS_ID_TOKEN_REQUEST_URL");
   }
   const host = url.hostname.toLowerCase();
-  const allowed = hosts.some((h) => (h.startsWith(".") ? host.endsWith(h) && host.length > h.length : host === h));
+  // No explicit port on a suffix rule (S0): `URL` drops the default 443, so any port left is another one.
+  const allowed = hosts.some((h) => (h.startsWith(".") ? url.port === "" && host.endsWith(h) && host.length > h.length : url.host.toLowerCase() === h));
   if (url.protocol !== "https:" || url.username || url.password || url.hash || !allowed) throw new ControlHttpError("config", "url", undefined, "ACTIONS_ID_TOKEN_REQUEST_URL");
   return url;
 }

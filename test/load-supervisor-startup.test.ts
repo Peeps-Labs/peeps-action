@@ -8,7 +8,9 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
-import { invariants, onPhase, rig, scripted, smallPlan, why, WORKLOAD_PATH } from "./support/run-supervisor";
+import { claimBodyProblem } from "../src/load/claim-body";
+import { canonical } from "../src/load/control-port";
+import { GRANT_REF, invariants, onPhase, rig, scripted, smallPlan, why, WORKLOAD_PATH } from "./support/run-supervisor";
 
 describe("load supervisor: malformed replies and startup", { concurrency: 4 }, () => {
   // ---------------------------------------------------------------- malformed replies
@@ -30,6 +32,28 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
     const r = await rig(t, { plan: smallPlan({ exportName: "get", durationMs: 20_000 }), script: { mangle: (x, seq) => (seq >= 3 ? { ...x, stop: { mode: "later" } } : x) } });
     const res = await r.result;
     assert.equal(res.status, "lease_lost", why(r, res));
+    invariants(r, res);
+  });
+
+  test("an unknown renewal refusal revokes immediately without retrying the running renewal", async (t) => {
+    let measuring = false;
+    let refusals = 0;
+    const r = await rig(t, {
+      plan: smallPlan({ exportName: "get", durationMs: 20_000 }),
+      observer: onPhase("measurement", () => { measuring = true; }),
+      script: { mangle: (reply) => {
+        if (!measuring || reply.closed === true) return reply;
+        refusals++;
+        return { refused: "future_refusal" };
+      } },
+    });
+    const res = await r.result;
+    assert.equal(res.reason, "lease_lost", why(r, res));
+    assert.equal(refusals, 1);
+    assert.ok(r.events.some((e) => e.type === "renewal" && e.decision === "unknown_refusal"), "the refusal is in the event stream");
+    const refused = res.latency.records.filter(([, , , outcome]) => outcome === "refused");
+    assert.equal(refused.length, 1, "the refused renewal's latency record says so");
+    assert.equal(refused[0]![2], null, "a refusal is never applied");
     invariants(r, res);
   });
 
@@ -111,6 +135,27 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
     assert.equal(res.cleanup, "not_started");
   });
 
+  test("the claim is P1's strict body: the grant reference, the probe's labels, observed digests", async (t) => {
+    const r = await rig(t, { seams: { labels: async () => ({ image: "ubuntu24 20261116.376.1", kernel: "6.8.0-1017-azure", tools: "systemd 255; unshare 2.39.3", chrony: "normal" }) } });
+    const res = await r.result;
+    assert.equal(res.status, "completed", why(r, res));
+    const sent = r.port.claims[0]!;
+    assert.equal(claimBodyProblem(canonical(sent)), undefined);
+    assert.equal(sent.grantRef, GRANT_REF);
+    assert.deepEqual(Object.keys(sent.lockDigests), ["package-lock.json"]);
+    assert.match(sent.observed.generatedLockDigest, /^[0-9a-f]{64}$/);
+    assert.deepEqual(sent.fence.probe, { passed: true, failures: [], image: "ubuntu24 20261116.376.1", kernel: "6.8.0-1017-azure", tools: "systemd 255; unshare 2.39.3", chrony: "normal" });
+  });
+
+  test("a body Peeps' strict schema would refuse is never sent: nothing is claimed", async (t) => {
+    const r = await rig(t, { grantRef: "not-a-grant-ref" });
+    const res = await r.result;
+    assert.equal(res.status, "didnt_start");
+    assert.equal(res.reason, "claim_invalid");
+    assert.equal(r.port.claims.length, 0);
+    assert.equal(r.jails.made.length, 0);
+  });
+
   test("a failed fence probe: nothing is claimed", async (t) => {
     const r = await rig(t, { seams: { probe: async () => ({ passed: false, failures: ["egress"], seen: null }) } });
     const res = await r.result;
@@ -121,10 +166,10 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
   });
 
   test("a refused claim: no jail starts", async (t) => {
-    const r = await rig(t, { script: { claimRefused: "matrix" } });
+    const r = await rig(t, { script: { claimRefused: "rerun" } });
     const res = await r.result;
     assert.equal(res.status, "didnt_start");
-    assert.equal(res.reason, "claim_matrix");
+    assert.equal(res.reason, "claim_rerun");
     assert.equal(r.jails.made.length, 0);
     assert.equal(r.port.renewals.length, 0);
   });
@@ -229,4 +274,22 @@ describe("load supervisor: malformed replies and startup", { concurrency: 4 }, (
     assert.equal(res.closed.state, "acked");
     assert.equal(res.closed.debited, 0);
   });
+});
+
+test("an inconsistent workload digest in the grant starts no jail", async (t) => {
+  const r = await rig(t, {
+    setup: { workload: { path: WORKLOAD_PATH, digest: "0".repeat(64), module: "journeys.ts", export: "get" } },
+  });
+  const res = await r.result;
+  assert.equal(res.reason, "claim_malformed", why(r, res));
+  assert.equal(r.jails.made.length, 0);
+  assert.equal(r.sink.arrivals.length, 0);
+});
+
+test("a grant without its explicit phase caps starts no jail", async (t) => {
+  const r = await rig(t, { limits: { phases: {} } });
+  const res = await r.result;
+  assert.equal(res.reason, "claim_malformed", why(r, res));
+  assert.equal(r.jails.made.length, 0);
+  assert.equal(r.sink.arrivals.length, 0);
 });

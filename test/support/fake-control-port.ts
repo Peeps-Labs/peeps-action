@@ -18,6 +18,7 @@
  * Refusals answer `{refused}`, which the runner cannot match to a renewal, so it is no answer.
  */
 import type { ClaimRequest, ControlPort, EventsBody, Binding, GrantLimits } from "../../src/load/control-port";
+import { claimBodyProblem } from "../../src/load/claim-body";
 import { canonical, planHashOf, sha256 } from "../../src/load/control-port";
 import { batchHash, EventLedger } from "../../src/load/gate/reconcile";
 
@@ -54,7 +55,7 @@ export interface PortScript {
 }
 
 export interface FakeSetup {
-  /** The grant's claim id; "claim-1" when absent. */
+  /** The grant's claim id; a fixture UUID when absent. */
   claimId?: string;
   plan: unknown;
   limits: GrantLimits;
@@ -92,8 +93,8 @@ export class FakeControlPort implements ControlPort {
   readonly posted: (EventsBody & { refused?: string })[] = [];
   readonly ledger = new Map<string, EventLedger>();
   readonly claimId: string;
-  readonly runToken = "run-token-" + "r".repeat(20);
-  readonly eventsToken = "events-token-" + "e".repeat(20);
+  readonly runToken = "r".repeat(42) + "A";
+  readonly eventsToken = "e".repeat(42) + "A";
   readonly epoch = 1;
   readonly planHash: string;
   private claimedAt: number | undefined;
@@ -113,7 +114,7 @@ export class FakeControlPort implements ControlPort {
   private nonceN = 0;
 
   constructor(private readonly setup: FakeSetup, private readonly script: PortScript = {}) {
-    this.claimId = setup.claimId ?? "claim-1";
+    this.claimId = setup.claimId ?? "7d0f6a52-1f1e-4b8e-9a51-3f0b3c1d2e4f";
     this.planHash = planHashOf(setup.plan);
     for (const seq of script.ackLost ?? []) this.ackLost.add(seq);
   }
@@ -140,7 +141,9 @@ export class FakeControlPort implements ControlPort {
     if (this.idempotencyKey !== undefined) return body.idempotencyKey === this.idempotencyKey ? this.claimAnswer : { refused: "duplicate_claim" };
     if (this.script.claimRefused) return { refused: this.script.claimRefused };
     const b = this.setup.binding;
-    if (body.checkoutSha !== b.checkoutSha || body.treeDigest !== b.treeDigest || canonical(body.lockDigests) !== canonical(b.lockDigests) || canonical(body.workload) !== canonical(b.workload)) return { refused: "binding" };
+    // Peeps' strict schema first (P1's parseClaimBody): a body it would not parse is `malformed`.
+    if (claimBodyProblem(canonical(body)) !== undefined) return { refused: "malformed" };
+    if (body.checkoutSha !== b.checkoutSha || canonical(body.observed) !== canonical(b.observed) || canonical(body.lockDigests) !== canonical(b.lockDigests) || canonical(body.workload) !== canonical(b.workload)) return { refused: "binding" };
     if (!body.fence?.probe?.passed) return { refused: "fence_unverified" };
     const now = this.now();
     this.claimedAt = now;
@@ -272,7 +275,7 @@ export class FakeControlPort implements ControlPort {
     const at = this.since();
     const answer = { ...stored };
     if (s.lostAfterMs !== undefined && at >= s.lostAfterMs) answer.lease = "lost";
-    if (s.stopAfterMs !== undefined && at >= s.stopAfterMs) answer.stop = { mode: s.stopMode ?? "graceful", reason: "owner" };
+    if (s.stopAfterMs !== undefined && at >= s.stopAfterMs) answer.stop = { mode: s.stopMode ?? "graceful", reason: "user_stop" };
     if (this.now() >= (stored.leaseUntilServerMs as number)) answer.lease = "lost";
     return answer;
   }
