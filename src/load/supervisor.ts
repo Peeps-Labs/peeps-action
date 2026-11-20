@@ -199,6 +199,7 @@ class LoadRun {
   private limits: RunLimits | undefined;
   private plan: Plan | undefined;
   private runEndMono = Number.POSITIVE_INFINITY;
+  private runEndWall = Number.POSITIVE_INFINITY;
   private caDir: string | undefined;
 
   /** Latches. */
@@ -217,7 +218,7 @@ class LoadRun {
   private readonly renewals = { sent: 0, states: [] as RenewState[], afterTerminate: 0 };
   private watchTimer: NodeJS.Timeout | undefined;
   private tickTimer: NodeJS.Timeout | undefined;
-  private graceEndMono: number | undefined;
+  private graceEnd: Clocks | undefined;
 
   private readonly credentials = new Map<string, number>();
   private readonly turns = new Map<number, TurnState>();
@@ -345,8 +346,10 @@ class LoadRun {
     this.claimId = g.claimId;
     const claimGrant: ClaimGrant = { binding: { claimId: g.claimId, epoch: g.epoch, planHash: g.planHash }, nonce: g.lease.nonce, renewEveryMs: g.lease.renewEveryMs, ttlMs: g.lease.ttlMs, ceiling: g.lease.ceiling, leaseUntilServerMs: g.lease.leaseUntilServerMs, serverNowMs: g.lease.serverNowMs };
     this.lease = new RunnerLease(claimGrant, sent, received);
-    // The hard end on the monotonic clock, conservatively from the claim's send.
-    this.runEndMono = sent.monoMs + (g.hardEndServerMs - g.lease.serverNowMs);
+    // Anchor both local clocks conservatively to when the claim was sent.
+    const hardRemainingMs = g.hardEndServerMs - g.lease.serverNowMs;
+    this.runEndMono = sent.monoMs + hardRemainingMs;
+    this.runEndWall = sent.wallMs + hardRemainingMs;
     this.emit({ type: "claimed", claimId: g.claimId });
     if (this.lease.lost) throw new Refused("lease_lost", "lease_lost");
     this.renewing = true;
@@ -449,11 +452,18 @@ class LoadRun {
   private onGracefulStop(): void {
     if (this.gracefulStop) return;
     this.gracefulStop = true;
-    this.gate?.drain();
     if (this.phase !== "measurement") return this.terminate(this.phase === "starting" ? "didnt_start" : "stopped", this.phase === "starting" ? "didnt_start" : "stopped");
-    this.graceEndMono = this.clocks().monoMs + this.k.stopGraceMs;
-    this.armWatch();
+    this.startDrain();
     this.maybeFinishMeasurement();
+  }
+
+  private startDrain(): void {
+    if (this.graceEnd === undefined) {
+      const t = this.clocks();
+      this.graceEnd = { monoMs: t.monoMs + this.k.stopGraceMs, wallMs: t.wallMs + this.k.stopGraceMs };
+      this.gate!.drain(this.graceEnd);
+    }
+    this.armWatch();
   }
 
   /** One self-re-arming timer on the nearest deadline: the lease, the run's end, and the grace end. */
@@ -461,8 +471,10 @@ class LoadRun {
     if (this.reason !== undefined || !this.lease) return;
     clearTimeout(this.watchTimer);
     const t = this.clocks();
-    const nearest = Math.min(this.lease.grantNow.monoUntil, this.runEndMono, this.graceEndMono ?? Number.POSITIVE_INFINITY);
-    const wait = Math.min(100, Math.max(1, nearest - t.monoMs));
+    const grant = this.lease.grantNow;
+    const monoLeft = Math.min(grant.monoUntil, this.runEndMono, this.graceEnd?.monoMs ?? Infinity) - t.monoMs;
+    const wallLeft = Math.min(grant.wallUntil, this.runEndWall, this.graceEnd?.wallMs ?? Infinity) - t.wallMs;
+    const wait = Math.min(100, Math.max(1, Math.min(monoLeft, wallLeft)));
     this.watchTimer = setTimeout(() => this.watch(), Number.isFinite(wait) ? wait : 100);
   }
 
@@ -470,8 +482,8 @@ class LoadRun {
     if (this.reason !== undefined || !this.lease) return;
     const t = this.clocks();
     if (!this.lease.held(t)) return this.onExpiry();
-    if (!(t.monoMs < this.runEndMono)) return this.terminate("run_end", "failed");
-    if (this.graceEndMono !== undefined && !(t.monoMs < this.graceEndMono)) return this.terminate(this.gracefulStop ? "stopped" : "completed");
+    if (!(t.monoMs < this.runEndMono && t.wallMs < this.runEndWall)) return this.terminate("run_end", "failed");
+    if (this.graceEnd && !(t.monoMs < this.graceEnd.monoMs && t.wallMs < this.graceEnd.wallMs)) return this.terminate(this.gracefulStop ? "stopped" : "completed");
     this.armWatch();
   }
 
@@ -509,7 +521,7 @@ class LoadRun {
     writeFileSync(caFile, ca.certPem, { mode: 0o600 });
 
     const journal = new Journal();
-    const gate = new Gate({ ...limits.value.gate, runEndMono: this.runEndMono, phase: limits.value.checking });
+    const gate = new Gate({ ...limits.value.gate, runEndMono: this.runEndMono, runEndWall: this.runEndWall, phase: limits.value.checking });
     gate.applyLease(this.lease!.grantNow);
     this.gate = gate;
     this.journal = journal;
@@ -570,8 +582,9 @@ class LoadRun {
     const t = this.clocks();
     const lease = this.lease!;
     if (this.reason !== undefined || this.gracefulStop || this.stopNowLive || !lease.held(t)) return null;
+    if (!(t.monoMs < this.runEndMono && t.wallMs < this.runEndWall)) return null;
     const g = lease.grantNow;
-    return { claimId: this.grant!.claimId, epoch: this.grant!.epoch, planHash: this.grant!.planHash, leaseSeq: g.seq, nonce: randomBytes(16).toString("hex"), monoDeadline: g.monoUntil, wallDeadline: g.wallUntil };
+    return { claimId: this.grant!.claimId, epoch: this.grant!.epoch, planHash: this.grant!.planHash, leaseSeq: g.seq, nonce: randomBytes(16).toString("hex"), monoDeadline: Math.min(g.monoUntil, this.runEndMono), wallDeadline: Math.min(g.wallUntil, this.runEndWall) };
   };
 
   private async startup(): Promise<void> {
@@ -615,7 +628,7 @@ class LoadRun {
   private openTurn(slot: number, phase: "checking" | "measurement", deadlineMs: number, accountingId: string): TurnState | null {
     const gate = this.gate!;
     const t = this.clocks();
-    const opened = gate.openTurn(`s${slot}`, t);
+    const opened = gate.openTurn(`s${slot}`, t, deadlineMs);
     if (!opened.ok) return null;
     const turn = opened.turn;
     const password = randomBytes(32).toString("base64url");
@@ -745,18 +758,14 @@ class LoadRun {
     }
     this.countRequests(planNow);
     this.publishIntervals(planNow, false);
-    if (scheduler.finished(planNow) && this.graceEndMono === undefined) {
-      this.gate!.drain();
-      this.graceEndMono = this.clocks().monoMs + this.k.stopGraceMs;
-      this.armWatch();
-    }
+    if (scheduler.finished(planNow) && this.graceEnd === undefined) this.startDrain();
     this.maybeFinishMeasurement();
     if (this.reason === undefined) this.tickTimer = setTimeout(() => this.tick(), this.k.tickMs);
   }
 
   private maybeFinishMeasurement(): void {
     if (this.reason !== undefined || this.phase !== "measurement") return;
-    const ending = this.gracefulStop || (this.scheduler !== undefined && this.graceEndMono !== undefined);
+    const ending = this.gracefulStop || (this.scheduler !== undefined && this.graceEnd !== undefined);
     if (ending && this.busySlots.size === 0) this.terminate(this.gracefulStop ? "stopped" : "completed");
   }
 

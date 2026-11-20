@@ -456,3 +456,34 @@ test("a graceful drain past the original hard end is refused run_end", () => {
   assert.ok(sendOk(g, req(), at(4_999)).ok, "existing turns go on while draining");
   assert.deepEqual(admit(g, req(), at(5_000)), { ok: false, reason: "run_end", final: true }, "a lease longer than the hard end does not stretch it");
 });
+
+test("handoff uses the opened turn's deadline on either clock with a live lease and run", () => {
+  const g = new Gate(limits({ turnDeadlineMs: 60_000 }));
+  g.applyLease(grant());
+  const opened = g.openTurn("checking", at(0), 100);
+  assert.ok(opened.ok);
+  const a = admit(g, { turn: opened.turn, origin: ORIGIN, method: "GET" }, at(1));
+  assert.ok(a.ok);
+  assert.equal(reason(g.checkDial(a.permit, at(50, at(100).wallMs), "tcp")), "turn_deadline");
+  assert.equal(reason(g.handoff(a.permit, at(50, at(100).wallMs))), "turn_deadline");
+  assert.equal(reason(g.handoff(a.permit, at(100, at(50).wallMs))), "turn_deadline");
+});
+
+test("handoff stops at the wall-clock run end even if a renewal still holds", () => {
+  const { g, req } = gate({ runEndMono: 100, runEndWall: at(100).wallMs });
+  const a = admit(g, req(), at(1));
+  assert.ok(a.ok);
+  assert.equal(reason(g.checkDial(a.permit, at(50, at(100).wallMs), "tcp")), "run_end");
+  assert.equal(reason(g.handoff(a.permit, at(50, at(100).wallMs))), "run_end");
+  assert.equal(reason(g.handoff(a.permit, at(100, at(50).wallMs))), "run_end");
+});
+
+test("handoff stops when drain grace runs out before the original hard end", () => {
+  const { g, req } = gate();
+  const a = admit(g, req(), at(1));
+  assert.ok(a.ok);
+  g.drain(at(200));
+  assert.equal(reason(g.checkDial(a.permit, at(150, at(200).wallMs), "tcp")), "run_end");
+  assert.equal(reason(g.handoff(a.permit, at(150, at(200).wallMs))), "run_end");
+  assert.equal(reason(g.handoff(a.permit, at(200, at(150).wallMs))), "run_end");
+});

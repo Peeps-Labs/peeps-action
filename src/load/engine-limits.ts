@@ -119,7 +119,7 @@ export interface RunLimits {
   checking: PhaseCaps;
   measurement: PhaseCaps;
   /** Everything the gate needs but the run's end and the first phase, which the supervisor sets. */
-  gate: Omit<GateLimits, "runEndMono" | "phase">;
+  gate: Omit<GateLimits, "runEndMono" | "runEndWall" | "phase">;
   policy: RequestPolicy;
   /** Canonical origin → how it is dialled. */
   approved: Map<string, ApprovedOrigin>;

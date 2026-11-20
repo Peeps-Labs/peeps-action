@@ -314,6 +314,32 @@ describe("load supervisor", { concurrency: 4 }, () => {
 
   // ---------------------------------------------------------------- Checking is a barrier
 
+  for (const clock of ["wall", "monotonic"] as const) {
+    test(`Checking cuts a verified dial at the turn deadline when only the ${clock} clock expires`, async (t) => {
+      let shifted = false;
+      const r = await rig(t, {
+        jail: scripted({}),
+        plan: smallPlan({ exportName: "get", users: 1 }),
+        setup: { ttlMs: 6000 },
+        seams: { constants: { ...FAST, checkingDeadlineMs: 2000 } },
+        dial: (inner) => async (...args) => {
+          const upstream = await inner(...args);
+          if (!shifted) {
+            shifted = true;
+            if (clock === "wall") r.seam.wallShift = 2500;
+            else r.seam.monoShift = 2500;
+          }
+          return upstream;
+        },
+      });
+      const res = await r.result;
+      assert.equal(res.reason, "checking_failed", why(r, res));
+      assert.equal(res.journal!.cut.turn_deadline, 1);
+      assert.deepEqual(res.handoffs!.unattempted, [1]);
+      assert.equal(r.sink.stats.requestBytes, 0);
+    });
+  }
+
   test("Checking: turns that report success but sent nothing do not pass", async (t) => {
     const r = await rig(t, { jail: scripted({ PEEPS_SCRIPT: "silent" }) });
     const res = await r.result;
