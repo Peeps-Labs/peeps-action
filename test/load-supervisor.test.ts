@@ -415,6 +415,13 @@ describe("load supervisor", { concurrency: 4 }, () => {
     assert.equal(res.gateClosed, true);
     assert.equal(res.final, "missing");
   });
+
+  test("a jail that cannot start: startup_failed, and its reason is in the failures", async (t) => {
+    const r = await rig(t, { launch: async () => { throw new Error("load jail: no systemd here"); } });
+    const res = await r.result;
+    assert.equal(res.reason, "startup_failed", why(r, res));
+    assert.deepEqual(res.failures, [{ message: "load jail: no systemd here", location: null }]);
+  });
 });
 
 /** Resolves once Peeps has seen a draining renewal. */

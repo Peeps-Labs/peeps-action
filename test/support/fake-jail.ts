@@ -16,7 +16,7 @@ import path from "node:path";
 import { sharedClocks } from "../../src/load/clocks";
 import { NoTicket, TicketRefused, type Installed, type JailEnd, type JailExit, type JailHandle, type StartJailOptions } from "../../src/load/jail";
 import { consumeTicket, decode, encode, LineSplitter, MAX_FRAME_BYTES, newTicketState, relayable, type CtlFrame, type Ticket } from "../../src/load/jail/ctl";
-import type { JailSpec } from "../../src/load/jail/spec";
+import { specProblems, type JailSpec } from "../../src/load/jail/spec";
 
 export const EXECUTOR = path.resolve(__dirname, "../../dist/load-executor.js");
 const MAX_QUEUE = 1024 * 1024;
@@ -50,6 +50,10 @@ export function fakeJail(o: FakeJailOptions = {}) {
   const made: FakeJail[] = [];
   const launch = async (spec: JailSpec, options: StartJailOptions, signal?: AbortSignal): Promise<JailHandle> => {
     signal?.throwIfAborted();
+    // The real jail's first check: a spec it would refuse is refused here too. The uids aside: the fake
+    // drops to no uid, and its tests may run as root (the real jail's tests never do).
+    const problems = specProblems({ ...spec, executorUid: spec.executorUid || 1000, executorGid: spec.executorGid || 1000 });
+    if (problems.length > 0) throw new Error(`load jail: ${problems.join("; ")}`);
     const dir = mkdtempSync(path.join(os.tmpdir(), "peeps-fake-jail-"));
     const sock = path.join(dir, "proxy.sock");
     const gate = await options.listenProxy(sock);

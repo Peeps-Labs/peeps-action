@@ -54,8 +54,11 @@ test("a stale ticket is refused before the install and loads no customer code", 
   const marker = trap(ws);
   const r = await rig(t, {
     ws,
-    // The supervisor's monotonic clock reads 10 min behind the shared one: its tickets are already stale to init.
-    monoShift: -600_000,
+    // The supervisor's monotonic clock reads 30 s behind the shared one: its tickets (deadline the lease's,
+    // 3 s on) are already stale to init. Not more: on a freshly booted runner CLOCK_MONOTONIC is only
+    // minutes old, and a shift past it makes the supervisor's clock negative, which the gate refuses
+    // (startup_failed, seen on CI with -10 min).
+    monoShift: -30_000,
   });
   const res = await r.result;
   assert.equal(res.status, "didnt_start");

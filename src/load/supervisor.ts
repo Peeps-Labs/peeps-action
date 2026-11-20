@@ -531,7 +531,8 @@ class LoadRun {
       install: [node, "/run/peeps/node/lib/node_modules/npm/bin/npm-cli.js", "rebuild", "--foreground-scripts"],
       command: this.s.command ?? [node, "/run/peeps/action/load-executor.js"],
       env: {},
-      limits: { maxRunMs: 15 * 60_000 + 60_000 + Math.max(0, this.runEndMono - this.clocks().monoMs) + g.graceMs, memoryMax: "2G", tasksMax: 512, cpuQuotaPercent: Math.max(100, (os.availableParallelism() - 1) * 100) },
+      // The clocks read fractional milliseconds; systemd and the spec take whole ones.
+      limits: { maxRunMs: Math.ceil(15 * 60_000 + 60_000 + Math.max(0, this.runEndMono - this.clocks().monoMs) + g.graceMs), memoryMax: "2G", tasksMax: 512, cpuQuotaPercent: Math.max(100, (os.availableParallelism() - 1) * 100) },
     };
     const proxy = this.proxy;
     const launch = this.s.launch ?? startJail;
@@ -754,8 +755,9 @@ class LoadRun {
   // ---------------------------------------------------------------- terminate, settle, report
 
   /** Synchronous and idempotent: one reason, latched. */
-  private terminate(trigger: string, status?: LoadStatus, _detail?: string): void {
+  private terminate(trigger: string, status?: LoadStatus, detail?: string): void {
     if (this.reason !== undefined) return;
+    if (detail !== undefined && this.failures.length < 20) this.failures.push({ message: sanitize(detail, 2000) ?? trigger, location: null });
     let reason = trigger;
     let st: LoadStatus | undefined = status;
     if (this.expiryObserved || this.gate?.leaseExpired) [reason, st] = ["lease_lost", "lease_lost"];
