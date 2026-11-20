@@ -397,6 +397,16 @@ class LoadRun {
     this.renewals.states.push(state);
     if (this.reason !== undefined) this.renewals.afterTerminate += 1;
     const signal = this.renewController.signal;
+    // Before every retry: a pause, so a port that fails or answers at once never holds the event
+    // loop (and the signal handlers, the watch and the proxy with it) for the rest of the lease;
+    // then the lease again, so nothing is sent outside the deadline it was first sent under.
+    const again = async (): Promise<boolean> => {
+      if (lease.mayRetry(this.clocks())) await delay(Math.min(100, this.k.renewAttemptMs), signal).catch(() => undefined);
+      if (signal.aborted) return false;
+      if (lease.mayRetry(this.clocks())) return true;
+      this.onExpiry();
+      return false;
+    };
     for (;;) {
       if (signal.aborted) return;
       const attempt = AbortSignal.any([signal, AbortSignal.timeout(this.k.renewAttemptMs)]);
@@ -404,22 +414,20 @@ class LoadRun {
       try {
         raw = await this.o.port.renew(g.claimId, g.runToken, tx.body, attempt);
       } catch {
-        if (signal.aborted) return;
-        if (!lease.mayRetry(this.clocks())) return this.onExpiry();
+        if (signal.aborted || !(await again())) return;
         continue;
       }
       if (signal.aborted) return;
       const decoded = decodeRenewReply(raw);
       if (decoded.kind === "unaddressed") {
-        if (!lease.mayRetry(this.clocks())) return this.onExpiry();
-        await delay(Math.min(100, this.k.renewAttemptMs), signal).catch(() => undefined);
+        if (!(await again())) return;
         continue;
       }
       const now = this.clocks();
       const d = lease.apply(decoded.reply, now);
       this.emit({ type: "renewal", seq: tx.seq, state, decision: d.kind });
       if (d.kind === "ignored") {
-        if (!lease.mayRetry(this.clocks())) return this.onExpiry();
+        if (!(await again())) return;
         continue;
       }
       if (d.kind === "lost") {
@@ -961,11 +969,16 @@ function pick<T extends object>(o: T | undefined, keys: string[]): Partial<T> {
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => {
       clearTimeout(timer);
-      reject(signal.reason);
-    }, { once: true });
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

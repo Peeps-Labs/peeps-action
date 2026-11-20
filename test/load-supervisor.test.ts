@@ -232,7 +232,57 @@ describe("load supervisor", { concurrency: 4 }, () => {
     const res = await r.result;
     assert.equal(res.status, "lease_lost", why(r, res));
     assert.ok(r.events.some((e) => e.type === "renewal" && e.decision === "ignored"));
+    // Paced: an answer that comes back at once is not asked for again in a tight loop.
+    assert.ok(r.port.renewals.length <= 100, `renew was sent ${r.port.renewals.length} times`);
     invariants(r, res);
+  });
+
+  test("a renew that fails at once is retried at a pace, not in a tight loop, until the lease runs out", async (t) => {
+    let calls = 0;
+    const r = await rig(t, {
+      plan: smallPlan({ exportName: "get", durationMs: 20_000 }),
+      observer: onPhase("measurement", (x) => {
+        x.port.renew = async () => {
+          calls += 1;
+          throw new Error("connect ECONNREFUSED");
+        };
+      }),
+    });
+    const res = await r.result;
+    assert.equal(res.status, "lease_lost", why(r, res));
+    assert.ok(calls >= 2, "retried");
+    assert.ok(calls <= 100, `renew was sent ${calls} times`);
+    invariants(r, res);
+  });
+
+  test("immediate ignored renewals leave the event loop live for cancellation", async (t) => {
+    const soft = new AbortController();
+    const hard = new AbortController();
+    let timerRan = false;
+    let ignored = 0;
+    let timerRanAtTerminate = false;
+    const r = await rig(t, {
+      signal: soft.signal,
+      hardSignal: hard.signal,
+      script: { mangle: (reply) => ({ ...reply, claimId: "unrelated" }) },
+      observer: (e) => {
+        if (e.type === "terminate") timerRanAtTerminate = timerRan;
+        if (e.type !== "renewal" || e.decision !== "ignored") return;
+        if (++ignored === 1) setTimeout(() => {
+          timerRan = true;
+          hard.abort();
+        }, 0);
+        if (ignored === 10) {
+          // Bound the regression run without waiting for a lease or accumulating attempts.
+          soft.abort();
+          hard.abort();
+        }
+      },
+    });
+    const res = await r.result;
+    assert.equal(res.status, "cancelled", why(r, res));
+    assert.ok(timerRanAtTerminate, "the cancellation timer ran while the retry was pending");
+    assert.equal(ignored, 1);
   });
 
   // ---------------------------------------------------------------- startup
@@ -473,6 +523,32 @@ describe("load supervisor", { concurrency: 4 }, () => {
     assert.equal(res.cleanup, "clean");
     assert.equal(res.gateClosed, true);
     assert.notEqual(res.final, "missing");
+    invariants(r, res);
+  });
+
+  test("a hard cancel while the gate cannot settle: no draining renewal, where a soft cancel sends them", async (t) => {
+    const soft = new AbortController();
+    const hard = new AbortController();
+    let parking = false;
+    const r = await rig(t, {
+      signal: soft.signal,
+      hardSignal: hard.signal,
+      plan: smallPlan({ exportName: "get", durationMs: 30_000 }),
+      // A dial that ignores its abort: the gate cannot settle, so a soft cancel would renew as
+      // draining to the reporting deadline (the two cancellation cases above).
+      dial: (inner: Dial): Dial => async (o, signal, pin, ready) => {
+        if (!parking) return inner(o, signal, pin, ready);
+        soft.abort();
+        hard.abort();
+        return new Promise<never>(() => undefined);
+      },
+      observer: onPhase("measurement", () => (parking = true)),
+    });
+    const res = await r.result;
+    assert.equal(res.status, "cancelled", why(r, res));
+    assert.equal(res.renewals.afterTerminate, 0, "no draining after a hard cancel");
+    assert.equal(r.port.renewals.filter((x) => x.fields.state === "draining").length, 0);
+    assert.equal(res.gateClosed, false);
     invariants(r, res);
   });
 
