@@ -38,6 +38,8 @@ export interface PortScript {
   ackLost?: number[];
   /** Events: no answer ever comes. */
   eventsBlocked?: boolean;
+  /** Events: this seq is answered as a conflicting replay. */
+  conflictSeq?: number;
 }
 
 export interface FakeSetup {
@@ -229,6 +231,10 @@ export class FakeControlPort implements ControlPort {
 
   async events(claimId: string, eventsToken: string, body: EventsBody, signal: AbortSignal): Promise<unknown> {
     if (this.script.eventsBlocked) return this.forever(signal);
+    if (this.script.conflictSeq === body.seq) {
+      this.posted.push({ ...structuredClone(body), refused: "conflict" });
+      return { ok: false, reason: "conflict" };
+    }
     const record: EventsBody & { refused?: string } = structuredClone(body);
     this.posted.push(record);
     if (claimId !== this.claimId || eventsToken !== this.eventsToken) return { ok: false, reason: (record.refused = "auth") };
