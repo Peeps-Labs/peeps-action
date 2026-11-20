@@ -78,7 +78,10 @@ describe("load supervisor", { concurrency: 4 }, () => {
       script,
       observer: onPhase("measurement", (x) => {
         script.silentAfterMs = 0;
-        x.seam.monoShift = -600_000;
+        // Back far enough that the monotonic clock alone would not end the 3 s lease within the run,
+        // never below zero: CLOCK_MONOTONIC counts from boot, and a freshly booted runner is only
+        // minutes old (-10 min read below zero on CI, which ended the run executor_exit instead).
+        x.seam.monoShift = -Math.min(60_000, Number(process.hrtime.bigint()) / 1e6 - 1);
       }),
     });
     const res = await r.result;

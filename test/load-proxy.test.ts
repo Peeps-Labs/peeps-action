@@ -1529,7 +1529,9 @@ test("a client that closes right after sending its request: target connections n
     const tls = tlsConnect({ socket: raw, servername: "sink.test", ca: [r.runCaPem], ALPNProtocols: ["http/1.1"] });
     tls.on("error", () => undefined);
     await new Promise((resolve) => tls.once("secureConnect", resolve));
-    tls.end(get(r, `/hit${i}`));
+    // Closed once the request is handed to the kernel: a destroy straight after `end` drops whatever
+    // is still queued, and on a slower machine that was the request itself (no debit at all, CI).
+    await new Promise<void>((resolve) => tls.end(get(r, `/hit${i}`), resolve));
     tls.destroy();
     r.clock.monoMs += 20;
   }
