@@ -312,7 +312,13 @@ async function runFromInputs(i: LoadInputs, deps: LoadEntryDeps, write: (line: s
       hardSignal: signals.hard,
     });
     if (i.resultFile) writeFileSync(i.resultFile, `${JSON.stringify(res)}\n`, { mode: 0o600 });
-    if (i.summaryFile) appendFileSync(i.summaryFile, stepSummary(res));
+    if (i.summaryFile) {
+      try {
+        appendFileSync(i.summaryFile, stepSummary(res));
+      } catch {
+        // Best effort: the log's titled line and cause, and the report, still follow.
+      }
+    }
     explain?.(res);
     write(JSON.stringify(reportOf(res)));
     return res.status === "completed" &&

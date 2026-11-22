@@ -119,12 +119,30 @@ test("a report write error emits a fixed diagnostic and preserves the result art
   const lines: string[] = [];
   const result = path.join(dir, "result.json");
   const summary = path.join(dir, SENTINEL, "\n::error::untrusted path");
+  // The step summary is best effort: one that can't be written leaves the report (CW-A round 2, Sol m3).
   const code = await mainLoad(env({ GITHUB_STEP_SUMMARY: summary, PEEPS_LOAD_RESULT_FILE: result }), {
     run: async () => res,
     write: (line) => lines.push(line),
   }, DIST);
-  assert.equal(code, 1);
-  assert.deepEqual(lines, ['{"failed":"run_or_report"}']);
+  assert.equal(code, 0);
+  assert.equal(lines.length, 1);
+  assert.equal(JSON.parse(lines[0]!).status, "completed");
+  assert.ok(!lines[0]!.includes(SENTINEL));
+  // The report line itself failing is the fixed diagnostic.
+  const failing: string[] = [];
+  let first = true;
+  const again = await mainLoad(env({ PEEPS_LOAD_RESULT_FILE: result }), {
+    run: async () => res,
+    write: (line) => {
+      if (first) {
+        first = false;
+        throw new Error(`EPIPE ${SENTINEL}`);
+      }
+      failing.push(line);
+    },
+  }, DIST);
+  assert.equal(again, 1);
+  assert.deepEqual(failing, ['{"failed":"run_or_report"}']);
   assert.deepEqual(JSON.parse(readFileSync(result, "utf8")), res);
 });
 

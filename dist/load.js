@@ -6316,7 +6316,12 @@ async function runFromInputs(i, deps, write, explain) {
     });
     if (i.resultFile) (0, import_node_fs6.writeFileSync)(i.resultFile, `${JSON.stringify(res)}
 `, { mode: 384 });
-    if (i.summaryFile) (0, import_node_fs6.appendFileSync)(i.summaryFile, stepSummary(res));
+    if (i.summaryFile) {
+      try {
+        (0, import_node_fs6.appendFileSync)(i.summaryFile, stepSummary(res));
+      } catch {
+      }
+    }
     explain?.(res);
     write(JSON.stringify(reportOf(res)));
     return res.status === "completed" && res.cleanup === "clean" && res.closed.state === "acked" && res.evidence.state === "complete" && res.final !== "missing" && res.final.watermark === res.closed.debited ? 0 : 1;
