@@ -2,7 +2,8 @@
  * V2: the engine judges a journey the way Playwright does (e4 plan v3 §3.2 `load-v2`). The
  * bench's robots check runs twice against one sink: as a Playwright test (`--reporter=json`) and
  * in the engine's Checking (the supervisor, fake jail). On the baseline both pass; on the
- * paginated variant both fail, with the same first line of the message and the same file:line.
+ * paginated variant both fail with the same assertion id (CW plan §4.6), which is the id of the
+ * robots check's `expect` line, so two missing ids can't agree.
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -12,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { assertionIdOf } from "./helpers/assertion-id";
 import { startSink, type Arrival } from "./support/load-sink";
 import { checkoutBits, rig, SINK_HOST, smallPlan } from "./support/run-supervisor";
 
@@ -42,12 +44,11 @@ function robots(variant: Variant) {
 
 interface Verdict {
   ok: boolean;
-  firstLine: string | null;
-  location: string | null;
+  assertionId: string | null;
 }
 
-const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, "");
-const firstLine = (message: string) => stripAnsi(message).replace(/^Error: /, "").split("\n")[0]!.trim();
+/** The robots check's `expect` that the paginated envelope fails (`fixtures/load-engine/v2/robots.ts`). */
+const EXPECTED_LINE = "robots.ts:12";
 
 interface JsonError {
   message?: string;
@@ -69,13 +70,9 @@ async function playwrightVerdict(baseURL: string): Promise<Verdict> {
   });
   assert.equal(results.length, 1, run.stderr);
   const [result] = results;
-  if (result!.status === "passed") return { ok: true, firstLine: null, location: null };
+  if (result!.status === "passed") return { ok: true, assertionId: null };
   const error = result!.errors[0]!;
-  return {
-    ok: false,
-    firstLine: firstLine(error.message ?? ""),
-    location: error.location ? `${path.relative(V2, error.location.file)}:${error.location.line}` : null,
-  };
+  return { ok: false, assertionId: error.location ? assertionIdOf(`${path.relative(V2, error.location.file)}:${error.location.line}`) : null };
 }
 
 /** A checkout holding the V2 journeys, with Playwright linked in. */
@@ -96,9 +93,9 @@ async function engineVerdict(t: TestContext, sink: Awaited<ReturnType<typeof sta
   // The verdict must come from real Checking traffic.
   assert.equal(res.checking.turns, 1, JSON.stringify({ reason: res.reason, failures: res.failures }));
   assert.ok(sink.arrivals.some((a) => a.url === "/c/api/robots"), "Checking reached the sink");
-  if (res.checking.success === 1) return { ok: true, firstLine: null, location: null };
+  if (res.checking.success === 1) return { ok: true, assertionId: null };
   const failure = res.failures[0]!;
-  return { ok: false, firstLine: firstLine(failure.message), location: failure.location };
+  return { ok: false, assertionId: failure.location ? assertionIdOf(failure.location) : null };
 }
 
 for (const variant of ["baseline", "paginated"] as const) {
@@ -110,6 +107,9 @@ for (const variant of ["baseline", "paginated"] as const) {
     assert.equal(playwright.ok, variant === "baseline", JSON.stringify(playwright));
     t.diagnostic(JSON.stringify({ playwright, engine }));
     assert.deepEqual(engine, playwright);
-    if (variant === "paginated") assert.match(String(engine.location), /^robots\.ts:\d+$/);
+    if (variant === "paginated") {
+      assert.notEqual(engine.assertionId, null);
+      assert.equal(engine.assertionId, assertionIdOf(EXPECTED_LINE));
+    }
   });
 }
