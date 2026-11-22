@@ -1,5 +1,5 @@
 {
-  "description": "CW-A, the customer load job (CW plan \u00a74): every refusal row, the identity read, the control origin, the toolchain hashes, the lockfile URL and SRI checks, the verified download (its first-failure stop and its retries), the refusal causes the job prints, and the supervisor's toolchain-first startup. A survivor means a security check no test would notice losing. Not here: the `%` check in canonicalRegistryTarball, an equivalent mutant (TARBALL_PATH admits no `%` either, so dropping it changes no answer; it stays as a second guard).",
+  "description": "CW-A, the customer load job (CW plan \u00a74): every refusal row, the identity read, the control origin, the toolchain hashes, the lockfile URL and SRI checks, the verified download (its first-failure stop and its retries), the refusal causes the job prints (fixed reasons and checked identifiers, one a line), the download total and idle limit, the platform skip, the best-effort summary, and the supervisor's toolchain-first startup. A survivor means a security check no test would notice losing. Not here: the `%` check in canonicalRegistryTarball, an equivalent mutant (TARBALL_PATH admits no `%` either, so dropping it changes no answer; it stays as a second guard).",
   "mutants": [
     {
       "name": "a tag or branch ref is read as a commit pin",
@@ -104,7 +104,7 @@
     {
       "name": "the total download cap is not enforced",
       "file": "src/load/registry-fetch.ts",
-      "find": "if (total > totalCap) return false;",
+      "find": "        if (received > totalCap) {\n          overTotal = true;\n          return false;\n        }\n",
       "replace": "",
       "tests": [
         "test/load-registry-fetch.test.ts"
@@ -167,7 +167,7 @@
     {
       "name": "a jail that can't start fails the run instead of refusing fence_unverified",
       "file": "src/load/supervisor.ts",
-      "find": "      return { passed: false, failures: [`the jail could not start: ${(error as Error).message}`], seen: null };",
+      "find": "      return { passed: false, failures: [`the jail could not start (sudo or systemd-run is missing or refused): ${publicCause(error)}`], seen: null };",
       "replace": "      throw error;",
       "tests": [
         "test/load-supervisor-customer.test.ts"
@@ -350,6 +350,162 @@
       "file": "src/load/registry-fetch.ts",
       "find": "if (retryable(error) && tries < RETRY_BACKOFF_MS.length && !window.aborted) {",
       "replace": "if (false) {",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a rejected resolved URL is printed as read",
+      "file": "src/load/install.ts",
+      "find": "      out.push(`package-lock.json: ${name}: resolved is not a tarball on ${REGISTRY} in its canonical form (https, no userinfo, query or fragment)`);",
+      "replace": "      out.push(`package-lock.json: ${name}: resolved ${String(entry.resolved)} is not a tarball on ${REGISTRY} in its canonical form (https, no userinfo, query or fragment)`);",
+      "tests": [
+        "test/load-install.test.ts",
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a refused manifest spec is printed as read",
+      "file": "src/load/install.ts",
+      "find": "  if (parseRange(spec) === null) return \"the spec is not a semver range (git, file, link, URL and tag specs are refused)\";",
+      "replace": "  if (parseRange(spec) === null) return `the spec ${spec} is not a semver range (git, file, link, URL and tag specs are refused)`;",
+      "tests": [
+        "test/load-install.test.ts",
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a package name is printed without its check",
+      "file": "src/load/install.ts",
+      "find": "return typeof name === \"string\" && name.length <= 214 && NAME.test(name) ? name : undefined;",
+      "replace": "return typeof name === \"string\" ? name : undefined;",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a path is printed without its check",
+      "file": "src/load/install.ts",
+      "find": "return typeof value === \"string\" && SHOWN_PATH.test(value) ? value : otherwise;",
+      "replace": "return typeof value === \"string\" ? value : otherwise;",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "an unexpected install error's own message is kept",
+      "file": "src/load/supervisor.ts",
+      "find": "error instanceof InstallFailed ? error.message : `install_failed: ${publicCause(error)}`",
+      "replace": "(error as Error).message",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "an exception's code is printed unchecked, or its message instead",
+      "file": "src/load/supervisor.ts",
+      "find": "return typeof code === \"string\" && /^[A-Z][A-Z0-9_]{0,39}$/.test(code) ? `an unexpected error (${code})` : \"an unexpected error\";",
+      "replace": "return `an unexpected error (${(error as Error).message})`;",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a refusal's problems are joined into one line again",
+      "file": "src/load/supervisor.ts",
+      "find": "if (!report.passed) throw new Refused(\"didnt_start\", \"fence_unverified\", report.failures);",
+      "replace": "if (!report.passed) throw new Refused(\"didnt_start\", \"fence_unverified\", report.failures.join(\"; \"));",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "the install's problems are joined into one line again",
+      "file": "src/load/supervisor.ts",
+      "find": "if (error instanceof InstallRefused) throw new Refused(\"didnt_start\", \"install_unsupported\", error.problems);",
+      "replace": "if (error instanceof InstallRefused) throw new Refused(\"didnt_start\", \"install_unsupported\", error.problems.join(\"; \"));",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "going over the download total is reported as one tarball's cap",
+      "file": "src/load/registry-fetch.ts",
+      "find": "        if (overTotal) return fail(`the downloads passed ${totalCap} bytes in all (total too large)`);\n",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a stalled attempt is not retried",
+      "file": "src/load/registry-fetch.ts",
+      "find": "      if (stalled && !window.aborted) throw new ControlHttpError(\"registry\", \"network\", undefined, \"stalled\");\n",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "no attempt has an idle limit",
+      "file": "src/load/registry-fetch.ts",
+      "find": "    arm();\n    try {",
+      "replace": "    try {",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "an unwritable step summary hides the cause again",
+      "file": "src/load/main.ts",
+      "find": "    if (i.summaryFile) {\n      try {\n        appendFileSync(i.summaryFile, stepSummary(res));\n      } catch {\n        // Best effort: the log's titled line and cause, and the report, still follow.\n      }\n    }",
+      "replace": "    if (i.summaryFile) appendFileSync(i.summaryFile, stepSummary(res));",
+      "tests": [
+        "test/load-customer-entry.test.ts",
+        "test/load-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a required entry for another platform is skipped",
+      "file": "src/load/install.ts",
+      "find": "  if (entry.optional !== true) return false;\n",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "libc is not read",
+      "file": "src/load/install.ts",
+      "find": " || (entry.libc !== undefined && !admits(entry.libc, \"glibc\"))",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a negated platform is not read",
+      "file": "src/load/install.ts",
+      "find": "      if (name.slice(1) === value) return false;\n",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "the download fetches other platforms' optional tarballs",
+      "file": "src/load/registry-fetch.ts",
+      "find": "if (!entry || !canonicalRegistryTarball(entry.resolved) || skippedOnRunner(entry)) continue;",
+      "replace": "if (!entry || !canonicalRegistryTarball(entry.resolved)) continue;",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "the cache check refuses a recipe for lacking another platform's optional tarball",
+      "file": "src/load/install.ts",
+      "find": " || checked.has(entry.integrity) || skippedOnRunner(entry)) continue;",
+      "replace": " || checked.has(entry.integrity)) continue;",
       "tests": [
         "test/load-registry-fetch.test.ts"
       ]

@@ -233,11 +233,15 @@ test("a cause carrying workflow commands from the lockfile prints no line that G
   });
   const res = await r.result;
   assert.equal(res.reason, "install_unsupported", JSON.stringify(res.failures));
-  const many = { ...res, failures: [...res.failures, ...Array.from({ length: 30 }, () => ({ message: "x".repeat(1000), location: null }))] };
+  // A failure that does carry such text (a journey's error, after the claim) is neutralized on the way out.
+  const carried = { message: "boom\n::add-mask::SECRET\n::error::forged\n##[error]forged", location: null };
+  const many = { ...res, failures: [...res.failures, carried, ...Array.from({ length: 30 }, () => ({ message: "x".repeat(1000), location: null }))] };
   const { seen } = await throughEntry(t, many);
   assert.equal(seen.err.filter((l) => l.startsWith("::")).length, 1, "only the titled line is a command");
   assert.ok(seen.err.every((l) => !l.includes("##[")), "no ##[ command either");
-  assert.ok(!seen.err.some((l) => /add-mask|forged|evil/.test(l)), "the rejected text itself is never shown");
+  assert.ok(!seen.err.some((l) => /evil/.test(l)), "the rejected text itself is never shown");
+  assert.ok(seen.err.some((l) => l.includes("add-mask")), "a carried failure's text is shown, neutralized");
+  assert.ok(seen.err.every((l) => !l.includes("::add-mask::") && !l.includes("::error::")), "with its :: broken up");
   assert.ok(seen.err.some((l) => /\ba\b.*resolved/.test(l)), "the package and the field are");
   assert.ok(seen.err.length <= 21, `${seen.err.length} lines`);
   assert.ok(seen.err.every((l) => l.length <= "peeps load: ".length + 300));
