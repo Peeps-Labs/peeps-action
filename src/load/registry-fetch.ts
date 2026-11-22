@@ -9,7 +9,8 @@
  *   - Only canonical tarball URLs (`canonicalRegistryTarball`), each fetched from exactly that
  *     path on registry.npmjs.org:443, over the shared transport: the job's proxy and CA
  *     variables are ignored and any 3xx fails.
- *   - At most 8 at a time, 64 MiB each, 1 GiB in all, 10 minutes in all. The first failure
+ *   - At most 8 at a time, 64 MiB each, 1 GiB received in all (retries and failed attempts
+ *     count: going over is "total too large", never retried), 10 minutes in all. The first failure
  *     stops the rest. A dropped connection or a 5xx is retried twice (250 ms, then 1 s), with a
  *     fresh hash; a 4xx, a redirect, a size cap or a sha512 mismatch never.
  *   - Each body is hashed with sha512 as it streams; a mismatch writes nothing and fails.
@@ -86,30 +87,30 @@ export async function downloadTarballs(tarballs: Tarball[], cache: string, tc: T
   const target = new URL(`https://${REGISTRY_HOST}${seams.port ? `:${seams.port}` : ""}`);
   const t = controlTransport(seams);
   const agent = t.agent({ keepAlive: true, maxSockets: FETCH_PARALLEL, maxFreeSockets: FETCH_PARALLEL });
-  let total = 0;
+  /** Every byte that arrived, retries and failed attempts included: what the total cap counts. */
+  let received = 0;
+  let overTotal = false;
+  /** The verified tarballs' bytes: what the log reports. */
+  let stored = 0;
   let next = 0;
   let first: { error: unknown } | undefined;
   const fail = (why: string): never => {
     throw new InstallFailed(why);
   };
-  /** One attempt: the body and its sha512, or the transport's error. Its bytes leave the total if it fails. */
+  /** One attempt: the body and its sha512, or the transport's error. Its bytes stay in the total whatever happens. */
   const attempt = async (pathname: string) => {
     const hash = createHash("sha512");
     const chunks: Buffer[] = [];
-    let mine = 0;
-    try {
-      await t.download("registry", agent, target, pathname, tarballCap, window, (chunk) => {
-        total += chunk.length;
-        mine += chunk.length;
-        if (total > totalCap) return false;
-        hash.update(chunk);
-        chunks.push(chunk);
-        return true;
-      });
-    } catch (error) {
-      total -= mine;
-      throw error;
-    }
+    await t.download("registry", agent, target, pathname, tarballCap, window, (chunk) => {
+      received += chunk.length;
+      if (received > totalCap) {
+        overTotal = true;
+        return false;
+      }
+      hash.update(chunk);
+      chunks.push(chunk);
+      return true;
+    });
     return { digest: `sha512-${hash.digest("base64")}`, body: Buffer.concat(chunks) };
   };
   const one = async (tarball: Tarball) => {
@@ -120,6 +121,7 @@ export async function downloadTarballs(tarballs: Tarball[], cache: string, tc: T
         got = await attempt(url.pathname);
       } catch (error) {
         signal?.throwIfAborted();
+        if (overTotal) return fail(`the downloads passed ${totalCap} bytes in all (total too large)`);
         if (retryable(error) && tries < RETRY_BACKOFF_MS.length && !window.aborted) {
           try {
             await sleep(RETRY_BACKOFF_MS[tries]!, window);
@@ -132,11 +134,11 @@ export async function downloadTarballs(tarballs: Tarball[], cache: string, tc: T
         return fail(`fetching ${url.pathname} failed (${code})`);
       }
     }
-    if (total > totalCap) fail(`the tarballs exceed ${totalCap} bytes`);
     if (got.digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);
     signal?.throwIfAborted();
     if (stop.signal.aborted) return;
     await cacache.put(cacheDir, cacheKeyOf(tarball.url), got.body, { integrity: tarball.integrity, algorithms: ["sha512"] });
+    stored += got.body.length;
   };
   try {
     const workers = Array.from({ length: Math.min(FETCH_PARALLEL, tarballs.length) }, async () => {
@@ -154,7 +156,7 @@ export async function downloadTarballs(tarballs: Tarball[], cache: string, tc: T
   } finally {
     t.close();
   }
-  return { count: tarballs.length, bytes: total };
+  return { count: tarballs.length, bytes: stored };
 }
 
 /**

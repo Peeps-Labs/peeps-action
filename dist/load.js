@@ -3812,7 +3812,9 @@ async function downloadTarballs(tarballs, cache, tc, seams = {}, signal) {
   const target = new URL(`https://${REGISTRY_HOST}${seams.port ? `:${seams.port}` : ""}`);
   const t = controlTransport(seams);
   const agent = t.agent({ keepAlive: true, maxSockets: FETCH_PARALLEL, maxFreeSockets: FETCH_PARALLEL });
-  let total = 0;
+  let received = 0;
+  let overTotal = false;
+  let stored = 0;
   let next = 0;
   let first;
   const fail = (why) => {
@@ -3821,20 +3823,16 @@ async function downloadTarballs(tarballs, cache, tc, seams = {}, signal) {
   const attempt = async (pathname) => {
     const hash = (0, import_node_crypto7.createHash)("sha512");
     const chunks = [];
-    let mine = 0;
-    try {
-      await t.download("registry", agent, target, pathname, tarballCap, window, (chunk) => {
-        total += chunk.length;
-        mine += chunk.length;
-        if (total > totalCap) return false;
-        hash.update(chunk);
-        chunks.push(chunk);
-        return true;
-      });
-    } catch (error) {
-      total -= mine;
-      throw error;
-    }
+    await t.download("registry", agent, target, pathname, tarballCap, window, (chunk) => {
+      received += chunk.length;
+      if (received > totalCap) {
+        overTotal = true;
+        return false;
+      }
+      hash.update(chunk);
+      chunks.push(chunk);
+      return true;
+    });
     return { digest: `sha512-${hash.digest("base64")}`, body: Buffer.concat(chunks) };
   };
   const one = async (tarball) => {
@@ -3845,6 +3843,7 @@ async function downloadTarballs(tarballs, cache, tc, seams = {}, signal) {
         got = await attempt(url.pathname);
       } catch (error) {
         signal?.throwIfAborted();
+        if (overTotal) return fail(`the downloads passed ${totalCap} bytes in all (total too large)`);
         if (retryable(error) && tries < RETRY_BACKOFF_MS.length && !window.aborted) {
           try {
             await sleep(RETRY_BACKOFF_MS[tries], window);
@@ -3856,11 +3855,11 @@ async function downloadTarballs(tarballs, cache, tc, seams = {}, signal) {
         return fail(`fetching ${url.pathname} failed (${code})`);
       }
     }
-    if (total > totalCap) fail(`the tarballs exceed ${totalCap} bytes`);
     if (got.digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);
     signal?.throwIfAborted();
     if (stop.signal.aborted) return;
     await cacache.put(cacheDir, cacheKeyOf(tarball.url), got.body, { integrity: tarball.integrity, algorithms: ["sha512"] });
+    stored += got.body.length;
   };
   try {
     const workers = Array.from({ length: Math.min(FETCH_PARALLEL, tarballs.length) }, async () => {
@@ -3878,7 +3877,7 @@ async function downloadTarballs(tarballs, cache, tc, seams = {}, signal) {
   } finally {
     t.close();
   }
-  return { count: tarballs.length, bytes: total };
+  return { count: tarballs.length, bytes: stored };
 }
 async function fetchPreinstall(ws, tc, scratch, ids, seams = {}, signal, log = () => void 0) {
   signal?.throwIfAborted();

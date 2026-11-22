@@ -155,7 +155,7 @@ test("a tarball over its cap, tarballs over the total, a non-200 and a hang past
   r.files.set("/fixture-b/-/fixture-b-1.0.0.tgz", b.bytes);
   const both: Tarball[] = [{ url: `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`, integrity: a.integrity }, { url: `${REG}/fixture-b/-/fixture-b-1.0.0.tgz`, integrity: b.integrity }];
   await assert.rejects(downloadTarballs(both.slice(0, 1), tmp(t), toolchain(), { ...r.seams, tarballMaxBytes: a.bytes.length - 1 }), /install_failed: .*too_large/);
-  await assert.rejects(downloadTarballs(both, tmp(t), toolchain(), { ...r.seams, totalMaxBytes: a.bytes.length + b.bytes.length - 1 }), /install_failed: .*too_large/);
+  await assert.rejects(downloadTarballs(both, tmp(t), toolchain(), { ...r.seams, totalMaxBytes: a.bytes.length + b.bytes.length - 1 }), /install_failed: the downloads passed \d+ bytes in all \(total too large\)$/);
   await assert.rejects(downloadTarballs([{ url: `${REG}/fixture-c/-/fixture-c-1.0.0.tgz`, integrity: a.integrity }], tmp(t), toolchain(), r.seams), /install_failed: .*status 404/);
   r.server.answer(() => undefined);
   const started = Date.now();
@@ -214,6 +214,11 @@ test("a dropped connection or a 5xx is retried twice with a fresh hash; a 4xx, a
     assert.equal(count(), answers.length);
     assert.equal(cacheEntries(cache).length, 1);
   }
+  // The 1 GiB is of every byte received, retries included: a cap between the verified total and
+  // what arrived (the partial body, then the whole one) fails, as its own reason, and is not retried.
+  const partial = script(["half", "ok", "ok"]);
+  await assert.rejects(downloadTarballs(one, tmp(t), toolchain(), { ...r.seams, totalMaxBytes: a.bytes.length + 5 }), /install_failed: the downloads passed \d+ bytes in all \(total too large\)$/);
+  assert.equal(partial(), 2, "the retry that crossed the total is not retried again");
   const persistent = script(["503"]);
   await assert.rejects(downloadTarballs(one, tmp(t), toolchain(), r.seams), /install_failed: .*status 503/);
   assert.equal(persistent(), 3, "two retries, then it fails");
