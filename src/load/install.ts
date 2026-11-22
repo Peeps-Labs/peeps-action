@@ -390,7 +390,8 @@ export function satisfies(version: string, range: string): boolean {
 
 // ---------------------------------------------------------------- validation
 
-const NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+/** A package name: scoped ones lowercase; legacy unscoped ones (JSONStream) may carry capitals, as npm still serves them. */
+const NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._~-]*|[A-Za-z0-9][A-Za-z0-9._~-]*)$/;
 
 /** The registry name and range a manifest spec asks for, or why it is refused. */
 function specOf(name: string, spec: unknown): { name: string; range: string } | string {
@@ -444,7 +445,8 @@ function validateOverrides(overrides: unknown, where: string, out: string[], dep
   }
 }
 
-const TARBALL_PATH = /^\/(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9._~-]+\/-\/[a-z0-9._~-]+-[0-9A-Za-z.+_-]+\.tgz$/;
+/** Scoped names are lowercase; legacy unscoped ones (JSONStream, Base64) may carry capitals, and so may their file. */
+const TARBALL_PATH = /^\/(?:@[a-z0-9][a-z0-9._~-]*\/[a-z0-9._~-]+|[A-Za-z0-9._~-]+)\/-\/[A-Za-z0-9._~-]+-[0-9A-Za-z.+_-]+\.tgz$/;
 
 /**
  * A tarball on the public registry, in its one canonical form (CW plan §4.5): the text parses

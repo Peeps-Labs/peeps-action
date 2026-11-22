@@ -198,7 +198,7 @@ test("another package manager's lockfile beside package-lock.json is refused, by
 });
 
 test("canonicalRegistryTarball accepts only the registry's one canonical tarball form", () => {
-  for (const url of [`${REG}/left-pad/-/left-pad-1.3.0.tgz`, `${REG}/@playwright/test/-/test-1.50.1.tgz`, `${REG}/@types/node/-/node-24.0.0-beta.1.tgz`]) {
+  for (const url of [`${REG}/left-pad/-/left-pad-1.3.0.tgz`, `${REG}/@playwright/test/-/test-1.50.1.tgz`, `${REG}/@types/node/-/node-24.0.0-beta.1.tgz`, `${REG}/JSONStream/-/JSONStream-1.3.5.tgz`, `${REG}/Base64/-/Base64-1.1.0.tgz`]) {
     assert.equal(canonicalRegistryTarball(url), true, url);
   }
   for (const url of [
@@ -214,13 +214,26 @@ test("canonicalRegistryTarball accepts only the registry's one canonical tarball
     `${REG}/left-pad/left-pad-1.3.0.tgz`,
     `${REG}/left-pad/-/../../x/-/x-1.0.0.tgz`,
     `${REG}/left-pad/-/left-pad-1.3.0.tar.gz`,
-    `${REG}/Left-Pad/-/left-pad-1.3.0.tgz`,
+    // Legacy unscoped names may carry capitals (JSONStream); a scope and a scoped name may not.
+    `${REG}/@types/Left-Pad/-/left-pad-1.3.0.tgz`,
+    `${REG}/@Types/left-pad/-/left-pad-1.3.0.tgz`,
     "http://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
     "https://registry.npmjs.org.evil.example/left-pad/-/left-pad-1.3.0.tgz",
     ` ${REG}/left-pad/-/left-pad-1.3.0.tgz`,
     `${REG}/left-pad/-/left-pad-1.3.0.tgz `,
     undefined,
   ]) assert.equal(canonicalRegistryTarball(url), false, String(url));
+});
+
+test("a legacy unscoped package with capitals (JSONStream) is installable; a scoped name with capitals is not", (t) => {
+  const manifest = { ...BASE_MANIFEST, dependencies: { ...BASE_MANIFEST.dependencies, JSONStream: "^1.3.5" } };
+  const lock = baseLock();
+  const pk = lock.packages as Record<string, Record<string, unknown>>;
+  pk[""] = { ...pk[""], dependencies: manifest.dependencies };
+  pk["node_modules/JSONStream"] = { version: "1.3.5", resolved: `${REG}/JSONStream/-/JSONStream-1.3.5.tgz`, integrity: INTEGRITY };
+  assert.deepEqual(problems(workspace(t, { manifest, lock })), []);
+  const scoped = { ...BASE_MANIFEST, dependencies: { ...BASE_MANIFEST.dependencies, "@acme/Pad": "^1.0.0" } };
+  assert.ok(problems(workspace(t, { manifest: scoped })).some((p) => p.includes("@acme/Pad is not a package name")));
 });
 
 test("an entry's integrity must hold a well-formed sha512: exactly 64 bytes of canonical base64", (t) => {
