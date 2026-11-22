@@ -234,7 +234,7 @@ export interface LoadResult {
 }
 
 class Refused extends Error {
-  constructor(readonly status: LoadStatus, readonly reason: string, detail?: string) {
+  constructor(readonly status: LoadStatus, readonly reason: string, readonly detail?: string) {
     super(`${reason}${detail ? `: ${detail}` : ""}`);
   }
 }
@@ -438,7 +438,8 @@ class LoadRun {
       await this.runChecking();
       await this.runMeasurement();
     } catch (error) {
-      if (error instanceof Refused) this.terminate(error.reason, error.status);
+      // The detail goes to the result's failures (sanitized, capped), so the job's log can say why.
+      if (error instanceof Refused) this.terminate(error.reason, error.status, error.detail);
       else if (error instanceof NoTicket) this.terminate("didnt_start", "didnt_start");
       else if (error instanceof TicketRefused) this.terminate(error.reason === "stale_ticket" ? "didnt_start" : "executor_protocol", error.reason === "stale_ticket" ? "didnt_start" : "failed");
       else if (this.reason === undefined) this.terminate("startup_failed", "failed", (error as Error).message);
@@ -470,7 +471,7 @@ class LoadRun {
       // No sudo or systemd-run (a container the job's signals missed): the fence is unverified,
       // never a startup failure, and nothing is claimed.
       if (this.signal.aborted) throw error;
-      return { passed: false, failures: ["the jail could not start"], seen: null };
+      return { passed: false, failures: [`the jail could not start: ${(error as Error).message}`], seen: null };
     }
   }
 

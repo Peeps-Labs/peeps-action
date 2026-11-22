@@ -72,6 +72,21 @@ export const REFUSAL_COPY: Readonly<Record<CustomerRefusalCode, string>> = {
   self_hosted: "Load runs need a GitHub-hosted runner for now. This job ran on a self-hosted runner.",
 };
 
+/**
+ * Fixed copy for the refusals the run itself reaches, before any claim: the install, the
+ * toolchain and the jail probe. Action-local for now: load-job-v1's hashed codes don't hold them,
+ * so they join the corpus with load-job-v2. Their cause follows on plain, neutralized lines,
+ * never inside the `::error` line (it may hold lockfile text).
+ */
+export const RUN_REFUSAL_COPY = {
+  install_unsupported: "This repository's install isn't supported for load runs. The lines after this one say why.",
+  install_failed: "Installing this repository's dependencies failed before the load run started. The lines after this one say why. Start a new run from Peeps.",
+  fence_unverified: "This job's jail check failed: load runs need the runner itself. The lines after this one say why.",
+} as const;
+
+/** A job whose identity token couldn't be minted at all (an unreachable or off-host endpoint, or GitHub failing). */
+export const IDENTITY_FAILED_COPY = "Couldn't read this job's identity from GitHub. Start a new run from Peeps.";
+
 /** Today's `mode: load` line, printed alone, byte for byte, for anything not pinned to a commit. */
 export const NOT_PINNED_LINE = `::error::${REFUSAL_COPY.action_not_pinned}`;
 

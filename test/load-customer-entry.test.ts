@@ -5,13 +5,14 @@
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { NOT_PINNED_LINE, REFUSAL_COPY } from "../src/load/customer";
+import { IDENTITY_FAILED_COPY, NOT_PINNED_LINE, REFUSAL_COPY, RUN_REFUSAL_COPY } from "../src/load/customer";
 import { mainCustomerLoad, readCustomerInputs, type CustomerEntryDeps } from "../src/load/main";
 import type { IdentityRead } from "../src/load/oidc";
-import type { LoadRunOptions } from "../src/load/supervisor";
+import type { Toolchain } from "../src/load/install";
+import type { LoadResult, LoadRunOptions } from "../src/load/supervisor";
 import { rig } from "./support/run-supervisor";
 
 const DIST = path.resolve(__dirname, "../dist");
@@ -172,11 +173,71 @@ test("the identity's refusals print their copy; a failed mint is a failure line;
   for (const [id, err, out] of [
     [{ ok: false, refused: "identity" }, [`::error title=Peeps load run::${REFUSAL_COPY.identity}`], ['{"refused":"identity"}']],
     [{ ok: false, refused: "self_hosted" }, [`::error title=Peeps load run::${REFUSAL_COPY.self_hosted}`], ['{"refused":"self_hosted"}']],
-    [{ ok: false, failed: "oidc" }, [], ['{"failed":"oidc"}']],
+    [{ ok: false, failed: "oidc" }, [`::error title=Peeps load run::${IDENTITY_FAILED_COPY}`], ['{"failed":"oidc"}']],
   ] as const) {
     const seen = fresh();
     assert.equal(await mainCustomerLoad(env(tc), deps(seen, id), DIST), 1);
     assert.deepEqual(seen.err, err);
     assert.deepEqual(seen.out, out);
   }
+});
+
+const TC: Toolchain = { nodeDir: "/opt/tc/node/24.22.3/x64", node: "/opt/tc/node/24.22.3/x64/bin/node", npmCli: "/opt/tc/node/24.22.3/x64/lib/node_modules/npm/bin/npm-cli.js", nodeVersion: "24.22.3", npmVersion: "11.19.1" };
+
+async function throughEntry(t: TestContext, res: LoadResult) {
+  const tc = toolCache(t);
+  const dir = mkdtempSync(path.join(os.tmpdir(), "peeps-load-sum-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const summary = path.join(dir, "summary.md");
+  const seen = fresh();
+  const code = await mainCustomerLoad(env(tc, { GITHUB_STEP_SUMMARY: summary }), deps(seen, OK_ID, async () => res), DIST);
+  return { code, seen, summary: readFileSync(summary, "utf8") };
+}
+
+test("a refusal the run reaches prints one titled line with fixed copy, the copy in the summary, then its cause as plain lines", async (t) => {
+  const r = await rig(t, { install: { mode: "fetch" }, afterBinding: (ws) => writeFileSync(path.join(ws, "yarn.lock"), ""), seams: { toolchain: () => TC, preinstall: undefined } });
+  const res = await r.result;
+  assert.equal(res.reason, "install_unsupported");
+  const { code, seen, summary } = await throughEntry(t, res);
+  assert.equal(code, 1);
+  assert.equal(seen.err[0], `::error title=Peeps load run::${RUN_REFUSAL_COPY.install_unsupported}`);
+  assert.ok(seen.err.slice(1).length > 0 && seen.err.slice(1).every((l) => l.startsWith("peeps load: ")), seen.err.join("\n"));
+  assert.ok(seen.err.some((l) => /yarn\.lock/.test(l)), "the cause reaches the log");
+  assert.ok(summary.includes(RUN_REFUSAL_COPY.install_unsupported));
+  assert.equal(JSON.parse(seen.out[0]!).reason, "install_unsupported");
+});
+
+test("each run refusal has its own copy; a refusal with no copy still prints its cause", async (t) => {
+  const r = await rig(t);
+  const base = await r.result;
+  for (const [reason, copy] of [["install_failed", RUN_REFUSAL_COPY.install_failed], ["fence_unverified", RUN_REFUSAL_COPY.fence_unverified], ["claim_malformed", null]] as const) {
+    const res = { ...base, status: "didnt_start", reason, failures: [{ message: `${reason}: the detail`, location: null }] } as LoadResult;
+    const { seen } = await throughEntry(t, res);
+    assert.deepEqual(seen.err, [...(copy ? [`::error title=Peeps load run::${copy}`] : []), `peeps load: ${reason}: the detail`], reason);
+  }
+  const { seen } = await throughEntry(t, base);
+  assert.deepEqual(seen.err, [], "a completed run prints no refusal");
+});
+
+test("a cause carrying workflow commands from the lockfile prints no line that GitHub would run, capped in count and length", async (t) => {
+  const r = await rig(t, {
+    install: { mode: "fetch" },
+    afterBinding: (ws) => writeFileSync(path.join(ws, "package-lock.json"), JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "app", version: "1.0.0" },
+        "node_modules/a": { version: "1.0.0", resolved: "https://evil.example/a.tgz\n::add-mask::SECRET\n::error::forged\n##[error]forged", integrity: "sha512-x" },
+      },
+    })),
+    seams: { toolchain: () => TC, preinstall: undefined },
+  });
+  const res = await r.result;
+  assert.equal(res.reason, "install_unsupported", JSON.stringify(res.failures));
+  const many = { ...res, failures: [...res.failures, ...Array.from({ length: 30 }, () => ({ message: "x".repeat(1000), location: null }))] };
+  const { seen } = await throughEntry(t, many);
+  assert.equal(seen.err.filter((l) => l.startsWith("::")).length, 1, "only the titled line is a command");
+  assert.ok(seen.err.every((l) => !l.includes("##[")), "no ##[ command either");
+  assert.ok(seen.err.some((l) => l.includes("add-mask")), "the text is shown, neutralized");
+  assert.ok(seen.err.length <= 21, `${seen.err.length} lines`);
+  assert.ok(seen.err.every((l) => l.length <= "peeps load: ".length + 300));
 });

@@ -6,11 +6,14 @@
  */
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { bindingOf } from "../src/load/supervisor";
-import { InstallRefused, type Toolchain } from "../src/load/install";
+import { InstallRefused, SUPPORTED_TOOLCHAIN, trustedToolchain, type Toolchain } from "../src/load/install";
 import type { JailSpec } from "../src/load/jail/spec";
 import { fakeJail } from "./support/fake-jail";
-import { rig, why, WORKLOAD_PATH } from "./support/run-supervisor";
+import { rig, why, workspace, WORKLOAD_PATH } from "./support/run-supervisor";
 
 const TC: Toolchain = { nodeDir: "/opt/tc/node/24.22.3/x64", node: "/opt/tc/node/24.22.3/x64/bin/node", npmCli: "/opt/tc/node/24.22.3/x64/lib/node_modules/npm/bin/npm-cli.js", nodeVersion: "24.22.3", npmVersion: "11.19.1" };
 const digests = async (w: string) => ({ lock: "", hiddenLock: "", tree: (await bindingOf(w, WORKLOAD_PATH)).observed.treeDigest });
@@ -101,5 +104,47 @@ describe("load supervisor: the customer path's startup", { concurrency: 4 }, () 
     assert.equal((await customer.result).status, "completed");
     const harness = await rig(t, { harnessHosts: ["sink.load-harness.example.com"] });
     assert.equal((await harness.result).reason, "outside_harness");
+  });
+});
+
+describe("load supervisor: a refusal before the claim keeps its cause", { concurrency: 4 }, () => {
+  const messages = (res: { failures: { message: string }[] }) => res.failures.map((f) => f.message).join("\n");
+
+  test("a yarn.lock in the checkout: install_unsupported, and the failures name the file", async (t) => {
+    const r = await rig(t, { install: { mode: "fetch" }, afterBinding: (ws) => writeFileSync(path.join(ws, "yarn.lock"), ""), seams: { toolchain: () => TC, preinstall: undefined } });
+    const res = await r.result;
+    assert.equal(res.reason, "install_unsupported", why(r, res));
+    assert.match(messages(res), /yarn\.lock/);
+    assert.equal(r.port.claims.length, 0);
+  });
+
+  test("a toolchain whose node isn't the pinned build: install_unsupported, and the failures carry the read and the pinned sha256", async (t) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "peeps-fake-tc-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const dir = path.join(root, "node", "24.22.3", "x64");
+    mkdirSync(path.join(dir, "bin"), { recursive: true });
+    mkdirSync(path.join(dir, "lib/node_modules/npm/bin"), { recursive: true });
+    writeFileSync(path.join(dir, "bin/node"), "#!/bin/sh\necho v24.22.3\n", { mode: 0o755 });
+    writeFileSync(path.join(dir, "lib/node_modules/npm/bin/npm-cli.js"), "require('../lib/cli.js')(process)\n");
+    writeFileSync(path.join(dir, "lib/node_modules/npm/package.json"), '{"version":"11.19.1"}');
+    const ws = workspace(t);
+    const r = await rig(t, { ws, seams: { toolchain: () => trustedToolchain(dir, ws, undefined, root, { platform: "linux-x64" }) } });
+    const res = await r.result;
+    assert.equal(res.reason, "install_unsupported", why(r, res));
+    assert.match(messages(res), new RegExp(`node's sha256 [0-9a-f]{64} is not the pinned ${SUPPORTED_TOOLCHAIN[0]!.linuxX64!.nodeSha256}`));
+  });
+
+  test("a jail that can't start: fence_unverified, and the failures say why", async (t) => {
+    const r = await rig(t, { seams: { toolchain: () => TC, probe: undefined, probeJail: async () => { throw new Error("sudo: a password is required"); } } });
+    const res = await r.result;
+    assert.equal(res.reason, "fence_unverified", why(r, res));
+    assert.match(messages(res), /the jail could not start: sudo: a password is required/);
+  });
+
+  test("a failed download: install_failed, and the failures name the tarball", async (t) => {
+    const r = await rig(t, { install: { mode: "fetch" }, seams: { toolchain: () => TC, preinstall: undefined, installers: { fetch: async () => { throw new Error("install_failed: /x/-/x-1.0.0.tgz does not match its lockfile sha512"); } } } });
+    const res = await r.result;
+    assert.equal(res.reason, "install_failed", why(r, res));
+    assert.match(messages(res), /x-1\.0\.0\.tgz does not match its lockfile sha512/);
   });
 });

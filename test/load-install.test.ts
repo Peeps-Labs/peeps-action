@@ -347,7 +347,14 @@ test("trustedToolchain hashes node and npm-cli.js before running either: a repla
   const verify = (entries: SupportedToolchain[] = [pinned], platform = "linux-x64") => trustedToolchain(nodeDir, ws, entries, cache, { platform });
   const lines: string[] = [];
   assert.equal(trustedToolchain(nodeDir, ws, [pinned], cache, { platform: "linux-x64", log: (l) => lines.push(l) }).nodeVersion, "24.22.3");
-  assert.deepEqual(lines, [`node 24.22.3 sha256 ${pinned.linuxX64!.nodeSha256}; npm-cli.js sha256 ${pinned.linuxX64!.npmCliSha256}`]);
+  assert.deepEqual(lines, [`node 24.22.3 sha256 ${pinned.linuxX64!.nodeSha256} (pinned ${pinned.linuxX64!.nodeSha256}); npm-cli.js sha256 ${pinned.linuxX64!.npmCliSha256} (pinned ${pinned.linuxX64!.npmCliSha256})`]);
+  const other = { ...pinned, linuxX64: { nodeSha256: "a".repeat(64), npmCliSha256: "b".repeat(64) } };
+  const logged: string[] = [];
+  assert.throws(() => trustedToolchain(nodeDir, ws, [other], cache, { platform: "linux-x64", log: (l) => logged.push(l) }), /is not the pinned a{64}/);
+  assert.deepEqual(logged, [`node 24.22.3 sha256 ${pinned.linuxX64!.nodeSha256} (pinned ${"a".repeat(64)}); npm-cli.js sha256 ${pinned.linuxX64!.npmCliSha256} (pinned ${"b".repeat(64)})`], "a mismatch logs the read hashes beside the pinned ones");
+  const unpinned: string[] = [];
+  assert.throws(() => trustedToolchain(nodeDir, ws, [pinned], cache, { platform: "linux-arm64", log: (l) => unpinned.push(l) }));
+  assert.match(unpinned[0]!, /\(pinned none\)/);
 
   // The same version line, other bytes, and a marker if it ever runs.
   writeFileSync(path.join(nodeDir, "bin/node"), `#!/bin/sh\ntouch ${marker}\necho v24.22.3\n`);

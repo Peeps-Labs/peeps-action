@@ -32,13 +32,13 @@
  */
 import { appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { customerRefusal, loadNodeDir, NOT_PINNED_LINE, refusal, type CustomerRefusal } from "./customer";
+import { customerRefusal, IDENTITY_FAILED_COPY, loadNodeDir, NOT_PINNED_LINE, refusal, RUN_REFUSAL_COPY, type CustomerRefusal } from "./customer";
 import { loadControlOrigin } from "./control-origin";
 import { HttpControlPort, type HttpControlPortOptions } from "./http-control-port";
 import { readJobFacts, type JobFactsDeps } from "./job-facts";
 import { readJobIdentity, type IdentityRead } from "./oidc";
 import { loadSignals, type LoadSignals } from "./signals";
-import { runLoad, type LoadInstall, type LoadResult, type LoadRunOptions } from "./supervisor";
+import { runLoad, sanitize, type LoadInstall, type LoadResult, type LoadRunOptions } from "./supervisor";
 
 export interface LoadInputs {
   peepsUrl: string;
@@ -224,20 +224,23 @@ export async function mainCustomerLoad(env: NodeJS.ProcessEnv = process.env, dep
   const write = deps.write ?? ((line: string) => void process.stdout.write(`${line}\n`));
   const error = deps.error ?? ((line: string) => void process.stderr.write(`${line}\n`));
   const read = readCustomerInputs(env, actionDir, deps.facts);
+  const titled = (copy: string, summaryText: string) => {
+    error(`::error title=Peeps load run::${copy}`);
+    const summary = env.GITHUB_STEP_SUMMARY;
+    if (summary) {
+      try {
+        appendFileSync(summary, summaryText);
+      } catch {
+        // The refusal is already on the log; a summary that can't be written changes nothing.
+      }
+    }
+  };
   const refuse = (r: CustomerRefusal) => {
     if (r.code === "action_not_pinned") {
       error(NOT_PINNED_LINE);
       return 1;
     }
-    error(`::error title=Peeps load run::${r.message}`);
-    const summary = env.GITHUB_STEP_SUMMARY;
-    if (summary) {
-      try {
-        appendFileSync(summary, `## Peeps load run\n\n${r.message}\n`);
-      } catch {
-        // The refusal is already on the log; a summary that can't be written changes nothing.
-      }
-    }
+    titled(r.message, `## Peeps load run\n\n${r.message}\n`);
     write(JSON.stringify({ refused: r.code }));
     return 1;
   };
@@ -245,16 +248,42 @@ export async function mainCustomerLoad(env: NodeJS.ProcessEnv = process.env, dep
   const id = await (deps.identity ?? ((oidc, e) => readJobIdentity(oidc, e)))(read.inputs.oidc, env);
   if (!id.ok) {
     if ("failed" in id) {
+      titled(IDENTITY_FAILED_COPY, `## Peeps load run\n\n${IDENTITY_FAILED_COPY}\n`);
       write(JSON.stringify({ failed: "oidc" }));
       return 1;
     }
     return refuse(refusal(id.refused));
   }
-  return runFromInputs({ ...read.inputs, checkRunId: id.checkRunId, runAttempt: id.runAttempt }, deps, write);
+  // A run that didn't start: one titled line with fixed copy for the reasons that have it, then
+  // the cause on plain lines (it may hold lockfile text, so never inside the `::error` line).
+  const explain = (res: LoadResult) => {
+    if (res.status !== "didnt_start") return;
+    const copy = (RUN_REFUSAL_COPY as Record<string, string>)[res.reason];
+    if (copy) titled(copy, `\n${copy}\n`);
+    for (const line of failureLines(res.failures)) error(line);
+  };
+  return runFromInputs({ ...read.inputs, checkRunId: id.checkRunId, runAttempt: id.runAttempt }, deps, write, explain);
+}
+
+const FAILURE_LINES = 20;
+const FAILURE_LINE_CHARS = 300;
+
+/** A result's failures as log lines: `peeps load: ` first, no control character, `::` or `##[`, at most 20 of 300 characters. */
+export function failureLines(failures: LoadResult["failures"]): string[] {
+  const out: string[] = [];
+  for (const f of failures) {
+    for (const raw of f.message.split(/\r?\n|\r/)) {
+      const line = (sanitize(raw, FAILURE_LINE_CHARS) ?? "").replaceAll("##[", "## [").trim();
+      if (!line) continue;
+      if (out.length === FAILURE_LINES) return out;
+      out.push(`peeps load: ${line}`);
+    }
+  }
+  return out;
 }
 
 /** Both entries from the port onwards: the run, the result file, the summary and the stdout line. */
-async function runFromInputs(i: LoadInputs, deps: LoadEntryDeps, write: (line: string) => void): Promise<number> {
+async function runFromInputs(i: LoadInputs, deps: LoadEntryDeps, write: (line: string) => void, explain?: (res: LoadResult) => void): Promise<number> {
   let port: HttpControlPort;
   try {
     port = (deps.makePort ?? ((o) => new HttpControlPort(o)))({ peepsUrl: i.peepsUrl, oidc: i.oidc, userAgent: `peeps-action-load/${i.actionVersion}` });
@@ -284,6 +313,7 @@ async function runFromInputs(i: LoadInputs, deps: LoadEntryDeps, write: (line: s
     });
     if (i.resultFile) writeFileSync(i.resultFile, `${JSON.stringify(res)}\n`, { mode: 0o600 });
     if (i.summaryFile) appendFileSync(i.summaryFile, stepSummary(res));
+    explain?.(res);
     write(JSON.stringify(reportOf(res)));
     return res.status === "completed" &&
       res.cleanup === "clean" &&

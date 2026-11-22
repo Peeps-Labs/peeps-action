@@ -709,7 +709,7 @@ export function trustedToolchain(
   const pinned = platform === "linux-x64" ? entry.linuxX64 : undefined;
   const nodeSha256 = sha256FileSync(node);
   const npmCliSha256 = sha256FileSync(npmCli);
-  check.log?.(`node ${entry.node} sha256 ${nodeSha256}; npm-cli.js sha256 ${npmCliSha256}`);
+  check.log?.(`node ${entry.node} sha256 ${nodeSha256} (pinned ${pinned?.nodeSha256 ?? "none"}); npm-cli.js sha256 ${npmCliSha256} (pinned ${pinned?.npmCliSha256 ?? "none"})`);
   if (!pinned) fail(`no pinned sha256 for node ${entry.node} on ${platform} (read node ${nodeSha256}, npm-cli.js ${npmCliSha256})`);
   if (nodeSha256 !== pinned!.nodeSha256) fail(`node's sha256 ${nodeSha256} is not the pinned ${pinned!.nodeSha256}`);
   if (npmCliSha256 !== pinned!.npmCliSha256) fail(`npm-cli.js's sha256 ${npmCliSha256} is not the pinned ${pinned!.npmCliSha256}`);
