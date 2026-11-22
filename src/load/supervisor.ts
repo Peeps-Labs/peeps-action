@@ -39,7 +39,8 @@ import { createRunCa } from "./gate/ca";
 import { encodeHandoffs, Journal, type JournalSnapshot } from "./gate/journal";
 import { GateProxy, makeDial, type Dial, type DialSeams } from "./gate/proxy";
 import { eventsBody } from "./gate/reconcile";
-import { checkoutHead, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests } from "./install";
+import { checkoutHead, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests, type Toolchain } from "./install";
+import { fetchPreinstall, type RegistryFetchSeams } from "./registry-fetch";
 import { NoTicket, probe as realProbe, startJail, TicketRefused, type JailHandle, type ProbeReport, type StartJailOptions } from "./jail";
 import type { CtlFrame, Ticket } from "./jail/ctl";
 import type { JailSpec } from "./jail/spec";
@@ -100,8 +101,12 @@ export interface LoadRunOptions {
   port: ControlPort;
   /** The dispatch's grant reference, sent with the claim. */
   grantRef: string;
-  /** The recipe's npm cache, for the offline pre-claim install. Without it the real install refuses. */
-  npmCache?: string;
+  /**
+   * The pre-claim install. `offline` (the harness): from the recipe's npm cache, with no network.
+   * `fetch` (a customer job): the action downloads and verifies the lockfile's tarballs, then npm
+   * installs offline from them. Without it the real install refuses.
+   */
+  install?: LoadInstall;
   /** When set, every origin the grant allows must be on one of these hosts (E5's harness: the sink only). */
   harnessHosts?: string[];
   actionVersion?: string;
@@ -113,6 +118,8 @@ export interface LoadRunOptions {
   observer?: (event: LoadEvent) => void;
 }
 
+export type LoadInstall = { mode: "offline"; cache: string } | { mode: "fetch" };
+
 /** Only this file and test/ name it. */
 export interface LoadSeams {
   clocks?: () => Clocks;
@@ -123,6 +130,14 @@ export interface LoadSeams {
   labels?: () => Promise<ProbeLabels>;
   /** The pre-claim install (tests without the pinned toolchain): the digests it leaves. */
   preinstall?: (workspace: string) => Promise<InstallDigests>;
+  /** The jail probe `realProbe` runs (tests: one that throws, or records the node it was given). */
+  probeJail?: typeof realProbe;
+  /** Resolves and checks the toolchain (tests: a fake one, or a refusal). */
+  toolchain?: () => Toolchain;
+  /** The two real installs (tests: to see which one ran). */
+  installers?: { offline?: typeof offlinePreinstall; fetch?: typeof fetchPreinstall };
+  /** The download phase's transport seams (tests: a local registry). */
+  registry?: RegistryFetchSeams;
   dialSeams?: DialSeams;
   dial?: Dial;
   seqHeader?: string;
@@ -283,6 +298,7 @@ class LoadRun {
 
   private claimId: string | null = null;
   private grant: Grant | undefined;
+  private toolchain: Toolchain | undefined;
   private lease: RunnerLease | undefined;
   private gate: Gate | undefined;
   private journal: Journal | undefined;
@@ -407,6 +423,9 @@ class LoadRun {
   private async execute(): Promise<void> {
     try {
       this.throwIfDone();
+      // The toolchain is resolved and hash-checked once, before the probe runs its node through
+      // sudo and before the install runs npm: both take this one (CW plan §4.5).
+      if (this.s.toolchain || !this.s.probe || !this.s.preinstall) this.toolchain = this.resolveToolchain();
       const report = await (this.s.probe ? this.s.probe() : this.realProbe());
       this.throwIfDone();
       if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures.join("; "));
@@ -430,24 +449,46 @@ class LoadRun {
     if (this.reason !== undefined) throw new Refused(this.status ?? "failed", this.reason);
   }
 
-  private async realProbe(): Promise<ProbeReport> {
-    const node = path.join(this.o.nodeDir, "bin", "node");
-    return realProbe(
-      { node, nodeDir: this.o.nodeDir, actionDir: this.o.actionDir, outer: path.join(this.o.actionDir, "load-outer.js"), init: path.join(this.o.actionDir, "load-init.js"), workspace: this.o.workspace, executorUid: process.getuid!(), executorGid: process.getgid!(), env: {}, limits: { maxRunMs: 60_000, memoryMax: "512M", tasksMax: 64, cpuQuotaPercent: 100 } },
-      `${this.o.runId}-probe`.slice(0, 40),
-      this.signal,
-    );
+  private resolveToolchain(): Toolchain {
+    try {
+      return this.s.toolchain ? this.s.toolchain() : trustedToolchain(this.o.nodeDir, this.o.workspace, undefined, undefined, { log: (line) => void process.stderr.write(`peeps load: ${line}\n`) });
+    } catch (error) {
+      // Whatever it is, nothing of the toolchain ran: unsupported, before the jail or a claim.
+      throw new Refused("didnt_start", "install_unsupported", (error as Error).message);
+    }
   }
 
-  /** Offline, from the recipe's npm cache, with no network interface (e5 plan v3 §2.10). */
+  private async realProbe(): Promise<ProbeReport> {
+    const tc = this.toolchain!;
+    try {
+      return await (this.s.probeJail ?? realProbe)(
+        { node: tc.node, nodeDir: tc.nodeDir, actionDir: this.o.actionDir, outer: path.join(this.o.actionDir, "load-outer.js"), init: path.join(this.o.actionDir, "load-init.js"), workspace: this.o.workspace, executorUid: process.getuid!(), executorGid: process.getgid!(), env: {}, limits: { maxRunMs: 60_000, memoryMax: "512M", tasksMax: 64, cpuQuotaPercent: 100 } },
+        `${this.o.runId}-probe`.slice(0, 40),
+        this.signal,
+      );
+    } catch (error) {
+      // No sudo or systemd-run (a container the job's signals missed): the fence is unverified,
+      // never a startup failure, and nothing is claimed.
+      if (this.signal.aborted) throw error;
+      return { passed: false, failures: ["the jail could not start"], seen: null };
+    }
+  }
+
+  /** Offline, from the recipe's npm cache (e5 plan v3 §2.10); or the verified download, then offline (CW plan §4.5). */
   private async realPreinstall(): Promise<InstallDigests> {
     this.signal.throwIfAborted();
-    if (!this.o.npmCache) throw new Refused("didnt_start", "install_unsupported", "no recipe npm cache");
+    const install = this.o.install;
+    if (!install || (install.mode === "offline" && !install.cache)) throw new Refused("didnt_start", "install_unsupported", "no recipe npm cache");
+    const tc = this.toolchain!;
     const scratch = mkdtempSync(path.join(os.tmpdir(), "peeps-load-install-"));
+    const ids = { uid: process.getuid!(), gid: process.getgid!() };
     try {
-      return await offlinePreinstall(this.o.workspace, trustedToolchain(this.o.nodeDir, this.o.workspace), scratch, { cache: this.o.npmCache, uid: process.getuid!(), gid: process.getgid!() }, undefined, this.signal);
+      if (install.mode === "fetch") {
+        return await (this.s.installers?.fetch ?? fetchPreinstall)(this.o.workspace, tc, scratch, ids, this.s.registry, this.signal, (line) => void process.stderr.write(`peeps load: ${line}\n`));
+      }
+      return await (this.s.installers?.offline ?? offlinePreinstall)(this.o.workspace, tc, scratch, { cache: install.cache, ...ids }, undefined, this.signal);
     } catch (error) {
-      // A checkout or toolchain refused before npm ran is unsupported; npm or the cache failing is install_failed.
+      // A checkout refused before npm ran is unsupported; a download, npm or the cache failing is install_failed.
       throw new Refused("didnt_start", error instanceof InstallRefused ? "install_unsupported" : "install_failed", (error as Error).message);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
@@ -765,8 +806,8 @@ class LoadRun {
     const spec: JailSpec = {
       runId: this.o.runId,
       claimId: g.claimId,
-      node: path.join(this.o.nodeDir, "bin", "node"),
-      nodeDir: this.o.nodeDir,
+      node: this.toolchain?.node ?? path.join(this.o.nodeDir, "bin", "node"),
+      nodeDir: this.toolchain?.nodeDir ?? this.o.nodeDir,
       actionDir: this.o.actionDir,
       outer: path.join(this.o.actionDir, "load-outer.js"),
       init: path.join(this.o.actionDir, "load-init.js"),

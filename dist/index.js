@@ -22,6 +22,10 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
+// src/main.ts
+var import_node_module = require("node:module");
+var import_node_path25 = __toESM(require("node:path"));
+
 // src/env.ts
 var import_node_fs = require("node:fs");
 var import_node_path = __toESM(require("node:path"));
@@ -332,9 +336,9 @@ function runnerHeaders(env = process.env) {
   return headers;
 }
 var PeepsHttpError = class extends Error {
-  constructor(path25, status, body) {
-    super(`Peeps ${path25} \u2192 ${status}: ${body.slice(0, 500)}`);
-    this.path = path25;
+  constructor(path26, status, body) {
+    super(`Peeps ${path26} \u2192 ${status}: ${body.slice(0, 500)}`);
+    this.path = path26;
     this.status = status;
     this.body = body;
     this.name = "PeepsHttpError";
@@ -401,11 +405,11 @@ var PeepsClient = class {
     );
   }
   /** Raw upload (artifacts). Retries transient failures a couple of times. */
-  async postBytes(path25, bytes) {
+  async postBytes(path26, bytes) {
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await fetch(`${this.env.peepsUrl}${path25}`, {
+        const response = await fetch(`${this.env.peepsUrl}${path26}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${await this.token()}`,
@@ -420,9 +424,9 @@ var PeepsClient = class {
         if (response.ok) return;
         const text2 = await response.text();
         if (response.status < 500 && response.status !== 408 && response.status !== 429) {
-          throw new Error(`Peeps ${path25} \u2192 ${response.status}: ${text2.slice(0, 300)}`);
+          throw new Error(`Peeps ${path26} \u2192 ${response.status}: ${text2.slice(0, 300)}`);
         }
-        lastError = new Error(`Peeps ${path25} \u2192 ${response.status}`);
+        lastError = new Error(`Peeps ${path26} \u2192 ${response.status}`);
       } catch (error) {
         lastError = error;
       }
@@ -431,8 +435,8 @@ var PeepsClient = class {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
   /** GET that treats 204 as "nothing" (long-poll idle) instead of an error. */
-  async getOrNull(path25) {
-    const response = await fetch(`${this.env.peepsUrl}${path25}`, {
+  async getOrNull(path26) {
+    const response = await fetch(`${this.env.peepsUrl}${path26}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -444,12 +448,12 @@ var PeepsClient = class {
     if (response.status === 204) return null;
     const text2 = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path25, response.status, text2);
+      throw new PeepsHttpError(path26, response.status, text2);
     }
     return JSON.parse(text2);
   }
-  async get(path25, signal) {
-    const response = await fetch(`${this.env.peepsUrl}${path25}`, {
+  async get(path26, signal) {
+    const response = await fetch(`${this.env.peepsUrl}${path26}`, {
       headers: {
         Authorization: `Bearer ${await this.token()}`,
         Accept: "application/json",
@@ -460,12 +464,12 @@ var PeepsClient = class {
     });
     const text2 = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path25, response.status, text2);
+      throw new PeepsHttpError(path26, response.status, text2);
     }
     return JSON.parse(text2);
   }
-  async post(path25, body) {
-    const response = await fetch(`${this.env.peepsUrl}${path25}`, {
+  async post(path26, body) {
+    const response = await fetch(`${this.env.peepsUrl}${path26}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${await this.token()}`,
@@ -478,7 +482,7 @@ var PeepsClient = class {
     });
     const text2 = await response.text();
     if (!response.ok) {
-      throw new PeepsHttpError(path25, response.status, text2);
+      throw new PeepsHttpError(path26, response.status, text2);
     }
     return text2 ? JSON.parse(text2) : {};
   }
@@ -898,8 +902,8 @@ function tokenOf(key, plain) {
   if (colon < 1 || !KINDS.has(kind)) throw new Error(`No token kind for ${kind || "an unnamed key"}`);
   return `${kind}:${keyedId(key, kind, rest)}`;
 }
-function pathToken(key, path25) {
-  return `route:${encodePath(key, path25)}`;
+function pathToken(key, path26) {
+  return `route:${encodePath(key, path26)}`;
 }
 function segmentsOf(route) {
   return route.split("/").map((raw) => raw.split(";", 1)[0]).filter((segment) => segment !== "").map((segment) => {
@@ -920,8 +924,8 @@ function encodeMatcher(key, route) {
   });
   return `/${out.join("/")}`;
 }
-function encodePath(key, path25) {
-  const out = segmentsOf(path25).map((segment) => segment === ":id" ? segment : segmentId(key, segment.toLowerCase()));
+function encodePath(key, path26) {
+  const out = segmentsOf(path26).map((segment) => segment === ":id" ? segment : segmentId(key, segment.toLowerCase()));
   return `/${out.join("/")}`;
 }
 function evidenceTokens(key, evidence) {
@@ -983,20 +987,20 @@ var MAX_BLOB_BYTES = 8 * 1024 * 1024;
 var MAX_MEMBERS = 16e3;
 var PROTOCOL_VERSION = 2;
 function peepsTransport(peepsUrl, token) {
-  const send = async (path25, body, contentType, timeoutMs) => {
-    const response = await fetch(`${peepsUrl}${path25}`, {
+  const send = async (path26, body, contentType, timeoutMs) => {
+    const response = await fetch(`${peepsUrl}${path26}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${await token()}`, "Content-Type": contentType, Accept: "application/json", "User-Agent": "peeps-action/0.1" },
       body,
       signal: AbortSignal.timeout(timeoutMs)
     });
     const text2 = await response.text();
-    if (!response.ok) throw new Error(`Peeps ${path25.split("?")[0]} \u2192 ${response.status}`);
+    if (!response.ok) throw new Error(`Peeps ${path26.split("?")[0]} \u2192 ${response.status}`);
     return text2 ? JSON.parse(text2) : {};
   };
   return {
-    postBytes: (path25, bytes, timeoutMs) => send(path25, new Uint8Array(bytes), "application/octet-stream", timeoutMs),
-    postJson: (path25, body, timeoutMs) => send(path25, JSON.stringify(body), "application/json", timeoutMs)
+    postBytes: (path26, bytes, timeoutMs) => send(path26, new Uint8Array(bytes), "application/octet-stream", timeoutMs),
+    postJson: (path26, body, timeoutMs) => send(path26, JSON.stringify(body), "application/json", timeoutMs)
   };
 }
 function gzipRecording(blob) {
@@ -2223,7 +2227,7 @@ async function negotiateTargetedRuns(env, peeps, log = addMask) {
 var MAX_UPLOAD_BYTES = 128 * 1024 * 1024;
 var NARROWED_DEFAULT_RETRIES = 1;
 function plannedTestsOf(list, rootDir) {
-  return listedTestsOf(list, rootDir).map(({ path: path25, titlePath, pwProject }) => ({ path: path25, titlePath, pwProject }));
+  return listedTestsOf(list, rootDir).map(({ path: path26, titlePath, pwProject }) => ({ path: path26, titlePath, pwProject }));
 }
 function listedTestsOf(list, rootDir) {
   const out = [];
@@ -6249,8 +6253,8 @@ async function waitForVercelPreview(request, deps = {}) {
   const now = deps.now ?? Date.now;
   const pollMs = deps.pollMs ?? 1e4;
   const short = request.sha.slice(0, 7);
-  const github = async (path25) => {
-    const res = await doFetch(`${request.apiUrl}/repos/${request.repository}${path25}`, {
+  const github = async (path26) => {
+    const res = await doFetch(`${request.apiUrl}/repos/${request.repository}${path26}`, {
       headers: {
         authorization: `Bearer ${request.token}`,
         accept: "application/vnd.github+json",
@@ -6262,10 +6266,10 @@ async function waitForVercelPreview(request, deps = {}) {
     }
     if (res.status === 403 || res.status === 404) {
       throw new Error(
-        `GitHub refused ${path25} (${res.status}). Give the job \`deployments: read\` and \`statuses: read\` in its permissions.`
+        `GitHub refused ${path26} (${res.status}). Give the job \`deployments: read\` and \`statuses: read\` in its permissions.`
       );
     }
-    if (!res.ok) throw new Error(`GitHub ${path25}: ${res.status} ${nameForLog((await res.text()).slice(0, 300))}`);
+    if (!res.ok) throw new Error(`GitHub ${path26}: ${res.status} ${nameForLog((await res.text()).slice(0, 300))}`);
     return await res.json();
   };
   const deadline = now() + request.timeoutMs;
@@ -6404,8 +6408,9 @@ async function main() {
     process.exit(0);
   }
   if (requested === "load") {
-    console.error("::error::Load testing isn't available for this repository yet.");
-    process.exit(1);
+    const load = (0, import_node_module.createRequire)(__filename)(import_node_path25.default.join(__dirname, "load.js"));
+    process.exitCode = await load.mainCustomerLoad(process.env, {}, __dirname);
+    return;
   }
   const env = readRunnerEnv();
   const peeps = new PeepsClient(env);
@@ -6422,21 +6427,21 @@ async function main() {
   const framework = mode === "agent" ? "playwright" : resolveFramework(env);
   if (framework === "pytest" || framework === "appium") {
     console.log(`[peeps] framework=${framework}`);
-    const path25 = framework === "pytest" ? { inventory: runPytestInventory, report: runPytestReport, run: runPytestDispatched } : { inventory: runAppiumInventory, report: runAppiumReport, run: runAppiumDispatched };
+    const path26 = framework === "pytest" ? { inventory: runPytestInventory, report: runPytestReport, run: runPytestDispatched } : { inventory: runAppiumInventory, report: runAppiumReport, run: runAppiumDispatched };
     switch (mode) {
       case "inventory":
-        await path25.inventory(env, peeps);
+        await path26.inventory(env, peeps);
         return;
       case "report":
         if (onDefaultBranch(env)) {
-          await path25.inventory(env, peeps).catch(
+          await path26.inventory(env, peeps).catch(
             (error) => console.log(`[peeps] inventory skipped: ${String(error)}`)
           );
         }
-        await path25.report(env, peeps);
+        await path26.report(env, peeps);
         return;
       case "run":
-        await path25.run(env, peeps);
+        await path26.run(env, peeps);
         return;
       default:
         throw new Error(`unknown mode ${mode}`);

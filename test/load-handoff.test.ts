@@ -1,8 +1,10 @@
 /**
- * `mode: load` refuses in this release, and it refuses before anything else can happen: no
- * customer code is loaded, no request reaches Peeps or GitHub's OIDC endpoint, and no
- * process is spawned (not even git). It runs the committed `dist/index.js`, which is what
- * `uses: Peeps-Labs/peeps-action@v1` runs.
+ * `mode: load` hands off to `dist/load.js` (CW plan §4.7), and its refusals come before anything
+ * else can happen: no customer code is loaded, no request reaches Peeps or GitHub's OIDC
+ * endpoint, and no process is spawned (not even git). It runs the committed `dist/index.js`.
+ *
+ * `uses: Peeps-Labs/peeps-action@v1`, any tag, a branch and GitLab keep today's refusal byte for
+ * byte. Pinned to a commit, the customer refusals answer, still before any request.
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -79,8 +81,8 @@ for (const name of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execF
   return file;
 }
 
-async function runAction(env: NodeJS.ProcessEnv, cwd: string) {
-  const child = spawn(process.execPath, [action], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+async function runAction(env: NodeJS.ProcessEnv, cwd: string, preload?: string) {
+  const child = spawn(process.execPath, [...(preload ? ["--require", preload] : []), action], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
@@ -145,13 +147,15 @@ for (const [name, envOf] of [
   // GitHub passes an input left blank as an empty INPUT_MODE; dispatch then reads PEEPS_MODE.
   ["PEEPS_MODE on GitHub with a blank mode input", (s: Setup) => ({ ...s.env, INPUT_MODE: "  ", PEEPS_MODE: "load" })],
   ["PEEPS_MODE on GitLab", (s: Setup) => ({ ...gitlab(s), PEEPS_MODE: "load" })],
+  ["the mode input under @v1", (s: Setup) => ({ ...s.env, INPUT_MODE: "load", GITHUB_ACTION_REF: "v1" })],
+  ["the mode input under a branch, with Peeps' inputs", (s: Setup) => ({ ...s.env, ...pinned(s), INPUT_MODE: "load", GITHUB_ACTION_REF: "main" })],
 ] as const) {
   test(`mode: load from ${name} refuses before any customer code, request or process`, async (t) => {
     const s = await setUp(t);
     const result = await runAction(envOf(s), s.workspace);
 
     assert.equal(result.code, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
-    assert.equal(result.stderr.trim(), MESSAGE);
+    assert.equal(result.stderr, `${MESSAGE}\n`, "today's line, byte for byte");
     // Nothing after the refusal, and no `[peeps] mode=` line before it.
     assert.equal(result.stdout, "");
     assert.equal(existsSync(s.marker), false, "customer code ran");
@@ -197,5 +201,62 @@ for (const [name, envOf] of [
     assert.notEqual(result.stderr.trim(), MESSAGE);
     assert.match(result.stdout, /\[peeps\] mode=inventory/);
     await reachedOut(s, result);
+  });
+}
+
+const SHA = "89abcdef0123456789abcdef0123456789abcdef";
+
+/** A `peeps-load` job pinned to a commit, with setup-node's 24.22.3 in a fake toolcache. */
+function pinned(s: Setup): NodeJS.ProcessEnv {
+  return {
+    GITHUB_ACTION_REF: SHA,
+    GITHUB_JOB: "peeps-load",
+    GITHUB_RUN_ID: "18000000001",
+    GITHUB_RUN_ATTEMPT: "1",
+    RUNNER_TOOL_CACHE: path.join(s.root, "toolcache"),
+    "INPUT_LOAD-GRANT": "q2Jx7Vf0bH1kR8sTzW4uYg",
+    "INPUT_LOAD-WORKLOAD": "peeps/load/robots.workload.yaml",
+  };
+}
+
+const TITLED = "::error title=Peeps load run::";
+
+for (const [name, envOf, line, code] of [
+  ["without Peeps' inputs", (s: Setup) => ({ ...pinned(s), "INPUT_LOAD-GRANT": undefined, "INPUT_LOAD-WORKLOAD": undefined }), "Peeps' dispatch inputs are missing or malformed: loadGrant, loadWorkload.", "input"],
+  [
+    "with the whole harness variable set and no inputs",
+    (s: Setup) => ({
+      ...pinned(s),
+      "INPUT_LOAD-GRANT": undefined,
+      "INPUT_LOAD-WORKLOAD": undefined,
+      PEEPS_URL: s.peeps.url,
+      PEEPS_LOAD_GRANT: "AbCdEfGhIjKlMnOpQrStUv",
+      PEEPS_LOAD_WORKLOAD: "peeps/load/robots.workload.yaml",
+      PEEPS_LOAD_NPM_CACHE: path.join(s.root, "cache"),
+      PEEPS_LOAD_SINK_HOSTS: "sink.example.com",
+      PEEPS_LOAD_CHECK_RUN_ID: "52000000001",
+    }),
+    "Peeps' dispatch inputs are missing or malformed: loadGrant, loadWorkload.",
+    "input",
+  ],
+  ["with a workspace under /__w/", (s: Setup) => ({ ...pinned(s), GITHUB_WORKSPACE: "/__w/shop/shop" }), "This load job runs in a container (the job's container). Load runs need the runner itself: remove `container:` from the `peeps-load` job.", "fence_unverified"],
+  ["in the ordinary job (mode \"load \")", (s: Setup) => ({ ...pinned(s), GITHUB_JOB: "peeps", INPUT_MODE: "load " }), "Load runs start only in the `peeps-load` job of a workflow Peeps dispatched.", "job"],
+  ["with PEEPS_API_URL off Peeps' own addresses", (s: Setup) => pinned(s), "PEEPS_API_URL must be set to one of Peeps' own addresses for load runs.", "control_origin"],
+] as const) {
+  test(`pinned to a commit ${name}: one titled refusal and its JSON line, before any customer code, request or process`, async (t) => {
+    const s = await setUp(t);
+    await mkdir(path.join(s.root, "toolcache", "node", "24.22.3", process.arch), { recursive: true });
+    // The spy rides on --require here: NODE_OPTIONS would itself be refused (node_options).
+    const { NODE_OPTIONS: _spy, ...rest } = s.env;
+    const env = { INPUT_MODE: "load", ...rest, ...envOf(s) } as NodeJS.ProcessEnv;
+    for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k];
+    const result = await runAction(env, s.workspace, s.spy);
+    assert.equal(result.code, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+    assert.equal(result.stderr, `${TITLED}${line}\n`);
+    assert.equal(result.stdout, `${JSON.stringify({ refused: code })}\n`);
+    assert.equal(existsSync(s.marker), false, "customer code ran");
+    assert.deepEqual(s.peeps.hits, [], "Peeps was asked something");
+    assert.deepEqual(s.oidc.hits, [], "an OIDC token was requested");
+    assert.equal(existsSync(s.spawns) ? await readFile(s.spawns, "utf8") : "", "", "a process was spawned");
   });
 }

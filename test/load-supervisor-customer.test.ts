@@ -1,0 +1,105 @@
+/**
+ * The supervisor's customer-path startup (CW plan §4.5): the toolchain is resolved and checked
+ * once, before the probe, and both the probe and the jail take it; a probe whose jail can't start
+ * is `fence_unverified`; the install runs in the mode the entry chose; and a customer run has no
+ * harness hosts. Every assertion is a count or an order.
+ */
+import { describe, test } from "node:test";
+import assert from "node:assert/strict";
+import { bindingOf } from "../src/load/supervisor";
+import { InstallRefused, type Toolchain } from "../src/load/install";
+import type { JailSpec } from "../src/load/jail/spec";
+import { fakeJail } from "./support/fake-jail";
+import { rig, why, WORKLOAD_PATH } from "./support/run-supervisor";
+
+const TC: Toolchain = { nodeDir: "/opt/tc/node/24.22.3/x64", node: "/opt/tc/node/24.22.3/x64/bin/node", npmCli: "/opt/tc/node/24.22.3/x64/lib/node_modules/npm/bin/npm-cli.js", nodeVersion: "24.22.3", npmVersion: "11.19.1" };
+const digests = async (w: string) => ({ lock: "", hiddenLock: "", tree: (await bindingOf(w, WORKLOAD_PATH)).observed.treeDigest });
+
+describe("load supervisor: the customer path's startup", { concurrency: 4 }, () => {
+  test("a toolchain that fails its check is install_unsupported: no probe, no jail, no claim", async (t) => {
+    let probes = 0;
+    const r = await rig(t, { seams: { toolchain: () => { throw new Error("node's sha256 is not the pinned one"); }, probe: async () => { probes++; return { passed: true, failures: [], seen: null }; } } });
+    const res = await r.result;
+    assert.equal(res.status, "didnt_start", why(r, res));
+    assert.equal(res.reason, "install_unsupported");
+    assert.equal(probes, 0);
+    assert.equal(r.jails.made.length, 0);
+    assert.equal(r.port.claims.length, 0);
+  });
+
+  test("the probe and the jail both run the checked toolchain's node, never nodeDir's", async (t) => {
+    const probed: string[] = [];
+    const jails = fakeJail();
+    const specs: JailSpec[] = [];
+    const r = await rig(t, {
+      launch: (spec, options, signal) => {
+        specs.push(spec);
+        return jails.launch(spec, options, signal);
+      },
+      seams: {
+        toolchain: () => TC,
+        probe: undefined,
+        probeJail: async (base) => {
+          probed.push(base.node, base.nodeDir);
+          return { passed: true, failures: [], seen: null };
+        },
+      },
+    });
+    const res = await r.result;
+    assert.equal(res.status, "completed", why(r, res));
+    assert.deepEqual(probed, [TC.node, TC.nodeDir]);
+    assert.deepEqual(specs.map((s) => [s.node, s.nodeDir]), [[TC.node, TC.nodeDir]]);
+  });
+
+  test("a probe whose jail can't start is fence_unverified, and nothing is claimed", async (t) => {
+    const r = await rig(t, { seams: { toolchain: () => TC, probe: undefined, probeJail: async () => { throw new Error("sudo: a password is required"); } } });
+    const res = await r.result;
+    assert.equal(res.status, "didnt_start", why(r, res));
+    assert.equal(res.reason, "fence_unverified");
+    assert.equal(r.port.claims.length, 0);
+    assert.equal(r.jails.made.length, 0);
+  });
+
+  test("fetch mode runs the download installer with the checked toolchain; offline mode the cache installer", async (t) => {
+    for (const install of [{ mode: "fetch" as const }, { mode: "offline" as const, cache: "/home/runner/cache" }]) {
+      const ran: string[] = [];
+      const r = await rig(t, {
+        install,
+        seams: {
+          toolchain: () => TC,
+          preinstall: undefined,
+          installers: {
+            fetch: async (ws, tc) => { ran.push(`fetch ${tc.node}`); return digests(ws); },
+            offline: async (ws, tc, _scratch, o) => { ran.push(`offline ${tc.node} ${o.cache}`); return digests(ws); },
+          },
+        },
+      });
+      const res = await r.result;
+      assert.equal(res.status, "completed", why(r, res));
+      assert.deepEqual(ran, install.mode === "fetch" ? [`fetch ${TC.node}`] : [`offline ${TC.node} /home/runner/cache`]);
+    }
+  });
+
+  test("a failed download is install_failed before the claim; a refused checkout is install_unsupported", async (t) => {
+    for (const [error, reason] of [[new Error("install_failed: /x/-/x-1.0.0.tgz does not match its lockfile sha512"), "install_failed"], [new InstallRefused(["package-lock.json is missing"]), "install_unsupported"]] as const) {
+      const r = await rig(t, { install: { mode: "fetch" }, seams: { toolchain: () => TC, preinstall: undefined, installers: { fetch: async () => { throw error; } } } });
+      const res = await r.result;
+      assert.equal(res.reason, reason, why(r, res));
+      assert.equal(r.port.claims.length, 0);
+    }
+  });
+
+  test("no install mode at all refuses install_unsupported", async (t) => {
+    const r = await rig(t, { seams: { toolchain: () => TC, preinstall: undefined } });
+    const res = await r.result;
+    assert.equal(res.reason, "install_unsupported", why(r, res));
+    assert.equal(r.port.claims.length, 0);
+  });
+
+  test("a customer run has no harness list: a grant on any host runs; the harness list still refuses it", async (t) => {
+    const customer = await rig(t, {});
+    assert.equal((await customer.result).status, "completed");
+    const harness = await rig(t, { harnessHosts: ["sink.load-harness.example.com"] });
+    assert.equal((await harness.result).reason, "outside_harness");
+  });
+});
