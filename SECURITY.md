@@ -267,6 +267,11 @@ lease renewals and the run's events carry the run tokens Peeps issued in its
 answer. The action never sends Peeps your code, the job's OIDC request token
 or `GITHUB_TOKEN`.
 
+The job log can show your checkout's contents (npm's own output, a journey's
+error messages), since whoever reads the log can read the checkout; nothing but
+codes and checked names (a reason, a field, a package name, a `file:line`)
+leaves the runner, in the result file or in anything sent to Peeps.
+
 Two parties are kept apart. Peeps decides where load may go: a grant names the
 origins and limits an Owner approved, and the action refuses anything else. Your
 journey code runs inside a jail on your runner, as the runner's own user,

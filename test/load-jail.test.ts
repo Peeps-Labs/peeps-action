@@ -581,6 +581,7 @@ test("runLoad on the real jail: 20 s, 5 users, then Stop now at 5 s into measure
 });
 
 test("the journey's environment is exactly the allowlist: PATH, HOME, the CA, and nothing from the job", { ...options, timeout: 600_000 }, async (t) => {
+  const logged: string[] = [];
   const ws = await sliceWorkspace(true);
   t.after(() => rmSync(ws, { recursive: true, force: true }));
   checkoutBits(ws);
@@ -590,12 +591,15 @@ test("the journey's environment is exactly the allowlist: PATH, HOME, the CA, an
     plan: smallPlan({ exportName: "envDump", users: 1, durationMs: 5_000 }),
     seams: {
       constants: { ...FAST, loadedMs: 120_000, checkingDeadlineMs: 60_000 },
+      // A journey's message reaches the job log only, never the result.
+      log: (line) => logged.push(line),
     },
   });
   const res = await r.result;
-  const dumped = res.failures.map((f) => f.message).find((m) => m.startsWith("ENV "));
+  const marker = /^peeps load: journey failure(?: at \S+)?: ENV /;
+  const dumped = logged.find((l) => marker.test(l));
   assert.ok(dumped, JSON.stringify({ reason: res.reason, failures: res.failures }));
-  const report = JSON.parse(dumped.slice(4));
+  const report = JSON.parse(dumped.replace(marker, ""));
   assert.deepEqual(report, {
     keys: ["HOME", "NODE_EXTRA_CA_CERTS", "PATH"],
     values: ["/run/peeps/home", "/run/peeps/ca.pem", "/run/peeps/node/bin:/usr/bin:/bin"],

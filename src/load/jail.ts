@@ -404,7 +404,7 @@ export async function probe(base: Omit<JailSpec, "command" | "claimId" | "instal
     expect(seen.workspaceWrite === "written" && !existsSync(`${base.workspace}/.peeps-probe`), "a write reached the checkout");
   }
   if (out.includes("PEEPS-PROBE-UNCLEAN")) failures.push("the unit's cgroup was not empty after end()");
-  if (hits.length !== 1 || hits[0] !== "GET /probe-relay HTTP/1.0") failures.push(`the listener saw ${JSON.stringify(hits)}`);
+  if (hits.length !== 1 || hits[0] !== "GET /probe-relay HTTP/1.0") failures.push(`the listener saw ${Math.min(hits.length, 1000)} requests, not the probe's one`);
   return { passed: failures.length === 0, failures, seen };
 }
 

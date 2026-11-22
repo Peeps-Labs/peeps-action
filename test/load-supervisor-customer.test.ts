@@ -172,3 +172,72 @@ describe("load supervisor: a refusal before the claim keeps its cause", { concur
     assert.equal(messages(res), "install_failed: an unexpected error");
   });
 });
+
+describe("load supervisor: nothing read from the checkout or an exception's message leaves the runner", { concurrency: 4 }, () => {
+  const SECRET = /SENTINEL-77|ghp_SENTINEL/;
+  /** Everything that leaves the runner or lands on disk: the result, the events Peeps was sent, the claims. */
+  const leaving = (r: Awaited<ReturnType<typeof rig>>, res: unknown) => JSON.stringify({ res, batches: r.port.batches(), claims: r.port.claims, events: r.events });
+  const fastInstall = { preinstall: async () => ({ lock: "", hiddenLock: "", tree: "0".repeat(64) }) };
+
+  for (const [what, head, files, detail] of [
+    ["a HEAD that is no ref", "ref: https://u:PASS-SENTINEL-77@x.example/r?t=SENTINEL-77\n", {}, "malformed"],
+    ["a HEAD holding something else", "machine x.example login u password PASS-SENTINEL-77\n", {}, "malformed"],
+    ["a ref whose target is missing", "ref: refs/heads/ghp_SENTINEL77\n", {}, "missing ref target"],
+    ["a ref whose target is no commit", "ref: refs/heads/main\n", { "refs/heads/main": "PASS-SENTINEL-77\n" }, "malformed"],
+  ] as const) {
+    test(`the binding before the claim: ${what} is checkout_changed (${detail}), with no text of it`, async (t) => {
+      const r = await rig(t, {
+        afterBinding: (ws) => {
+          writeFileSync(path.join(ws, ".git/HEAD"), head);
+          for (const [name, body] of Object.entries(files)) {
+            mkdirSync(path.dirname(path.join(ws, ".git", name)), { recursive: true });
+            writeFileSync(path.join(ws, ".git", name), body);
+          }
+        },
+        seams: { toolchain: () => TC, ...fastInstall },
+      });
+      const res = await r.result;
+      assert.equal(res.reason, "checkout_changed", why(r, res));
+      assert.equal(res.status, "didnt_start");
+      assert.equal(r.port.claims.length, 0);
+      assert.deepEqual(res.failures, [{ message: `checkout_changed: ${detail}`, location: null }]);
+      assert.doesNotMatch(leaving(r, res), SECRET);
+    });
+  }
+
+  test("the binding prepare reads again: a HEAD changed after the claim is checkout_changed, with no text of it", async (t) => {
+    const r = await rig(t, {
+      seams: { toolchain: () => TC },
+      observer: (e, rg) => {
+        if (e.type === "claimed") writeFileSync(path.join(rg.ws, ".git/HEAD"), "ref: https://u:PASS-SENTINEL-77@x.example/\n");
+      },
+    });
+    const res = await r.result;
+    assert.equal(res.reason, "checkout_changed", why(r, res));
+    assert.equal(r.port.claims.length, 1);
+    assert.deepEqual(res.failures.map((f) => f.message), ["checkout_changed: malformed"]);
+    assert.doesNotMatch(leaving(r, res), SECRET);
+  });
+
+  test("an unexpected exception at startup is a fixed stage and code, never its message", async (t) => {
+    const r = await rig(t, { seams: { toolchain: () => TC }, launch: async () => { throw Object.assign(new Error("spawn failed for https://u:PASS-SENTINEL-77@x.example/"), { code: "EACCES" }); } });
+    const res = await r.result;
+    assert.equal(res.reason, "startup_failed", why(r, res));
+    assert.deepEqual(res.failures, [{ message: "startup_failed: the jail could not start: an unexpected error (EACCES)", location: null }]);
+    assert.doesNotMatch(leaving(r, res), SECRET);
+  });
+
+  test("a journey's exception is its kind, its error's name and its location; the message goes to the job log only", async (t) => {
+    const lines: string[] = [];
+    const r = await rig(t, { exportName: "throwsSecret", seams: { toolchain: () => TC, log: (line: string) => lines.push(line) } });
+    const res = await r.result;
+    assert.equal(res.reason, "checking_failed", why(r, res));
+    assert.ok(res.failures.length > 0);
+    for (const f of res.failures) {
+      assert.equal(f.message, "failure: TypeError");
+      assert.match(f.location ?? "", /^journeys\.ts:\d+(:\d+)?$/);
+    }
+    assert.doesNotMatch(leaving(r, res), SECRET);
+    assert.ok(lines.some((l) => l.includes("PASS-SENTINEL-77")), "the customer's own log still has the message");
+  });
+});

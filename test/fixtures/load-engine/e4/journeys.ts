@@ -75,6 +75,11 @@ export async function throwsUnreadable(): Promise<void> {
   throw Object.create(null);
 }
 
+/** Throws with a credential-shaped message: nothing of it may leave the runner. */
+export async function throwsSecret(): Promise<void> {
+  throw new TypeError("https://u:PASS-SENTINEL-77@app.example/?token=Q-SENTINEL-77");
+}
+
 /** Never ends by itself. */
 export async function hang(): Promise<void> {
   await new Promise(() => undefined);

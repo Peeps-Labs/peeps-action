@@ -39,7 +39,7 @@ import { createRunCa } from "./gate/ca";
 import { encodeHandoffs, Journal, type JournalSnapshot } from "./gate/journal";
 import { GateProxy, makeDial, type Dial, type DialSeams } from "./gate/proxy";
 import { eventsBody } from "./gate/reconcile";
-import { checkoutHead, InstallFailed, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests, type Toolchain } from "./install";
+import { CheckoutChanged, checkoutHead, InstallFailed, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests, type Toolchain } from "./install";
 import { fetchPreinstall, type RegistryFetchSeams } from "./registry-fetch";
 import { NoTicket, probe as realProbe, startJail, TicketRefused, type JailHandle, type ProbeReport, type StartJailOptions } from "./jail";
 import type { CtlFrame, Ticket } from "./jail/ctl";
@@ -144,6 +144,8 @@ export interface LoadSeams {
   constants?: Partial<SupervisorConstants> & Partial<EngineConstants>;
   /** The executor's command and install, as the jail sees them (tests: the fake jail's own). */
   command?: string[];
+  /** The job log (tests: to read what a journey's failure printed). */
+  log?: (line: string) => void;
   /** Hands the run's journal to a test once it exists (load-freeze snapshots it at its boundary). */
   onJournal?: (journal: Journal) => void;
 }
@@ -239,6 +241,23 @@ class Refused extends Error {
     super(`${reason}${detail ? `: ${typeof detail === "string" ? detail : detail.join("; ")}` : ""}`);
   }
 }
+
+/** A journey failure's location as the result carries it: a checkout path and a line (and column). */
+const JOURNEY_LOCATION = /^[A-Za-z0-9._@/+-]{1,200}:\d{1,7}(?::\d{1,7})?$/;
+
+type Stage = "toolchain" | "probe" | "install" | "binding" | "claim" | "prepare" | "jail" | "startup" | "checking" | "measurement";
+const STAGE_TEXT: Record<Stage, string> = {
+  toolchain: "the toolchain could not be checked",
+  probe: "the fence could not be checked",
+  install: "the install could not run",
+  binding: "the checkout could not be read",
+  claim: "the claim could not be made",
+  prepare: "the run could not be prepared",
+  jail: "the jail could not start",
+  startup: "the journey could not start",
+  checking: "checking stopped",
+  measurement: "the measurement stopped",
+};
 
 /** Why an error that isn't one of the install's own refusals stopped the install, without its message (which may hold paths or URLs). */
 function publicCause(error: unknown): string {
@@ -356,6 +375,8 @@ class LoadRun {
   private readonly busySlots = new Map<number, TurnState>();
   private duplicateOutcomes = 0;
   private readonly failures: LoadResult["failures"] = [];
+  /** Where the run is: an unexpected error is reported by it, never by its message. */
+  private stage: Stage = "toolchain";
   private playwright: string | null = null;
   private readonly checking = { turns: 0, success: 0, failure: 0, timeout: 0, cancelled: 0, responded: [] as number[] };
   private readonly measurement = { started: 0, missed: 0, success: 0, failure: 0, timeout: 0, cancelled: 0 };
@@ -433,23 +454,33 @@ class LoadRun {
       // The toolchain is resolved and hash-checked once, before the probe runs its node through
       // sudo and before the install runs npm: both take this one (CW plan §4.5).
       if (this.s.toolchain || !this.s.probe || !this.s.preinstall) this.toolchain = this.resolveToolchain();
+      this.stage = "probe";
       const report = await (this.s.probe ? this.s.probe() : this.realProbe());
       this.throwIfDone();
       if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures);
+      this.stage = "install";
       const digests = await (this.s.preinstall ? this.s.preinstall(this.o.workspace) : this.realPreinstall());
+      this.stage = "binding";
       const binding = await bindingOf(this.o.workspace, this.o.workloadPath, digests.tree, this.signal);
       this.throwIfDone();
+      this.stage = "claim";
       await this.claim(binding, report);
+      this.stage = "prepare";
       await this.prepare(binding);
+      this.stage = "startup";
       await this.startup();
+      this.stage = "checking";
       await this.runChecking();
+      this.stage = "measurement";
       await this.runMeasurement();
     } catch (error) {
-      // The detail goes to the result's failures (sanitized, capped), so the job's log can say why.
+      // The detail goes to the result's failures, and from there to Peeps' summary: only fixed
+      // words and checked identifiers, never a message (CW-A round 2 follow-up).
       if (error instanceof Refused) this.terminate(error.reason, error.status, error.detail);
+      else if (error instanceof CheckoutChanged) this.terminate("checkout_changed", "didnt_start", error.message);
       else if (error instanceof NoTicket) this.terminate("didnt_start", "didnt_start");
       else if (error instanceof TicketRefused) this.terminate(error.reason === "stale_ticket" ? "didnt_start" : "executor_protocol", error.reason === "stale_ticket" ? "didnt_start" : "failed");
-      else if (this.reason === undefined) this.terminate("startup_failed", "failed", (error as Error).message);
+      else if (this.reason === undefined) this.terminate("startup_failed", "failed", `startup_failed: ${STAGE_TEXT[this.stage]}: ${publicCause(error)}`);
     }
   }
 
@@ -833,6 +864,7 @@ class LoadRun {
     };
     const proxy = this.proxy;
     const launch = this.s.launch ?? startJail;
+    this.stage = "jail";
     this.jailLaunchPending = true;
     this.launchCalled = true;
     let handle: JailHandle;
@@ -879,10 +911,11 @@ class LoadRun {
     this.throwIfDone();
     if (!f) throw new Refused("didnt_start", "loaded_timeout");
     if (f.type === "fatal") {
-      this.failures.push({ message: sanitize(f.message, 2000) ?? "", location: sanitize(f.location) });
+      this.journeyFailure(`executor_${f.code}`, f.message, f.location);
       throw new Refused("didnt_start", `executor_${f.code}`);
     }
-    if (f.type === "loaded") this.playwright = sanitize(f.playwright, 64);
+    // The version the checkout's Playwright reports: kept only as a plain version string.
+    if (f.type === "loaded") this.playwright = /^[0-9A-Za-z.+-]{1,64}$/.test(f.playwright) ? f.playwright : "unreadable";
   }
 
   /** The next frame matching, or null at the time limit or the run's end. */
@@ -950,7 +983,7 @@ class LoadRun {
     this.proxy?.closeTurn(f.turn);
     this.busySlots.delete(state.slot);
     this.emit({ type: "outcome", turn: f.turn, kind: f.kind });
-    if (f.kind !== "success" && this.failures.length < 20) this.failures.push({ message: sanitize(f.message, 2000) ?? f.kind, location: sanitize(f.location) });
+    if (f.kind !== "success" && this.failures.length < 20) this.journeyFailure(f.kind, f.message, f.location);
     const counts = state.phase === "checking" ? this.checking : this.measurement;
     counts[f.kind] += 1;
     if (state.phase === "measurement") {
@@ -1091,6 +1124,27 @@ class LoadRun {
   }
 
   /** Synchronous and idempotent: one reason, latched. */
+  /**
+   * A journey's failure: the result (and Peeps' summary) get its kind, its error's name when that
+   * passes a check, and its location when that is a plain `file:line`; the message, the journey's
+   * own text, goes to the job log only (CW-A round 2 follow-up).
+   */
+  private journeyFailure(kind: string, message: string | undefined, location: string | undefined): void {
+    const name = /^([A-Z][A-Za-z0-9]{0,63}): /.exec(message ?? "")?.[1];
+    const where = location !== undefined && JOURNEY_LOCATION.test(location) ? location : null;
+    this.failures.push({ message: name ? `${kind}: ${name}` : kind, location: where });
+    if (message) this.log(`journey ${kind}${where ? ` at ${where}` : ""}: ${message.slice(0, 2000)}`);
+  }
+
+  /** The job log: each line neutralized, so a journey's text runs no workflow command. */
+  private log(text: string): void {
+    for (const line of text.split(/\r?\n|\r/)) {
+      const shown = `peeps load: ${(sanitize(line, 2000) ?? "").replaceAll("##[", "## [")}`;
+      if (this.s.log) this.s.log(shown);
+      else process.stderr.write(`${shown}\n`);
+    }
+  }
+
   private terminate(trigger: string, status?: LoadStatus, detail?: string | readonly string[]): void {
     if (this.reason !== undefined) return;
     // One failure a line, so each problem reaches the log whole (CW-A round 2, Opus m1).

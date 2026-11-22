@@ -1,5 +1,5 @@
 {
-  "description": "CW-A, the customer load job (CW plan \u00a74): every refusal row, the identity read, the control origin, the toolchain hashes, the lockfile URL and SRI checks, the verified download (its first-failure stop and its retries), the refusal causes the job prints (fixed reasons and checked identifiers, one a line), the download total and idle limit, the platform skip, the best-effort summary, and the supervisor's toolchain-first startup. A survivor means a security check no test would notice losing. Not here: the `%` check in canonicalRegistryTarball, an equivalent mutant (TARBALL_PATH admits no `%` either, so dropping it changes no answer; it stays as a second guard).",
+  "description": "CW-A, the customer load job (CW plan \u00a74): every refusal row, the identity read, the control origin, the toolchain hashes, the lockfile URL and SRI checks, the verified download (its first-failure stop and its retries), the refusal causes the job prints (fixed reasons and checked identifiers, one a line), the download total and idle limit, the platform skip, the best-effort summary, the typed checkout_changed and startup_failed details, journey failures as codes, and the supervisor's toolchain-first startup. A survivor means a security check no test would notice losing. Not here: the `%` check in canonicalRegistryTarball, an equivalent mutant (TARBALL_PATH admits no `%` either, so dropping it changes no answer; it stays as a second guard).",
   "mutants": [
     {
       "name": "a tag or branch ref is read as a commit pin",
@@ -508,6 +508,61 @@
       "replace": " || checked.has(entry.integrity)) continue;",
       "tests": [
         "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a malformed HEAD's content is echoed in the refusal",
+      "file": "src/load/install.ts",
+      "find": "  if (!ref || !REF.test(ref) || ref.split(\"/\").some((part) => part === \"..\" || part === \".\" || part === \"\")) throw new CheckoutChanged(\"malformed\");",
+      "replace": "  if (!ref || !REF.test(ref) || ref.split(\"/\").some((part) => part === \"..\" || part === \".\" || part === \"\")) throw new Error(`checkout_changed: HEAD is not a ref this action reads (${head.slice(0, 100)})`);",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a missing ref target echoes the ref",
+      "file": "src/load/install.ts",
+      "find": "  throw new CheckoutChanged(\"missing ref target\");",
+      "replace": "  throw new Error(`checkout_changed: ${ref} is not found`);",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a checkout_changed read is reported as an unexpected startup error",
+      "file": "src/load/supervisor.ts",
+      "find": "      else if (error instanceof CheckoutChanged) this.terminate(\"checkout_changed\", \"didnt_start\", error.message);\n",
+      "replace": "",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "an unexpected startup error's message reaches the failures",
+      "file": "src/load/supervisor.ts",
+      "find": "`startup_failed: ${STAGE_TEXT[this.stage]}: ${publicCause(error)}`",
+      "replace": "(error as Error).message",
+      "tests": [
+        "test/load-supervisor-customer.test.ts",
+        "test/load-supervisor-evidence.test.ts"
+      ]
+    },
+    {
+      "name": "a journey's message reaches the failures",
+      "file": "src/load/supervisor.ts",
+      "find": "this.failures.push({ message: name ? `${kind}: ${name}` : kind, location: where });",
+      "replace": "this.failures.push({ message: message ?? kind, location: where });",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a journey's message never reaches the job log",
+      "file": "src/load/supervisor.ts",
+      "find": "    if (message) this.log(`journey ${kind}${where ? ` at ${where}` : \"\"}: ${message.slice(0, 2000)}`);\n",
+      "replace": "",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
       ]
     }
   ]

@@ -3772,25 +3772,39 @@ async function treeDigest(ws, signal) {
 }
 var SHA2 = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 var REF = /^refs\/[A-Za-z0-9._/-]+$/;
+var CheckoutChanged = class extends Error {
+  constructor(detail) {
+    super(`checkout_changed: ${detail}`);
+    this.detail = detail;
+    this.name = "CheckoutChanged";
+  }
+};
 function checkoutHead(ws) {
   const git = import_node_path2.default.join(ws, ".git");
-  const head = (0, import_node_fs2.readFileSync)(import_node_path2.default.join(git, "HEAD"), "utf8").trim();
+  const read = (file) => {
+    try {
+      return (0, import_node_fs2.readFileSync)(file, "utf8");
+    } catch {
+      throw new CheckoutChanged("unreadable");
+    }
+  };
+  const head = read(import_node_path2.default.join(git, "HEAD")).trim();
   if (SHA2.test(head)) return head;
   const m = /^ref: (\S+)$/.exec(head);
   const ref = m?.[1];
-  if (!ref || !REF.test(ref) || ref.split("/").some((part) => part === ".." || part === "." || part === "")) throw new Error(`checkout_changed: HEAD is not a ref this action reads (${head.slice(0, 100)})`);
+  if (!ref || !REF.test(ref) || ref.split("/").some((part) => part === ".." || part === "." || part === "")) throw new CheckoutChanged("malformed");
   const loose = import_node_path2.default.join(git, ref);
   if ((0, import_node_fs2.existsSync)(loose)) {
-    const sha2 = (0, import_node_fs2.readFileSync)(loose, "utf8").trim();
+    const sha2 = read(loose).trim();
     if (SHA2.test(sha2)) return sha2;
-    throw new Error(`checkout_changed: ${ref} does not hold a commit`);
+    throw new CheckoutChanged("malformed");
   }
-  const packed = (0, import_node_fs2.existsSync)(import_node_path2.default.join(git, "packed-refs")) ? (0, import_node_fs2.readFileSync)(import_node_path2.default.join(git, "packed-refs"), "utf8").split("\n") : [];
+  const packed = (0, import_node_fs2.existsSync)(import_node_path2.default.join(git, "packed-refs")) ? read(import_node_path2.default.join(git, "packed-refs")).split("\n") : [];
   for (const line of packed) {
     const [sha2, name2] = line.split(" ");
     if (name2 === ref && sha2 && SHA2.test(sha2)) return sha2;
   }
-  throw new Error(`checkout_changed: ${ref} is not found`);
+  throw new CheckoutChanged("missing ref target");
 }
 
 // src/load/registry-fetch.ts
@@ -4338,7 +4352,7 @@ async function probe(base, runId, signal) {
     expect(seen.workspaceWrite === "written" && !(0, import_node_fs4.existsSync)(`${base.workspace}/.peeps-probe`), "a write reached the checkout");
   }
   if (out.includes("PEEPS-PROBE-UNCLEAN")) failures.push("the unit's cgroup was not empty after end()");
-  if (hits.length !== 1 || hits[0] !== "GET /probe-relay HTTP/1.0") failures.push(`the listener saw ${JSON.stringify(hits)}`);
+  if (hits.length !== 1 || hits[0] !== "GET /probe-relay HTTP/1.0") failures.push(`the listener saw ${Math.min(hits.length, 1e3)} requests, not the probe's one`);
   return { passed: failures.length === 0, failures, seen };
 }
 function nonLoopbackIPv4() {
@@ -5016,6 +5030,19 @@ var Refused = class extends Error {
     this.detail = detail;
   }
 };
+var JOURNEY_LOCATION = /^[A-Za-z0-9._@/+-]{1,200}:\d{1,7}(?::\d{1,7})?$/;
+var STAGE_TEXT = {
+  toolchain: "the toolchain could not be checked",
+  probe: "the fence could not be checked",
+  install: "the install could not run",
+  binding: "the checkout could not be read",
+  claim: "the claim could not be made",
+  prepare: "the run could not be prepared",
+  jail: "the jail could not start",
+  startup: "the journey could not start",
+  checking: "checking stopped",
+  measurement: "the measurement stopped"
+};
 function publicCause(error) {
   const code = error?.code;
   return typeof code === "string" && /^[A-Z][A-Z0-9_]{0,39}$/.test(code) ? `an unexpected error (${code})` : "an unexpected error";
@@ -5115,6 +5142,8 @@ var LoadRun = class {
   busySlots = /* @__PURE__ */ new Map();
   duplicateOutcomes = 0;
   failures = [];
+  /** Where the run is: an unexpected error is reported by it, never by its message. */
+  stage = "toolchain";
   playwright = null;
   checking = { turns: 0, success: 0, failure: 0, timeout: 0, cancelled: 0, responded: [] };
   measurement = { started: 0, missed: 0, success: 0, failure: 0, timeout: 0, cancelled: 0 };
@@ -5171,22 +5200,31 @@ var LoadRun = class {
     try {
       this.throwIfDone();
       if (this.s.toolchain || !this.s.probe || !this.s.preinstall) this.toolchain = this.resolveToolchain();
+      this.stage = "probe";
       const report = await (this.s.probe ? this.s.probe() : this.realProbe());
       this.throwIfDone();
       if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures);
+      this.stage = "install";
       const digests = await (this.s.preinstall ? this.s.preinstall(this.o.workspace) : this.realPreinstall());
+      this.stage = "binding";
       const binding = await bindingOf(this.o.workspace, this.o.workloadPath, digests.tree, this.signal);
       this.throwIfDone();
+      this.stage = "claim";
       await this.claim(binding, report);
+      this.stage = "prepare";
       await this.prepare(binding);
+      this.stage = "startup";
       await this.startup();
+      this.stage = "checking";
       await this.runChecking();
+      this.stage = "measurement";
       await this.runMeasurement();
     } catch (error) {
       if (error instanceof Refused) this.terminate(error.reason, error.status, error.detail);
+      else if (error instanceof CheckoutChanged) this.terminate("checkout_changed", "didnt_start", error.message);
       else if (error instanceof NoTicket) this.terminate("didnt_start", "didnt_start");
       else if (error instanceof TicketRefused) this.terminate(error.reason === "stale_ticket" ? "didnt_start" : "executor_protocol", error.reason === "stale_ticket" ? "didnt_start" : "failed");
-      else if (this.reason === void 0) this.terminate("startup_failed", "failed", error.message);
+      else if (this.reason === void 0) this.terminate("startup_failed", "failed", `startup_failed: ${STAGE_TEXT[this.stage]}: ${publicCause(error)}`);
     }
   }
   throwIfDone() {
@@ -5541,6 +5579,7 @@ var LoadRun = class {
     };
     const proxy = this.proxy;
     const launch = this.s.launch ?? startJail;
+    this.stage = "jail";
     this.jailLaunchPending = true;
     this.launchCalled = true;
     let handle;
@@ -5584,10 +5623,10 @@ var LoadRun = class {
     this.throwIfDone();
     if (!f) throw new Refused("didnt_start", "loaded_timeout");
     if (f.type === "fatal") {
-      this.failures.push({ message: sanitize(f.message, 2e3) ?? "", location: sanitize(f.location) });
+      this.journeyFailure(`executor_${f.code}`, f.message, f.location);
       throw new Refused("didnt_start", `executor_${f.code}`);
     }
-    if (f.type === "loaded") this.playwright = sanitize(f.playwright, 64);
+    if (f.type === "loaded") this.playwright = /^[0-9A-Za-z.+-]{1,64}$/.test(f.playwright) ? f.playwright : "unreadable";
   }
   /** The next frame matching, or null at the time limit or the run's end. */
   nextFrame(match2, ms2) {
@@ -5649,7 +5688,7 @@ var LoadRun = class {
     this.proxy?.closeTurn(f.turn);
     this.busySlots.delete(state.slot);
     this.emit({ type: "outcome", turn: f.turn, kind: f.kind });
-    if (f.kind !== "success" && this.failures.length < 20) this.failures.push({ message: sanitize(f.message, 2e3) ?? f.kind, location: sanitize(f.location) });
+    if (f.kind !== "success" && this.failures.length < 20) this.journeyFailure(f.kind, f.message, f.location);
     const counts = state.phase === "checking" ? this.checking : this.measurement;
     counts[f.kind] += 1;
     if (state.phase === "measurement") {
@@ -5771,6 +5810,26 @@ var LoadRun = class {
     this.renewController.abort();
   }
   /** Synchronous and idempotent: one reason, latched. */
+  /**
+   * A journey's failure: the result (and Peeps' summary) get its kind, its error's name when that
+   * passes a check, and its location when that is a plain `file:line`; the message, the journey's
+   * own text, goes to the job log only (CW-A round 2 follow-up).
+   */
+  journeyFailure(kind, message, location) {
+    const name2 = /^([A-Z][A-Za-z0-9]{0,63}): /.exec(message ?? "")?.[1];
+    const where = location !== void 0 && JOURNEY_LOCATION.test(location) ? location : null;
+    this.failures.push({ message: name2 ? `${kind}: ${name2}` : kind, location: where });
+    if (message) this.log(`journey ${kind}${where ? ` at ${where}` : ""}: ${message.slice(0, 2e3)}`);
+  }
+  /** The job log: each line neutralized, so a journey's text runs no workflow command. */
+  log(text2) {
+    for (const line of text2.split(/\r?\n|\r/)) {
+      const shown = `peeps load: ${(sanitize(line, 2e3) ?? "").replaceAll("##[", "## [")}`;
+      if (this.s.log) this.s.log(shown);
+      else process.stderr.write(`${shown}
+`);
+    }
+  }
   terminate(trigger, status, detail) {
     if (this.reason !== void 0) return;
     for (const line of typeof detail === "string" ? detail.split("\n") : detail ?? []) {

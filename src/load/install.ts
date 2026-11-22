@@ -915,7 +915,13 @@ async function digestsOf(ws: string, signal?: AbortSignal): Promise<InstallDiges
   };
 }
 
-/** Runs npm (or its wrapper), its output neutralized onto stderr; rejects `install_failed` on a non-zero exit. */
+/**
+ * Runs npm (or its wrapper), its output neutralized onto stderr; rejects `install_failed` on a non-zero exit.
+ *
+ * The boundary (CW-A round 2 follow-up): npm's output goes to the job log, whose readers can read
+ * the checkout anyway, and npm's own errors are what a customer needs to fix their install. It
+ * never reaches `failures`, the result JSON or Peeps: the rejection carries the exit code only.
+ */
 function runNpm(file: string, args: string[], o: { cwd: string; env: Record<string, string> }, timeoutMs: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const child = spawn(file, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL", signal });
@@ -973,24 +979,42 @@ export async function treeDigest(ws: string, signal?: AbortSignal): Promise<stri
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const REF = /^refs\/[A-Za-z0-9._/-]+$/;
 
+/**
+ * The checkout's `.git` could not be read as this action reads it. Its detail is one of three
+ * fixed words: never HEAD's content or the ref, which may hold anything (CW-A round 2 follow-up).
+ */
+export class CheckoutChanged extends Error {
+  constructor(readonly detail: "unreadable" | "malformed" | "missing ref target") {
+    super(`checkout_changed: ${detail}`);
+    this.name = "CheckoutChanged";
+  }
+}
+
 /** HEAD, read from `.git` as files: no git binary runs, so the checkout's git config runs nothing. */
 export function checkoutHead(ws: string): string {
   const git = path.join(ws, ".git");
-  const head = readFileSync(path.join(git, "HEAD"), "utf8").trim();
+  const read = (file: string): string => {
+    try {
+      return readFileSync(file, "utf8");
+    } catch {
+      throw new CheckoutChanged("unreadable");
+    }
+  };
+  const head = read(path.join(git, "HEAD")).trim();
   if (SHA.test(head)) return head;
   const m = /^ref: (\S+)$/.exec(head);
   const ref = m?.[1];
-  if (!ref || !REF.test(ref) || ref.split("/").some((part) => part === ".." || part === "." || part === "")) throw new Error(`checkout_changed: HEAD is not a ref this action reads (${head.slice(0, 100)})`);
+  if (!ref || !REF.test(ref) || ref.split("/").some((part) => part === ".." || part === "." || part === "")) throw new CheckoutChanged("malformed");
   const loose = path.join(git, ref);
   if (existsSync(loose)) {
-    const sha = readFileSync(loose, "utf8").trim();
+    const sha = read(loose).trim();
     if (SHA.test(sha)) return sha;
-    throw new Error(`checkout_changed: ${ref} does not hold a commit`);
+    throw new CheckoutChanged("malformed");
   }
-  const packed = existsSync(path.join(git, "packed-refs")) ? readFileSync(path.join(git, "packed-refs"), "utf8").split("\n") : [];
+  const packed = existsSync(path.join(git, "packed-refs")) ? read(path.join(git, "packed-refs")).split("\n") : [];
   for (const line of packed) {
     const [sha, name] = line.split(" ");
     if (name === ref && sha && SHA.test(sha)) return sha;
   }
-  throw new Error(`checkout_changed: ${ref} is not found`);
+  throw new CheckoutChanged("missing ref target");
 }
