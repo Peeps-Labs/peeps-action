@@ -1,5 +1,5 @@
 {
-  "description": "CW-A, the customer load job (CW plan \u00a74): every refusal row, the identity read, the control origin, the toolchain hashes, the lockfile URL and SRI checks, the verified download and the supervisor's toolchain-first startup. A survivor means a security check no test would notice losing.",
+  "description": "CW-A, the customer load job (CW plan \u00a74): every refusal row, the identity read, the control origin, the toolchain hashes, the lockfile URL and SRI checks, the verified download (its first-failure stop and its retries), the refusal causes the job prints, and the supervisor's toolchain-first startup. A survivor means a security check no test would notice losing. Not here: the `%` check in canonicalRegistryTarball, an equivalent mutant (TARBALL_PATH admits no `%` either, so dropping it changes no answer; it stays as a second guard).",
   "mutants": [
     {
       "name": "a tag or branch ref is read as a commit pin",
@@ -50,8 +50,8 @@
     {
       "name": "a malformed workload path is accepted",
       "file": "src/load/customer.ts",
-      "find": "...(f.workload !== null && WORKLOAD_FILE.test(f.workload) ? [] : [\"loadWorkload\"]),",
-      "replace": "...(f.workload !== null ? [] : [\"loadWorkload\"]),",
+      "find": "...(f.workload !== null && f.workload.length <= WORKLOAD_MAX && WORKLOAD_FILE.test(f.workload) ? [] : [\"loadWorkload\"]),",
+      "replace": "...(f.workload !== null && f.workload.length <= WORKLOAD_MAX ? [] : [\"loadWorkload\"]),",
       "tests": [
         "test/load-customer.test.ts"
       ]
@@ -95,7 +95,7 @@
     {
       "name": "a tarball that doesn't match its lockfile sha512 is cached",
       "file": "src/load/registry-fetch.ts",
-      "find": "if (digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);",
+      "find": "if (got.digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);",
       "replace": "",
       "tests": [
         "test/load-registry-fetch.test.ts"
@@ -167,7 +167,7 @@
     {
       "name": "a jail that can't start fails the run instead of refusing fence_unverified",
       "file": "src/load/supervisor.ts",
-      "find": "      return { passed: false, failures: [\"the jail could not start\"], seen: null };",
+      "find": "      return { passed: false, failures: [`the jail could not start: ${(error as Error).message}`], seen: null };",
       "replace": "      throw error;",
       "tests": [
         "test/load-supervisor-customer.test.ts"
@@ -189,6 +189,169 @@
       "replace": "      scope: { kind: \"harness\", sinkHosts: [\"sink.example.com\"] },",
       "tests": [
         "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a job without GitHub's id-token is not refused not_github",
+      "file": "src/load/customer.ts",
+      "find": "if (!f.github || !f.oidcUrl || !f.oidcToken) return refusal(\"not_github\");",
+      "replace": "",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "not_github answers before the unpinned line",
+      "file": "src/load/customer.ts",
+      "find": "  if (f.actionRef === null || !COMMIT.test(f.actionRef)) return refusal(\"action_not_pinned\");\n  if (!f.github || !f.oidcUrl || !f.oidcToken) return refusal(\"not_github\");",
+      "replace": "  if (!f.github || !f.oidcUrl || !f.oidcToken) return refusal(\"not_github\");\n  if (f.actionRef === null || !COMMIT.test(f.actionRef)) return refusal(\"action_not_pinned\");",
+      "tests": [
+        "test/load-customer.test.ts",
+        "test/load-handoff.test.ts"
+      ]
+    },
+    {
+      "name": "/.dockerenv is not seen",
+      "file": "src/load/customer.ts",
+      "find": "if (f.dockerenv || (f.workspace ?? \"\").startsWith(\"/__w/\")) {",
+      "replace": "if ((f.workspace ?? \"\").startsWith(\"/__w/\")) {",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a job without setup-node's 24.22.3 is not refused node_version",
+      "file": "src/load/customer.ts",
+      "find": "if (!f.trustedNodePresent) return refusal(\"node_version\"",
+      "replace": "if (false) return refusal(\"node_version\"",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a malformed grant is accepted",
+      "file": "src/load/customer.ts",
+      "find": "...(f.grant !== null && GRANT_REF.test(f.grant) ? [] : [\"loadGrant\"]),",
+      "replace": "...(f.grant !== null ? [] : [\"loadGrant\"]),",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "customerRefusal doesn't check the control origin",
+      "file": "src/load/customer.ts",
+      "find": "if (!loadControlOrigin(f.apiUrl ?? undefined).ok) return refusal(\"control_origin\");",
+      "replace": "",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a numeric claim is read as a string",
+      "file": "src/load/oidc.ts",
+      "find": "const read = (name: string) => (typeof claims[name] === \"string\" ? (claims[name] as string) : null);",
+      "replace": "const read = (name: string) => (claims[name] === undefined || claims[name] === null ? null : String(claims[name]));",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "a token from another event is accepted",
+      "file": "src/load/oidc.ts",
+      "find": "if (claims.eventName !== \"workflow_dispatch\") return { ok: false, refused: \"identity\" };",
+      "replace": "",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "a malformed check_run_id is accepted",
+      "file": "src/load/oidc.ts",
+      "find": "if (!CHECK_RUN_ID.test(claims.checkRunId) || !Number.isSafeInteger(checkRunId)) return { ok: false, refused: \"identity\" };",
+      "replace": "",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "another lockfile beside package-lock.json is accepted",
+      "file": "src/load/install.ts",
+      "find": "  for (const name of ws.otherLockfiles) out.push(`${name} is not supported: load runs install from package-lock.json only`);\n",
+      "replace": "",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a tarball URL that doesn't round-trip is accepted",
+      "file": "src/load/install.ts",
+      "find": "return url.href === value && url.protocol === \"https:\"",
+      "replace": "return url.protocol === \"https:\"",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "any tarball path on the registry is accepted",
+      "file": "src/load/install.ts",
+      "find": "url.search === \"\" && url.hash === \"\" && TARBALL_PATH.test(url.pathname);",
+      "replace": "url.search === \"\" && url.hash === \"\";",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a run refusal's cause is not printed",
+      "file": "src/load/main.ts",
+      "find": "    for (const line of failureLines(res.failures)) error(line);\n",
+      "replace": "",
+      "tests": [
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a cause's workflow commands are printed as they are",
+      "file": "src/load/main.ts",
+      "find": "const line = (sanitize(raw, FAILURE_LINE_CHARS) ?? \"\").replaceAll(\"##[\", \"## [\").trim();",
+      "replace": "const line = raw.slice(0, FAILURE_LINE_CHARS).trim();",
+      "tests": [
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a Refused's detail is dropped",
+      "file": "src/load/supervisor.ts",
+      "find": "if (error instanceof Refused) this.terminate(error.reason, error.status, error.detail);",
+      "replace": "if (error instanceof Refused) this.terminate(error.reason, error.status);",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a failed tarball doesn't stop the others",
+      "file": "src/load/registry-fetch.ts",
+      "find": "          first ??= { error };\n          stop.abort();",
+      "replace": "          first ??= { error };",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a 4xx is retried",
+      "file": "src/load/registry-fetch.ts",
+      "find": "(error.code === \"status\" && error.status !== undefined && error.status >= 500)",
+      "replace": "error.code === \"status\"",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "nothing is retried",
+      "file": "src/load/registry-fetch.ts",
+      "find": "if (retryable(error) && tries < RETRY_BACKOFF_MS.length && !window.aborted) {",
+      "replace": "if (false) {",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
       ]
     }
   ]
