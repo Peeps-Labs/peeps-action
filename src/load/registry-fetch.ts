@@ -10,7 +10,8 @@
  *     path on registry.npmjs.org:443, over the shared transport: the job's proxy and CA
  *     variables are ignored and any 3xx fails.
  *   - At most 8 at a time, 64 MiB each, 1 GiB received in all (retries and failed attempts
- *     count: going over is "total too large", never retried), 10 minutes in all. The first failure
+ *     count: going over is "total too large", never retried), 10 minutes in all. An attempt
+ *     that receives no byte for 60 s has stalled: a dropped connection. The first failure
  *     stops the rest. A dropped connection or a 5xx is retried twice (250 ms, then 1 s), with a
  *     fresh hash; a 4xx, a redirect, a size cap or a sha512 mismatch never.
  *   - Each body is hashed with sha512 as it streams; a mismatch writes nothing and fails.
@@ -29,6 +30,8 @@ export const FETCH_PARALLEL = 8;
 export const TARBALL_MAX_BYTES = 64 * 1024 * 1024;
 export const TOTAL_MAX_BYTES = 1024 * 1024 * 1024;
 export const FETCH_MS = 10 * 60_000;
+/** An attempt that receives no byte (headers or body) for this long is a dropped connection, and retried. */
+export const IDLE_MS = 60_000;
 /** Two retries per tarball, for a dropped connection or a 5xx only. */
 export const RETRY_BACKOFF_MS = [250, 1_000] as const;
 
@@ -44,6 +47,7 @@ export interface RegistryFetchSeams extends HttpControlSeams {
   tarballMaxBytes?: number;
   totalMaxBytes?: number;
   deadlineMs?: number;
+  idleMs?: number;
 }
 
 export interface Tarball {
@@ -97,20 +101,43 @@ export async function downloadTarballs(tarballs: Tarball[], cache: string, tc: T
   const fail = (why: string): never => {
     throw new InstallFailed(why);
   };
-  /** One attempt: the body and its sha512, or the transport's error. Its bytes stay in the total whatever happens. */
+  const idleMs = seams.idleMs ?? IDLE_MS;
+  /**
+   * One attempt: the body and its sha512, or the transport's error. Its bytes stay in the total
+   * whatever happens. No byte for `idleMs` ends it as a dropped connection (`stalled`), so it is retried.
+   */
   const attempt = async (pathname: string) => {
     const hash = createHash("sha512");
     const chunks: Buffer[] = [];
-    await t.download("registry", agent, target, pathname, tarballCap, window, (chunk) => {
-      received += chunk.length;
-      if (received > totalCap) {
-        overTotal = true;
-        return false;
-      }
-      hash.update(chunk);
-      chunks.push(chunk);
-      return true;
-    });
+    const idle = new AbortController();
+    let stalled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        stalled = true;
+        idle.abort();
+      }, idleMs);
+    };
+    arm();
+    try {
+      await t.download("registry", agent, target, pathname, tarballCap, AbortSignal.any([window, idle.signal]), (chunk) => {
+        arm();
+        received += chunk.length;
+        if (received > totalCap) {
+          overTotal = true;
+          return false;
+        }
+        hash.update(chunk);
+        chunks.push(chunk);
+        return true;
+      });
+    } catch (error) {
+      if (stalled && !window.aborted) throw new ControlHttpError("registry", "network", undefined, "stalled");
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     return { digest: `sha512-${hash.digest("base64")}`, body: Buffer.concat(chunks) };
   };
   const one = async (tarball: Tarball) => {
@@ -130,7 +157,7 @@ export async function downloadTarballs(tarballs: Tarball[], cache: string, tc: T
             // The window closed while waiting: report the failure it interrupted.
           }
         }
-        const code = error instanceof ControlHttpError ? `${error.code}${error.status !== undefined ? ` ${error.status}` : ""}` : "download";
+        const code = !(error instanceof ControlHttpError) ? "download" : error.detail === "stalled" ? "stalled" : `${error.code}${error.status !== undefined ? ` ${error.status}` : ""}`;
         return fail(`fetching ${url.pathname} failed (${code})`);
       }
     }

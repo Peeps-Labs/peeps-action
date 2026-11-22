@@ -229,6 +229,42 @@ test("a dropped connection or a 5xx is retried twice with a fresh hash; a 4xx, a
   }
 });
 
+test("an attempt that receives nothing for the idle limit is a dropped connection: retried, and after two retries it fails as stalled", { skip: hasNpm ? false : "no npm beside this Node" }, async (t) => {
+  const r = await registry(t);
+  const a = tarball(t, "fixture-a", "1.0.0");
+  const one = [{ url: `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`, integrity: a.integrity }];
+  const open = new Set<{ destroy(): void }>();
+  t.after(() => { for (const res of open) res.destroy(); });
+  const script = (answers: ("ok" | "stall" | "silent")[]) => {
+    let n = 0;
+    r.server.answer((_x, res) => {
+      const what = answers[Math.min(n++, answers.length - 1)];
+      open.add(res);
+      if (what === "ok") res.writeHead(200, { "content-length": String(a.bytes.length) }).end(a.bytes);
+      else if (what === "stall") {
+        // Some of the body, then nothing: the connection stays open.
+        res.writeHead(200, { "content-length": String(a.bytes.length) });
+        res.write(a.bytes.subarray(0, 10));
+      }
+      // "silent": no answer at all, not even headers.
+    });
+    return () => n;
+  };
+  const seams = { ...r.seams, idleMs: 200, deadlineMs: 20_000 };
+  for (const answers of [["stall", "ok"], ["silent", "ok"]] as const) {
+    const count = script([...answers]);
+    const cache = tmp(t);
+    assert.deepEqual(await downloadTarballs(one, cache, toolchain(), seams), { count: 1, bytes: a.bytes.length }, answers.join(" "));
+    assert.equal(count(), 2, answers.join(" "));
+    assert.equal(cacheEntries(cache).length, 1);
+  }
+  const stuck = script(["stall"]);
+  const started = Date.now();
+  await assert.rejects(downloadTarballs(one, tmp(t), toolchain(), seams), /^InstallFailed: install_failed: fetching \/fixture-a\/-\/fixture-a-1\.0\.0\.tgz failed \(stalled\)$/);
+  assert.equal(stuck(), 3, "two retries, then it fails");
+  assert.ok(Date.now() - started < 10_000, "the idle limit ended each attempt, not the 20 s deadline");
+});
+
 test("the download ignores the job's proxy: with Node's env proxy on from startup, only the global agent's control request reaches it", { skip: hasNpm && envProxySupported ? false : "needs npm beside this Node, and Node 24.5 or later for NODE_USE_ENV_PROXY" }, async (t) => {
   const proxy = await recordingProxy(t);
   const r = await registry(t);

@@ -3786,6 +3786,7 @@ var FETCH_PARALLEL = 8;
 var TARBALL_MAX_BYTES = 64 * 1024 * 1024;
 var TOTAL_MAX_BYTES = 1024 * 1024 * 1024;
 var FETCH_MS = 10 * 6e4;
+var IDLE_MS = 6e4;
 var RETRY_BACKOFF_MS = [250, 1e3];
 function retryable(error) {
   return error instanceof ControlHttpError && (error.code === "network" || error.code === "status" && error.status !== void 0 && error.status >= 500);
@@ -3820,19 +3821,39 @@ async function downloadTarballs(tarballs, cache, tc, seams = {}, signal) {
   const fail = (why) => {
     throw new InstallFailed(why);
   };
+  const idleMs = seams.idleMs ?? IDLE_MS;
   const attempt = async (pathname) => {
     const hash = (0, import_node_crypto7.createHash)("sha512");
     const chunks = [];
-    await t.download("registry", agent, target, pathname, tarballCap, window, (chunk) => {
-      received += chunk.length;
-      if (received > totalCap) {
-        overTotal = true;
-        return false;
-      }
-      hash.update(chunk);
-      chunks.push(chunk);
-      return true;
-    });
+    const idle = new AbortController();
+    let stalled = false;
+    let timer;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        stalled = true;
+        idle.abort();
+      }, idleMs);
+    };
+    arm();
+    try {
+      await t.download("registry", agent, target, pathname, tarballCap, AbortSignal.any([window, idle.signal]), (chunk) => {
+        arm();
+        received += chunk.length;
+        if (received > totalCap) {
+          overTotal = true;
+          return false;
+        }
+        hash.update(chunk);
+        chunks.push(chunk);
+        return true;
+      });
+    } catch (error) {
+      if (stalled && !window.aborted) throw new ControlHttpError("registry", "network", void 0, "stalled");
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     return { digest: `sha512-${hash.digest("base64")}`, body: Buffer.concat(chunks) };
   };
   const one = async (tarball) => {
@@ -3851,7 +3872,7 @@ async function downloadTarballs(tarballs, cache, tc, seams = {}, signal) {
           } catch {
           }
         }
-        const code = error instanceof ControlHttpError ? `${error.code}${error.status !== void 0 ? ` ${error.status}` : ""}` : "download";
+        const code = !(error instanceof ControlHttpError) ? "download" : error.detail === "stalled" ? "stalled" : `${error.code}${error.status !== void 0 ? ` ${error.status}` : ""}`;
         return fail(`fetching ${url.pathname} failed (${code})`);
       }
     }
