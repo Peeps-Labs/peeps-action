@@ -1,0 +1,2 @@
+      loadGrant:    { type: string, required: false }   # load runs only
+      loadWorkload: { type: string, required: false }   # load runs only

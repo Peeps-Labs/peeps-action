@@ -1,0 +1,13 @@
+{
+  "action_not_pinned": [],
+  "not_github": [],
+  "job": [],
+  "rerun": [],
+  "fence_unverified": ["id"],
+  "node_options": ["vars"],
+  "node_version": ["found"],
+  "input": ["name"],
+  "control_origin": [],
+  "identity": [],
+  "self_hosted": []
+}

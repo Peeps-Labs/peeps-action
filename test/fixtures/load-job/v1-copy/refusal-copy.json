@@ -1,0 +1,13 @@
+{
+  "action_not_pinned": "Load testing isn't available for this repository yet.",
+  "not_github": "Load runs need GitHub Actions with `id-token: write`.",
+  "job": "Load runs start only in the `peeps-load` job of a workflow Peeps dispatched.",
+  "rerun": "Load runs can't be re-run. Start a new run from Peeps.",
+  "fence_unverified": "This load job runs in a container ({id}). Load runs need the runner itself: remove `container:` from the `peeps-load` job.",
+  "node_options": "Unset {vars} for load runs: they change how Node starts.",
+  "node_version": "Load runs need Node 24.22.3 from `actions/setup-node`. This job set up Node {found}.",
+  "input": "Peeps' dispatch inputs are missing or malformed: {name}.",
+  "control_origin": "PEEPS_API_URL must be set to one of Peeps' own addresses for load runs.",
+  "identity": "This job's GitHub identity token doesn't match its run.",
+  "self_hosted": "Load runs need a GitHub-hosted runner for now. This job ran on a self-hosted runner."
+}

@@ -1,0 +1,31 @@
+  peeps-load:
+    name: Peeps load run
+    if: inputs.mode == 'load' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NODE_OPTIONS: ""
+      NODE_DEBUG: ""
+      NODE_PATH: ""
+      LD_PRELOAD: ""
+      LD_AUDIT: ""
+      LD_LIBRARY_PATH: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38   # v6
+        with:
+          node-version: "24.22.3"
+          package-manager-cache: false
+      - uses: Peeps-Labs/peeps-action@0123456789abcdef0123456789abcdef01234567
+        env:
+          PEEPS_API_URL: https://dev.peepsai.com
+        with:
+          mode: load
+          load-grant: ${{ inputs.loadGrant }}
+          load-workload: ${{ inputs.loadWorkload }}

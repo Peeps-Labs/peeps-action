@@ -6,7 +6,7 @@ branding:
   color: "green"
 inputs:
   mode:
-    description: "inventory | run | report | agent | ci (default: decide from the event) | attach-start | attach-finish (report your own test step's run, its command and reporters unchanged; these two never fail the job) | load (refuses and exits 1 in this release: load testing isn't available yet)"
+    description: "inventory | run | report | agent | ci (default: decide from the event) | attach-start | attach-finish (report your own test step's run, its command and reporters unchanged; these two never fail the job) | load (a Peeps load run: Peeps dispatches it to the `peeps-load` job, with the action pinned to a commit)"
     required: false
     default: "ci"
   session-id:
@@ -50,6 +50,12 @@ inputs:
     required: false
   peeps-project:
     description: "With peeps-environment: the Peeps project's acronym, for a repository that backs more than one project with an environment of that name"
+    required: false
+  load-grant:
+    description: "load mode: the grant reference Peeps dispatched (`inputs.loadGrant`)"
+    required: false
+  load-workload:
+    description: "load mode: the workload file Peeps dispatched (`inputs.loadWorkload`), peeps/load/<name>.workload.yaml"
     required: false
   github-token:
     description: "Token for reading the pull request's deployments with preview (default: the job's GITHUB_TOKEN). The action removes it from its environment before anything runs, so test processes don't inherit it"
