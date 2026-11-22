@@ -20,7 +20,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { canonicalRegistryTarball, installProblems, InstallRefused, offlinePreinstall, readWorkspace, sha512Of, type InstallDigests, type OfflineInstall, type Toolchain } from "./install";
+import { canonicalRegistryTarball, InstallFailed, installProblems, InstallRefused, offlinePreinstall, readWorkspace, sha512Of, type InstallDigests, type OfflineInstall, type Toolchain } from "./install";
 import { ControlHttpError, controlTransport, sleep, type HttpControlSeams } from "./transport";
 
 export const REGISTRY_HOST = "registry.npmjs.org";
@@ -90,7 +90,7 @@ export async function downloadTarballs(tarballs: Tarball[], cache: string, tc: T
   let next = 0;
   let first: { error: unknown } | undefined;
   const fail = (why: string): never => {
-    throw new Error(`install_failed: ${why}`);
+    throw new InstallFailed(why);
   };
   /** One attempt: the body and its sha512, or the transport's error. Its bytes leave the total if it fails. */
   const attempt = async (pathname: string) => {

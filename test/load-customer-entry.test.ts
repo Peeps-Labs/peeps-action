@@ -237,7 +237,42 @@ test("a cause carrying workflow commands from the lockfile prints no line that G
   const { seen } = await throughEntry(t, many);
   assert.equal(seen.err.filter((l) => l.startsWith("::")).length, 1, "only the titled line is a command");
   assert.ok(seen.err.every((l) => !l.includes("##[")), "no ##[ command either");
-  assert.ok(seen.err.some((l) => l.includes("add-mask")), "the text is shown, neutralized");
+  assert.ok(!seen.err.some((l) => /add-mask|forged|evil/.test(l)), "the rejected text itself is never shown");
+  assert.ok(seen.err.some((l) => /\ba\b.*resolved/.test(l)), "the package and the field are");
   assert.ok(seen.err.length <= 21, `${seen.err.length} lines`);
   assert.ok(seen.err.every((l) => l.length <= "peeps load: ".length + 300));
+});
+
+test("a credential in a rejected resolved URL or a manifest spec reaches no output: the reason and the field do", async (t) => {
+  const resolved = "https://ci-user:PASS-SENTINEL-91@registry.npmjs.org/a/-/a-1.0.0.tgz?token=QUERY-SENTINEL-37";
+  const spec = "https://deploy:SPEC-SENTINEL-55@git.example/b.tgz";
+  const r = await rig(t, {
+    install: { mode: "fetch" },
+    afterBinding: (ws) => {
+      writeFileSync(path.join(ws, "package.json"), JSON.stringify({ name: "app", version: "1.0.0", dependencies: { a: "1.0.0", b: spec } }));
+      writeFileSync(path.join(ws, "package-lock.json"), JSON.stringify({
+        lockfileVersion: 3,
+        packages: {
+          "": { name: "app", version: "1.0.0", dependencies: { a: "1.0.0", b: spec } },
+          "node_modules/a": { version: "1.0.0", resolved, integrity: `sha512-${Buffer.alloc(64).toString("base64")}` },
+        },
+      }));
+    },
+    seams: { toolchain: () => TC, preinstall: undefined },
+  });
+  const res = await r.result;
+  assert.equal(res.reason, "install_unsupported", JSON.stringify(res.failures));
+  const tc = toolCache(t);
+  const dir = mkdtempSync(path.join(os.tmpdir(), "peeps-load-sum-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const summary = path.join(dir, "summary.md");
+  const seen = fresh();
+  assert.equal(await mainCustomerLoad(env(tc, { GITHUB_STEP_SUMMARY: summary }), deps(seen, OK_ID, async () => res), DIST), 1);
+  const outputs = { stderr: seen.err.join("\n"), stdout: seen.out.join("\n"), summary: readFileSync(summary, "utf8"), result: JSON.stringify(res) };
+  for (const [where, text] of Object.entries(outputs)) {
+    for (const secret of ["PASS-SENTINEL-91", "QUERY-SENTINEL-37", "SPEC-SENTINEL-55", "ci-user", "deploy:"]) assert.ok(!text.includes(secret), `${secret} in ${where}`);
+  }
+  assert.equal(seen.err[0], `::error title=Peeps load run::${RUN_REFUSAL_COPY.install_unsupported}`);
+  assert.ok(seen.err.some((l) => /\ba: resolved is not\b/.test(l)), outputs.stderr);
+  assert.ok(seen.err.some((l) => /dependencies b\b.*spec/.test(l)), outputs.stderr);
 });

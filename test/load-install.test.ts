@@ -132,6 +132,36 @@ test("lockfile problems are refused: v1, none, shrinkwrap, foreign hosts, http, 
   assert.match(mutate((p) => (p["node_modules/linked"] = { resolved: "packages/missing", link: true })), /linked/);
 });
 
+test("no problem prints a value as read: a credential in any refused URL, spec, name, path or version stays out", (t) => {
+  const url = (n: number) => `https://u${n}:S3CRET-${n}@target.example/x.tgz?token=S3CRET-${n}`;
+  const lock = baseLock();
+  const p = lock.packages as Record<string, Record<string, unknown>>;
+  p["node_modules/left-pad"]!.resolved = url(1);
+  p["node_modules/left-pad"]!.dependencies = { nested: url(2), [url(3)]: "^1.0.0" };
+  p["node_modules/bundled"] = { version: "1.0.0", resolved: url(4), inBundle: true };
+  p["node_modules/plain"] = { name: url(5), version: url(6), inBundle: true };
+  p["node_modules/linked"] = { resolved: url(7), link: true };
+  p[`node_modules/${url(8)}`] = { version: "1.0.0", resolved: url(9), integrity: INTEGRITY };
+  p[url(10)] = { version: "1.0.0" };
+  p[""]!.dependencies = { "left-pad": url(11) };
+  lock.dependencies = { [url(12)]: { version: url(13), dependencies: { y: { from: url(14) } } } };
+  const manifest = { ...BASE_MANIFEST, dependencies: { "left-pad": "^1.3.0", [url(15)]: url(16) }, overrides: { [url(17)]: url(18) }, workspaces: [url(19)] };
+  const found = problems(workspace(t, { manifest, lock }));
+  assert.ok(found.length >= 12, found.join("\n"));
+  for (const line of found) assert.doesNotMatch(line, /S3CRET|target\.example|:\/\/u\d/, line);
+  // What stays: the reason, the field, and names and keys that passed their check.
+  assert.ok(found.includes("package-lock.json: left-pad: resolved is not a tarball on https://registry.npmjs.org/ in its canonical form (https, no userinfo, query or fragment)"), found.join("\n"));
+  assert.ok(found.some((l) => /node_modules\/left-pad: dependencies nested: the spec is not a semver range/.test(l)), found.join("\n"));
+  assert.ok(found.some((l) => /dependencies entry #2: the spec/.test(l)), found.join("\n"));
+  assert.ok(found.some((l) => /dependencies entry #2 > y: from is not from the registry|dependencies entry #1 > y: from is not from the registry/.test(l)), found.join("\n"));
+  const v = problems(workspace(t, { lock: { ...baseLock(), lockfileVersion: url(20) } }));
+  assert.deepEqual(v, ["package-lock.json: lockfileVersion (not a whole number) is not supported (2 or 3 with packages)"]);
+  const locked = baseLock();
+  (locked.packages as Record<string, Record<string, unknown>>)["node_modules/left-pad"]!.version = url(21);
+  (locked.packages as Record<string, Record<string, unknown>>)["node_modules/left-pad"]!.name = url(22);
+  assert.deepEqual(problems(workspace(t, { lock: locked })), ["package-lock.json: left-pad is locked as another name, not left-pad", "package-lock.json: left-pad is locked at a version, outside ^1.3.0"]);
+});
+
 test("a lock entry is read as npm reads it: inBundle, hasShrinkwrap, a truthy link and a URL for a version open no other host", (t) => {
   const mutate = (fn: (p: Record<string, Record<string, unknown>>) => void) => {
     const lock = baseLock();
@@ -233,7 +263,8 @@ test("a legacy unscoped package with capitals (JSONStream) is installable; a sco
   pk["node_modules/JSONStream"] = { version: "1.3.5", resolved: `${REG}/JSONStream/-/JSONStream-1.3.5.tgz`, integrity: INTEGRITY };
   assert.deepEqual(problems(workspace(t, { manifest, lock })), []);
   const scoped = { ...BASE_MANIFEST, dependencies: { ...BASE_MANIFEST.dependencies, "@acme/Pad": "^1.0.0" } };
-  assert.ok(problems(workspace(t, { manifest: scoped })).some((p) => p.includes("@acme/Pad is not a package name")));
+  // A name that fails the check is not printed: the refusal names the field and the entry's place.
+  assert.ok(problems(workspace(t, { manifest: scoped })).includes(`package.json: dependencies entry #${Object.keys(scoped.dependencies).length} is not a package name`));
 });
 
 test("an entry's integrity must hold a well-formed sha512: exactly 64 bytes of canonical base64", (t) => {

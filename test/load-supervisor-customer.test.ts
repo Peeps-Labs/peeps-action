@@ -9,8 +9,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { failureLines } from "../src/load/main";
 import { bindingOf } from "../src/load/supervisor";
-import { InstallRefused, SUPPORTED_TOOLCHAIN, trustedToolchain, type Toolchain } from "../src/load/install";
+import { InstallFailed, InstallRefused, SUPPORTED_TOOLCHAIN, trustedToolchain, type Toolchain } from "../src/load/install";
 import type { JailSpec } from "../src/load/jail/spec";
 import { fakeJail } from "./support/fake-jail";
 import { rig, why, workspace, WORKLOAD_PATH } from "./support/run-supervisor";
@@ -134,17 +135,39 @@ describe("load supervisor: a refusal before the claim keeps its cause", { concur
     assert.match(messages(res), new RegExp(`node's sha256 [0-9a-f]{64} is not the pinned ${SUPPORTED_TOOLCHAIN[0]!.linuxX64!.nodeSha256}`));
   });
 
+  test("two problems are two failures, each on its own log line, neither cut by the other", async (t) => {
+    const r = await rig(t, { install: { mode: "fetch" }, afterBinding: (ws) => { for (const name of ["yarn.lock", "pnpm-lock.yaml"]) writeFileSync(path.join(ws, name), ""); }, seams: { toolchain: () => TC, preinstall: undefined } });
+    const res = await r.result;
+    assert.equal(res.reason, "install_unsupported", why(r, res));
+    const lines = failureLines(res.failures);
+    assert.ok(lines.includes("peeps load: yarn.lock is not supported: load runs install from package-lock.json only"), lines.join("\n"));
+    assert.ok(lines.includes("peeps load: pnpm-lock.yaml is not supported: load runs install from package-lock.json only"), lines.join("\n"));
+    const fence = await rig(t, { seams: { toolchain: () => TC, probe: async () => ({ passed: false, failures: ["first ".repeat(60), "second"], seen: null }) } });
+    const fenced = await fence.result;
+    assert.equal(fenced.reason, "fence_unverified", why(fence, fenced));
+    assert.deepEqual(fenced.failures.map((f) => f.message), ["first ".repeat(60), "second"]);
+    assert.equal(failureLines(fenced.failures).at(-1), "peeps load: second");
+  });
+
   test("a jail that can't start: fence_unverified, and the failures say why", async (t) => {
-    const r = await rig(t, { seams: { toolchain: () => TC, probe: undefined, probeJail: async () => { throw new Error("sudo: a password is required"); } } });
+    const r = await rig(t, { seams: { toolchain: () => TC, probe: undefined, probeJail: async () => { throw Object.assign(new Error("spawn /home/runner/SECRET-PATH/sudo ENOENT"), { code: "ENOENT" }); } } });
     const res = await r.result;
     assert.equal(res.reason, "fence_unverified", why(r, res));
-    assert.match(messages(res), /the jail could not start: sudo: a password is required/);
+    assert.match(messages(res), /^the jail could not start \(sudo or systemd-run is missing or refused\): an unexpected error \(ENOENT\)$/);
+    assert.doesNotMatch(JSON.stringify(res), /SECRET-PATH/, "the exception's own message is never kept");
   });
 
   test("a failed download: install_failed, and the failures name the tarball", async (t) => {
-    const r = await rig(t, { install: { mode: "fetch" }, seams: { toolchain: () => TC, preinstall: undefined, installers: { fetch: async () => { throw new Error("install_failed: /x/-/x-1.0.0.tgz does not match its lockfile sha512"); } } } });
+    const r = await rig(t, { install: { mode: "fetch" }, seams: { toolchain: () => TC, preinstall: undefined, installers: { fetch: async () => { throw new InstallFailed("/x/-/x-1.0.0.tgz does not match its lockfile sha512"); } } } });
     const res = await r.result;
     assert.equal(res.reason, "install_failed", why(r, res));
     assert.match(messages(res), /x-1\.0\.0\.tgz does not match its lockfile sha512/);
+  });
+
+  test("an install error that isn't the install's own: install_failed with a fixed cause, never its message", async (t) => {
+    const r = await rig(t, { install: { mode: "fetch" }, seams: { toolchain: () => TC, preinstall: undefined, installers: { fetch: async () => { throw new Error("install_failed: https://u:PASS-SENTINEL@registry.example/a.tgz?t=Q"); } } } });
+    const res = await r.result;
+    assert.equal(res.reason, "install_failed", why(r, res));
+    assert.equal(messages(res), "install_failed: an unexpected error");
   });
 });

@@ -39,7 +39,7 @@ import { createRunCa } from "./gate/ca";
 import { encodeHandoffs, Journal, type JournalSnapshot } from "./gate/journal";
 import { GateProxy, makeDial, type Dial, type DialSeams } from "./gate/proxy";
 import { eventsBody } from "./gate/reconcile";
-import { checkoutHead, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests, type Toolchain } from "./install";
+import { checkoutHead, InstallFailed, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests, type Toolchain } from "./install";
 import { fetchPreinstall, type RegistryFetchSeams } from "./registry-fetch";
 import { NoTicket, probe as realProbe, startJail, TicketRefused, type JailHandle, type ProbeReport, type StartJailOptions } from "./jail";
 import type { CtlFrame, Ticket } from "./jail/ctl";
@@ -234,9 +234,16 @@ export interface LoadResult {
 }
 
 class Refused extends Error {
-  constructor(readonly status: LoadStatus, readonly reason: string, readonly detail?: string) {
-    super(`${reason}${detail ? `: ${detail}` : ""}`);
+  /** `detail`: one failure a line, each safe to print and to send (no value read from the checkout as it is). */
+  constructor(readonly status: LoadStatus, readonly reason: string, readonly detail?: string | readonly string[]) {
+    super(`${reason}${detail ? `: ${typeof detail === "string" ? detail : detail.join("; ")}` : ""}`);
   }
+}
+
+/** Why an error that isn't one of the install's own refusals stopped the install, without its message (which may hold paths or URLs). */
+function publicCause(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]{0,39}$/.test(code) ? `an unexpected error (${code})` : "an unexpected error";
 }
 
 /** One run, end to end. Never throws: every way it ends is a `LoadResult`. */
@@ -428,7 +435,7 @@ class LoadRun {
       if (this.s.toolchain || !this.s.probe || !this.s.preinstall) this.toolchain = this.resolveToolchain();
       const report = await (this.s.probe ? this.s.probe() : this.realProbe());
       this.throwIfDone();
-      if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures.join("; "));
+      if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures);
       const digests = await (this.s.preinstall ? this.s.preinstall(this.o.workspace) : this.realPreinstall());
       const binding = await bindingOf(this.o.workspace, this.o.workloadPath, digests.tree, this.signal);
       this.throwIfDone();
@@ -455,7 +462,7 @@ class LoadRun {
       return this.s.toolchain ? this.s.toolchain() : trustedToolchain(this.o.nodeDir, this.o.workspace, undefined, undefined, { log: (line) => void process.stderr.write(`peeps load: ${line}\n`) });
     } catch (error) {
       // Whatever it is, nothing of the toolchain ran: unsupported, before the jail or a claim.
-      throw new Refused("didnt_start", "install_unsupported", (error as Error).message);
+      throw new Refused("didnt_start", "install_unsupported", error instanceof InstallRefused ? error.problems : `the toolchain could not be checked: ${publicCause(error)}`);
     }
   }
 
@@ -471,7 +478,7 @@ class LoadRun {
       // No sudo or systemd-run (a container the job's signals missed): the fence is unverified,
       // never a startup failure, and nothing is claimed.
       if (this.signal.aborted) throw error;
-      return { passed: false, failures: [`the jail could not start: ${(error as Error).message}`], seen: null };
+      return { passed: false, failures: [`the jail could not start (sudo or systemd-run is missing or refused): ${publicCause(error)}`], seen: null };
     }
   }
 
@@ -489,8 +496,10 @@ class LoadRun {
       }
       return await (this.s.installers?.offline ?? offlinePreinstall)(this.o.workspace, tc, scratch, { cache: install.cache, ...ids }, undefined, this.signal);
     } catch (error) {
-      // A checkout refused before npm ran is unsupported; a download, npm or the cache failing is install_failed.
-      throw new Refused("didnt_start", error instanceof InstallRefused ? "install_unsupported" : "install_failed", (error as Error).message);
+      // A checkout refused before npm ran is unsupported; a download, npm or the cache failing is
+      // install_failed. Only the install's own messages are kept: they are safe to print.
+      if (error instanceof InstallRefused) throw new Refused("didnt_start", "install_unsupported", error.problems);
+      throw new Refused("didnt_start", "install_failed", error instanceof InstallFailed ? error.message : `install_failed: ${publicCause(error)}`);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -1082,9 +1091,12 @@ class LoadRun {
   }
 
   /** Synchronous and idempotent: one reason, latched. */
-  private terminate(trigger: string, status?: LoadStatus, detail?: string): void {
+  private terminate(trigger: string, status?: LoadStatus, detail?: string | readonly string[]): void {
     if (this.reason !== undefined) return;
-    if (detail !== undefined && this.failures.length < 20) this.failures.push({ message: sanitize(detail, 2000) ?? trigger, location: null });
+    // One failure a line, so each problem reaches the log whole (CW-A round 2, Opus m1).
+    for (const line of typeof detail === "string" ? detail.split("\n") : (detail ?? [])) {
+      if (this.failures.length < 20) this.failures.push({ message: sanitize(line, 2000) ?? trigger, location: null });
+    }
     let reason = trigger;
     let st: LoadStatus | undefined = status;
     if (this.expiryObserved || this.gate?.leaseExpired) [reason, st] = ["lease_lost", "lease_lost"];

@@ -126,7 +126,7 @@ test("a body whose sha512 differs fails install_failed and writes nothing", { sk
   const other = tarball(t, "fixture-a", "1.0.1");
   r.files.set("/fixture-a/-/fixture-a-1.0.0.tgz", other.bytes);
   const cache = tmp(t);
-  await assert.rejects(downloadTarballs([{ url: `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`, integrity: a.integrity }], cache, toolchain(), r.seams), /^Error: install_failed: \/fixture-a\/-\/fixture-a-1\.0\.0\.tgz does not match its lockfile sha512$/);
+  await assert.rejects(downloadTarballs([{ url: `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`, integrity: a.integrity }], cache, toolchain(), r.seams), /^InstallFailed: install_failed: \/fixture-a\/-\/fixture-a-1\.0\.0\.tgz does not match its lockfile sha512$/);
   assert.deepEqual(cacheEntries(cache), []);
 });
 

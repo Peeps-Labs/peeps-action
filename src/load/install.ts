@@ -62,11 +62,23 @@ export const REGISTRY = "https://registry.npmjs.org/";
 const INSTALL_MS = 10 * 60_000;
 const DEP_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] as const;
 
-/** Refused before anything ran. The message starts with the reason code. */
+/**
+ * Refused before anything ran. The message starts with the reason code, then one problem a line.
+ * Each problem is safe to print (CW-A round 2, Sol M1): fixed words, field names and identifiers
+ * that passed a check (`shownName`, `shownPath`), never a URL, spec or other value as read.
+ */
 export class InstallRefused extends Error {
   constructor(readonly problems: string[]) {
-    super(`install_unsupported: ${problems.join("; ")}`);
+    super(`install_unsupported: ${problems.join("\n")}`);
     this.name = "InstallRefused";
+  }
+}
+
+/** The install failed after the checks. Its message is safe to print, as `InstallRefused`'s problems are. */
+export class InstallFailed extends Error {
+  constructor(why: string) {
+    super(`install_failed: ${why}`);
+    this.name = "InstallFailed";
   }
 }
 
@@ -393,19 +405,36 @@ export function satisfies(version: string, range: string): boolean {
 /** A package name: scoped ones lowercase; legacy unscoped ones (JSONStream) may carry capitals, as npm still serves them. */
 const NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._~-]*|[A-Za-z0-9][A-Za-z0-9._~-]*)$/;
 
-/** The registry name and range a manifest spec asks for, or why it is refused. */
+/** A package name as a refusal may print it: one that passes NAME, or undefined. */
+function shownName(name: unknown): string | undefined {
+  return typeof name === "string" && name.length <= 214 && NAME.test(name) ? name : undefined;
+}
+
+/** A path in the checkout as a refusal may print it: plain characters, no `:`, `?`, `=`, `%` or space. */
+const SHOWN_PATH = /^[A-Za-z0-9._@/+-]{1,200}$/;
+function shownPath(value: unknown, otherwise: string): string {
+  return typeof value === "string" && SHOWN_PATH.test(value) ? value : otherwise;
+}
+
+/** The nth (from 1) key of an object, by its name when that may be printed. */
+const label = (name: string, index: number) => shownName(name) ?? `entry #${index + 1}`;
+
+/**
+ * The registry name and range a manifest spec asks for, or why it is refused: fixed words, never
+ * the spec, which may carry a credential in a URL.
+ */
 function specOf(name: string, spec: unknown): { name: string; range: string } | string {
-  if (typeof spec !== "string") return `${name}: the spec is not a string`;
+  if (typeof spec !== "string") return "the spec is not a string";
   if (spec.startsWith("npm:")) {
     const rest = spec.slice(4);
     const at = rest.lastIndexOf("@");
-    if (at <= 0) return `${name}: an npm: alias must name a version range`;
+    if (at <= 0) return "the spec is an npm: alias with no version range";
     const target = rest.slice(0, at);
     const range = rest.slice(at + 1);
-    if (!NAME.test(target) || parseRange(range) === null) return `${name}: ${spec} is not an npm: alias to a semver range`;
+    if (!NAME.test(target) || parseRange(range) === null) return "the spec is not an npm: alias to a semver range";
     return { name: target, range };
   }
-  if (parseRange(spec) === null) return `${name}: ${spec} is not a semver range (git, file, link, URL and tag specs are refused)`;
+  if (parseRange(spec) === null) return "the spec is not a semver range (git, file, link, URL and tag specs are refused)";
   return { name, range: spec };
 }
 
@@ -420,10 +449,10 @@ function manifestProblems(manifest: unknown, where: string): string[] {
   for (const field of DEP_FIELDS) {
     const raw = (manifest as Record<string, unknown>)[field];
     if (raw !== undefined && (typeof raw !== "object" || raw === null || Array.isArray(raw))) out.push(`${where}: ${field} is not an object`);
-    for (const [name, spec] of Object.entries(depsOf(manifest, field))) {
-      if (!NAME.test(name)) out.push(`${where}: ${name} is not a package name`);
+    for (const [index, [name, spec]] of Object.entries(depsOf(manifest, field)).entries()) {
+      if (!NAME.test(name)) out.push(`${where}: ${field} entry #${index + 1} is not a package name`);
       const parsed = specOf(name, spec);
-      if (typeof parsed === "string") out.push(`${where}: ${field} ${parsed}`);
+      if (typeof parsed === "string") out.push(`${where}: ${field} ${label(name, index)}: ${parsed}`);
     }
   }
   // npm applies overrides while it builds the tree, before it checks the tree against the lock.
@@ -436,11 +465,11 @@ function validateOverrides(overrides: unknown, where: string, out: string[], dep
     out.push(`${where}: invalid overrides object`);
     return;
   }
-  for (const [name, value] of Object.entries(overrides)) {
+  for (const [index, [name, value]] of Object.entries(overrides).entries()) {
     if (typeof value === "object" && value !== null) validateOverrides(value, where, out, depth + 1);
     else if (!(typeof value === "string" && value.startsWith("$") && NAME.test(value.slice(1)))) {
       const spec = specOf(name, value);
-      if (typeof spec === "string") out.push(`${where}: overrides ${spec}`);
+      if (typeof spec === "string") out.push(`${where}: overrides ${label(name, index)}: ${spec}`);
     }
   }
 }
@@ -486,16 +515,17 @@ const BAD_LEGACY = /^(?:git\b|git\+|github:|gist:|bitbucket:|gitlab:|file:|link:
 
 function legacyProblems(deps: unknown, trail: string, out: string[], depth = 0): void {
   if (typeof deps !== "object" || deps === null || depth > 64) return;
-  for (const [name, entry] of Object.entries(deps as Record<string, unknown>)) {
+  for (const [index, [name, entry]] of Object.entries(deps as Record<string, unknown>).entries()) {
+    const shown = label(name, index);
     if (typeof entry !== "object" || entry === null) {
-      out.push(`package-lock.json: dependencies ${trail}${name} is not an object`);
+      out.push(`package-lock.json: dependencies ${trail}${shown} is not an object`);
       continue;
     }
     const e = entry as Record<string, unknown>;
     for (const key of ["version", "from"] as const) {
-      if (typeof e[key] === "string" && BAD_LEGACY.test(e[key] as string)) out.push(`package-lock.json: dependencies ${trail}${name} ${key} ${String(e[key])} is not from the registry`);
+      if (typeof e[key] === "string" && BAD_LEGACY.test(e[key] as string)) out.push(`package-lock.json: dependencies ${trail}${shown}: ${key} is not from the registry`);
     }
-    legacyProblems(e.dependencies, `${trail}${name} > `, out, depth + 1);
+    legacyProblems(e.dependencies, `${trail}${shown} > `, out, depth + 1);
   }
 }
 
@@ -504,7 +534,8 @@ function lockProblems(ws: WorkspaceFiles): string[] {
   if (lock === undefined) return ws.unreadable.includes("package-lock.json") ? [] : ["package-lock.json is required"];
   if (typeof lock !== "object" || lock === null) return ["package-lock.json: not a JSON object"];
   if ((lock.lockfileVersion !== 2 && lock.lockfileVersion !== 3) || typeof lock.packages !== "object" || lock.packages === null || Array.isArray(lock.packages)) {
-    return [`package-lock.json: lockfileVersion ${String(lock.lockfileVersion)} is not supported (2 or 3 with packages)`];
+    const version = Number.isSafeInteger(lock.lockfileVersion) ? String(lock.lockfileVersion) : "(not a whole number)";
+    return [`package-lock.json: lockfileVersion ${version} is not supported (2 or 3 with packages)`];
   }
   const out: string[] = [];
   const packages = lock.packages as Record<string, Record<string, unknown> | null>;
@@ -516,14 +547,16 @@ function lockProblems(ws: WorkspaceFiles): string[] {
   // package's dependencies from the URLs in the package's own shrinkwrap, which nothing here sees.
   // Every entry's own dependency specs are read too: npm builds its tree from them before it
   // compares the tree with the lock, so a git or URL spec in a transitive package reaches out.
-  for (const [key, entry] of Object.entries(packages)) {
+  for (const [index, [key, entry]] of Object.entries(packages).entries()) {
     const inModules = key.includes("node_modules/");
-    const name = key === "" ? "<root>" : inModules ? key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length) : key;
+    // What a refusal names it: the package name, or a workspace's folder, when it may be printed.
+    const other = `packages entry #${index + 1}`;
+    const name = key === "" ? "<root>" : inModules ? (shownName(key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length)) ?? other) : shownPath(key, other);
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
       out.push(`package-lock.json: ${name} is not an object`);
       continue;
     }
-    out.push(...manifestProblems(entry, `package-lock.json: ${key || "<root>"}`));
+    out.push(...manifestProblems(entry, `package-lock.json: ${key === "" ? "<root>" : shownPath(key, other)}`));
     if (key === "") continue;
     if (entry.hasShrinkwrap) {
       out.push(`package-lock.json: ${name} carries its own shrinkwrap, which is not supported`);
@@ -532,7 +565,7 @@ function lockProblems(ws: WorkspaceFiles): string[] {
     if (entry.link) {
       const target = inModules && entry.link === true && typeof entry.resolved === "string" ? path.posix.normalize(entry.resolved) : "";
       const ok = target !== "" && !target.startsWith("..") && !path.posix.isAbsolute(target) && workspaceFolders.has(target) && packages[target] !== undefined;
-      if (!ok) out.push(`package-lock.json: ${name} links to ${String(entry.resolved)}, not a workspace folder in the checkout`);
+      if (!ok) out.push(`package-lock.json: ${name} links to a resolved path that is not a workspace folder in the checkout`);
       continue;
     }
     if (!inModules) {
@@ -541,19 +574,21 @@ function lockProblems(ws: WorkspaceFiles): string[] {
     }
     if (entry.inBundle === true && entry.resolved !== undefined) {
       // npm does not read inBundle from a v2 or v3 lock and fetches `resolved`: a bundled entry names no source.
-      out.push(`package-lock.json: bundled ${name} has an explicit source (${String(entry.resolved)}), not resolved from ${REGISTRY} by its parent`);
+      out.push(`package-lock.json: bundled ${name} has an explicit source in resolved, not resolved from ${REGISTRY} by its parent`);
       continue;
     }
     if (entry.resolved === undefined && entry.inBundle === true) {
       // Shipped inside its parent's tarball. Should npm fetch it after all, it asks the registry for name@version.
       const plainName = entry.name === undefined || (typeof entry.name === "string" && NAME.test(entry.name));
       if (!plainName || typeof entry.version !== "string" || parseVersion(entry.version) === null) {
-        out.push(`package-lock.json: ${name} is bundled but is not a plain name and version (${String(entry.name ?? name)}@${String(entry.version)})`);
+        out.push(`package-lock.json: ${name} is bundled but its name or version is not a plain package name and semver version`);
       }
       continue;
     }
-    if (!canonicalRegistryTarball(entry.resolved) || typeof entry.integrity !== "string" || !entry.integrity) {
-      out.push(`package-lock.json: ${name} is not resolved from ${REGISTRY} with an integrity hash (${String(entry.resolved)})`);
+    if (!canonicalRegistryTarball(entry.resolved)) {
+      out.push(`package-lock.json: ${name}: resolved is not a tarball on ${REGISTRY} in its canonical form (https, no userinfo, query or fragment)`);
+    } else if (typeof entry.integrity !== "string" || !entry.integrity) {
+      out.push(`package-lock.json: ${name}: integrity is missing`);
     } else if (sha512Of(entry.integrity) === null) {
       out.push(`package-lock.json: ${name} has no sha512 integrity hash (re-lock with npm 7 or later)`);
     }
@@ -565,12 +600,13 @@ function lockProblems(ws: WorkspaceFiles): string[] {
     if (workspace.problem || typeof workspace.manifest !== "object" || workspace.manifest === null) continue;
     const manifest = workspace.manifest as Record<string, unknown>;
     const locked = packages[workspace.rel];
-    if (!locked || manifest.version !== locked.version) out.push(`package-lock.json: ${workspace.rel} has a different locked version`);
+    const rel = shownPath(workspace.rel, "a workspace");
+    if (!locked || manifest.version !== locked.version) out.push(`package-lock.json: ${rel} has a different locked version`);
     for (const field of DEP_FIELDS) {
       const wanted = depsOf(manifest, field);
       const actual = depsOf(locked, field);
       if ([...new Set([...Object.keys(wanted), ...Object.keys(actual)])].some((dep) => wanted[dep] !== actual[dep])) {
-        out.push(`package-lock.json: ${workspace.rel} has different ${field}`);
+        out.push(`package-lock.json: ${rel} has different ${field}`);
       }
     }
   }
@@ -581,9 +617,10 @@ function lockProblems(ws: WorkspaceFiles): string[] {
     const wanted = depsOf(ws.manifest, field);
     const locked = depsOf(rootEntry, field);
     const names = new Set([...Object.keys(wanted), ...Object.keys(locked)]);
-    for (const name of names) {
+    for (const [index, name] of [...names].entries()) {
+      const shown = label(name, index);
       if (wanted[name] !== locked[name]) {
-        out.push(`package-lock.json: ${field} ${name} is ${JSON.stringify(locked[name])} in the lock and ${JSON.stringify(wanted[name])} in package.json`);
+        out.push(`package-lock.json: ${field} ${shown} differs between the lock's root entry and package.json`);
         continue;
       }
       const spec = specOf(name, wanted[name]);
@@ -593,13 +630,14 @@ function lockProblems(ws: WorkspaceFiles): string[] {
       const dependency = packages[`node_modules/${name}`];
       const entry = dependency?.link === true && typeof dependency.resolved === "string" ? packages[path.posix.normalize(dependency.resolved)] : dependency;
       if (!entry) {
-        if (!optionalPeer) out.push(`package-lock.json: ${field} ${name} has no locked version`);
+        if (!optionalPeer) out.push(`package-lock.json: ${field} ${shown} has no locked version`);
         continue;
       }
       const lockedName = typeof entry.name === "string" ? entry.name : name;
-      if (lockedName !== spec.name) out.push(`package-lock.json: ${name} is locked as ${lockedName}, not ${spec.name}`);
+      if (lockedName !== spec.name) out.push(`package-lock.json: ${shown} is locked as ${shownName(lockedName) ?? "another name"}, not ${shownName(spec.name) ?? "the name package.json asks for"}`);
       if (typeof entry.version !== "string" || !satisfies(entry.version, spec.range)) {
-        out.push(`package-lock.json: ${name} is locked at ${String(entry.version)}, outside ${spec.range}`);
+        const version = typeof entry.version === "string" && entry.version.length <= 64 && parseVersion(entry.version) ? entry.version : "a version";
+        out.push(`package-lock.json: ${shown} is locked at ${version}, outside ${spec.range.length <= 64 ? spec.range : "its range"}`);
       }
     }
   }
@@ -609,17 +647,18 @@ function lockProblems(ws: WorkspaceFiles): string[] {
 /** Why the checkout cannot be installed by E4's rules; empty when it can. */
 export function installProblems(ws: WorkspaceFiles): string[] {
   const out: string[] = [];
-  for (const name of ws.unreadable) out.push(`${name} must be a valid JSON file inside the checkout`);
+  for (const name of ws.unreadable) out.push(`${shownPath(name, "a workspace's package.json")} must be a valid JSON file inside the checkout`);
   if (ws.manifest === undefined && !ws.unreadable.includes("package.json")) out.push("package.json is required");
   else if (ws.manifest !== undefined) out.push(...manifestProblems(ws.manifest, "package.json"));
   for (const w of ws.workspaces) {
-    if (w.problem) out.push(`${w.rel}: ${w.problem}`);
-    else if (w.manifest !== undefined) out.push(...manifestProblems(w.manifest, `${w.rel}/package.json`));
+    const rel = shownPath(w.rel, "a workspace");
+    if (w.problem) out.push(`${rel}: ${w.problem}`);
+    else if (w.manifest !== undefined) out.push(...manifestProblems(w.manifest, `${rel}/package.json`));
   }
   if (ws.shrinkwrap) out.push("npm-shrinkwrap.json is not supported");
   if (ws.npmrc) out.push("a project .npmrc is not supported (private registries are not supported)");
   for (const name of ws.otherLockfiles) out.push(`${name} is not supported: load runs install from package-lock.json only`);
-  for (const link of ws.externalLinks) out.push(`${link} is a symlink that leaves the checkout`);
+  for (const link of ws.externalLinks) out.push(`${shownPath(link, "a path")} is a symlink that leaves the checkout`);
   out.push(...lockProblems(ws));
   return out;
 }
@@ -689,18 +728,18 @@ export function trustedToolchain(
     }
   } catch (error) {
     if (error instanceof InstallRefused) throw error;
-    return fail(`cannot resolve the runner toolcache or ${nodeDir}`);
+    return fail("cannot resolve the runner toolcache or the Node folder in it");
   }
   try {
     node = realpathSync(path.join(nodeDir, "bin/node"));
     npmCli = realpathSync(path.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"));
     npmPkg = realpathSync(path.join(nodeDir, "lib/node_modules/npm/package.json"));
   } catch {
-    return fail(`no node and npm in ${nodeDir}`);
+    return fail("no node and npm in the toolcache's Node folder");
   }
-  for (const [label, file] of [["node", node], ["npm", npmCli], ["npm", npmPkg], ["the toolchain", dir]] as const) {
-    if (inside(file, root) || inside(root, file)) fail(`${label} must not come from the workspace (${file})`);
-    if (!inside(file, dir)) fail(`${label} must sit inside ${dir} (${file})`);
+  for (const [what, file] of [["node", node], ["npm", npmCli], ["npm", npmPkg], ["the toolchain", dir]] as const) {
+    if (inside(file, root) || inside(root, file)) fail(`${what} must not come from the workspace`);
+    if (!inside(file, dir)) fail(`${what} must sit inside the toolcache's Node folder`);
   }
   // The files, by real path, before anything in the folder runs: a replaced binary that prints
   // the right version is still refused.
@@ -715,8 +754,9 @@ export function trustedToolchain(
   if (npmCliSha256 !== pinned!.npmCliSha256) fail(`npm-cli.js's sha256 ${npmCliSha256} is not the pinned ${pinned!.npmCliSha256}`);
   const nodeVersion = execFileSync(node, ["--version"], { encoding: "utf8", env: {}, timeout: 10_000 }).trim().replace(/^v/, "");
   const npmVersion = String((JSON.parse(readFileSync(npmPkg, "utf8")) as { version?: unknown }).version);
-  if (path.basename(path.dirname(dir)) !== nodeVersion) fail(`node ${nodeVersion} disagrees with its pinned toolcache directory`);
-  if (!supported.some((s) => s.node === nodeVersion && s.npm === npmVersion)) fail(`npm ${npmVersion} with node ${nodeVersion} is not a supported toolchain`);
+  const shownVersion = (value: string) => (/^[0-9A-Za-z.+-]{1,40}$/.test(value) ? value : "(unreadable)");
+  if (path.basename(path.dirname(dir)) !== nodeVersion) fail(`node ${shownVersion(nodeVersion)} disagrees with its pinned toolcache directory`);
+  if (!supported.some((s) => s.node === nodeVersion && s.npm === npmVersion)) fail(`npm ${shownVersion(npmVersion)} with node ${shownVersion(nodeVersion)} is not a supported toolchain`);
   return { nodeDir: dir, node, npmCli, nodeVersion, npmVersion };
 }
 
@@ -792,7 +832,7 @@ async function verifyRecipeCache(cache: string, tc: Toolchain, lock: unknown, si
   const checked = new Set<string>();
   const cacheDir = path.join(cache, "_cacache");
   const requireFromNpm = createRequire(tc.npmCli);
-  for (const [name, entry] of Object.entries(packages)) {
+  for (const [key, entry] of Object.entries(packages)) {
     if (!canonicalRegistryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity)) continue;
     signal?.throwIfAborted();
     const cacache = requireFromNpm("cacache") as {
@@ -807,7 +847,7 @@ async function verifyRecipeCache(cache: string, tc: Toolchain, lock: unknown, si
       checked.add(entry.integrity);
     } catch {
       signal?.throwIfAborted();
-      throw new Error(`install_failed: cached tarball missing or corrupt for ${name}`);
+      throw new InstallFailed(`the cached tarball for ${shownPath(key, "a locked package")} is missing or corrupt`);
     } finally {
       signal?.removeEventListener("abort", abort);
     }
@@ -867,7 +907,7 @@ function runNpm(file: string, args: string[], o: { cwd: string; env: Record<stri
       if (signal?.aborted) reject(signal.reason);
       else if (spawnError) reject(spawnError);
       else if (code === 0) resolve();
-      else reject(new Error(`install_failed: npm ci exited ${code ?? exitSignal}`));
+      else reject(new InstallFailed(`npm ci exited ${code ?? exitSignal}`));
     });
   });
 }
