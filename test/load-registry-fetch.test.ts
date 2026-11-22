@@ -285,7 +285,9 @@ test("a refused checkout fetches nothing", async (t) => {
   const ws = tmp(t);
   writeFileSync(path.join(ws, "package.json"), JSON.stringify({ name: "app", version: "1.0.0" }));
   writeFileSync(path.join(ws, "yarn.lock"), "");
-  await assert.rejects(fetchPreinstall(ws, toolchain(), tmp(t), { uid: 0, gid: 0 }, r.seams), /install_unsupported: .*yarn\.lock/);
+  // A toolchain that is never read: the refusal comes first, so no npm need be here.
+  const none: Toolchain = { nodeDir: "/nonexistent/node", node: "/nonexistent/node/bin/node", npmCli: "/nonexistent/npm-cli.js", nodeVersion: "24.22.3", npmVersion: "11.19.1" };
+  await assert.rejects(fetchPreinstall(ws, none, tmp(t), { uid: 0, gid: 0 }, r.seams), /install_unsupported: .*yarn\.lock/);
   assert.deepEqual(r.server.arrivals, []);
 });
 

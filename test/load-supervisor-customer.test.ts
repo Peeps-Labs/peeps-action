@@ -122,7 +122,8 @@ describe("load supervisor: a refusal before the claim keeps its cause", { concur
   test("a toolchain whose node isn't the pinned build: install_unsupported, and the failures carry the read and the pinned sha256", async (t) => {
     const root = mkdtempSync(path.join(os.tmpdir(), "peeps-fake-tc-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
-    const dir = path.join(root, "node", "24.22.3", "x64");
+    // The toolcache folder trustedToolchain accepts is this host's arch; the pinned hashes are linux x64's.
+    const dir = path.join(root, "node", "24.22.3", process.arch);
     mkdirSync(path.join(dir, "bin"), { recursive: true });
     mkdirSync(path.join(dir, "lib/node_modules/npm/bin"), { recursive: true });
     writeFileSync(path.join(dir, "bin/node"), "#!/bin/sh\necho v24.22.3\n", { mode: 0o755 });
