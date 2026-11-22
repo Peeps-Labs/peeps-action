@@ -17,14 +17,47 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir, readlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { neutralize } from "./jail/spec";
 
-/** The toolchains CI pins (`ci.yml`): node and the npm it ships with. */
-export const SUPPORTED_TOOLCHAIN: readonly { node: string; npm: string }[] = [{ node: "24.22.3", npm: "11.19.1" }];
+export interface ToolchainHashes {
+  /** sha256 of `bin/node`. */
+  nodeSha256: string;
+  /** sha256 of `lib/node_modules/npm/bin/npm-cli.js`. */
+  npmCliSha256: string;
+}
+
+export interface SupportedToolchain {
+  node: string;
+  npm: string;
+  /** The files' sha256 on linux x64; with none for this host, the toolchain is refused. */
+  linuxX64?: ToolchainHashes;
+}
+
+/**
+ * The toolchains CI pins (`ci.yml`): node and the npm it ships with, and their files' sha256.
+ *
+ * Provenance of the linux x64 hashes (2026-11-22): nodejs.org's `node-v24.22.3-linux-x64.tar.xz`,
+ * whose sha256 4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb matched its line
+ * in https://nodejs.org/dist/v24.22.3/SHASUMS256.txt (fetched over HTTPS; the signature on
+ * SHASUMS256.txt.asc was not checked), extracted, then `sha256sum bin/node` and
+ * `lib/node_modules/npm/bin/npm-cli.js`. CW's gate (plan §8 step 1.2) compares them with what
+ * setup-node v6 installs at `$RUNNER_TOOL_CACHE/node/24.22.3/x64` on ubuntu-24.04 and 22.04; a
+ * runner whose files differ is refused `install_unsupported`, and the refusal names what it read.
+ */
+export const SUPPORTED_TOOLCHAIN: readonly SupportedToolchain[] = [
+  {
+    node: "24.22.3",
+    npm: "11.19.1",
+    linuxX64: {
+      nodeSha256: "a7ec1b37e6ff9d187e4198c5b6df9a4eb1c74dd31804fb3bac55cc4ceca1ac01",
+      npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    },
+  },
+];
 export const REGISTRY = "https://registry.npmjs.org/";
 const INSTALL_MS = 10 * 60_000;
 const DEP_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] as const;
@@ -69,6 +102,8 @@ export interface WorkspaceFiles {
   unreadable: string[];
   shrinkwrap: boolean;
   npmrc: boolean;
+  /** Another package manager's lockfile at the root (by `lstat`). */
+  otherLockfiles: string[];
   workspaces: WorkspaceManifest[];
   /** Symlinks (relative paths) whose target is outside the checkout. */
   externalLinks: string[];
@@ -102,6 +137,9 @@ function workspacePatterns(manifest: unknown): unknown[] {
   if (typeof w === "object" && w !== null && Array.isArray((w as { packages?: unknown }).packages)) return (w as { packages: unknown[] }).packages;
   return [w];
 }
+
+/** Lockfiles of other package managers: the install reads package-lock.json only. */
+const OTHER_LOCKFILES = ["yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"] as const;
 
 export function readWorkspace(dir: string): WorkspaceFiles {
   const root = realpathSync(dir);
@@ -154,6 +192,7 @@ export function readWorkspace(dir: string): WorkspaceFiles {
     unreadable,
     shrinkwrap: existsSync(path.join(root, "npm-shrinkwrap.json")),
     npmrc: lstatExists(path.join(root, ".npmrc")),
+    otherLockfiles: OTHER_LOCKFILES.filter((name) => lstatExists(path.join(root, name))),
     workspaces,
     externalLinks: externalLinks(root),
   };
@@ -405,15 +444,40 @@ function validateOverrides(overrides: unknown, where: string, out: string[], dep
   }
 }
 
-/** A tarball on the public registry itself: its origin, with no credentials in the URL. */
-function registryTarball(value: unknown): boolean {
-  if (typeof value !== "string" || !value.startsWith(REGISTRY)) return false;
+const TARBALL_PATH = /^\/(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9._~-]+\/-\/[a-z0-9._~-]+-[0-9A-Za-z.+_-]+\.tgz$/;
+
+/**
+ * A tarball on the public registry, in its one canonical form (CW plan §4.5): the text parses
+ * as a URL whose `href` is the text itself; https, host registry.npmjs.org, no port, userinfo,
+ * query or fragment; no `%` anywhere; one leading slash, then `[@scope/]name/-/file.tgz`.
+ */
+export function canonicalRegistryTarball(value: unknown): value is string {
+  if (typeof value !== "string" || value.includes("%")) return false;
+  let url: URL;
   try {
-    const url = new URL(value);
-    return url.origin === new URL(REGISTRY).origin && url.username === "" && url.password === "";
+    url = new URL(value);
   } catch {
     return false;
   }
+  return url.href === value && url.protocol === "https:" && url.hostname === "registry.npmjs.org" && url.port === "" &&
+    url.username === "" && url.password === "" && url.search === "" && url.hash === "" && TARBALL_PATH.test(url.pathname);
+}
+
+/**
+ * The sha512 an SRI string names, as `sha512-<base64>`: the base64 of exactly 64 bytes, which
+ * re-encodes to the same text. Other algorithms beside it are ignored; null when there is none.
+ */
+export function sha512Of(integrity: unknown): string | null {
+  if (typeof integrity !== "string") return null;
+  for (const part of integrity.trim().split(/\s+/)) {
+    if (!part.startsWith("sha512-")) continue;
+    const encoded = part.slice("sha512-".length);
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
+    const bytes = Buffer.from(encoded, "base64");
+    if (bytes.length !== 64 || bytes.toString("base64") !== encoded) return null;
+    return part;
+  }
+  return null;
 }
 
 const BAD_LEGACY = /^(?:git\b|git\+|github:|gist:|bitbucket:|gitlab:|file:|link:|https?:|[^@/:]+\/[^@/:])/;
@@ -486,8 +550,10 @@ function lockProblems(ws: WorkspaceFiles): string[] {
       }
       continue;
     }
-    if (!registryTarball(entry.resolved) || typeof entry.integrity !== "string" || !entry.integrity) {
+    if (!canonicalRegistryTarball(entry.resolved) || typeof entry.integrity !== "string" || !entry.integrity) {
       out.push(`package-lock.json: ${name} is not resolved from ${REGISTRY} with an integrity hash (${String(entry.resolved)})`);
+    } else if (sha512Of(entry.integrity) === null) {
+      out.push(`package-lock.json: ${name} has no sha512 integrity hash (re-lock with npm 7 or later)`);
     }
   }
   legacyProblems(lock.dependencies, "", out);
@@ -550,6 +616,7 @@ export function installProblems(ws: WorkspaceFiles): string[] {
   }
   if (ws.shrinkwrap) out.push("npm-shrinkwrap.json is not supported");
   if (ws.npmrc) out.push("a project .npmrc is not supported (private registries are not supported)");
+  for (const name of ws.otherLockfiles) out.push(`${name} is not supported: load runs install from package-lock.json only`);
   for (const link of ws.externalLinks) out.push(`${link} is a symlink that leaves the checkout`);
   out.push(...lockProblems(ws));
   return out;
@@ -570,6 +637,8 @@ export function installEnv(tc: Toolchain, scratch: string): Record<string, strin
     npm_config_userconfig: npmrc,
     npm_config_globalconfig: globalNpmrc,
     npm_config_registry: REGISTRY,
+    // Offline it changes nothing; online it is one rewrite fewer of a lockfile URL.
+    npm_config_replace_registry_host: "never",
     npm_config_git: "/bin/false",
     npm_config_script_shell: "/bin/false",
     npm_config_ignore_scripts: "true",
@@ -581,16 +650,25 @@ export function installEnv(tc: Toolchain, scratch: string): Record<string, strin
   };
 }
 
+export interface ToolchainCheck {
+  /** `<platform>-<arch>` of the host whose pinned hashes apply (the running process's by default). */
+  platform?: string;
+  /** Told the two files' sha256, read before either runs (the job log line). */
+  log?: (line: string) => void;
+}
+
 /**
  * The node and npm in `nodeDir`, by real path, never in or through the workspace, at a
- * version CI pins. `nodeDir` must be setup-node's folder for a pinned version under the
- * runner's toolcache, checked before anything in it runs. Throws `install_unsupported` otherwise.
+ * version CI pins, with the files CI pins. `nodeDir` must be setup-node's folder for a pinned
+ * version under the runner's toolcache; both files' sha256 are checked before either runs.
+ * Throws `install_unsupported` otherwise.
  */
 export function trustedToolchain(
   nodeDir: string,
   ws: string,
-  supported: readonly { node: string; npm: string }[] = SUPPORTED_TOOLCHAIN,
+  supported: readonly SupportedToolchain[] = SUPPORTED_TOOLCHAIN,
   toolCache = process.env.RUNNER_TOOL_CACHE,
+  check: ToolchainCheck = {},
 ): Toolchain {
   const fail = (why: string): never => {
     throw new InstallRefused([why]);
@@ -622,11 +700,39 @@ export function trustedToolchain(
     if (inside(file, root) || inside(root, file)) fail(`${label} must not come from the workspace (${file})`);
     if (!inside(file, dir)) fail(`${label} must sit inside ${dir} (${file})`);
   }
+  // The files, by real path, before anything in the folder runs: a replaced binary that prints
+  // the right version is still refused.
+  const entry = supported.find((s) => path.basename(path.dirname(dir)) === s.node)!;
+  const platform = check.platform ?? `${process.platform}-${process.arch}`;
+  const pinned = platform === "linux-x64" ? entry.linuxX64 : undefined;
+  const nodeSha256 = sha256FileSync(node);
+  const npmCliSha256 = sha256FileSync(npmCli);
+  check.log?.(`node ${entry.node} sha256 ${nodeSha256}; npm-cli.js sha256 ${npmCliSha256}`);
+  if (!pinned) fail(`no pinned sha256 for node ${entry.node} on ${platform} (read node ${nodeSha256}, npm-cli.js ${npmCliSha256})`);
+  if (nodeSha256 !== pinned!.nodeSha256) fail(`node's sha256 ${nodeSha256} is not the pinned ${pinned!.nodeSha256}`);
+  if (npmCliSha256 !== pinned!.npmCliSha256) fail(`npm-cli.js's sha256 ${npmCliSha256} is not the pinned ${pinned!.npmCliSha256}`);
   const nodeVersion = execFileSync(node, ["--version"], { encoding: "utf8", env: {}, timeout: 10_000 }).trim().replace(/^v/, "");
   const npmVersion = String((JSON.parse(readFileSync(npmPkg, "utf8")) as { version?: unknown }).version);
   if (path.basename(path.dirname(dir)) !== nodeVersion) fail(`node ${nodeVersion} disagrees with its pinned toolcache directory`);
   if (!supported.some((s) => s.node === nodeVersion && s.npm === npmVersion)) fail(`npm ${npmVersion} with node ${nodeVersion} is not a supported toolchain`);
   return { nodeDir: dir, node, npmCli, nodeVersion, npmVersion };
+}
+
+/** sha256 of a file, read in 1 MiB pieces. */
+export function sha256FileSync(file: string): string {
+  const hash = createHash("sha256");
+  const fd = openSync(file, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(1 << 20);
+    for (;;) {
+      const n = readSync(fd, buffer, 0, buffer.length, null);
+      if (n === 0) break;
+      hash.update(buffer.subarray(0, n));
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest("hex");
 }
 
 async function sha256File(file: string, signal?: AbortSignal): Promise<string> {
@@ -685,7 +791,7 @@ async function verifyRecipeCache(cache: string, tc: Toolchain, lock: unknown, si
   const cacheDir = path.join(cache, "_cacache");
   const requireFromNpm = createRequire(tc.npmCli);
   for (const [name, entry] of Object.entries(packages)) {
-    if (!registryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity)) continue;
+    if (!canonicalRegistryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity)) continue;
     signal?.throwIfAborted();
     const cacache = requireFromNpm("cacache") as {
       get: { stream: { byDigest(cacheDir: string, integrity: string): CacheReadStream } };

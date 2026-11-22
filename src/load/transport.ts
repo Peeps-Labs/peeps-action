@@ -88,8 +88,11 @@ export interface ControlTransport {
   agent(shape: AgentShape): Agent;
   /** One JSON request: a GET without a body, a POST with one. */
   send(op: ControlOp, agent: Agent, target: URL, path: string, bearer: string, body: string | undefined, cap: number, signal: AbortSignal): Promise<Answer>;
-  /** A GET whose 200 body streams to `onChunk`, at most `cap` bytes. Anything but a 200 rejects. */
-  download(op: ControlOp, agent: Agent, target: URL, path: string, cap: number, signal: AbortSignal, onChunk: (chunk: Buffer) => void): Promise<number>;
+  /**
+   * A GET whose 200 body streams to `onChunk`, at most `cap` bytes. Anything but a 200 rejects;
+   * `onChunk` answering false stops it as `too_large`.
+   */
+  download(op: ControlOp, agent: Agent, target: URL, path: string, cap: number, signal: AbortSignal, onChunk: (chunk: Buffer) => boolean): Promise<number>;
   /** Closes every agent it made. */
   close(): void;
 }
@@ -216,8 +219,7 @@ export function controlTransport(seams: HttpControlSeams = {}, userAgent = "peep
           res.on("data", (chunk: Buffer) => {
             if (settled) return;
             size += chunk.length;
-            if (size > cap) return finish(new ControlHttpError(op, "too_large", status));
-            onChunk(chunk);
+            if (size > cap || !onChunk(chunk)) return finish(new ControlHttpError(op, "too_large", status));
           });
           res.on("error", (e: NodeJS.ErrnoException) => finish(new ControlHttpError(op, "network", status, errnoCode(e))));
           res.on("close", () => {
