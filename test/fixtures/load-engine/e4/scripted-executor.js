@@ -4,10 +4,10 @@
  *
  *   silent     every turn reports success without a request
  *   request    every turn makes one GET through the gate, then reports success
- *   fatal      answers `init` with `fatal`
+ *   fatal      answers `init` with `fatal` (PEEPS_FATAL_MESSAGE, _LOCATION and _ERROR set its fields)
  *   mute       never answers `init`
  *
- * and on top, with `request`: PEEPS_DUP=1 reports each outcome twice; PEEPS_EXIT_AFTER=n exits
+ * PEEPS_PW_VERSION sets the Playwright version `loaded` reports. And on top, with `request`: PEEPS_DUP=1 reports each outcome twice; PEEPS_EXIT_AFTER=n exits
  * after n outcomes; PEEPS_BAD_AFTER=n sends a frame only init may send after n outcomes;
  * PEEPS_BIG_AFTER=n sends an oversized line; PEEPS_IGNORE_AFTER=n answers no turn after n
  * outcomes, `cancel` included.
@@ -66,8 +66,8 @@ process.stdin.on("data", (chunk) => {
     buf = buf.slice(i + 1);
     if (f.type === "init") {
       init = f;
-      if (mode === "fatal") send({ type: "fatal", code: "journey", message: "the journey did not load::set-output", location: "journeys.ts:1" });
-      else if (mode !== "mute") send({ type: "loaded", playwright: "0.0.0-scripted" });
+      if (mode === "fatal") send({ type: "fatal", code: "journey", message: process.env.PEEPS_FATAL_MESSAGE || "the journey did not load::set-output", location: process.env.PEEPS_FATAL_LOCATION || "journeys.ts:1", ...(process.env.PEEPS_FATAL_ERROR ? { error: process.env.PEEPS_FATAL_ERROR } : {}) });
+      else if (mode !== "mute") send({ type: "loaded", playwright: process.env.PEEPS_PW_VERSION || "0.0.0-scripted" });
     } else if (f.type === "turn") void onTurn(f);
   }
 });

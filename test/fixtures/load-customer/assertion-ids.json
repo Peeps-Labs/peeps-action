@@ -1,0 +1,61 @@
+status: provisional
+{
+  "limitA": "two expects on robots.ts line 12, or a helper expect at robots.ts:12 reached from two call sites, both report robots.ts:12 and share its id",
+  "vectors": [
+    {
+      "location": "robots.ts:12",
+      "id": "as1_a231f102387e237e035bd1f40cf4a4dc"
+    },
+    {
+      "location": "robots.ts:12:5",
+      "id": "as1_a231f102387e237e035bd1f40cf4a4dc",
+      "note": "limit (b): the column is dropped"
+    },
+    {
+      "location": "robots.ts:12:40",
+      "id": "as1_a231f102387e237e035bd1f40cf4a4dc",
+      "note": "limit (b): the column is dropped"
+    },
+    {
+      "location": "journeys\\robots.ts:12",
+      "id": "as1_dc56d6693fd062ede256589d4739a7f5",
+      "note": "a Windows separator is normalized to POSIX"
+    },
+    {
+      "location": "journeys/robots.ts:12",
+      "id": "as1_dc56d6693fd062ede256589d4739a7f5"
+    },
+    {
+      "location": "robots.ts:13",
+      "id": "as1_41f88bc864c55297db7bd978d63c9379"
+    },
+    {
+      "location": "/abs/robots.ts:12",
+      "id": null
+    },
+    {
+      "location": "../robots.ts:12",
+      "id": null
+    },
+    {
+      "location": "a//b.ts:3",
+      "id": null
+    },
+    {
+      "location": "robots.ts:0",
+      "id": null
+    },
+    {
+      "location": "robots.ts:012",
+      "id": null
+    },
+    {
+      "location": "robots.ts",
+      "id": null
+    },
+    {
+      "location": "",
+      "id": null
+    }
+  ]
+}

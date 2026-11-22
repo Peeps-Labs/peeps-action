@@ -17,12 +17,11 @@ import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import os from "node:os";
 import { PassThrough } from "node:stream";
-import { StringDecoder } from "node:string_decoder";
 import net from "node:net";
 import { promisify } from "node:util";
 import { sharedClocks } from "./clocks";
 import { decode, encode, LineSplitter, relayable, sameNonce, type CtlFrame, type RefusedReason, type Ticket } from "./jail/ctl";
-import { IN_JAIL, neutralize, RELAY_UID, rootDir, socketDir, specProblems, systemdRunArgs, unitName, type JailSpec } from "./jail/spec";
+import { IN_JAIL, NeutralLines, RELAY_UID, rootDir, socketDir, specProblems, systemdRunArgs, unitName, type JailSpec } from "./jail/spec";
 
 const exec = promisify(execFile);
 /** Host tools run by absolute path with a fixed PATH: nothing the job put on its PATH is found first. */
@@ -144,8 +143,8 @@ export async function startJail(spec: JailSpec, options: StartJailOptions, signa
   ctl.catch(() => undefined);
   // Never hand the job's log the jail's raw output: the runner reads workflow commands there.
   const child = spawn("/usr/bin/sudo", ["-n", ...systemdRunArgs(spec)], { env: HOST_ENV, stdio: ["pipe", "pipe", "pipe"] });
-  const stdout = neutralized(child.stdout!);
-  const stderr = neutralized(child.stderr!);
+  const stdout = neutralizedStream(child.stdout!);
+  const stderr = neutralizedStream(child.stderr!);
   if (options.stdout !== "pipe") stdout.pipe(process.stdout);
   stderr.pipe(process.stderr);
   const lifeline = child.stdin!;
@@ -404,7 +403,7 @@ export async function probe(base: Omit<JailSpec, "command" | "claimId" | "instal
     expect(seen.workspaceWrite === "written" && !existsSync(`${base.workspace}/.peeps-probe`), "a write reached the checkout");
   }
   if (out.includes("PEEPS-PROBE-UNCLEAN")) failures.push("the unit's cgroup was not empty after end()");
-  if (hits.length !== 1 || hits[0] !== "GET /probe-relay HTTP/1.0") failures.push(`the listener saw ${JSON.stringify(hits)}`);
+  if (hits.length !== 1 || hits[0] !== "GET /probe-relay HTTP/1.0") failures.push(`the listener saw ${Math.min(hits.length, 1000)} requests, not the probe's one`);
   return { passed: failures.length === 0, failures, seen };
 }
 
@@ -426,31 +425,17 @@ function abortError(signal: AbortSignal): Error {
  * customer output cannot grow this process's memory.
  */
 const MAX_LINE = 64 * 1024;
-function neutralized(source: NodeJS.ReadableStream): PassThrough {
+export function neutralizedStream(source: NodeJS.ReadableStream): PassThrough {
   const out = new PassThrough();
-  const decoder = new StringDecoder("utf8");
-  let pending = "";
-  const emit = (line: string) => {
-    if (!out.write(`${neutralize(line.endsWith("\r") ? line.slice(0, -1) : line)}\n`)) {
+  const lines = new NeutralLines((line) => {
+    if (!out.write(`${line}\n`)) {
       source.pause();
       out.once("drain", () => source.resume());
     }
-  };
-  source.on("data", (chunk: Buffer) => {
-    pending += decoder.write(chunk);
-    let nl: number;
-    while ((nl = pending.indexOf("\n")) !== -1) {
-      emit(pending.slice(0, nl));
-      pending = pending.slice(nl + 1);
-    }
-    while (pending.length > MAX_LINE) {
-      emit(pending.slice(0, MAX_LINE));
-      pending = pending.slice(MAX_LINE);
-    }
-  });
+  }, MAX_LINE);
+  source.on("data", (chunk: Buffer) => lines.write(chunk));
   source.on("end", () => {
-    pending += decoder.end();
-    if (pending) emit(pending);
+    lines.end();
     out.end();
   });
   return out;

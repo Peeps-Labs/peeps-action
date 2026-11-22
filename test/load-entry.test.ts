@@ -1,7 +1,7 @@
 /**
  * `dist/load.js`, the direct load entry the go-line workflow runs (e5 plan §4, v2 §4, v3 §2.4 and
  * §4): its inputs, what it writes, and that nothing of it reaches the published action's
- * `dist/index.js`, whose `mode: load` keeps refusing (load-refusal.test.ts, untouched).
+ * `dist/index.js`, which hands `mode: load` to `mainCustomerLoad` only (load-handoff.test.ts).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -39,7 +39,8 @@ test("the entry's inputs: each one checked, a problem named by its variable, nev
   assert.ok(ok.ok);
   assert.equal(ok.inputs.runId, "gh-18000000001-1");
   assert.equal(ok.inputs.nodeDir, "/opt/hostedtoolcache/node/24.22.3/x64");
-  assert.deepEqual(ok.inputs.sinkHosts, ["sink.peeps-harness.example.com"]);
+  assert.deepEqual(ok.inputs.scope, { kind: "harness", sinkHosts: ["sink.peeps-harness.example.com"] });
+  assert.deepEqual(ok.inputs.install, { mode: "offline", cache: env().PEEPS_LOAD_NPM_CACHE });
   assert.equal(ok.inputs.checkRunId, 52000000001);
   assert.equal(ok.inputs.workspace, "/home/runner/work/fixture/fixture");
   const app = readLoadInputs(env({ PEEPS_LOAD_WORKSPACE: "/home/runner/work/fixture/fixture/app" }), DIST);
@@ -86,7 +87,7 @@ test("mainLoad runs the supervisor with the harness hosts, the grant and the rec
   assert.equal(code, 0);
   assert.equal(given!.grantRef, GRANT);
   assert.deepEqual(given!.harnessHosts, ["sink.peeps-harness.example.com"]);
-  assert.equal(given!.npmCache, env().PEEPS_LOAD_NPM_CACHE);
+  assert.deepEqual(given!.install, { mode: "offline", cache: env().PEEPS_LOAD_NPM_CACHE });
   assert.equal(given!.actionDir, DIST);
   assert.equal(lines.length, 1);
   const report = JSON.parse(lines[0]!);
@@ -118,12 +119,30 @@ test("a report write error emits a fixed diagnostic and preserves the result art
   const lines: string[] = [];
   const result = path.join(dir, "result.json");
   const summary = path.join(dir, SENTINEL, "\n::error::untrusted path");
+  // The step summary is best effort: one that can't be written leaves the report (CW-A round 2, Sol m3).
   const code = await mainLoad(env({ GITHUB_STEP_SUMMARY: summary, PEEPS_LOAD_RESULT_FILE: result }), {
     run: async () => res,
     write: (line) => lines.push(line),
   }, DIST);
-  assert.equal(code, 1);
-  assert.deepEqual(lines, ['{"failed":"run_or_report"}']);
+  assert.equal(code, 0);
+  assert.equal(lines.length, 1);
+  assert.equal(JSON.parse(lines[0]!).status, "completed");
+  assert.ok(!lines[0]!.includes(SENTINEL));
+  // The report line itself failing is the fixed diagnostic.
+  const failing: string[] = [];
+  let first = true;
+  const again = await mainLoad(env({ PEEPS_LOAD_RESULT_FILE: result }), {
+    run: async () => res,
+    write: (line) => {
+      if (first) {
+        first = false;
+        throw new Error(`EPIPE ${SENTINEL}`);
+      }
+      failing.push(line);
+    },
+  }, DIST);
+  assert.equal(again, 1);
+  assert.deepEqual(failing, ['{"failed":"run_or_report"}']);
   assert.deepEqual(JSON.parse(readFileSync(result, "utf8")), res);
 });
 

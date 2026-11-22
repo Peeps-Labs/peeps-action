@@ -124,11 +124,11 @@ describe("load supervisor: evidence and hard cancel", { concurrency: 4 }, () => 
     assert.equal(res.final, "missing");
   });
 
-  test("a jail that cannot start: startup_failed, and its reason is in the failures", async (t) => {
+  test("a jail that cannot start: startup_failed, and the failures name the stage, never the error's message", async (t) => {
     const r = await rig(t, { launch: async () => { throw new Error("load jail: no systemd here"); } });
     const res = await r.result;
     assert.equal(res.reason, "startup_failed", why(r, res));
-    assert.deepEqual(res.failures, [{ message: "load jail: no systemd here", location: null }]);
+    assert.deepEqual(res.failures, [{ message: "startup_failed: the jail could not start: an unexpected error", location: null }]);
   });
 
   test("a hard cancel (SIGTERM) mid-measurement: cancelled, no draining renewal, the gate closes and the final goes, cleanup clean", async (t) => {

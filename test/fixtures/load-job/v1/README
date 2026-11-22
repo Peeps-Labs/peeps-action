@@ -1,0 +1,30 @@
+load-job-v1: the customer load job, the text Peeps gives a repository's
+peeps.yml for load runs (CW).
+
+Peeps' source of truth is src/lib/repo-backed/load-workflow.ts
+(loadJobTemplate, loadJobSpec, the dispatch input lines and the guard).
+Peeps' load-workflow.test.ts and the three templates' tests compare every
+file here with what that module and the templates render.
+
+The action copies this folder byte for byte and pins the same root hash: the
+sha256 of MANIFEST without its first line, the status line, so marking the
+corpus frozen does not change the hash. The copy of each refusal is outside
+it, in ../load-job-v1-copy/refusal-copy.json: an edit there is not a change
+of meaning.
+
+Status: draft until the action's load release (A5). While draft, both
+repositories change it together. Once frozen, a change of meaning is
+load-job-v2.
+
+Every file is rendered with the pins
+  actionSha   0123456789abcdef0123456789abcdef01234567
+  peepsOrigin https://dev.peepsai.com
+and the golden templates with testRoot ".", defaultBranch "main", no config.
+
+Files:
+  peeps-load-job.yml        the peeps-load job, appended under jobs:
+  dispatch-input-lines.yml  the two workflow_dispatch inputs it reads
+  not-load-if.txt           the guard on the repository's ordinary job
+  control-origins.json      the Peeps origins the action accepts for load
+  refusal-codes.json        the action's refusal codes and their slot names
+  golden/*.yml              each template rendered whole with the pins

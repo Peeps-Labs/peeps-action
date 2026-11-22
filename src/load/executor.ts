@@ -20,7 +20,7 @@ import net from "node:net";
 import path from "node:path";
 
 import { sharedClocks } from "./clocks";
-import { decode, encode, LineSplitter, MAX_LOCATION, MAX_MESSAGE, type CtlFrame, type FatalCode } from "./jail/ctl";
+import { decode, encode, LineSplitter, MAX_LOCATION, MAX_MESSAGE, type CtlFrame, type ErrorClass, type FatalCode, type PlaywrightCompat } from "./jail/ctl";
 import { loadJourney, originalLocation, resolveTsFile } from "./loader";
 import { Sessions, type Journey, type PlaywrightRequest } from "./session";
 
@@ -60,14 +60,26 @@ let journey: Journey | null = null;
 let stopping = false;
 const pending = new Set<Promise<void>>();
 
-function failureOf(error: unknown): { message: string; location?: string } {
-  const e = error instanceof Error ? error : new Error(String(error));
-  const location = originalLocation(e.stack, root);
-  return { message: `${e.name === "Error" ? "" : `${e.name}: `}${e.message}`.slice(0, MAX_MESSAGE), ...(location ? { location: location.slice(0, MAX_LOCATION) } : {}) };
+const NETWORK = /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|EHOSTUNREACH|ENETUNREACH)\b/;
+
+/** The error's class, from a closed set: all the supervisor publishes of it. */
+function classOf(e: Error): ErrorClass {
+  const code = (e as { code?: unknown }).code;
+  if (e.name === "AssertionError" || code === "ERR_ASSERTION") return "assertion";
+  if (e.name === "TimeoutError") return "timeout";
+  if ((typeof code === "string" && NETWORK.test(code)) || NETWORK.test(String(e.message))) return "network";
+  return "other";
 }
 
-function fatal(code: FatalCode, error: unknown): void {
-  send({ type: "fatal", code, ...failureOf(error) });
+/** The message and location go to the job log only; the class is what the result and Peeps get. */
+function failureOf(error: unknown): { message: string; location?: string; error: ErrorClass } {
+  const e = error instanceof Error ? error : new Error(String(error));
+  const location = originalLocation(e.stack, root);
+  return { message: `${e.name === "Error" ? "" : `${e.name}: `}${e.message}`.slice(0, MAX_MESSAGE), ...(location ? { location: location.slice(0, MAX_LOCATION) } : {}), error: classOf(e) };
+}
+
+function fatal(code: FatalCode, error: unknown, playwright?: PlaywrightCompat): void {
+  send({ type: "fatal", code, ...failureOf(error), ...(playwright ? { playwright } : {}) });
 }
 
 /** The customer's Playwright package, from the working directory or the journey's folder; not loaded yet. */
@@ -108,16 +120,24 @@ function onInit(frame: Extract<CtlFrame, { type: "init" }>): void {
   // Finding, reading and loading Playwright fail one way: a fatal frame, never a dead executor.
   let request: PlaywrightRequest;
   let version: string;
+  let compat: PlaywrightCompat = "unreadable";
   try {
     const found = findPlaywright([root, path.dirname(file)]);
-    if (!found) throw new Error("Playwright was not found from the working directory or the journey's folder");
+    if (!found) {
+      compat = "not_found";
+      throw new Error("Playwright was not found from the working directory or the journey's folder");
+    }
     version = found.version;
-    if (!atLeastFloor(version)) throw new Error(`Playwright ${version} is below ${PLAYWRIGHT_FLOOR.join(".")}, the oldest a load journey runs on`);
+    if (!atLeastFloor(version)) {
+      compat = "below_floor";
+      throw new Error(`Playwright ${version} is below ${PLAYWRIGHT_FLOOR.join(".")}, the oldest a load journey runs on`);
+    }
+    compat = "unreadable";
     const loaded = found.load();
     if (typeof loaded?.newContext !== "function") throw new Error(`Playwright ${version} has no request API`);
     request = loaded;
   } catch (error) {
-    return fatal("playwright", error);
+    return fatal("playwright", error, compat);
   }
   try {
     journey = loadJourney(root, frame.journey.module, frame.journey.export) as Journey;
@@ -146,7 +166,7 @@ function onTurn(frame: Extract<CtlFrame, { type: "turn" }>): void {
       send({ type: "outcome", turn: frame.turn, kind: result.kind, ...extra });
     })
     // What the journey threw could not be read (no prototype, a getter that throws): the turn still gets its outcome.
-    .catch(() => void send({ type: "outcome", turn: frame.turn, kind: "failure", message: "the journey threw a value that could not be read" }))
+    .catch(() => void send({ type: "outcome", turn: frame.turn, kind: "failure", message: "the journey threw a value that could not be read", error: "other" }))
     .finally(() => pending.delete(work));
   pending.add(work);
 }

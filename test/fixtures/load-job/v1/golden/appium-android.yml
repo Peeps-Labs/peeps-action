@@ -1,0 +1,130 @@
+# .github/workflows/peeps.yml — installed by you; Peeps never edits workflow files
+name: Peeps
+on:
+  workflow_dispatch:
+    inputs:
+      mode:      { type: string, required: true }   # inventory | run | agent | load
+      sessionId: { type: string, required: false }
+      ref:       { type: string, required: false }
+      deviceTools: { type: string, required: false }   # "true" when Peeps' agent drives the device
+      loadGrant:    { type: string, required: false }   # load runs only
+      loadWorkload: { type: string, required: false }   # load runs only
+  push:
+    branches: [main]   # the headline branch is what Peeps mirrors
+  pull_request:
+  merge_group:           # a merge queue's group is tested before it merges
+    types: [checks_requested]
+permissions:
+  contents: read
+  id-token: write        # OIDC → Peeps; no Peeps secret needed
+jobs:
+  peeps:
+    name: "peeps ${{ inputs.mode || 'report' }} ${{ inputs.sessionId || '' }}"
+    if: inputs.mode != 'load'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100   # an agent session waits up to 40 min for the app's build, then runs up to 50
+    steps:
+      - uses: actions/checkout@v7
+        with: { ref: "${{ inputs.ref || github.ref }}" }
+      - uses: actions/setup-node@v7
+        with: { node-version: "22" }
+      - name: Install the suite and Appium's uiautomator2 driver
+        run: |
+          npm ci
+          export APPIUM_HOME="$RUNNER_TEMP/appium"
+          echo "APPIUM_HOME=$APPIUM_HOME" >> "$GITHUB_ENV"
+          # uiautomator2 8 is the last major that runs on Appium 3; later ones need Appium 4.
+          npx appium driver install uiautomator2@8
+      - uses: actions/setup-java@v5
+        if: inputs.mode != 'inventory'
+        with: { distribution: temurin, java-version: "17" }
+      - name: Build the debug APK   # edit to match your app
+        if: inputs.mode != 'inventory'
+        run: ./gradlew assembleDebug
+      # The runner's root disk has too little room for the emulator's data
+      # partition; drop toolchains this job never uses.
+      - name: Free disk space for the emulator
+        if: inputs.mode != 'inventory'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
+          sudo docker image prune --all --force > /dev/null || true
+          df -h /
+      - name: Enable KVM for the emulator
+        if: inputs.mode != 'inventory'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Start an Android emulator
+        if: inputs.mode != 'inventory'
+        run: |
+          TOOLS="$ANDROID_HOME/cmdline-tools/latest/bin"
+          ADB="$ANDROID_HOME/platform-tools/adb"
+          # Pinned: on ubuntu-24.04 avdmanager wrote the AVD somewhere other
+          # than ~/.android/avd, so config.ini was not found.
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          yes | "$TOOLS/sdkmanager" --licenses > /dev/null || true
+          "$TOOLS/sdkmanager" "platform-tools" "emulator" "system-images;android-34;google_apis;x86_64"
+          echo no | "$TOOLS/avdmanager" create avd --force -n peeps -k "system-images;android-34;google_apis;x86_64"
+          # A 4 GB data partition (the image's default does not fit the disk);
+          # 4 cores when the runner has them, as 2 can stall System UI.
+          printf 'disk.dataPartition.size=4096M\nhw.cpu.ncore=%s\n' "$(( $(nproc) >= 4 ? 4 : 2 ))" \
+            >> "$ANDROID_AVD_HOME/peeps.avd/config.ini"
+          nohup "$ANDROID_HOME/emulator/emulator" -avd peeps -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -camera-back none > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          timeout 120 "$ADB" wait-for-device
+          for _ in $(seq 1 180); do
+            [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
+            sleep 5
+          done
+          if [ "$("$ADB" shell getprop sys.boot_completed | tr -d '\r')" != "1" ]; then
+            echo "::error::The emulator did not boot within 15 minutes"
+            tail -n 100 "$RUNNER_TEMP/emulator.log"
+            exit 1
+          fi
+          "$ADB" shell settings put global window_animation_scale 0
+          "$ADB" shell settings put global transition_animation_scale 0
+          "$ADB" shell settings put global animator_duration_scale 0
+          # An ANR in a system process must not cover the app under test.
+          "$ADB" shell settings put global hide_error_dialogs 1
+      - uses: Peeps-Labs/peeps-action@v1
+        env:
+          APP_PATH: ${{ github.workspace }}/app/build/outputs/apk/debug/app-debug.apk
+          PEEPS_API_URL: https://dev.peepsai.com
+        with:
+          framework: appium
+          mode: ${{ inputs.mode }}
+          session-id: ${{ inputs.sessionId }}
+          device-tools: ${{ inputs.deviceTools }}
+
+  peeps-load:
+    name: Peeps load run
+    if: inputs.mode == 'load' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NODE_OPTIONS: ""
+      NODE_DEBUG: ""
+      NODE_PATH: ""
+      LD_PRELOAD: ""
+      LD_AUDIT: ""
+      LD_LIBRARY_PATH: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38   # v6
+        with:
+          node-version: "24.22.3"
+          package-manager-cache: false
+      - uses: Peeps-Labs/peeps-action@0123456789abcdef0123456789abcdef01234567
+        env:
+          PEEPS_API_URL: https://dev.peepsai.com
+        with:
+          mode: load
+          load-grant: ${{ inputs.loadGrant }}
+          load-workload: ${{ inputs.loadWorkload }}

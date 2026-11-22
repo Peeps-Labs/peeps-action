@@ -66,7 +66,7 @@ describe("load supervisor: Checking and the executor", { concurrency: 4 }, () =>
     const r = await rig(t, { jail: scripted({ PEEPS_SCRIPT: "request" }) });
     const res = await r.result;
     assert.equal(res.status, "completed", why(r, res));
-    assert.equal(res.playwright, "0.0.0-scripted");
+    assert.equal(res.playwright, "ok", "a compatibility code; the version itself goes to the job log only");
     invariants(r, res);
   });
 

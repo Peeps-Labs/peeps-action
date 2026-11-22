@@ -530,6 +530,8 @@ https://docs.peepsai.com/repository/vercel-previews.
 | `app-ready-url` | no | With `app-start`: a URL that answers 2xx once the app serves |
 | `peeps-environment` | no | `report` mode: the Peeps environment whose **Send to CI** variables this run gets, e.g. `dev` (see "Variables from Peeps"). GitHub only |
 | `peeps-project` | with several projects | With `peeps-environment`: the Peeps project's acronym, for a repository that backs more than one project with an environment of that name |
+| `load-grant` | for `load` | The grant reference Peeps dispatches a load run with. Peeps passes it on dispatch |
+| `load-workload` | for `load` | The workload file Peeps dispatches a load run for, `peeps/load/<name>.workload.yaml`. Peeps passes it on dispatch |
 | `app-reset` | no | With `app-start`: run before each of those runs to put the app's state back, for example by cloning a seeded template database. `PEEPS_INVOCATION` is `ambient` for the first run and `spec` after, here and in the tests' environment |
 
 ## Variables from Peeps
@@ -580,7 +582,7 @@ new test never gets them; the run that checks a fix does.
 | `agent` | a tool server for a Peeps agent session; every call is echoed to the job log. `run_tests` runs Playwright, pytest (or your `.peeps/run-tests` hook) in a pytest suite, or WebdriverIO in an Appium suite, where `device-tools: true` also has Appium and a device session serve the `device_*` tools |
 | `attach-start` | nothing: writes a config beside yours that adds the Peeps reporter to your reporters, and exports its path as `PEEPS_ATTACH_CONFIG` |
 | `attach-finish` | nothing: uploads your run's HTML report and closes the run's batches |
-| `load` | nothing: refuses with "Load testing isn't available for this repository yet." and exits 1, before any of your code, a network call, an OIDC request or a process |
+| `load` | a Peeps load run, only in the `peeps-load` job Peeps gives you, with the action pinned to a commit and Peeps' dispatch inputs. Any other ref (`@v1`, a tag, a branch) and GitLab refuse with "Load testing isn't available for this repository yet." and exit 1, before any of your code, a network call, an OIDC request or a process |
 
 `ci` is the default and means `report`. Peeps names the mode explicitly on every
 dispatch it makes.

@@ -1,9 +1,15 @@
 /**
- * `dist/load.js`: the direct load entry the go-line workflow runs (e5 plan §4 and §7, v2 §4, v3
- * §4). `src/main.ts` never imports it, so the published action's `mode: load` keeps refusing
- * until A5 turns it on.
+ * `dist/load.js`: the two load entries.
  *
- * Its inputs are explicit and come from the caller's workflow file, never from the checkout:
+ * `mainCustomerLoad` is the published action's `mode: load` (CW plan §2, §4.3–§4.5):
+ * `dist/index.js` hands off to it, never to `mainLoad`. It reads only the job's own GitHub
+ * variables, the two inputs and `PEEPS_API_URL`; never a `PEEPS_LOAD_*` variable. Its refusals
+ * run before any network, then the job's identity comes from its own OIDC token, then the run
+ * installs with the verified download phase and no harness hosts.
+ *
+ * `mainLoad` is the direct entry the go-line workflow runs (`node dist/load.js`, e5 plan §4 and
+ * §7, v2 §4, v3 §4). Its inputs are explicit and come from the caller's workflow file, never from
+ * the checkout:
  *
  *   PEEPS_URL                       Peeps' origin, written in the workflow file
  *   PEEPS_LOAD_GRANT                the dispatch's grant reference (128 bits, base64url)
@@ -18,24 +24,31 @@
  *   GITHUB_WORKSPACE, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_STEP_SUMMARY
  *   ACTIONS_ID_TOKEN_REQUEST_URL and _TOKEN (the job's `id-token: write`)
  *
- * Nothing it writes carries a token: the stdout line, the step summary and the result file hold
- * the result's counts, states and latencies only, and no workflow command is ever printed (not
- * even `add-mask`: a token is never on stdout to need one). It refuses to run with `NODE_DEBUG`
- * set, which Node reads at startup and would print requests with.
+ * Nothing either writes carries a token: the stdout line, the step summary and the result file
+ * hold the result's counts, states and latencies only. The harness entry prints no workflow
+ * command; the customer entry prints one `::error` line for a refusal, with fixed copy and
+ * bounded slots only. The harness entry refuses to run with `NODE_DEBUG` set, which Node reads at
+ * startup and would print requests with; the customer entry refuses it as `node_options`.
  */
 import { appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { customerRefusal, IDENTITY_FAILED_COPY, loadNodeDir, NOT_PINNED_LINE, refusal, RUN_REFUSAL_COPY, type CustomerRefusal } from "./customer";
+import { loadControlOrigin } from "./control-origin";
 import { HttpControlPort, type HttpControlPortOptions } from "./http-control-port";
+import { readJobFacts, type JobFactsDeps } from "./job-facts";
+import { readJobIdentity, type IdentityRead } from "./oidc";
 import { loadSignals, type LoadSignals } from "./signals";
-import { runLoad, type LoadResult, type LoadRunOptions } from "./supervisor";
+import { runLoad, sanitize, type LoadInstall, type LoadResult, type LoadRunOptions } from "./supervisor";
 
 export interface LoadInputs {
   peepsUrl: string;
   grantRef: string;
   workspace: string;
   workloadPath: string;
-  npmCache: string;
-  sinkHosts: string[];
+  /** Harness: the recipe's npm cache. Customer: the verified download, then offline. */
+  install: LoadInstall;
+  /** Harness: a grant may name only the sink hosts. Customer: Peeps' own grant check. */
+  scope: { kind: "harness"; sinkHosts: string[] } | { kind: "customer" };
   nodeDir: string;
   actionDir: string;
   actionVersion: string;
@@ -93,8 +106,8 @@ export function readLoadInputs(env: NodeJS.ProcessEnv, actionDir: string, execPa
       grantRef,
       workspace,
       workloadPath,
-      npmCache,
-      sinkHosts,
+      install: { mode: "offline", cache: npmCache },
+      scope: { kind: "harness", sinkHosts },
       nodeDir,
       actionDir,
       actionVersion,
@@ -153,6 +166,15 @@ export interface LoadEntryDeps {
   write?: (line: string) => void;
 }
 
+export interface CustomerEntryDeps extends LoadEntryDeps {
+  /** Where the `::error` line goes (stderr by default, as today's refusal). */
+  error?: (line: string) => void;
+  /** The job's identity (tests: without a token endpoint). */
+  identity?: (oidc: LoadInputs["oidc"], env: NodeJS.ProcessEnv) => Promise<IdentityRead>;
+  /** `readJobFacts`' seams (tests: no `/.dockerenv` lookup on the test host, a fake toolcache arch). */
+  facts?: JobFactsDeps;
+}
+
 /** Runs one load run from the environment. Resolves to the exit code: 0 when it completed. */
 export async function mainLoad(env: NodeJS.ProcessEnv = process.env, deps: LoadEntryDeps = {}, actionDir = __dirname): Promise<number> {
   const write = deps.write ?? ((line: string) => void process.stdout.write(`${line}\n`));
@@ -161,7 +183,107 @@ export async function mainLoad(env: NodeJS.ProcessEnv = process.env, deps: LoadE
     write(JSON.stringify({ refused: "input", input: read.problem }));
     return 2;
   }
-  const i = read.inputs;
+  return runFromInputs(read.inputs, deps, write);
+}
+
+/**
+ * The customer job's inputs (CW plan §4.5): the refusals of `customerRefusal`, then the values
+ * they checked. The check-run id and the attempt come later, from the job's token.
+ */
+export function readCustomerInputs(env: NodeJS.ProcessEnv, actionDir: string, facts: JobFactsDeps = {}): { ok: true; inputs: Omit<LoadInputs, "checkRunId" | "runAttempt"> } | { ok: false; refusal: CustomerRefusal } {
+  const f = readJobFacts(env, facts);
+  const refused = customerRefusal(f);
+  if (refused) return { ok: false, refusal: refused };
+  const origin = loadControlOrigin(f.apiUrl ?? undefined);
+  if (!origin.ok) return { ok: false, refusal: refusal("control_origin") };
+  return {
+    ok: true,
+    inputs: {
+      peepsUrl: origin.origin,
+      grantRef: f.grant!,
+      workspace: f.workspace!,
+      workloadPath: f.workload!,
+      install: { mode: "fetch" },
+      scope: { kind: "customer" },
+      nodeDir: loadNodeDir(f.toolCache!, facts.arch ?? process.arch),
+      actionDir,
+      actionVersion: f.actionRef!,
+      runId: `gh-${env.GITHUB_RUN_ID}-${f.runAttempt}`.slice(0, 40),
+      oidc: { requestUrl: env.ACTIONS_ID_TOKEN_REQUEST_URL!, requestToken: env.ACTIONS_ID_TOKEN_REQUEST_TOKEN! },
+      summaryFile: env.GITHUB_STEP_SUMMARY || undefined,
+    },
+  };
+}
+
+/**
+ * The published action's `mode: load`. A ref that isn't a commit prints today's line alone, byte
+ * for byte; any other refusal prints one titled `::error` line, the copy in the step summary and
+ * `{"refused":"<code>"}`. A token that couldn't be minted is a failure, not a refusal.
+ */
+export async function mainCustomerLoad(env: NodeJS.ProcessEnv = process.env, deps: CustomerEntryDeps = {}, actionDir = __dirname): Promise<number> {
+  const write = deps.write ?? ((line: string) => void process.stdout.write(`${line}\n`));
+  const error = deps.error ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const read = readCustomerInputs(env, actionDir, deps.facts);
+  const titled = (copy: string, summaryText: string) => {
+    error(`::error title=Peeps load run::${copy}`);
+    const summary = env.GITHUB_STEP_SUMMARY;
+    if (summary) {
+      try {
+        appendFileSync(summary, summaryText);
+      } catch {
+        // The refusal is already on the log; a summary that can't be written changes nothing.
+      }
+    }
+  };
+  const refuse = (r: CustomerRefusal) => {
+    if (r.code === "action_not_pinned") {
+      error(NOT_PINNED_LINE);
+      return 1;
+    }
+    titled(r.message, `## Peeps load run\n\n${r.message}\n`);
+    write(JSON.stringify({ refused: r.code }));
+    return 1;
+  };
+  if (!read.ok) return refuse(read.refusal);
+  const id = await (deps.identity ?? ((oidc, e) => readJobIdentity(oidc, e)))(read.inputs.oidc, env);
+  if (!id.ok) {
+    if ("failed" in id) {
+      titled(IDENTITY_FAILED_COPY, `## Peeps load run\n\n${IDENTITY_FAILED_COPY}\n`);
+      write(JSON.stringify({ failed: "oidc" }));
+      return 1;
+    }
+    return refuse(refusal(id.refused));
+  }
+  // A run that didn't start: one titled line with fixed copy for the reasons that have it, then
+  // the cause on plain lines (it may hold lockfile text, so never inside the `::error` line).
+  const explain = (res: LoadResult) => {
+    if (res.status !== "didnt_start") return;
+    const copy = (RUN_REFUSAL_COPY as Record<string, string>)[res.reason];
+    if (copy) titled(copy, `\n${copy}\n`);
+    for (const line of failureLines(res.failures)) error(line);
+  };
+  return runFromInputs({ ...read.inputs, checkRunId: id.checkRunId, runAttempt: id.runAttempt }, deps, write, explain);
+}
+
+const FAILURE_LINES = 20;
+const FAILURE_LINE_CHARS = 300;
+
+/** A result's failures as log lines: `peeps load: ` first, no control character, `::` or `##[`, at most 20 of 300 characters. */
+export function failureLines(failures: LoadResult["failures"]): string[] {
+  const out: string[] = [];
+  for (const f of failures) {
+    for (const raw of f.message.split(/\r?\n|\r/)) {
+      const line = (sanitize(raw, FAILURE_LINE_CHARS) ?? "").replaceAll("##[", "## [").trim();
+      if (!line) continue;
+      if (out.length === FAILURE_LINES) return out;
+      out.push(`peeps load: ${line}`);
+    }
+  }
+  return out;
+}
+
+/** Both entries from the port onwards: the run, the result file, the summary and the stdout line. */
+async function runFromInputs(i: LoadInputs, deps: LoadEntryDeps, write: (line: string) => void, explain?: (res: LoadResult) => void): Promise<number> {
   let port: HttpControlPort;
   try {
     port = (deps.makePort ?? ((o) => new HttpControlPort(o)))({ peepsUrl: i.peepsUrl, oidc: i.oidc, userAgent: `peeps-action-load/${i.actionVersion}` });
@@ -181,8 +303,8 @@ export async function mainLoad(env: NodeJS.ProcessEnv = process.env, deps: LoadE
       actionDir: i.actionDir,
       port,
       grantRef: i.grantRef,
-      npmCache: i.npmCache,
-      harnessHosts: i.sinkHosts,
+      install: i.install,
+      ...(i.scope.kind === "harness" ? { harnessHosts: i.scope.sinkHosts } : {}),
       actionVersion: i.actionVersion,
       runAttempt: i.runAttempt,
       checkRunId: i.checkRunId,
@@ -190,7 +312,14 @@ export async function mainLoad(env: NodeJS.ProcessEnv = process.env, deps: LoadE
       hardSignal: signals.hard,
     });
     if (i.resultFile) writeFileSync(i.resultFile, `${JSON.stringify(res)}\n`, { mode: 0o600 });
-    if (i.summaryFile) appendFileSync(i.summaryFile, stepSummary(res));
+    if (i.summaryFile) {
+      try {
+        appendFileSync(i.summaryFile, stepSummary(res));
+      } catch {
+        // Best effort: the log's titled line and cause, and the report, still follow.
+      }
+    }
+    explain?.(res);
     write(JSON.stringify(reportOf(res)));
     return res.status === "completed" &&
       res.cleanup === "clean" &&

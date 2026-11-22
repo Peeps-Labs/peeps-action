@@ -1,0 +1,93 @@
+# .github/workflows/peeps.yml — installed by you; Peeps never edits workflow files
+name: Peeps
+on:
+  workflow_dispatch:
+    inputs:
+      mode:      { type: string, required: true }   # inventory | run | agent | load
+      sessionId: { type: string, required: false }
+      ref:       { type: string, required: false }
+      deviceTools: { type: string, required: false }   # "true" when Peeps' agent drives the device
+      loadGrant:    { type: string, required: false }   # load runs only
+      loadWorkload: { type: string, required: false }   # load runs only
+  push:
+    branches: [main]   # the headline branch is what Peeps mirrors
+  pull_request:
+  merge_group:           # a merge queue's group is tested before it merges
+    types: [checks_requested]
+permissions:
+  contents: read
+  id-token: write        # OIDC → Peeps; no Peeps secret needed
+jobs:
+  peeps:
+    name: "peeps ${{ inputs.mode || 'report' }} ${{ inputs.sessionId || '' }}"
+    if: inputs.mode != 'load'
+    runs-on: macos-15
+    timeout-minutes: 100   # an agent session waits up to 40 min for the app's build, then runs up to 50
+    steps:
+      - uses: actions/checkout@v7
+        with: { ref: "${{ inputs.ref || github.ref }}" }
+      - uses: actions/setup-node@v7
+        with: { node-version: "22" }
+      - name: Install the suite and Appium's xcuitest driver
+        run: |
+          npm ci
+          export APPIUM_HOME="$RUNNER_TEMP/appium"
+          echo "APPIUM_HOME=$APPIUM_HOME" >> "$GITHUB_ENV"
+          # xcuitest 12 is the last major that runs on Appium 3; later ones need Appium 4.
+          npx appium driver install xcuitest@12
+      # WebViews: on current simulators (iOS 26) Web Inspector lists your app as
+      # process-<AppName>, so add this to your suite's wdio capabilities to see
+      # WEBVIEW_* contexts: "appium:additionalWebviewBundleIds": ["process-<AppName>"]
+      - name: Build the app for the simulator   # edit to match your app
+        if: inputs.mode != 'inventory'
+        run: xcodebuild -scheme App -sdk iphonesimulator -configuration Debug -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+      # Pin your suite's session to this simulator in its wdio capabilities:
+      # "appium:udid": process.env.SIMULATOR_UDID
+      - name: Boot an iOS simulator
+        if: inputs.mode != 'inventory'
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for r in d for x in d[r] if x["name"].startswith("iPhone")))')
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          echo "SIMULATOR_UDID=$UDID" >> "$GITHUB_ENV"
+      - uses: Peeps-Labs/peeps-action@v1
+        env:
+          APP_PATH: ${{ github.workspace }}/build/Build/Products/Debug-iphonesimulator/App.app
+          PEEPS_API_URL: https://dev.peepsai.com
+        with:
+          framework: appium
+          mode: ${{ inputs.mode }}
+          session-id: ${{ inputs.sessionId }}
+          device-tools: ${{ inputs.deviceTools }}
+
+  peeps-load:
+    name: Peeps load run
+    if: inputs.mode == 'load' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NODE_OPTIONS: ""
+      NODE_DEBUG: ""
+      NODE_PATH: ""
+      LD_PRELOAD: ""
+      LD_AUDIT: ""
+      LD_LIBRARY_PATH: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38   # v6
+        with:
+          node-version: "24.22.3"
+          package-manager-cache: false
+      - uses: Peeps-Labs/peeps-action@0123456789abcdef0123456789abcdef01234567
+        env:
+          PEEPS_API_URL: https://dev.peepsai.com
+        with:
+          mode: load
+          load-grant: ${{ inputs.loadGrant }}
+          load-workload: ${{ inputs.loadWorkload }}

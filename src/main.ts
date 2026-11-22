@@ -11,13 +11,16 @@
  *   attach-start, attach-finish
  *               report the workflow's own Playwright run, its command and
  *               reporters unchanged (`attach.ts`); never fail the job
- *   load        refuses and exits 1 in this release: load testing isn't
- *               available yet
+ *   load        a Peeps load run (`dist/load.js`'s `mainCustomerLoad`): only
+ *               with the action pinned to a commit and Peeps' dispatch inputs;
+ *               any other ref refuses with today's line and exits 1
  *   ci          the default; means `report`. A workflow_dispatch from Peeps
  *               always names its mode explicitly, so there is nothing to
  *               decide from the event here.
  */
 
+import { createRequire } from "node:module";
+import path from "node:path";
 import { readRunnerEnv, resolveMode, type RunnerEnv } from "./env";
 import { runInventory } from "./inventory";
 import { PeepsClient } from "./peeps";
@@ -72,13 +75,18 @@ async function main(): Promise<void> {
     // A request Peeps never answered would otherwise hold the step open.
     process.exit(0);
   }
-  // Load testing isn't available yet, so this mode refuses here: before the environment is
-  // read, Peeps or OIDC is asked anything, variables are exported, the framework is resolved
-  // or a browser probe spawns (test/load-refusal.test.ts). After the attach steps, which
-  // never fail the job even when a GitLab job sets PEEPS_MODE=load (test/attach.test.ts).
+  // A load run hands off to `dist/load.js` here: before the environment is read, Peeps is asked
+  // anything, variables are exported, the framework is resolved or a browser probe spawns
+  // (test/load-handoff.test.ts). Its own refusals run first; a ref that isn't a commit prints
+  // today's line, byte for byte. A computed path keeps the load code out of this bundle. After
+  // the attach steps, which never fail the job even when a GitLab job sets PEEPS_MODE=load
+  // (test/attach.test.ts).
   if (requested === "load") {
-    console.error("::error::Load testing isn't available for this repository yet.");
-    process.exit(1);
+    const load = createRequire(__filename)(path.join(__dirname, "load.js")) as {
+      mainCustomerLoad(env: NodeJS.ProcessEnv, deps: object, actionDir: string): Promise<number>;
+    };
+    process.exitCode = await load.mainCustomerLoad(process.env, {}, __dirname);
+    return;
   }
 
   const env = readRunnerEnv();

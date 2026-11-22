@@ -30,21 +30,78 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/load/main.ts
 var main_exports = {};
 __export(main_exports, {
+  failureLines: () => failureLines,
+  mainCustomerLoad: () => mainCustomerLoad,
   mainLoad: () => mainLoad,
+  readCustomerInputs: () => readCustomerInputs,
   readLoadInputs: () => readLoadInputs,
   reportOf: () => reportOf,
   stepSummary: () => stepSummary
 });
 module.exports = __toCommonJS(main_exports);
-var import_node_fs4 = require("node:fs");
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_fs6 = require("node:fs");
+var import_node_path5 = __toESM(require("node:path"));
 
-// src/load/http-control-port.ts
-var import_node_crypto2 = require("node:crypto");
-var import_node_http = require("node:http");
-var import_node_https = require("node:https");
-var import_node_tls = require("node:tls");
-var import_node_util = require("node:util");
+// src/load/control-origin.ts
+var LOAD_CONTROL_ORIGINS = ["https://app.peepsai.com", "https://rc.peepsai.com", "https://dev.peepsai.com"];
+function loadControlOrigin(raw) {
+  if (!raw) return { ok: false, refused: "control_origin" };
+  const origin = raw.endsWith("/") ? raw.slice(0, -1) : raw;
+  return LOAD_CONTROL_ORIGINS.includes(origin) ? { ok: true, origin } : { ok: false, refused: "control_origin" };
+}
+
+// src/load/customer.ts
+var LOAD_NODE_VERSION = "24.22.3";
+var PRELOAD_VARS = ["NODE_OPTIONS", "NODE_DEBUG", "NODE_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"];
+var REFUSAL_COPY = {
+  action_not_pinned: "Load testing isn't available for this repository yet.",
+  not_github: "Load runs need GitHub Actions with `id-token: write`.",
+  job: "Load runs start only in the `peeps-load` job of a workflow Peeps dispatched.",
+  rerun: "Load runs can't be re-run. Start a new run from Peeps.",
+  fence_unverified: "This load job runs in a container ({id}). Load runs need the runner itself: remove `container:` from the `peeps-load` job.",
+  node_options: "Unset {vars} for load runs: they change how Node starts.",
+  node_version: "Load runs need Node 24.22.3 from `actions/setup-node`. This job set up Node {found}.",
+  input: "Peeps' dispatch inputs are missing or malformed: {name}.",
+  control_origin: "PEEPS_API_URL must be set to one of Peeps' own addresses for load runs.",
+  identity: "This job's GitHub identity token doesn't match its run.",
+  self_hosted: "Load runs need a GitHub-hosted runner for now. This job ran on a self-hosted runner."
+};
+var RUN_REFUSAL_COPY = {
+  install_unsupported: "This repository's install isn't supported for load runs. The lines after this one say why.",
+  install_failed: "Installing this repository's dependencies failed before the load run started. The lines after this one say why. Start a new run from Peeps.",
+  fence_unverified: "This job's jail check failed: load runs need the runner itself. The lines after this one say why."
+};
+var IDENTITY_FAILED_COPY = "Couldn't read this job's identity from GitHub. Start a new run from Peeps.";
+var NOT_PINNED_LINE = `::error::${REFUSAL_COPY.action_not_pinned}`;
+var COMMIT = /^[0-9a-f]{40}$/;
+var GRANT_REF = /^[A-Za-z0-9_-]{22}$/;
+var WORKLOAD_FILE = /^peeps\/load\/[^/\x00-\x1f\x7f]+\.workload\.ya?ml$/;
+var WORKLOAD_MAX = 1024;
+var CONTAINER_ID = /^[0-9a-f]{12}$/;
+function refusal(code, slots = {}) {
+  return { code, message: REFUSAL_COPY[code].replace(/\{(\w+)\}/g, (_m, name2) => slots[name2] ?? "") };
+}
+function customerRefusal(f) {
+  if (f.actionRef === null || !COMMIT.test(f.actionRef)) return refusal("action_not_pinned");
+  if (!f.github || !f.oidcUrl || !f.oidcToken) return refusal("not_github");
+  if (f.job !== "peeps-load" || f.eventName !== "workflow_dispatch") return refusal("job");
+  if (f.runAttempt !== "1") return refusal("rerun");
+  if (f.dockerenv || (f.workspace ?? "").startsWith("/__w/")) {
+    return refusal("fence_unverified", { id: f.hostname !== null && CONTAINER_ID.test(f.hostname) ? f.hostname : "the job's container" });
+  }
+  if (f.preloadVars.length > 0) return refusal("node_options", { vars: f.preloadVars.join(", ") });
+  if (!f.trustedNodePresent) return refusal("node_version", { found: f.pathNodeVersions.length > 0 ? f.pathNodeVersions.join(", ") : "no Node" });
+  const bad = [
+    ...f.grant !== null && GRANT_REF.test(f.grant) ? [] : ["loadGrant"],
+    ...f.workload !== null && f.workload.length <= WORKLOAD_MAX && WORKLOAD_FILE.test(f.workload) ? [] : ["loadWorkload"]
+  ];
+  if (bad.length > 0) return refusal("input", { name: bad.join(", ") });
+  if (!loadControlOrigin(f.apiUrl ?? void 0).ok) return refusal("control_origin");
+  return null;
+}
+function loadNodeDir(toolCache, arch) {
+  return `${toolCache.replace(/\/+$/, "")}/node/${LOAD_NODE_VERSION}/${arch}`;
+}
 
 // src/load/control-port.ts
 var import_node_crypto = require("node:crypto");
@@ -112,13 +169,13 @@ var texts = (v2, max) => Array.isArray(v2) && v2.length <= max && v2.every((x) =
 var CLAIM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var LOAD_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 var SHA = /^[0-9a-f]{64}$/;
-var COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+var COMMIT2 = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 var sha = (v2) => typeof v2 === "string" && SHA.test(v2);
 var only = (v2, keys) => Object.keys(v2).length === keys.length && keys.every((k) => Object.hasOwn(v2, k));
 function decodeBinding(v2) {
   if (!isObj(v2) || !only(v2, ["checkoutSha", "lockDigests", "observed", "workload"])) return;
   const { lockDigests: l, observed: o, workload: w } = v2;
-  if (typeof v2.checkoutSha !== "string" || !COMMIT.test(v2.checkoutSha)) return;
+  if (typeof v2.checkoutSha !== "string" || !COMMIT2.test(v2.checkoutSha)) return;
   if (!isObj(l) || !only(l, ["package-lock.json"]) || !sha(l["package-lock.json"])) return;
   if (!isObj(o) || !only(o, ["treeDigest", "generatedLockDigest"]) || !sha(o.treeDigest) || !sha(o.generatedLockDigest)) return;
   if (!isObj(w) || !only(w, ["path", "digest"]) || !text(w.path, 1024) || !sha(w.digest)) return;
@@ -215,20 +272,12 @@ function decodeClosedReceipt(raw) {
   return { claimId: raw.claimId, epoch: raw.epoch, planHash: raw.planHash, seq: raw.seq, nonce: raw.nonce, closed: true };
 }
 
-// src/load/http-control-port.ts
-var LOAD_OIDC_AUDIENCE = "peeps-load";
-var CLAIM_RETRY_MS = 4500;
-var CLAIM_ATTEMPT_MS = 2e3;
-var CLAIM_PAUSE_MS = 100;
-var CLAIM_ANSWER_MAX_BYTES = 2 * 1024 * 1024;
-var ANSWER_MAX_BYTES = 64 * 1024;
-var OIDC_ANSWER_MAX_BYTES = 16 * 1024;
-var OIDC_TOKEN_MAX_CHARS = 8 * 1024;
-var OIDC_ATTEMPTS = 5;
-var GITHUB_OIDC_HOSTS = [".actions.githubusercontent.com"];
-var REFUSALS = /* @__PURE__ */ new Set([...CLAIM_REFUSALS, ...RENEW_REFUSALS]);
-var CLAIM_ID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var EVENT_REASONS = new Set(EVENTS_REFUSALS);
+// src/load/transport.ts
+var import_node_crypto2 = require("node:crypto");
+var import_node_http = require("node:http");
+var import_node_https = require("node:https");
+var import_node_tls = require("node:tls");
+var import_node_util = require("node:util");
 var ControlHttpError = class extends Error {
   constructor(op, code, status, detail) {
     super(`load control ${op}: ${code}${status !== void 0 ? ` ${status}` : ""}${detail ? ` (${detail})` : ""}`);
@@ -244,225 +293,154 @@ var ControlHttpError = class extends Error {
     return this.code === "network" || this.code === "timeout";
   }
 };
-var monoNow = () => Number(process.hrtime.bigint()) / 1e6;
-var HttpControlPort = class {
-  origin;
-  oidcUrl;
-  requestToken;
-  userAgent;
-  lookup;
-  renewAgent;
-  eventsAgent;
-  oidcAgent;
-  constructor(options, seams = {}) {
-    if (diagnosticsOn()) throw new ControlHttpError("config", "diagnostics");
-    this.origin = peepsOrigin(options.peepsUrl);
-    this.oidcUrl = oidcRequestUrl(options.oidc.requestUrl, seams.oidcHosts ?? GITHUB_OIDC_HOSTS);
-    this.requestToken = options.oidc.requestToken;
-    this.userAgent = options.userAgent ?? "peeps-action-load";
-    this.lookup = seams.lookup;
-    const tls = {
-      ca: seams.ca ?? [...import_node_tls.rootCertificates],
-      rejectUnauthorized: true,
-      minVersion: "TLSv1.2",
-      maxVersion: "TLSv1.3",
-      ciphers: import_node_crypto2.constants.defaultCoreCipherList,
-      enableTrace: false,
-      ALPNProtocols: ["http/1.1"],
-      ...seams.lookup ? { lookup: seams.lookup } : {}
-    };
-    this.renewAgent = new import_node_https.Agent({ ...tls, keepAlive: true, maxSockets: 2, maxFreeSockets: 2, scheduling: "lifo" });
-    this.eventsAgent = new import_node_https.Agent({ ...tls, keepAlive: true, maxSockets: 1, maxFreeSockets: 1 });
-    this.oidcAgent = new import_node_https.Agent({ ...tls, keepAlive: false, maxSockets: 1 });
-  }
-  /**
-   * Mints the OIDC token, then sends the claim and retries it, identical bytes and the same
-   * token, on a transient failure until `CLAIM_RETRY_MS` after the call.
-   */
-  async claim(body, signal) {
-    const deadline = monoNow() + CLAIM_RETRY_MS;
-    const window = AbortSignal.any([signal, AbortSignal.timeout(CLAIM_RETRY_MS)]);
-    const idToken = await this.mint(window, signal);
-    const bytes = canonical(body);
-    let last;
-    for (; ; ) {
-      const left = deadline - monoNow();
-      if (left <= 0) throw last ?? new ControlHttpError("claim", "timeout");
-      const cutByWindow = left < CLAIM_ATTEMPT_MS;
-      const attempt = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, Math.ceil(Math.min(left, CLAIM_ATTEMPT_MS))))]);
-      try {
-        const answer = await this.send("claim", this.renewAgent, "/api/v1/load/claims", idToken, bytes, CLAIM_ANSWER_MAX_BYTES, attempt);
-        if (monoNow() >= deadline) {
-          last = new ControlHttpError("claim", "timeout");
-          continue;
+function controlTransport(seams = {}, userAgent = "peeps-action-load") {
+  if (diagnosticsOn()) throw new ControlHttpError("config", "diagnostics");
+  const tls = {
+    ca: seams.ca ?? [...import_node_tls.rootCertificates],
+    rejectUnauthorized: true,
+    minVersion: "TLSv1.2",
+    maxVersion: "TLSv1.3",
+    ciphers: import_node_crypto2.constants.defaultCoreCipherList,
+    enableTrace: false,
+    ALPNProtocols: ["http/1.1"],
+    ...seams.lookup ? { lookup: seams.lookup } : {}
+  };
+  const agents = [];
+  const lookup = seams.lookup;
+  return {
+    agent(shape) {
+      const agent = new import_node_https.Agent({ ...tls, ...shape });
+      agents.push(agent);
+      return agent;
+    },
+    send(op, agent, target, path6, bearer, body, cap, signal) {
+      return new Promise((resolve, reject) => {
+        if (signal.aborted) return reject(abortError(op, signal));
+        let settled = false;
+        let renewRefusalStatus;
+        const headers = { accept: "application/json", authorization: `Bearer ${bearer}`, "user-agent": userAgent };
+        if (body !== void 0) {
+          headers["content-type"] = "application/json";
+          headers["content-length"] = String(Buffer.byteLength(body));
         }
-        const reply = reduceRefusal(answer);
-        if (isObj2(reply) && !("refused" in reply) && !(typeof reply.claimId === "string" && CLAIM_ID2.test(reply.claimId))) throw new ControlHttpError("claim", "malformed", answer.status);
-        return reply;
-      } catch (error) {
-        if (!(error instanceof ControlHttpError) || !error.transient || signal.aborted) throw signal.aborted ? new ControlHttpError("claim", "aborted") : error;
-        if (!(last && cutByWindow && error.code === "timeout")) last = error;
-      }
-      const pause = Math.min(CLAIM_PAUSE_MS, deadline - monoNow());
-      if (pause > 0) await sleep(pause, signal).catch(() => void 0);
-    }
-  }
-  async renew(claimId, runToken, body, signal) {
-    const answer = await this.send("renew", this.renewAgent, claimPath(claimId, "renew"), runToken, body, ANSWER_MAX_BYTES, signal);
-    return reduceRefusal(answer);
-  }
-  async events(claimId, eventsToken, body, signal) {
-    const answer = await this.send("events", this.eventsAgent, claimPath(claimId, "events"), eventsToken, JSON.stringify(body), ANSWER_MAX_BYTES, signal);
-    const json = answer.json;
-    if (isObj2(json) && json.ok === true && answer.status < 300) {
-      if ("refused" in json || "reason" in json || typeof json.replay !== "boolean") throw new ControlHttpError("events", "malformed", answer.status);
-      return { ok: true, replay: json.replay };
-    }
-    if (isObj2(json) && json.ok === false) return { ok: false, reason: typeof json.reason === "string" && EVENT_REASONS.has(json.reason) ? json.reason : "unknown" };
-    return reduceRefusal(answer);
-  }
-  /** Closes the kept-alive sockets. */
-  close() {
-    this.renewAgent.destroy();
-    this.eventsAgent.destroy();
-    this.oidcAgent.destroy();
-  }
-  /** The job's OIDC token for `peeps-load`. GitHub's 5xx is retried, bounded by `window`. */
-  async mint(window, caller) {
-    const url = new URL(this.oidcUrl);
-    url.searchParams.set("audience", LOAD_OIDC_AUDIENCE);
-    const path4 = url.pathname + url.search;
-    for (let attempt = 1; ; attempt++) {
-      try {
-        const answer = await this.send("oidc", this.oidcAgent, path4, this.requestToken, void 0, OIDC_ANSWER_MAX_BYTES, window, url);
-        if (answer.status !== 200) throw new ControlHttpError("oidc", "status", answer.status);
-        const value = isObj2(answer.json) ? answer.json.value : void 0;
-        if (typeof value !== "string" || value.length > OIDC_TOKEN_MAX_CHARS || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)) throw new ControlHttpError("oidc", "malformed");
-        return value;
-      } catch (error) {
-        if (caller.aborted) throw new ControlHttpError("claim", "aborted");
-        if (!(error instanceof ControlHttpError) || !error.transient || attempt >= OIDC_ATTEMPTS || window.aborted) throw error;
-      }
-      await sleep(200 * attempt, window).catch(() => void 0);
-    }
-  }
-  send(op, agent, path4, bearer, body, cap, signal, target = this.origin) {
-    return new Promise((resolve, reject) => {
-      if (signal.aborted) return reject(abortError(op, signal));
-      let settled = false;
-      let renewRefusalStatus;
-      const headers = { accept: "application/json", authorization: `Bearer ${bearer}`, "user-agent": this.userAgent };
-      if (body !== void 0) {
-        headers["content-type"] = "application/json";
-        headers["content-length"] = String(Buffer.byteLength(body));
-      }
-      try {
-        for (const [name2, value] of Object.entries(headers)) (0, import_node_http.validateHeaderValue)(name2, value);
-      } catch {
-        return reject(new ControlHttpError(op, "malformed"));
-      }
-      const options = {
-        agent,
-        protocol: "https:",
-        hostname: target.hostname,
-        port: target.port || 443,
-        servername: target.hostname,
-        path: path4,
-        method: body === void 0 ? "GET" : "POST",
-        rejectUnauthorized: true,
-        ...this.lookup ? { lookup: this.lookup } : {}
-      };
-      const req = (0, import_node_https.request)(options);
-      const finish = (error, answer) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        if (error) {
-          req.destroy();
-          if (renewRefusalStatus !== void 0 && error.code !== "aborted") {
-            resolve({ status: renewRefusalStatus, json: void 0 });
-          } else {
-            reject(error);
-          }
-        } else resolve(answer);
-      };
-      const onAbort = () => finish(abortError(op, signal));
-      signal.addEventListener("abort", onAbort, { once: true });
-      req.on("error", (e) => finish(new ControlHttpError(op, "network", void 0, errnoCode(e))));
-      req.on("response", (res) => {
-        const status = res.statusCode ?? 0;
-        if (status >= 300 && status < 400) return finish(new ControlHttpError(op, "redirect", status));
-        if (status >= 500 || status === 408 || status === 429) return finish(new ControlHttpError(op, "status", status));
-        if (status < 200) return finish(new ControlHttpError(op, "status", status));
-        if (op === "renew" && status >= 400 && status < 500) renewRefusalStatus = status;
-        if (!/^application\/json\s*(;|$)/i.test(String(res.headers["content-type"] ?? ""))) return finish(new ControlHttpError(op, "content_type", status));
-        const declared = Number(res.headers["content-length"]);
-        if (Number.isFinite(declared) && declared > cap) return finish(new ControlHttpError(op, "too_large", status));
-        const chunks = [];
-        let size = 0;
-        res.on("data", (chunk) => {
-          size += chunk.length;
-          if (size > cap) return finish(new ControlHttpError(op, "too_large", status));
-          chunks.push(chunk);
+        try {
+          for (const [name2, value] of Object.entries(headers)) (0, import_node_http.validateHeaderValue)(name2, value);
+        } catch {
+          return reject(new ControlHttpError(op, "malformed"));
+        }
+        const req = (0, import_node_https.request)(requestOptions(agent, target, path6, body === void 0 ? "GET" : "POST", lookup));
+        const finish = (error, answer) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          if (error) {
+            req.destroy();
+            if (renewRefusalStatus !== void 0 && error.code !== "aborted") {
+              resolve({ status: renewRefusalStatus, json: void 0 });
+            } else {
+              reject(error);
+            }
+          } else resolve(answer);
+        };
+        const onAbort = () => finish(abortError(op, signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+        req.on("error", (e) => finish(new ControlHttpError(op, "network", void 0, errnoCode(e))));
+        req.on("response", (res) => {
+          const status = res.statusCode ?? 0;
+          if (status >= 300 && status < 400) return finish(new ControlHttpError(op, "redirect", status));
+          if (status >= 500 || status === 408 || status === 429) return finish(new ControlHttpError(op, "status", status));
+          if (status < 200) return finish(new ControlHttpError(op, "status", status));
+          if (op === "renew" && status >= 400 && status < 500) renewRefusalStatus = status;
+          if (!/^application\/json\s*(;|$)/i.test(String(res.headers["content-type"] ?? ""))) return finish(new ControlHttpError(op, "content_type", status));
+          const declared = Number(res.headers["content-length"]);
+          if (Number.isFinite(declared) && declared > cap) return finish(new ControlHttpError(op, "too_large", status));
+          const chunks = [];
+          let size = 0;
+          res.on("data", (chunk) => {
+            size += chunk.length;
+            if (size > cap) return finish(new ControlHttpError(op, "too_large", status));
+            chunks.push(chunk);
+          });
+          res.on("error", (e) => finish(new ControlHttpError(op, "network", status, errnoCode(e))));
+          res.on("close", () => {
+            if (!res.complete) finish(new ControlHttpError(op, "network", status, "ECONNRESET"));
+          });
+          res.on("end", () => {
+            let json;
+            try {
+              json = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            } catch {
+              return finish(new ControlHttpError(op, "malformed", status));
+            }
+            finish(void 0, { status, json });
+          });
         });
-        res.on("error", (e) => finish(new ControlHttpError(op, "network", status, errnoCode(e))));
-        res.on("close", () => {
-          if (!res.complete) finish(new ControlHttpError(op, "network", status, "ECONNRESET"));
-        });
-        res.on("end", () => {
-          let json;
-          try {
-            json = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-          } catch {
-            return finish(new ControlHttpError(op, "malformed", status));
-          }
-          finish(void 0, { status, json });
-        });
+        for (const [name2, value] of Object.entries(headers)) req.setHeader(name2, value);
+        req.end(body);
       });
-      for (const [name2, value] of Object.entries(headers)) req.setHeader(name2, value);
-      req.end(body);
-    });
-  }
-};
+    },
+    download(op, agent, target, path6, cap, signal, onChunk) {
+      return new Promise((resolve, reject) => {
+        if (signal.aborted) return reject(abortError(op, signal));
+        let settled = false;
+        const headers = { accept: "application/octet-stream", "user-agent": userAgent };
+        const req = (0, import_node_https.request)(requestOptions(agent, target, path6, "GET", lookup));
+        const finish = (error, size = 0) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          if (error) {
+            req.destroy();
+            reject(error);
+          } else resolve(size);
+        };
+        const onAbort = () => finish(abortError(op, signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+        req.on("error", (e) => finish(new ControlHttpError(op, "network", void 0, errnoCode(e))));
+        req.on("response", (res) => {
+          const status = res.statusCode ?? 0;
+          if (status >= 300 && status < 400) return finish(new ControlHttpError(op, "redirect", status));
+          if (status !== 200) return finish(new ControlHttpError(op, "status", status));
+          const declared = Number(res.headers["content-length"]);
+          if (Number.isFinite(declared) && declared > cap) return finish(new ControlHttpError(op, "too_large", status));
+          let size = 0;
+          res.on("data", (chunk) => {
+            if (settled) return;
+            size += chunk.length;
+            if (size > cap || !onChunk(chunk)) return finish(new ControlHttpError(op, "too_large", status));
+          });
+          res.on("error", (e) => finish(new ControlHttpError(op, "network", status, errnoCode(e))));
+          res.on("close", () => {
+            if (!res.complete) finish(new ControlHttpError(op, "network", status, "ECONNRESET"));
+          });
+          res.on("end", () => finish(void 0, size));
+        });
+        for (const [name2, value] of Object.entries(headers)) req.setHeader(name2, value);
+        req.end();
+      });
+    },
+    close() {
+      for (const agent of agents) agent.destroy();
+    }
+  };
+}
+function requestOptions(agent, target, path6, method, lookup) {
+  return {
+    agent,
+    protocol: "https:",
+    hostname: target.hostname,
+    port: target.port || 443,
+    servername: target.hostname,
+    path: path6,
+    method,
+    rejectUnauthorized: true,
+    ...lookup ? { lookup } : {}
+  };
+}
 function diagnosticsOn() {
   if (["http", "https", "net", "stream", "tls"].some((section) => (0, import_node_util.debuglog)(section).enabled)) return true;
   const nodeOptions = (process.env.NODE_OPTIONS ?? "").replace(/["\\]/g, "");
   return [nodeOptions, ...process.execArgv].some((arg) => /--tls[-_]keylog\b/.test(arg));
-}
-function claimPath(claimId, op) {
-  try {
-    return `/api/v1/load/claims/${encodeURIComponent(claimId)}/${op}`;
-  } catch {
-    throw new ControlHttpError(op, "malformed");
-  }
-}
-function peepsOrigin(raw) {
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ControlHttpError("config", "url", void 0, "PEEPS_URL");
-  }
-  if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" && url.pathname !== "" || url.search || url.hash) throw new ControlHttpError("config", "url", void 0, "PEEPS_URL");
-  return url;
-}
-function oidcRequestUrl(raw, hosts) {
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ControlHttpError("config", "url", void 0, "ACTIONS_ID_TOKEN_REQUEST_URL");
-  }
-  const host = url.hostname.toLowerCase();
-  const allowed = hosts.some((h) => h.startsWith(".") ? url.port === "" && host.endsWith(h) && host.length > h.length : url.host.toLowerCase() === h);
-  if (url.protocol !== "https:" || url.username || url.password || url.hash || !allowed) throw new ControlHttpError("config", "url", void 0, "ACTIONS_ID_TOKEN_REQUEST_URL");
-  return url;
-}
-var isObj2 = (v2) => typeof v2 === "object" && v2 !== null && !Array.isArray(v2);
-function reduceRefusal(answer) {
-  const json = answer.json;
-  if (isObj2(json) && "refused" in json) return { refused: typeof json.refused === "string" && REFUSALS.has(json.refused) ? json.refused : "unknown" };
-  return answer.status < 300 ? json : { refused: "unknown" };
 }
 function errnoCode(e) {
   return typeof e.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(e.code) ? e.code : void 0;
@@ -488,6 +466,260 @@ function sleep(ms2, signal) {
     }, ms2);
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+// src/load/oidc.ts
+var LOAD_OIDC_AUDIENCE = "peeps-load";
+var LOAD_IDENTITY_AUDIENCE = "peeps-load-identity";
+var OIDC_ANSWER_MAX_BYTES = 16 * 1024;
+var OIDC_TOKEN_MAX_CHARS = 8 * 1024;
+var OIDC_ATTEMPTS = 5;
+var CLAIMS_MAX_BYTES = 16 * 1024;
+var IDENTITY_MS = 3e4;
+var GITHUB_OIDC_HOSTS = [".actions.githubusercontent.com"];
+function oidcRequestUrl(raw, hosts = GITHUB_OIDC_HOSTS) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ControlHttpError("config", "url", void 0, "ACTIONS_ID_TOKEN_REQUEST_URL");
+  }
+  const host = url.hostname.toLowerCase();
+  const allowed = hosts.some((h) => h.startsWith(".") ? url.port === "" && host.endsWith(h) && host.length > h.length : url.host.toLowerCase() === h);
+  if (url.protocol !== "https:" || url.username || url.password || url.hash || !allowed) throw new ControlHttpError("config", "url", void 0, "ACTIONS_ID_TOKEN_REQUEST_URL");
+  return url;
+}
+async function mintOidcToken(t, agent, oidcUrl, requestToken, audience, window, caller = window, abortOp = "oidc") {
+  const url = new URL(oidcUrl);
+  url.searchParams.set("audience", audience);
+  const path6 = url.pathname + url.search;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const answer = await t.send("oidc", agent, url, path6, requestToken, void 0, OIDC_ANSWER_MAX_BYTES, window);
+      if (answer.status !== 200) throw new ControlHttpError("oidc", "status", answer.status);
+      const value = isObj2(answer.json) ? answer.json.value : void 0;
+      if (typeof value !== "string" || value.length > OIDC_TOKEN_MAX_CHARS || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)) throw new ControlHttpError("oidc", "malformed");
+      return value;
+    } catch (error) {
+      if (caller.aborted) throw new ControlHttpError(abortOp, "aborted");
+      if (!(error instanceof ControlHttpError) || !error.transient || attempt >= OIDC_ATTEMPTS || window.aborted) throw error;
+    }
+    await sleep(200 * attempt, window).catch(() => void 0);
+  }
+}
+function decodeJobClaims(token) {
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts.every((p) => /^[A-Za-z0-9_-]+$/.test(p))) return null;
+  const payload = parts[1];
+  if (Math.floor(payload.length * 3 / 4) > CLAIMS_MAX_BYTES) return null;
+  let claims;
+  try {
+    claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!isObj2(claims)) return null;
+  const read = (name2) => typeof claims[name2] === "string" ? claims[name2] : null;
+  const out = {
+    checkRunId: read("check_run_id"),
+    runId: read("run_id"),
+    runAttempt: read("run_attempt"),
+    runnerEnvironment: read("runner_environment"),
+    eventName: read("event_name"),
+    repositoryId: read("repository_id")
+  };
+  return Object.values(out).every((v2) => v2 !== null) ? out : null;
+}
+var CHECK_RUN_ID = /^[1-9]\d{0,18}$/;
+function identityOf(claims, env) {
+  if (!claims) return { ok: false, refused: "identity" };
+  const checkRunId = Number(claims.checkRunId);
+  if (!CHECK_RUN_ID.test(claims.checkRunId) || !Number.isSafeInteger(checkRunId)) return { ok: false, refused: "identity" };
+  if (claims.runId !== env.GITHUB_RUN_ID || claims.runAttempt !== env.GITHUB_RUN_ATTEMPT) return { ok: false, refused: "identity" };
+  if (claims.eventName !== "workflow_dispatch") return { ok: false, refused: "identity" };
+  if (claims.runnerEnvironment !== "github-hosted") return { ok: false, refused: "self_hosted" };
+  return { ok: true, checkRunId, runAttempt: Number(claims.runAttempt) };
+}
+async function readJobIdentity(oidc, env, seams = {}, signal) {
+  let t;
+  try {
+    const url = oidcRequestUrl(oidc.requestUrl, seams.oidcHosts ?? GITHUB_OIDC_HOSTS);
+    t = controlTransport(seams);
+    const agent = t.agent({ keepAlive: false, maxSockets: 1 });
+    const window = AbortSignal.any([AbortSignal.timeout(IDENTITY_MS), ...signal ? [signal] : []]);
+    const token = await mintOidcToken(t, agent, url, oidc.requestToken, LOAD_IDENTITY_AUDIENCE, window);
+    return identityOf(decodeJobClaims(token), env);
+  } catch {
+    return { ok: false, failed: "oidc" };
+  } finally {
+    t?.close();
+  }
+}
+var isObj2 = (v2) => typeof v2 === "object" && v2 !== null && !Array.isArray(v2);
+
+// src/load/http-control-port.ts
+var CLAIM_RETRY_MS = 4500;
+var CLAIM_ATTEMPT_MS = 2e3;
+var CLAIM_PAUSE_MS = 100;
+var CLAIM_ANSWER_MAX_BYTES = 2 * 1024 * 1024;
+var ANSWER_MAX_BYTES = 64 * 1024;
+var REFUSALS = /* @__PURE__ */ new Set([...CLAIM_REFUSALS, ...RENEW_REFUSALS]);
+var CLAIM_ID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var EVENT_REASONS = new Set(EVENTS_REFUSALS);
+var monoNow = () => Number(process.hrtime.bigint()) / 1e6;
+var HttpControlPort = class {
+  origin;
+  oidcUrl;
+  requestToken;
+  transport;
+  renewAgent;
+  eventsAgent;
+  oidcAgent;
+  constructor(options, seams = {}) {
+    const transport = controlTransport(seams, options.userAgent ?? "peeps-action-load");
+    this.origin = peepsOrigin(options.peepsUrl);
+    this.oidcUrl = oidcRequestUrl(options.oidc.requestUrl, seams.oidcHosts ?? GITHUB_OIDC_HOSTS);
+    this.requestToken = options.oidc.requestToken;
+    this.transport = transport;
+    this.renewAgent = transport.agent({ keepAlive: true, maxSockets: 2, maxFreeSockets: 2, scheduling: "lifo" });
+    this.eventsAgent = transport.agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 });
+    this.oidcAgent = transport.agent({ keepAlive: false, maxSockets: 1 });
+  }
+  /**
+   * Mints the OIDC token, then sends the claim and retries it, identical bytes and the same
+   * token, on a transient failure until `CLAIM_RETRY_MS` after the call.
+   */
+  async claim(body, signal) {
+    const deadline = monoNow() + CLAIM_RETRY_MS;
+    const window = AbortSignal.any([signal, AbortSignal.timeout(CLAIM_RETRY_MS)]);
+    const idToken = await mintOidcToken(this.transport, this.oidcAgent, this.oidcUrl, this.requestToken, LOAD_OIDC_AUDIENCE, window, signal, "claim");
+    const bytes = canonical(body);
+    let last;
+    for (; ; ) {
+      const left = deadline - monoNow();
+      if (left <= 0) throw last ?? new ControlHttpError("claim", "timeout");
+      const cutByWindow = left < CLAIM_ATTEMPT_MS;
+      const attempt = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, Math.ceil(Math.min(left, CLAIM_ATTEMPT_MS))))]);
+      try {
+        const answer = await this.send("claim", this.renewAgent, "/api/v1/load/claims", idToken, bytes, CLAIM_ANSWER_MAX_BYTES, attempt);
+        if (monoNow() >= deadline) {
+          last = new ControlHttpError("claim", "timeout");
+          continue;
+        }
+        const reply = reduceRefusal(answer);
+        if (isObj3(reply) && !("refused" in reply) && !(typeof reply.claimId === "string" && CLAIM_ID2.test(reply.claimId))) throw new ControlHttpError("claim", "malformed", answer.status);
+        return reply;
+      } catch (error) {
+        if (!(error instanceof ControlHttpError) || !error.transient || signal.aborted) throw signal.aborted ? new ControlHttpError("claim", "aborted") : error;
+        if (!(last && cutByWindow && error.code === "timeout")) last = error;
+      }
+      const pause = Math.min(CLAIM_PAUSE_MS, deadline - monoNow());
+      if (pause > 0) await sleep(pause, signal).catch(() => void 0);
+    }
+  }
+  async renew(claimId, runToken, body, signal) {
+    const answer = await this.send("renew", this.renewAgent, claimPath(claimId, "renew"), runToken, body, ANSWER_MAX_BYTES, signal);
+    return reduceRefusal(answer);
+  }
+  async events(claimId, eventsToken, body, signal) {
+    const answer = await this.send("events", this.eventsAgent, claimPath(claimId, "events"), eventsToken, JSON.stringify(body), ANSWER_MAX_BYTES, signal);
+    const json = answer.json;
+    if (isObj3(json) && json.ok === true && answer.status < 300) {
+      if ("refused" in json || "reason" in json || typeof json.replay !== "boolean") throw new ControlHttpError("events", "malformed", answer.status);
+      return { ok: true, replay: json.replay };
+    }
+    if (isObj3(json) && json.ok === false) return { ok: false, reason: typeof json.reason === "string" && EVENT_REASONS.has(json.reason) ? json.reason : "unknown" };
+    return reduceRefusal(answer);
+  }
+  /** Closes the kept-alive sockets. */
+  close() {
+    this.transport.close();
+  }
+  send(op, agent, path6, bearer, body, cap, signal) {
+    return this.transport.send(op, agent, this.origin, path6, bearer, body, cap, signal);
+  }
+};
+function claimPath(claimId, op) {
+  try {
+    return `/api/v1/load/claims/${encodeURIComponent(claimId)}/${op}`;
+  } catch {
+    throw new ControlHttpError(op, "malformed");
+  }
+}
+function peepsOrigin(raw) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ControlHttpError("config", "url", void 0, "PEEPS_URL");
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" && url.pathname !== "" || url.search || url.hash) throw new ControlHttpError("config", "url", void 0, "PEEPS_URL");
+  return url;
+}
+var isObj3 = (v2) => typeof v2 === "object" && v2 !== null && !Array.isArray(v2);
+function reduceRefusal(answer) {
+  const json = answer.json;
+  if (isObj3(json) && "refused" in json) return { refused: typeof json.refused === "string" && REFUSALS.has(json.refused) ? json.refused : "unknown" };
+  return answer.status < 300 ? json : { refused: "unknown" };
+}
+
+// src/load/job-facts.ts
+var import_node_fs = require("node:fs");
+var import_node_os = __toESM(require("node:os"));
+var import_node_path = __toESM(require("node:path"));
+var VERSION = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+var DIGITS = /^[1-9][0-9]{0,18}$/;
+function readJobFacts(env, deps = {}) {
+  const exists = deps.exists ?? import_node_fs.existsSync;
+  const arch = deps.arch ?? process.arch;
+  const value = (name2) => {
+    const v2 = env[name2];
+    return typeof v2 === "string" && v2.length > 0 ? v2 : null;
+  };
+  const input = (name2) => {
+    const v2 = env[name2]?.trim();
+    return v2 ? v2 : null;
+  };
+  const workspace = value("GITHUB_WORKSPACE");
+  const toolCache = value("RUNNER_TOOL_CACHE");
+  let hostname = null;
+  try {
+    hostname = (deps.hostname ?? import_node_os.default.hostname)();
+  } catch {
+    hostname = null;
+  }
+  return {
+    github: env.GITHUB_ACTIONS === "true" && workspace !== null && import_node_path.default.isAbsolute(workspace) && DIGITS.test(value("GITHUB_RUN_ID") ?? ""),
+    oidcUrl: value("ACTIONS_ID_TOKEN_REQUEST_URL") !== null,
+    oidcToken: value("ACTIONS_ID_TOKEN_REQUEST_TOKEN") !== null,
+    actionRef: value("GITHUB_ACTION_REF"),
+    job: value("GITHUB_JOB"),
+    eventName: value("GITHUB_EVENT_NAME"),
+    runAttempt: value("GITHUB_RUN_ATTEMPT"),
+    dockerenv: exists(import_node_path.default.join(deps.root ?? "/", ".dockerenv")),
+    workspace,
+    hostname,
+    toolCache,
+    trustedNodePresent: toolCache !== null && import_node_path.default.isAbsolute(toolCache) && exists(loadNodeDir(toolCache, arch)),
+    pathNodeVersions: toolCache === null ? [] : pathNodeVersions(env.PATH ?? "", toolCache, arch),
+    preloadVars: PRELOAD_VARS.filter((name2) => value(name2) !== null),
+    grant: input("INPUT_LOAD-GRANT"),
+    workload: input("INPUT_LOAD-WORKLOAD"),
+    apiUrl: value("PEEPS_API_URL")
+  };
+}
+function pathNodeVersions(pathVar, toolCache, arch) {
+  const prefix = `${toolCache.replace(/\/+$/, "")}/node/`;
+  const suffix = `/${arch}/bin`;
+  const out = [];
+  for (const entry of pathVar.split(":")) {
+    const dir = entry.replace(/\/+$/, "");
+    if (!dir.startsWith(prefix) || !dir.endsWith(suffix)) continue;
+    const version = dir.slice(prefix.length, dir.length - suffix.length);
+    if (VERSION.test(version) && !out.includes(version)) out.push(version);
+    if (out.length === 5) break;
+  }
+  return out;
 }
 
 // src/load/signals.ts
@@ -518,11 +750,11 @@ function loadSignals(proc = process) {
 }
 
 // src/load/supervisor.ts
-var import_node_crypto8 = require("node:crypto");
-var import_node_fs3 = require("node:fs");
+var import_node_crypto9 = require("node:crypto");
+var import_node_fs5 = require("node:fs");
 var import_node_perf_hooks = require("node:perf_hooks");
-var import_node_os4 = __toESM(require("node:os"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_os5 = __toESM(require("node:os"));
+var import_node_path4 = __toESM(require("node:path"));
 
 // src/load/accounting.ts
 var DENY_REASONS = [
@@ -754,7 +986,7 @@ function sharedClocks() {
 
 // src/load/claim-body.ts
 var import_node_child_process = require("node:child_process");
-var import_node_os = __toESM(require("node:os"));
+var import_node_os2 = __toESM(require("node:os"));
 var MAX_FAILURES = 20;
 var MAX_FAILURE = 256;
 var MAX_LABEL = 128;
@@ -796,16 +1028,16 @@ function clip(text2, max) {
   return out;
 }
 var SHA256_HEX = /^[0-9a-f]{64}$/;
-var COMMIT2 = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-var GRANT_REF = /^[A-Za-z0-9_-]{22}$/;
+var COMMIT3 = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+var GRANT_REF2 = /^[A-Za-z0-9_-]{22}$/;
 var UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 var utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-var isObj3 = (v2) => typeof v2 === "object" && v2 !== null && !Array.isArray(v2);
+var isObj4 = (v2) => typeof v2 === "object" && v2 !== null && !Array.isArray(v2);
 var whole2 = (v2, min = 0) => typeof v2 === "number" && Number.isSafeInteger(v2) && v2 >= min;
 var str = (v2, min, max) => typeof v2 === "string" && v2.length >= min && v2.length <= max;
 var match = (v2, re) => typeof v2 === "string" && re.test(v2);
 function exactly(v2, at, keys) {
-  if (!isObj3(v2)) return at;
+  if (!isObj4(v2)) return at;
   for (const k of Object.keys(v2)) if (!keys.includes(k)) return `${at}.${k}`;
   for (const k of keys) if (!Object.hasOwn(v2, k)) return `${at}.${k}`;
   return void 0;
@@ -819,15 +1051,15 @@ function claimBodyProblem(body) {
   } catch {
     return "json";
   }
-  if (isObj3(raw) && typeof raw.protocol === "number" && raw.protocol !== WIRE_PROTOCOL) return "unsupported_protocol";
+  if (isObj4(raw) && typeof raw.protocol === "number" && raw.protocol !== WIRE_PROTOCOL) return "unsupported_protocol";
   const top = exactly(raw, "body", ["protocol", "actionVersion", "grantRef", "idempotencyKey", "checkoutSha", "workload", "lockDigests", "observed", "runAttempt", "checkRunId", "fence"]);
   if (top) return top;
   const r = raw;
   if (r.protocol !== WIRE_PROTOCOL) return "protocol";
   if (!str(r.actionVersion, 1, 64)) return "actionVersion";
-  if (!match(r.grantRef, GRANT_REF)) return "grantRef";
+  if (!match(r.grantRef, GRANT_REF2)) return "grantRef";
   if (!match(r.idempotencyKey, UUID_V4)) return "idempotencyKey";
-  if (!match(r.checkoutSha, COMMIT2)) return "checkoutSha";
+  if (!match(r.checkoutSha, COMMIT3)) return "checkoutSha";
   const w = exactly(r.workload, "workload", ["path", "digest"]);
   if (w) return w;
   if (!str(r.workload.path, 1, 1024)) return "workload.path";
@@ -866,7 +1098,7 @@ function imageLabel(env) {
 }
 function kernelRelease() {
   try {
-    return KERNEL_RELEASE.exec(import_node_os.default.release())?.[0] ?? "unknown";
+    return KERNEL_RELEASE.exec(import_node_os2.default.release())?.[0] ?? "unknown";
   } catch {
     return "unknown";
   }
@@ -1136,8 +1368,8 @@ function normalize(req, tunnel, policy) {
   if (!req.target.startsWith("/")) return refuse("form");
   if (req.rawHeaders.length > 2 * MAX_HEADERS) return refuse("header", 431);
   const q = req.target.indexOf("?");
-  const path4 = q < 0 ? req.target : req.target.slice(0, q);
-  if (!unambiguousPath(path4) || !/^[\x21-\x7e]*$/.test(req.target) || req.target.includes("#")) return refuse("path");
+  const path6 = q < 0 ? req.target : req.target.slice(0, q);
+  if (!unambiguousPath(path6) || !/^[\x21-\x7e]*$/.test(req.target) || req.target.includes("#")) return refuse("path");
   const extra = new Set((policy.headers ?? []).map((h) => h.toLowerCase()).filter((h) => !OVERRIDE_HEADERS.test(h.replaceAll("_", "-"))));
   const lines = [];
   let host;
@@ -1165,25 +1397,25 @@ function normalize(req, tunnel, policy) {
   if (length2 !== void 0 && (!/^(0|[1-9][0-9]*)$/.test(length2) || Number(length2) !== req.body.length)) return refuse("length");
   if (READ_METHODS.has(req.method) && req.body.length > 0) return refuse("length");
   if (!READ_METHODS.has(req.method)) {
-    if (!policy.allowedRequests.some((r) => r.method === req.method && r.path === path4)) return refuse("not_allowed", 403);
+    if (!policy.allowedRequests.some((r) => r.method === req.method && r.path === path6)) return refuse("not_allowed", 403);
     if (q >= 0 && [...new URLSearchParams(req.target.slice(q + 1)).keys()].some((k) => phpName(k).toLowerCase() === "_method")) return refuse("not_allowed", 403);
     if (namesMethodOverride(req.body.toString("latin1"))) return refuse("not_allowed", 403);
   }
   const hostLine = authority.port === 443 ? authority.host : `${authority.host}:${authority.port}`;
   const framing = WRITE_METHODS.has(req.method) || req.body.length > 0 ? [`content-length: ${req.body.length}`] : [];
   const head = [`${req.method} ${req.target} HTTP/1.1`, `host: ${hostLine}`, ...lines, ...framing, "connection: close", "", ""].join("\r\n");
-  return { ok: true, method: req.method, path: path4, origin: authority.origin, head, body: req.body };
+  return { ok: true, method: req.method, path: path6, origin: authority.origin, head, body: req.body };
 }
 function hostMatches(value, a) {
   const v2 = value.toLowerCase();
   return v2 === `${a.host}:${a.port}` || a.port === 443 && v2 === a.host;
 }
-function unambiguousPath(path4) {
-  if (!path4.startsWith("/") || path4.includes("\\") || path4.includes(";")) return false;
-  if (/%(2f|5c|2e|00)/i.test(path4)) return false;
-  if (/%(?![0-9a-f]{2})/i.test(path4)) return false;
-  const segments = path4.slice(1).split("/");
-  return segments.every((s, i) => (s !== "" || i === segments.length - 1) && s !== "." && s !== "..") && !(path4.length > 1 && path4.endsWith("//"));
+function unambiguousPath(path6) {
+  if (!path6.startsWith("/") || path6.includes("\\") || path6.includes(";")) return false;
+  if (/%(2f|5c|2e|00)/i.test(path6)) return false;
+  if (/%(?![0-9a-f]{2})/i.test(path6)) return false;
+  const segments = path6.slice(1).split("/");
+  return segments.every((s, i) => (s !== "" || i === segments.length - 1) && s !== "." && s !== "..") && !(path6.length > 1 && path6.endsWith("//"));
 }
 
 // src/load/engine-limits.ts
@@ -1727,7 +1959,7 @@ var import_node_tls3 = require("node:tls");
 var import_node_crypto4 = require("node:crypto");
 var import_promises = require("node:dns/promises");
 var import_node_net = require("node:net");
-var import_node_os2 = require("node:os");
+var import_node_os3 = require("node:os");
 var import_node_tls2 = require("node:tls");
 var METADATA_V4 = /* @__PURE__ */ new Set(["169.254.169.254", "168.63.129.16"]);
 function classify(address) {
@@ -1806,7 +2038,7 @@ function canonical2(address) {
 }
 function ownAddresses() {
   return new Set(
-    Object.values((0, import_node_os2.networkInterfaces)()).flat().filter((i) => i !== void 0).map((i) => canonical2(i.address))
+    Object.values((0, import_node_os3.networkInterfaces)()).flat().filter((i) => i !== void 0).map((i) => canonical2(i.address))
   );
 }
 function reachable(address, origin, own = ownAddresses()) {
@@ -2237,11 +2469,11 @@ var GateProxy = class {
   buffered = 0;
   closing;
   /** Listen on the proxy's Unix socket. */
-  listen(path4) {
+  listen(path6) {
     if (this.closed) return Promise.reject(new Error("load gate: proxy is closed"));
     return new Promise((resolve, reject) => {
       this.server.once("error", reject);
-      this.server.listen(path4, () => {
+      this.server.listen(path6, () => {
         this.server.off("error", reject);
         resolve();
       });
@@ -2702,12 +2934,13 @@ function eventsBody(streamId, seq2, batch, final) {
 // src/load/install.ts
 var import_node_child_process2 = require("node:child_process");
 var import_node_crypto6 = require("node:crypto");
-var import_node_fs = require("node:fs");
+var import_node_fs2 = require("node:fs");
 var import_promises3 = require("node:fs/promises");
 var import_node_module = require("node:module");
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 
 // src/load/jail/spec.ts
+var import_node_string_decoder = require("node:string_decoder");
 var RELAY_UID = 65533;
 var ADDRESS_FAMILIES = ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"];
 var DENIED_SYSCALLS = [
@@ -2747,6 +2980,44 @@ var OUTPUT_PREFIX = "jail| ";
 function neutralize(line) {
   return OUTPUT_PREFIX + line.replaceAll("##[", "## [");
 }
+var NeutralLines = class {
+  constructor(emit, max = 64 * 1024) {
+    this.emit = emit;
+    this.max = max;
+  }
+  pending = "";
+  /** The last chunk ended with CR: a LF at the start of the next one ends nothing more. */
+  afterCr = false;
+  decoder = new import_node_string_decoder.StringDecoder("utf8");
+  write(chunk) {
+    this.take(typeof chunk === "string" ? chunk : this.decoder.write(chunk));
+  }
+  end() {
+    this.take(this.decoder.end());
+    if (this.pending) this.emit(neutralize(this.pending));
+    this.pending = "";
+  }
+  take(text2) {
+    if (this.afterCr && text2.startsWith("\n")) text2 = text2.slice(1);
+    if (text2 === "") return;
+    this.afterCr = text2.endsWith("\r");
+    const parts = text2.split(/\r\n|\r|\n/);
+    this.pending += parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      this.cut();
+      this.emit(neutralize(this.pending));
+      this.pending = parts[i];
+    }
+    this.cut();
+  }
+  /** Hands on full pieces of an over-long line, keeping the rest. */
+  cut() {
+    while (this.pending.length > this.max) {
+      this.emit(neutralize(this.pending.slice(0, this.max)));
+      this.pending = this.pending.slice(this.max);
+    }
+  }
+};
 function specProblems(spec) {
   const problems = [];
   if (!RUN_ID.test(spec.runId)) problems.push("runId must be 1-40 lowercase letters, digits or dashes");
@@ -2842,26 +3113,41 @@ function baseOf(file) {
 }
 
 // src/load/install.ts
-var SUPPORTED_TOOLCHAIN = [{ node: "24.22.3", npm: "11.19.1" }];
+var SUPPORTED_TOOLCHAIN = [
+  {
+    node: "24.22.3",
+    npm: "11.19.1",
+    linuxX64: {
+      nodeSha256: "a7ec1b37e6ff9d187e4198c5b6df9a4eb1c74dd31804fb3bac55cc4ceca1ac01",
+      npmTreeSha256: "b67169ebac6067aac627cadae018dba12e6dc829a2902fa2345853b8ddaded5c"
+    }
+  }
+];
 var REGISTRY = "https://registry.npmjs.org/";
 var INSTALL_MS = 10 * 6e4;
 var DEP_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
 var InstallRefused = class extends Error {
   constructor(problems) {
-    super(`install_unsupported: ${problems.join("; ")}`);
+    super(`install_unsupported: ${problems.join("\n")}`);
     this.problems = problems;
     this.name = "InstallRefused";
+  }
+};
+var InstallFailed = class extends Error {
+  constructor(why) {
+    super(`install_failed: ${why}`);
+    this.name = "InstallFailed";
   }
 };
 function readJson(root, file, unreadable, name2) {
   if (!lstatExists(file)) return void 0;
   try {
-    const resolved = (0, import_node_fs.realpathSync)(file);
-    if (!inside(resolved, root) || !(0, import_node_fs.statSync)(resolved).isFile()) {
+    const resolved = (0, import_node_fs2.realpathSync)(file);
+    if (!inside(resolved, root) || !(0, import_node_fs2.statSync)(resolved).isFile()) {
       unreadable.push(name2);
       return void 0;
     }
-    return JSON.parse((0, import_node_fs.readFileSync)(resolved, "utf8"));
+    return JSON.parse((0, import_node_fs2.readFileSync)(resolved, "utf8"));
   } catch {
     unreadable.push(name2);
     return void 0;
@@ -2878,11 +3164,12 @@ function workspacePatterns(manifest) {
   if (typeof w === "object" && w !== null && Array.isArray(w.packages)) return w.packages;
   return [w];
 }
+var OTHER_LOCKFILES = ["yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"];
 function readWorkspace(dir) {
-  const root = (0, import_node_fs.realpathSync)(dir);
+  const root = (0, import_node_fs2.realpathSync)(dir);
   const unreadable = [];
-  const manifest = readJson(root, import_node_path.default.join(root, "package.json"), unreadable, "package.json");
-  const lock = readJson(root, import_node_path.default.join(root, "package-lock.json"), unreadable, "package-lock.json");
+  const manifest = readJson(root, import_node_path2.default.join(root, "package.json"), unreadable, "package.json");
+  const lock = readJson(root, import_node_path2.default.join(root, "package-lock.json"), unreadable, "package-lock.json");
   const workspaces = [];
   for (const pattern of workspacePatterns(manifest)) {
     if (typeof pattern !== "string" || !/^[A-Za-z0-9._@/-]+(\/\*)?$/.test(pattern) || pattern.startsWith("/")) {
@@ -2890,24 +3177,24 @@ function readWorkspace(dir) {
       continue;
     }
     const base = pattern.endsWith("/*") ? pattern.slice(0, -2) : pattern;
-    const lexical = import_node_path.default.resolve(root, base);
+    const lexical = import_node_path2.default.resolve(root, base);
     let dirs = [];
     try {
-      const real = (0, import_node_fs.realpathSync)(lexical);
+      const real = (0, import_node_fs2.realpathSync)(lexical);
       if (!inside(real, root) || !inside(lexical, root)) {
         workspaces.push({ rel: pattern, problem: "workspace is outside the checkout" });
         continue;
       }
-      dirs = pattern.endsWith("/*") ? (0, import_node_fs.readdirSync)(real, { withFileTypes: true }).filter((entry) => entry.isDirectory() || entry.isSymbolicLink()).map((entry) => import_node_path.default.join(lexical, entry.name)) : [lexical];
+      dirs = pattern.endsWith("/*") ? (0, import_node_fs2.readdirSync)(real, { withFileTypes: true }).filter((entry) => entry.isDirectory() || entry.isSymbolicLink()).map((entry) => import_node_path2.default.join(lexical, entry.name)) : [lexical];
     } catch {
       if (!inside(lexical, root)) workspaces.push({ rel: pattern, problem: "workspace is outside the checkout" });
       continue;
     }
     for (const d of dirs) {
-      const rel = import_node_path.default.relative(root, d).split(import_node_path.default.sep).join("/");
+      const rel = import_node_path2.default.relative(root, d).split(import_node_path2.default.sep).join("/");
       let real;
       try {
-        real = (0, import_node_fs.realpathSync)(d);
+        real = (0, import_node_fs2.realpathSync)(d);
       } catch {
         continue;
       }
@@ -2915,8 +3202,8 @@ function readWorkspace(dir) {
         workspaces.push({ rel, problem: "workspace is outside the checkout" });
         continue;
       }
-      if (!(0, import_node_fs.statSync)(real).isDirectory() || !lstatExists(import_node_path.default.join(real, "package.json"))) continue;
-      workspaces.push({ rel, manifest: readJson(root, import_node_path.default.join(real, "package.json"), unreadable, `${rel}/package.json`) });
+      if (!(0, import_node_fs2.statSync)(real).isDirectory() || !lstatExists(import_node_path2.default.join(real, "package.json"))) continue;
+      workspaces.push({ rel, manifest: readJson(root, import_node_path2.default.join(real, "package.json"), unreadable, `${rel}/package.json`) });
     }
   }
   return {
@@ -2924,15 +3211,16 @@ function readWorkspace(dir) {
     manifest,
     lock,
     unreadable,
-    shrinkwrap: (0, import_node_fs.existsSync)(import_node_path.default.join(root, "npm-shrinkwrap.json")),
-    npmrc: lstatExists(import_node_path.default.join(root, ".npmrc")),
+    shrinkwrap: (0, import_node_fs2.existsSync)(import_node_path2.default.join(root, "npm-shrinkwrap.json")),
+    npmrc: lstatExists(import_node_path2.default.join(root, ".npmrc")),
+    otherLockfiles: OTHER_LOCKFILES.filter((name2) => lstatExists(import_node_path2.default.join(root, name2))),
     workspaces,
     externalLinks: externalLinks(root)
   };
 }
 function lstatExists(file) {
   try {
-    (0, import_node_fs.lstatSync)(file);
+    (0, import_node_fs2.lstatSync)(file);
     return true;
   } catch {
     return false;
@@ -2941,16 +3229,16 @@ function lstatExists(file) {
 function externalLinks(root) {
   const out = [];
   const walk = (dir) => {
-    for (const entry of (0, import_node_fs.readdirSync)(dir, { withFileTypes: true })) {
-      const full = import_node_path.default.join(dir, entry.name);
+    for (const entry of (0, import_node_fs2.readdirSync)(dir, { withFileTypes: true })) {
+      const full = import_node_path2.default.join(dir, entry.name);
       if (entry.isSymbolicLink()) {
         let target;
         try {
-          target = (0, import_node_fs.realpathSync)(full);
+          target = (0, import_node_fs2.realpathSync)(full);
         } catch {
-          target = import_node_path.default.resolve(dir, (0, import_node_fs.readlinkSync)(full));
+          target = import_node_path2.default.resolve(dir, (0, import_node_fs2.readlinkSync)(full));
         }
-        if (!inside(target, root)) out.push(import_node_path.default.relative(root, full));
+        if (!inside(target, root)) out.push(import_node_path2.default.relative(root, full));
       } else if (entry.isDirectory() && entry.name !== ".git" && entry.name !== "node_modules") walk(full);
     }
   };
@@ -3088,19 +3376,27 @@ function satisfies(version, range) {
     return set2.some((c) => c.v.pre.length > 0 && c.v.major === ver.major && c.v.minor === ver.minor && c.v.patch === ver.patch);
   });
 }
-var NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+var NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._~-]*|[A-Za-z0-9][A-Za-z0-9._~-]*)$/;
+function shownName(name2) {
+  return typeof name2 === "string" && name2.length <= 214 && NAME.test(name2) ? name2 : void 0;
+}
+var SHOWN_PATH = /^[A-Za-z0-9._@/+-]{1,200}$/;
+function shownPath(value, otherwise) {
+  return typeof value === "string" && SHOWN_PATH.test(value) ? value : otherwise;
+}
+var label = (name2, index) => shownName(name2) ?? `entry #${index + 1}`;
 function specOf(name2, spec) {
-  if (typeof spec !== "string") return `${name2}: the spec is not a string`;
+  if (typeof spec !== "string") return "the spec is not a string";
   if (spec.startsWith("npm:")) {
     const rest = spec.slice(4);
     const at = rest.lastIndexOf("@");
-    if (at <= 0) return `${name2}: an npm: alias must name a version range`;
+    if (at <= 0) return "the spec is an npm: alias with no version range";
     const target = rest.slice(0, at);
     const range = rest.slice(at + 1);
-    if (!NAME.test(target) || parseRange(range) === null) return `${name2}: ${spec} is not an npm: alias to a semver range`;
+    if (!NAME.test(target) || parseRange(range) === null) return "the spec is not an npm: alias to a semver range";
     return { name: target, range };
   }
-  if (parseRange(spec) === null) return `${name2}: ${spec} is not a semver range (git, file, link, URL and tag specs are refused)`;
+  if (parseRange(spec) === null) return "the spec is not a semver range (git, file, link, URL and tag specs are refused)";
   return { name: name2, range: spec };
 }
 function depsOf(manifest, field) {
@@ -3113,10 +3409,10 @@ function manifestProblems(manifest, where) {
   for (const field of DEP_FIELDS) {
     const raw = manifest[field];
     if (raw !== void 0 && (typeof raw !== "object" || raw === null || Array.isArray(raw))) out.push(`${where}: ${field} is not an object`);
-    for (const [name2, spec] of Object.entries(depsOf(manifest, field))) {
-      if (!NAME.test(name2)) out.push(`${where}: ${name2} is not a package name`);
+    for (const [index, [name2, spec]] of Object.entries(depsOf(manifest, field)).entries()) {
+      if (!NAME.test(name2)) out.push(`${where}: ${field} entry #${index + 1} is not a package name`);
       const parsed = specOf(name2, spec);
-      if (typeof parsed === "string") out.push(`${where}: ${field} ${parsed}`);
+      if (typeof parsed === "string") out.push(`${where}: ${field} ${label(name2, index)}: ${parsed}`);
     }
   }
   if (Object.hasOwn(manifest, "overrides")) validateOverrides(manifest.overrides, where, out);
@@ -3127,36 +3423,51 @@ function validateOverrides(overrides, where, out, depth = 0) {
     out.push(`${where}: invalid overrides object`);
     return;
   }
-  for (const [name2, value] of Object.entries(overrides)) {
+  for (const [index, [name2, value]] of Object.entries(overrides).entries()) {
     if (typeof value === "object" && value !== null) validateOverrides(value, where, out, depth + 1);
     else if (!(typeof value === "string" && value.startsWith("$") && NAME.test(value.slice(1)))) {
       const spec = specOf(name2, value);
-      if (typeof spec === "string") out.push(`${where}: overrides ${spec}`);
+      if (typeof spec === "string") out.push(`${where}: overrides ${label(name2, index)}: ${spec}`);
     }
   }
 }
-function registryTarball(value) {
-  if (typeof value !== "string" || !value.startsWith(REGISTRY)) return false;
+var TARBALL_PATH = /^\/(?:@[a-z0-9][a-z0-9._~-]*\/[a-z0-9._~-]+|[A-Za-z0-9._~-]+)\/-\/[A-Za-z0-9._~-]+-[0-9A-Za-z.+_-]+\.tgz$/;
+function canonicalRegistryTarball(value) {
+  if (typeof value !== "string" || value.includes("%")) return false;
+  let url;
   try {
-    const url = new URL(value);
-    return url.origin === new URL(REGISTRY).origin && url.username === "" && url.password === "";
+    url = new URL(value);
   } catch {
     return false;
   }
+  return url.href === value && url.protocol === "https:" && url.hostname === "registry.npmjs.org" && url.port === "" && url.username === "" && url.password === "" && url.search === "" && url.hash === "" && TARBALL_PATH.test(url.pathname);
+}
+function sha512Of(integrity) {
+  if (typeof integrity !== "string") return null;
+  for (const part of integrity.trim().split(/\s+/)) {
+    if (!part.startsWith("sha512-")) continue;
+    const encoded = part.slice("sha512-".length);
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
+    const bytes = Buffer.from(encoded, "base64");
+    if (bytes.length !== 64 || bytes.toString("base64") !== encoded) return null;
+    return part;
+  }
+  return null;
 }
 var BAD_LEGACY = /^(?:git\b|git\+|github:|gist:|bitbucket:|gitlab:|file:|link:|https?:|[^@/:]+\/[^@/:])/;
 function legacyProblems(deps, trail, out, depth = 0) {
   if (typeof deps !== "object" || deps === null || depth > 64) return;
-  for (const [name2, entry] of Object.entries(deps)) {
+  for (const [index, [name2, entry]] of Object.entries(deps).entries()) {
+    const shown = label(name2, index);
     if (typeof entry !== "object" || entry === null) {
-      out.push(`package-lock.json: dependencies ${trail}${name2} is not an object`);
+      out.push(`package-lock.json: dependencies ${trail}${shown} is not an object`);
       continue;
     }
     const e = entry;
     for (const key of ["version", "from"]) {
-      if (typeof e[key] === "string" && BAD_LEGACY.test(e[key])) out.push(`package-lock.json: dependencies ${trail}${name2} ${key} ${String(e[key])} is not from the registry`);
+      if (typeof e[key] === "string" && BAD_LEGACY.test(e[key])) out.push(`package-lock.json: dependencies ${trail}${shown}: ${key} is not from the registry`);
     }
-    legacyProblems(e.dependencies, `${trail}${name2} > `, out, depth + 1);
+    legacyProblems(e.dependencies, `${trail}${shown} > `, out, depth + 1);
   }
 }
 function lockProblems(ws) {
@@ -3164,28 +3475,30 @@ function lockProblems(ws) {
   if (lock === void 0) return ws.unreadable.includes("package-lock.json") ? [] : ["package-lock.json is required"];
   if (typeof lock !== "object" || lock === null) return ["package-lock.json: not a JSON object"];
   if (lock.lockfileVersion !== 2 && lock.lockfileVersion !== 3 || typeof lock.packages !== "object" || lock.packages === null || Array.isArray(lock.packages)) {
-    return [`package-lock.json: lockfileVersion ${String(lock.lockfileVersion)} is not supported (2 or 3 with packages)`];
+    const version = Number.isSafeInteger(lock.lockfileVersion) ? String(lock.lockfileVersion) : "(not a whole number)";
+    return [`package-lock.json: lockfileVersion ${version} is not supported (2 or 3 with packages)`];
   }
   const out = [];
   const packages = lock.packages;
   const workspaceFolders = new Set(ws.workspaces.filter((w) => !w.problem).map((w) => w.rel));
-  for (const [key, entry] of Object.entries(packages)) {
+  for (const [index, [key, entry]] of Object.entries(packages).entries()) {
     const inModules = key.includes("node_modules/");
-    const name2 = key === "" ? "<root>" : inModules ? key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length) : key;
+    const other = `packages entry #${index + 1}`;
+    const name2 = key === "" ? "<root>" : inModules ? shownName(key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length)) ?? other : shownPath(key, other);
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
       out.push(`package-lock.json: ${name2} is not an object`);
       continue;
     }
-    out.push(...manifestProblems(entry, `package-lock.json: ${key || "<root>"}`));
+    out.push(...manifestProblems(entry, `package-lock.json: ${key === "" ? "<root>" : shownPath(key, other)}`));
     if (key === "") continue;
     if (entry.hasShrinkwrap) {
       out.push(`package-lock.json: ${name2} carries its own shrinkwrap, which is not supported`);
       continue;
     }
     if (entry.link) {
-      const target = inModules && entry.link === true && typeof entry.resolved === "string" ? import_node_path.default.posix.normalize(entry.resolved) : "";
-      const ok = target !== "" && !target.startsWith("..") && !import_node_path.default.posix.isAbsolute(target) && workspaceFolders.has(target) && packages[target] !== void 0;
-      if (!ok) out.push(`package-lock.json: ${name2} links to ${String(entry.resolved)}, not a workspace folder in the checkout`);
+      const target = inModules && entry.link === true && typeof entry.resolved === "string" ? import_node_path2.default.posix.normalize(entry.resolved) : "";
+      const ok = target !== "" && !target.startsWith("..") && !import_node_path2.default.posix.isAbsolute(target) && workspaceFolders.has(target) && packages[target] !== void 0;
+      if (!ok) out.push(`package-lock.json: ${name2} links to a resolved path that is not a workspace folder in the checkout`);
       continue;
     }
     if (!inModules) {
@@ -3193,18 +3506,22 @@ function lockProblems(ws) {
       continue;
     }
     if (entry.inBundle === true && entry.resolved !== void 0) {
-      out.push(`package-lock.json: bundled ${name2} has an explicit source (${String(entry.resolved)}), not resolved from ${REGISTRY} by its parent`);
+      out.push(`package-lock.json: bundled ${name2} has an explicit source in resolved, not resolved from ${REGISTRY} by its parent`);
       continue;
     }
     if (entry.resolved === void 0 && entry.inBundle === true) {
       const plainName = entry.name === void 0 || typeof entry.name === "string" && NAME.test(entry.name);
       if (!plainName || typeof entry.version !== "string" || parseVersion(entry.version) === null) {
-        out.push(`package-lock.json: ${name2} is bundled but is not a plain name and version (${String(entry.name ?? name2)}@${String(entry.version)})`);
+        out.push(`package-lock.json: ${name2} is bundled but its name or version is not a plain package name and semver version`);
       }
       continue;
     }
-    if (!registryTarball(entry.resolved) || typeof entry.integrity !== "string" || !entry.integrity) {
-      out.push(`package-lock.json: ${name2} is not resolved from ${REGISTRY} with an integrity hash (${String(entry.resolved)})`);
+    if (!canonicalRegistryTarball(entry.resolved)) {
+      out.push(`package-lock.json: ${name2}: resolved is not a tarball on ${REGISTRY} in its canonical form (https, no userinfo, query or fragment)`);
+    } else if (typeof entry.integrity !== "string" || !entry.integrity) {
+      out.push(`package-lock.json: ${name2}: integrity is missing`);
+    } else if (sha512Of(entry.integrity) === null) {
+      out.push(`package-lock.json: ${name2} has no sha512 integrity hash (re-lock with npm 7 or later)`);
     }
   }
   legacyProblems(lock.dependencies, "", out);
@@ -3212,12 +3529,13 @@ function lockProblems(ws) {
     if (workspace.problem || typeof workspace.manifest !== "object" || workspace.manifest === null) continue;
     const manifest = workspace.manifest;
     const locked = packages[workspace.rel];
-    if (!locked || manifest.version !== locked.version) out.push(`package-lock.json: ${workspace.rel} has a different locked version`);
+    const rel = shownPath(workspace.rel, "a workspace");
+    if (!locked || manifest.version !== locked.version) out.push(`package-lock.json: ${rel} has a different locked version`);
     for (const field of DEP_FIELDS) {
       const wanted = depsOf(manifest, field);
       const actual = depsOf(locked, field);
       if ([.../* @__PURE__ */ new Set([...Object.keys(wanted), ...Object.keys(actual)])].some((dep) => wanted[dep] !== actual[dep])) {
-        out.push(`package-lock.json: ${workspace.rel} has different ${field}`);
+        out.push(`package-lock.json: ${rel} has different ${field}`);
       }
     }
   }
@@ -3226,24 +3544,26 @@ function lockProblems(ws) {
     const wanted = depsOf(ws.manifest, field);
     const locked = depsOf(rootEntry, field);
     const names = /* @__PURE__ */ new Set([...Object.keys(wanted), ...Object.keys(locked)]);
-    for (const name2 of names) {
+    for (const [index, name2] of [...names].entries()) {
+      const shown = label(name2, index);
       if (wanted[name2] !== locked[name2]) {
-        out.push(`package-lock.json: ${field} ${name2} is ${JSON.stringify(locked[name2])} in the lock and ${JSON.stringify(wanted[name2])} in package.json`);
+        out.push(`package-lock.json: ${field} ${shown} differs between the lock's root entry and package.json`);
         continue;
       }
       const spec = specOf(name2, wanted[name2]);
       if (typeof spec === "string") continue;
       const optionalPeer = field === "peerDependencies" && ws.manifest.peerDependenciesMeta?.[name2]?.optional === true;
       const dependency = packages[`node_modules/${name2}`];
-      const entry = dependency?.link === true && typeof dependency.resolved === "string" ? packages[import_node_path.default.posix.normalize(dependency.resolved)] : dependency;
+      const entry = dependency?.link === true && typeof dependency.resolved === "string" ? packages[import_node_path2.default.posix.normalize(dependency.resolved)] : dependency;
       if (!entry) {
-        if (!optionalPeer) out.push(`package-lock.json: ${field} ${name2} has no locked version`);
+        if (!optionalPeer) out.push(`package-lock.json: ${field} ${shown} has no locked version`);
         continue;
       }
       const lockedName = typeof entry.name === "string" ? entry.name : name2;
-      if (lockedName !== spec.name) out.push(`package-lock.json: ${name2} is locked as ${lockedName}, not ${spec.name}`);
+      if (lockedName !== spec.name) out.push(`package-lock.json: ${shown} is locked as ${shownName(lockedName) ?? "another name"}, not ${shownName(spec.name) ?? "the name package.json asks for"}`);
       if (typeof entry.version !== "string" || !satisfies(entry.version, spec.range)) {
-        out.push(`package-lock.json: ${name2} is locked at ${String(entry.version)}, outside ${spec.range}`);
+        const version = typeof entry.version === "string" && entry.version.length <= 64 && parseVersion(entry.version) ? entry.version : "a version";
+        out.push(`package-lock.json: ${shown} is locked at ${version}, outside ${spec.range.length <= 64 ? spec.range : "its range"}`);
       }
     }
   }
@@ -3251,81 +3571,137 @@ function lockProblems(ws) {
 }
 function installProblems(ws) {
   const out = [];
-  for (const name2 of ws.unreadable) out.push(`${name2} must be a valid JSON file inside the checkout`);
+  for (const name2 of ws.unreadable) out.push(`${shownPath(name2, "a workspace's package.json")} must be a valid JSON file inside the checkout`);
   if (ws.manifest === void 0 && !ws.unreadable.includes("package.json")) out.push("package.json is required");
   else if (ws.manifest !== void 0) out.push(...manifestProblems(ws.manifest, "package.json"));
   for (const w of ws.workspaces) {
-    if (w.problem) out.push(`${w.rel}: ${w.problem}`);
-    else if (w.manifest !== void 0) out.push(...manifestProblems(w.manifest, `${w.rel}/package.json`));
+    const rel = shownPath(w.rel, "a workspace");
+    if (w.problem) out.push(`${rel}: ${w.problem}`);
+    else if (w.manifest !== void 0) out.push(...manifestProblems(w.manifest, `${rel}/package.json`));
   }
   if (ws.shrinkwrap) out.push("npm-shrinkwrap.json is not supported");
   if (ws.npmrc) out.push("a project .npmrc is not supported (private registries are not supported)");
-  for (const link of ws.externalLinks) out.push(`${link} is a symlink that leaves the checkout`);
+  for (const name2 of ws.otherLockfiles) out.push(`${name2} is not supported: load runs install from package-lock.json only`);
+  for (const link of ws.externalLinks) out.push(`${shownPath(link, "a path")} is a symlink that leaves the checkout`);
   out.push(...lockProblems(ws));
   return out;
 }
 function installEnv(tc, scratch) {
-  const npmrc = import_node_path.default.join(scratch, "npmrc");
-  const globalNpmrc = import_node_path.default.join(scratch, "npmrc-global");
-  (0, import_node_fs.mkdirSync)(import_node_path.default.join(scratch, "home"), { recursive: true });
-  for (const file of [npmrc, globalNpmrc]) (0, import_node_fs.writeFileSync)(file, `registry=${REGISTRY}
+  const npmrc = import_node_path2.default.join(scratch, "npmrc");
+  const globalNpmrc = import_node_path2.default.join(scratch, "npmrc-global");
+  (0, import_node_fs2.mkdirSync)(import_node_path2.default.join(scratch, "home"), { recursive: true });
+  for (const file of [npmrc, globalNpmrc]) (0, import_node_fs2.writeFileSync)(file, `registry=${REGISTRY}
 `);
   return {
-    PATH: `${import_node_path.default.join(tc.nodeDir, "bin")}:/usr/bin:/bin`,
-    HOME: import_node_path.default.join(scratch, "home"),
+    PATH: `${import_node_path2.default.join(tc.nodeDir, "bin")}:/usr/bin:/bin`,
+    HOME: import_node_path2.default.join(scratch, "home"),
     npm_config_userconfig: npmrc,
     npm_config_globalconfig: globalNpmrc,
     npm_config_registry: REGISTRY,
+    // Offline it changes nothing; online it is one rewrite fewer of a lockfile URL.
+    npm_config_replace_registry_host: "never",
     npm_config_git: "/bin/false",
     npm_config_script_shell: "/bin/false",
     npm_config_ignore_scripts: "true",
-    npm_config_cache: import_node_path.default.join(scratch, "cache"),
+    npm_config_cache: import_node_path2.default.join(scratch, "cache"),
     npm_config_install_links: "false",
     npm_config_audit: "false",
     npm_config_fund: "false",
     npm_config_update_notifier: "false"
   };
 }
-function trustedToolchain(nodeDir, ws, supported = SUPPORTED_TOOLCHAIN, toolCache = process.env.RUNNER_TOOL_CACHE) {
+function trustedToolchain(nodeDir, ws, supported = SUPPORTED_TOOLCHAIN, toolCache = process.env.RUNNER_TOOL_CACHE, check = {}) {
   const fail = (why) => {
     throw new InstallRefused([why]);
   };
-  const root = (0, import_node_fs.realpathSync)(ws);
+  const root = (0, import_node_fs2.realpathSync)(ws);
   if (!toolCache) return fail("RUNNER_TOOL_CACHE is required");
   let dir;
   let node;
   let npmCli;
   let npmPkg;
+  let npmDir;
   try {
-    const cache = (0, import_node_fs.realpathSync)(toolCache);
-    dir = (0, import_node_fs.realpathSync)(nodeDir);
-    if (inside(cache, root) || inside(root, cache) || !supported.some(({ node: version }) => dir === import_node_path.default.join(cache, "node", version, process.arch))) {
+    const cache = (0, import_node_fs2.realpathSync)(toolCache);
+    dir = (0, import_node_fs2.realpathSync)(nodeDir);
+    if (inside(cache, root) || inside(root, cache) || !supported.some(({ node: version }) => dir === import_node_path2.default.join(cache, "node", version, process.arch))) {
       return fail("Node must come from the runner's pinned setup-node toolcache");
     }
   } catch (error) {
     if (error instanceof InstallRefused) throw error;
-    return fail(`cannot resolve the runner toolcache or ${nodeDir}`);
+    return fail("cannot resolve the runner toolcache or the Node folder in it");
   }
   try {
-    node = (0, import_node_fs.realpathSync)(import_node_path.default.join(nodeDir, "bin/node"));
-    npmCli = (0, import_node_fs.realpathSync)(import_node_path.default.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"));
-    npmPkg = (0, import_node_fs.realpathSync)(import_node_path.default.join(nodeDir, "lib/node_modules/npm/package.json"));
+    node = (0, import_node_fs2.realpathSync)(import_node_path2.default.join(nodeDir, "bin/node"));
+    npmCli = (0, import_node_fs2.realpathSync)(import_node_path2.default.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"));
+    npmPkg = (0, import_node_fs2.realpathSync)(import_node_path2.default.join(nodeDir, "lib/node_modules/npm/package.json"));
+    npmDir = (0, import_node_fs2.realpathSync)(import_node_path2.default.join(nodeDir, "lib/node_modules/npm"));
   } catch {
-    return fail(`no node and npm in ${nodeDir}`);
+    return fail("no node and npm in the toolcache's Node folder");
   }
-  for (const [label, file] of [["node", node], ["npm", npmCli], ["npm", npmPkg], ["the toolchain", dir]]) {
-    if (inside(file, root) || inside(root, file)) fail(`${label} must not come from the workspace (${file})`);
-    if (!inside(file, dir)) fail(`${label} must sit inside ${dir} (${file})`);
+  for (const [what, file] of [["node", node], ["npm", npmDir], ["npm", npmCli], ["npm", npmPkg], ["the toolchain", dir]]) {
+    if (inside(file, root) || inside(root, file)) fail(`${what} must not come from the workspace`);
+    if (!inside(file, dir)) fail(`${what} must sit inside the toolcache's Node folder`);
   }
+  const entry = supported.find((s) => import_node_path2.default.basename(import_node_path2.default.dirname(dir)) === s.node);
+  const platform = check.platform ?? `${process.platform}-${process.arch}`;
+  const pinned = platform === "linux-x64" ? entry.linuxX64 : void 0;
+  const nodeSha256 = sha256FileSync(node);
+  const npmTreeSha256 = npmTreeDigestSync(npmDir);
+  check.log?.(`node ${entry.node} sha256 ${nodeSha256} (pinned ${pinned?.nodeSha256 ?? "none"}); npm tree sha256 ${npmTreeSha256} (pinned ${pinned?.npmTreeSha256 ?? "none"})`);
+  if (!pinned) fail(`no pinned sha256 for node ${entry.node} on ${platform} (read node ${nodeSha256}, npm tree ${npmTreeSha256})`);
+  if (nodeSha256 !== pinned.nodeSha256) fail(`node's sha256 ${nodeSha256} is not the pinned ${pinned.nodeSha256}`);
+  if (npmTreeSha256 !== pinned.npmTreeSha256) fail(`npm's tree sha256 ${npmTreeSha256} is not the pinned ${pinned.npmTreeSha256}`);
   const nodeVersion = (0, import_node_child_process2.execFileSync)(node, ["--version"], { encoding: "utf8", env: {}, timeout: 1e4 }).trim().replace(/^v/, "");
-  const npmVersion = String(JSON.parse((0, import_node_fs.readFileSync)(npmPkg, "utf8")).version);
-  if (import_node_path.default.basename(import_node_path.default.dirname(dir)) !== nodeVersion) fail(`node ${nodeVersion} disagrees with its pinned toolcache directory`);
-  if (!supported.some((s) => s.node === nodeVersion && s.npm === npmVersion)) fail(`npm ${npmVersion} with node ${nodeVersion} is not a supported toolchain`);
+  const npmVersion = String(JSON.parse((0, import_node_fs2.readFileSync)(npmPkg, "utf8")).version);
+  const shownVersion = (value) => /^[0-9A-Za-z.+-]{1,40}$/.test(value) ? value : "(unreadable)";
+  if (import_node_path2.default.basename(import_node_path2.default.dirname(dir)) !== nodeVersion) fail(`node ${shownVersion(nodeVersion)} disagrees with its pinned toolcache directory`);
+  if (!supported.some((s) => s.node === nodeVersion && s.npm === npmVersion)) fail(`npm ${shownVersion(npmVersion)} with node ${shownVersion(nodeVersion)} is not a supported toolchain`);
   return { nodeDir: dir, node, npmCli, nodeVersion, npmVersion };
+}
+function npmTreeDigestSync(npmDir) {
+  const root = (0, import_node_fs2.realpathSync)(npmDir);
+  const hash = (0, import_node_crypto6.createHash)("sha256");
+  const walk = (dir, rel) => {
+    for (const name2 of (0, import_node_fs2.readdirSync)(dir).sort()) {
+      const full = import_node_path2.default.join(dir, name2);
+      const relPath = rel ? `${rel}/${name2}` : name2;
+      const st = (0, import_node_fs2.lstatSync)(full);
+      if (st.isSymbolicLink()) {
+        const target = (0, import_node_fs2.readlinkSync)(full);
+        if (import_node_path2.default.isAbsolute(target) || !inside(import_node_path2.default.resolve(dir, target), root)) throw new InstallRefused(["npm's tree holds a symlink that leaves it"]);
+        hash.update(`L\0${relPath}\0${target}
+`);
+      } else if (st.isDirectory()) {
+        hash.update(`D\0${relPath}
+`);
+        walk(full, relPath);
+      } else if (st.isFile()) hash.update(`F\0${relPath}\0${st.size}\0${sha256FileSync(full)}
+`);
+      else throw new InstallRefused(["npm's tree holds a special file"]);
+    }
+  };
+  walk(root, "");
+  return hash.digest("hex");
+}
+function sha256FileSync(file) {
+  const hash = (0, import_node_crypto6.createHash)("sha256");
+  const fd = (0, import_node_fs2.openSync)(file, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(1 << 20);
+    for (; ; ) {
+      const n = (0, import_node_fs2.readSync)(fd, buffer, 0, buffer.length, null);
+      if (n === 0) break;
+      hash.update(buffer.subarray(0, n));
+    }
+  } finally {
+    (0, import_node_fs2.closeSync)(fd);
+  }
+  return hash.digest("hex");
 }
 async function sha256File(file, signal) {
   const hash = (0, import_node_crypto6.createHash)("sha256");
-  for await (const chunk of (0, import_node_fs.createReadStream)(file, { signal })) hash.update(chunk);
+  for await (const chunk of (0, import_node_fs2.createReadStream)(file, { signal })) hash.update(chunk);
   return hash.digest("hex");
 }
 function netnsPrefix(o) {
@@ -3333,18 +3709,35 @@ function netnsPrefix(o) {
   return ["/usr/bin/sudo", "-n", "/usr/bin/unshare", "--net", "--", "/usr/bin/setpriv", `--reuid=${o.uid}`, `--regid=${o.gid}`, "--init-groups", "--pdeathsig", "SIGKILL", "/usr/bin/env", "-i"];
 }
 function offlineInstallArgv(tc, cache, scratch, o) {
-  const env = { ...installEnv(tc, scratch), npm_config_cache: cache, npm_config_offline: "true", npm_config_logs_dir: import_node_path.default.join(scratch, "logs") };
+  const env = { ...installEnv(tc, scratch), npm_config_cache: cache, npm_config_offline: "true", npm_config_logs_dir: import_node_path2.default.join(scratch, "logs") };
   const [file, ...prefix] = netnsPrefix(o);
   const vars = Object.entries(env).map(([k, v2]) => `${k}=${v2}`);
   return { file, args: [...prefix, ...vars, tc.node, tc.npmCli, "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache", cache], env };
 }
+function admits(list, value) {
+  const names = typeof list === "string" ? [list] : Array.isArray(list) ? list.filter((x) => typeof x === "string") : [];
+  if (names.length === 0 || names.length === 1 && names[0] === "any") return true;
+  let match2 = false;
+  let negated = 0;
+  for (const name2 of names) {
+    if (name2.startsWith("!")) {
+      negated++;
+      if (name2.slice(1) === value) return false;
+    } else if (name2 === value) match2 = true;
+  }
+  return match2 || negated === names.length;
+}
+function skippedOnRunner(entry) {
+  if (entry.optional !== true) return false;
+  return !admits(entry.os, "linux") || !admits(entry.cpu, "x64") || entry.libc !== void 0 && !admits(entry.libc, "glibc");
+}
 async function verifyRecipeCache(cache, tc, lock, signal) {
   const { packages } = lock;
   const checked = /* @__PURE__ */ new Set();
-  const cacheDir = import_node_path.default.join(cache, "_cacache");
+  const cacheDir = import_node_path2.default.join(cache, "_cacache");
   const requireFromNpm = (0, import_node_module.createRequire)(tc.npmCli);
-  for (const [name2, entry] of Object.entries(packages)) {
-    if (!registryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity)) continue;
+  for (const [key, entry] of Object.entries(packages)) {
+    if (!canonicalRegistryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity) || skippedOnRunner(entry)) continue;
     signal?.throwIfAborted();
     const cacache = requireFromNpm("cacache");
     const stream = cacache.get.stream.byDigest(cacheDir, entry.integrity);
@@ -3356,7 +3749,7 @@ async function verifyRecipeCache(cache, tc, lock, signal) {
       checked.add(entry.integrity);
     } catch {
       signal?.throwIfAborted();
-      throw new Error(`install_failed: cached tarball missing or corrupt for ${name2}`);
+      throw new InstallFailed(`the cached tarball for ${shownPath(key, "a locked package")} is missing or corrupt`);
     } finally {
       signal?.removeEventListener("abort", abort);
     }
@@ -3366,8 +3759,8 @@ async function offlinePreinstall(ws, tc, scratch, o, timeoutMs = INSTALL_MS, sig
   signal?.throwIfAborted();
   let cache;
   try {
-    cache = (0, import_node_fs.realpathSync)(o.cache);
-    if (!(0, import_node_fs.statSync)(cache).isDirectory()) throw new Error("not a directory");
+    cache = (0, import_node_fs2.realpathSync)(o.cache);
+    if (!(0, import_node_fs2.statSync)(cache).isDirectory()) throw new Error("not a directory");
   } catch {
     throw new InstallRefused(["the recipe's npm cache is missing"]);
   }
@@ -3383,8 +3776,8 @@ async function offlinePreinstall(ws, tc, scratch, o, timeoutMs = INSTALL_MS, sig
 async function digestsOf(ws, signal) {
   signal?.throwIfAborted();
   return {
-    lock: await sha256File(import_node_path.default.join(ws, "package-lock.json"), signal),
-    hiddenLock: (0, import_node_fs.existsSync)(import_node_path.default.join(ws, "node_modules/.package-lock.json")) ? await sha256File(import_node_path.default.join(ws, "node_modules/.package-lock.json"), signal) : "",
+    lock: await sha256File(import_node_path2.default.join(ws, "package-lock.json"), signal),
+    hiddenLock: (0, import_node_fs2.existsSync)(import_node_path2.default.join(ws, "node_modules/.package-lock.json")) ? await sha256File(import_node_path2.default.join(ws, "node_modules/.package-lock.json"), signal) : "",
     tree: await treeDigest(ws, signal)
   };
 }
@@ -3392,15 +3785,10 @@ function runNpm(file, args, o, timeoutMs, signal) {
   return new Promise((resolve, reject) => {
     const child = (0, import_node_child_process2.spawn)(file, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL", signal });
     for (const stream of [child.stdout, child.stderr]) {
-      stream.setEncoding("utf8");
-      let pending = "";
-      stream.on("data", (chunk) => {
-        pending += chunk;
-        const lines = pending.split("\n");
-        pending = lines.pop() ?? "";
-        for (const line of lines) process.stderr.write(`${neutralize(line.slice(0, 4096))}
-`);
-      });
+      const lines = new NeutralLines((line) => void process.stderr.write(`${line}
+`), 4096);
+      stream.on("data", (chunk) => lines.write(chunk));
+      stream.on("end", () => lines.end());
     }
     let spawnError;
     child.once("error", (error) => {
@@ -3410,20 +3798,20 @@ function runNpm(file, args, o, timeoutMs, signal) {
       if (signal?.aborted) reject(signal.reason);
       else if (spawnError) reject(spawnError);
       else if (code === 0) resolve();
-      else reject(new Error(`install_failed: npm ci exited ${code ?? exitSignal}`));
+      else reject(new InstallFailed(`npm ci exited ${code ?? exitSignal}`));
     });
   });
 }
 async function treeDigest(ws, signal) {
   signal?.throwIfAborted();
-  const root = (0, import_node_fs.realpathSync)(ws);
+  const root = (0, import_node_fs2.realpathSync)(ws);
   const hash = (0, import_node_crypto6.createHash)("sha256");
   const walk = async (dir, rel) => {
     const names = (await (0, import_promises3.readdir)(dir)).sort();
     for (const name2 of names) {
       signal?.throwIfAborted();
       if (rel === "" && name2 === ".git") continue;
-      const full = import_node_path.default.join(dir, name2);
+      const full = import_node_path2.default.join(dir, name2);
       const relPath = rel ? `${rel}/${name2}` : name2;
       const st = await (0, import_promises3.lstat)(full);
       const mode = (st.mode & 4095).toString(8);
@@ -3445,41 +3833,194 @@ async function treeDigest(ws, signal) {
 }
 var SHA2 = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 var REF = /^refs\/[A-Za-z0-9._/-]+$/;
+var CheckoutChanged = class extends Error {
+  constructor(detail) {
+    super(`checkout_changed: ${detail}`);
+    this.detail = detail;
+    this.name = "CheckoutChanged";
+  }
+};
 function checkoutHead(ws) {
-  const git = import_node_path.default.join(ws, ".git");
-  const head = (0, import_node_fs.readFileSync)(import_node_path.default.join(git, "HEAD"), "utf8").trim();
+  const git = import_node_path2.default.join(ws, ".git");
+  const read = (file) => {
+    try {
+      return (0, import_node_fs2.readFileSync)(file, "utf8");
+    } catch {
+      throw new CheckoutChanged("unreadable");
+    }
+  };
+  const head = read(import_node_path2.default.join(git, "HEAD")).trim();
   if (SHA2.test(head)) return head;
   const m = /^ref: (\S+)$/.exec(head);
   const ref = m?.[1];
-  if (!ref || !REF.test(ref) || ref.split("/").some((part) => part === ".." || part === "." || part === "")) throw new Error(`checkout_changed: HEAD is not a ref this action reads (${head.slice(0, 100)})`);
-  const loose = import_node_path.default.join(git, ref);
-  if ((0, import_node_fs.existsSync)(loose)) {
-    const sha2 = (0, import_node_fs.readFileSync)(loose, "utf8").trim();
+  if (!ref || !REF.test(ref) || ref.split("/").some((part) => part === ".." || part === "." || part === "")) throw new CheckoutChanged("malformed");
+  const loose = import_node_path2.default.join(git, ref);
+  if ((0, import_node_fs2.existsSync)(loose)) {
+    const sha2 = read(loose).trim();
     if (SHA2.test(sha2)) return sha2;
-    throw new Error(`checkout_changed: ${ref} does not hold a commit`);
+    throw new CheckoutChanged("malformed");
   }
-  const packed = (0, import_node_fs.existsSync)(import_node_path.default.join(git, "packed-refs")) ? (0, import_node_fs.readFileSync)(import_node_path.default.join(git, "packed-refs"), "utf8").split("\n") : [];
+  const packed = (0, import_node_fs2.existsSync)(import_node_path2.default.join(git, "packed-refs")) ? read(import_node_path2.default.join(git, "packed-refs")).split("\n") : [];
   for (const line of packed) {
     const [sha2, name2] = line.split(" ");
     if (name2 === ref && sha2 && SHA2.test(sha2)) return sha2;
   }
-  throw new Error(`checkout_changed: ${ref} is not found`);
+  throw new CheckoutChanged("missing ref target");
+}
+
+// src/load/registry-fetch.ts
+var import_node_crypto7 = require("node:crypto");
+var import_node_fs3 = require("node:fs");
+var import_node_module2 = require("node:module");
+var import_node_path3 = __toESM(require("node:path"));
+var REGISTRY_HOST = "registry.npmjs.org";
+var FETCH_PARALLEL = 8;
+var TARBALL_MAX_BYTES = 64 * 1024 * 1024;
+var TOTAL_MAX_BYTES = 1024 * 1024 * 1024;
+var FETCH_MS = 10 * 6e4;
+var IDLE_MS = 6e4;
+var RETRY_BACKOFF_MS = [250, 1e3];
+function retryable(error) {
+  return error instanceof ControlHttpError && (error.code === "network" || error.code === "status" && error.status !== void 0 && error.status >= 500);
+}
+function lockedTarballs(lock) {
+  const packages = lock.packages ?? {};
+  const seen = /* @__PURE__ */ new Map();
+  for (const entry of Object.values(packages)) {
+    if (!entry || !canonicalRegistryTarball(entry.resolved) || skippedOnRunner(entry)) continue;
+    const integrity = sha512Of(entry.integrity);
+    if (integrity === null) continue;
+    seen.set(`${entry.resolved} ${integrity}`, { url: entry.resolved, integrity });
+  }
+  return [...seen.values()];
+}
+var cacheKeyOf = (url) => `make-fetch-happen:request-cache:${url}`;
+async function downloadTarballs(tarballs, cache, tc, seams = {}, signal) {
+  const cacache = (0, import_node_module2.createRequire)(tc.npmCli)("cacache");
+  const cacheDir = import_node_path3.default.join(cache, "_cacache");
+  const tarballCap = seams.tarballMaxBytes ?? TARBALL_MAX_BYTES;
+  const totalCap = seams.totalMaxBytes ?? TOTAL_MAX_BYTES;
+  const stop = new AbortController();
+  const window = AbortSignal.any([AbortSignal.timeout(seams.deadlineMs ?? FETCH_MS), stop.signal, ...signal ? [signal] : []]);
+  const target = new URL(`https://${REGISTRY_HOST}${seams.port ? `:${seams.port}` : ""}`);
+  const t = controlTransport(seams);
+  const agent = t.agent({ keepAlive: true, maxSockets: FETCH_PARALLEL, maxFreeSockets: FETCH_PARALLEL });
+  let received = 0;
+  let overTotal = false;
+  let stored = 0;
+  let next = 0;
+  let first;
+  const fail = (why) => {
+    throw new InstallFailed(why);
+  };
+  const idleMs = seams.idleMs ?? IDLE_MS;
+  const attempt = async (pathname) => {
+    const hash = (0, import_node_crypto7.createHash)("sha512");
+    const chunks = [];
+    const idle = new AbortController();
+    let stalled = false;
+    let timer;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        stalled = true;
+        idle.abort();
+      }, idleMs);
+    };
+    arm();
+    try {
+      await t.download("registry", agent, target, pathname, tarballCap, AbortSignal.any([window, idle.signal]), (chunk) => {
+        arm();
+        received += chunk.length;
+        if (received > totalCap) {
+          overTotal = true;
+          return false;
+        }
+        hash.update(chunk);
+        chunks.push(chunk);
+        return true;
+      });
+    } catch (error) {
+      if (stalled && !window.aborted) throw new ControlHttpError("registry", "network", void 0, "stalled");
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    return { digest: `sha512-${hash.digest("base64")}`, body: Buffer.concat(chunks) };
+  };
+  const one = async (tarball) => {
+    const url = new URL(tarball.url);
+    let got;
+    for (let tries = 0; !got; tries++) {
+      try {
+        got = await attempt(url.pathname);
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (overTotal) return fail(`the downloads passed ${totalCap} bytes in all (total too large)`);
+        if (retryable(error) && tries < RETRY_BACKOFF_MS.length && !window.aborted) {
+          try {
+            await sleep(RETRY_BACKOFF_MS[tries], window);
+            continue;
+          } catch {
+          }
+        }
+        const code = !(error instanceof ControlHttpError) ? "download" : error.detail === "stalled" ? "stalled" : `${error.code}${error.status !== void 0 ? ` ${error.status}` : ""}`;
+        return fail(`fetching ${url.pathname} failed (${code})`);
+      }
+    }
+    if (got.digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);
+    signal?.throwIfAborted();
+    if (stop.signal.aborted) return;
+    await cacache.put(cacheDir, cacheKeyOf(tarball.url), got.body, { integrity: tarball.integrity, algorithms: ["sha512"] });
+    stored += got.body.length;
+  };
+  try {
+    const workers = Array.from({ length: Math.min(FETCH_PARALLEL, tarballs.length) }, async () => {
+      while (next < tarballs.length && !stop.signal.aborted) {
+        try {
+          await one(tarballs[next++]);
+        } catch (error) {
+          first ??= { error };
+          stop.abort();
+        }
+      }
+    });
+    await Promise.all(workers);
+    if (first) throw first.error;
+  } finally {
+    t.close();
+  }
+  return { count: tarballs.length, bytes: stored };
+}
+async function fetchPreinstall(ws, tc, scratch, ids, seams = {}, signal, log = () => void 0) {
+  signal?.throwIfAborted();
+  const workspace = readWorkspace(ws);
+  const problems = installProblems(workspace);
+  if (problems.length > 0) throw new InstallRefused(problems);
+  const cache = import_node_path3.default.join(scratch, "cache");
+  (0, import_node_fs3.mkdirSync)(cache, { recursive: true });
+  const fetched = await downloadTarballs(lockedTarballs(workspace.lock), cache, tc, seams, signal);
+  log(`downloaded ${fetched.count} tarballs (${fetched.bytes} bytes) from ${REGISTRY_HOST}, each checked against its lockfile sha512`);
+  const digests = await offlinePreinstall(ws, tc, scratch, { cache, ...ids }, void 0, signal);
+  log("npm ci --offline --ignore-scripts ran in a network namespace with no interface");
+  return digests;
 }
 
 // src/load/jail.ts
 var import_node_child_process3 = require("node:child_process");
-var import_node_crypto7 = require("node:crypto");
-var import_node_fs2 = require("node:fs");
+var import_node_crypto8 = require("node:crypto");
+var import_node_fs4 = require("node:fs");
 var import_promises4 = require("node:fs/promises");
-var import_node_os3 = __toESM(require("node:os"));
+var import_node_os4 = __toESM(require("node:os"));
 var import_node_stream = require("node:stream");
-var import_node_string_decoder = require("node:string_decoder");
 var import_node_net3 = __toESM(require("node:net"));
 var import_node_util2 = require("node:util");
 
 // src/load/jail/ctl.ts
 var MAX_FRAME_BYTES = 64 * 1024;
 var MAX_MESSAGE = 2e3;
+var ERROR_CLASSES = ["assertion", "timeout", "network", "other"];
+var PLAYWRIGHT_COMPAT = ["ok", "not_found", "below_floor", "unreadable"];
 var MAX_LOCATION = 500;
 var TO_EXECUTOR = /* @__PURE__ */ new Set(["init", "turn", "cancel", "stop"]);
 var TO_SUPERVISOR = /* @__PURE__ */ new Set(["loaded", "fatal", "outcome"]);
@@ -3509,6 +4050,10 @@ function ticketOf(v2) {
 function optional(v2, name2, max) {
   if (v2[name2] === void 0) return {};
   return isText(v2[name2], max) ? { [name2]: v2[name2] } : null;
+}
+function oneOf(v2, name2, set2) {
+  if (v2[name2] === void 0) return {};
+  return typeof v2[name2] === "string" && set2.includes(v2[name2]) ? { [name2]: v2[name2] } : null;
 }
 function decode(line) {
   let value;
@@ -3554,15 +4099,18 @@ function decode(line) {
     case "fatal": {
       if (v2.code !== "unreadable" && v2.code !== "playwright" && v2.code !== "journey" && v2.code !== "protocol") return null;
       const location = optional(v2, "location", MAX_LOCATION);
-      if (!isText(v2.message, MAX_MESSAGE) || !location) return null;
-      return { type: "fatal", code: v2.code, message: v2.message, ...location };
+      const error = oneOf(v2, "error", ERROR_CLASSES);
+      const playwright = oneOf(v2, "playwright", PLAYWRIGHT_COMPAT);
+      if (!isText(v2.message, MAX_MESSAGE) || !location || !error || !playwright) return null;
+      return { type: "fatal", code: v2.code, message: v2.message, ...location, ...error, ...playwright };
     }
     case "outcome": {
       if (!isSafePositive(v2.turn) || v2.kind !== "success" && v2.kind !== "failure" && v2.kind !== "timeout" && v2.kind !== "cancelled") return null;
       const message = optional(v2, "message", MAX_MESSAGE);
       const location = optional(v2, "location", MAX_LOCATION);
-      if (!message || !location) return null;
-      return { type: "outcome", turn: v2.turn, kind: v2.kind, ...message, ...location };
+      const error = oneOf(v2, "error", ERROR_CLASSES);
+      if (!message || !location || !error) return null;
+      return { type: "outcome", turn: v2.turn, kind: v2.kind, ...message, ...location, ...error };
     }
     default:
       return null;
@@ -3619,7 +4167,7 @@ async function startJail(spec, options, signal) {
   for (const tree of [spec.workspace, spec.nodeDir, spec.actionDir]) await refuseSpecialFiles(tree);
   const unit = unitName(spec.runId);
   const dir = socketDir(spec.runId);
-  const nonce = (0, import_node_crypto7.randomBytes)(32).toString("hex");
+  const nonce = (0, import_node_crypto8.randomBytes)(32).toString("hex");
   await removeStale(unit, dir, spec.runId);
   let proxy;
   const ctlServer = import_node_net3.default.createServer();
@@ -3650,8 +4198,8 @@ async function startJail(spec, options, signal) {
   const ctl = acceptCtl(ctlServer, nonce);
   ctl.catch(() => void 0);
   const child = (0, import_node_child_process3.spawn)("/usr/bin/sudo", ["-n", ...systemdRunArgs(spec)], { env: HOST_ENV, stdio: ["pipe", "pipe", "pipe"] });
-  const stdout = neutralized(child.stdout);
-  const stderr = neutralized(child.stderr);
+  const stdout = neutralizedStream(child.stdout);
+  const stderr = neutralizedStream(child.stderr);
   if (options.stdout !== "pipe") stdout.pipe(process.stdout);
   stderr.pipe(process.stderr);
   const lifeline = child.stdin;
@@ -3820,14 +4368,14 @@ async function probe(base, runId, signal) {
   });
   await new Promise((resolve) => listener.listen(0, ip, resolve));
   const target = `${ip}:${listener.address().port}`;
-  const forward = (path4) => new Promise((resolve) => {
+  const forward = (path6) => new Promise((resolve) => {
     const server = import_node_net3.default.createServer((c) => {
       const u = import_node_net3.default.connect(listener.address().port, ip);
       c.pipe(u).pipe(c);
       u.on("error", () => c.destroy());
       c.on("error", () => u.destroy());
     });
-    server.listen(path4, () => resolve(server));
+    server.listen(path6, () => resolve(server));
   });
   const spec = { ...base, runId, claimId: `probe-${runId}`, command: [`${IN_JAIL.node}/bin/node`, `${IN_JAIL.action}/load-init.js`, "--probe", target] };
   let out = "";
@@ -3837,7 +4385,7 @@ async function probe(base, runId, signal) {
     handle.stdout.on("data", (d) => out += d);
     const ticket = () => {
       const now = sharedClocks();
-      return { claimId: spec.claimId, epoch: 0, planHash: "probe", leaseSeq: 0, nonce: (0, import_node_crypto7.randomBytes)(16).toString("hex"), monoDeadline: now.monoMs + CALL_MS, wallDeadline: now.wallMs + CALL_MS };
+      return { claimId: spec.claimId, epoch: 0, planHash: "probe", leaseSeq: 0, nonce: (0, import_node_crypto8.randomBytes)(16).toString("hex"), monoDeadline: now.monoMs + CALL_MS, wallDeadline: now.wallMs + CALL_MS };
     };
     try {
       await handle.start(ticket, signal);
@@ -3870,14 +4418,14 @@ async function probe(base, runId, signal) {
     expect(seen.procOne === "EACCES" && seen.procOneRoot === "EACCES", "init's /proc entry is readable");
     expect(seen.procSelf === "readable", "/proc does not work");
     expect(Array.isArray(seen.mounts) && seen.mounts.every((m) => PROBE_MOUNTS.test(m) && !/ws-lower|\/up$/.test(m)), "mounts outside the manifest are visible");
-    expect(seen.workspaceWrite === "written" && !(0, import_node_fs2.existsSync)(`${base.workspace}/.peeps-probe`), "a write reached the checkout");
+    expect(seen.workspaceWrite === "written" && !(0, import_node_fs4.existsSync)(`${base.workspace}/.peeps-probe`), "a write reached the checkout");
   }
   if (out.includes("PEEPS-PROBE-UNCLEAN")) failures.push("the unit's cgroup was not empty after end()");
-  if (hits.length !== 1 || hits[0] !== "GET /probe-relay HTTP/1.0") failures.push(`the listener saw ${JSON.stringify(hits)}`);
+  if (hits.length !== 1 || hits[0] !== "GET /probe-relay HTTP/1.0") failures.push(`the listener saw ${Math.min(hits.length, 1e3)} requests, not the probe's one`);
   return { passed: failures.length === 0, failures, seen };
 }
 function nonLoopbackIPv4() {
-  for (const list of Object.values(import_node_os3.default.networkInterfaces())) {
+  for (const list of Object.values(import_node_os4.default.networkInterfaces())) {
     for (const a of list ?? []) if (a.family === "IPv4" && !a.internal) return a.address;
   }
   throw new Error("load jail probe: no non-loopback IPv4 address");
@@ -3887,32 +4435,18 @@ function abortError2(signal) {
   return reason instanceof Error ? reason : new Error("load jail: aborted");
 }
 var MAX_LINE = 64 * 1024;
-function neutralized(source) {
+function neutralizedStream(source) {
   const out = new import_node_stream.PassThrough();
-  const decoder = new import_node_string_decoder.StringDecoder("utf8");
-  let pending = "";
-  const emit = (line) => {
-    if (!out.write(`${neutralize(line.endsWith("\r") ? line.slice(0, -1) : line)}
+  const lines = new NeutralLines((line) => {
+    if (!out.write(`${line}
 `)) {
       source.pause();
       out.once("drain", () => source.resume());
     }
-  };
-  source.on("data", (chunk) => {
-    pending += decoder.write(chunk);
-    let nl;
-    while ((nl = pending.indexOf("\n")) !== -1) {
-      emit(pending.slice(0, nl));
-      pending = pending.slice(nl + 1);
-    }
-    while (pending.length > MAX_LINE) {
-      emit(pending.slice(0, MAX_LINE));
-      pending = pending.slice(MAX_LINE);
-    }
-  });
+  }, MAX_LINE);
+  source.on("data", (chunk) => lines.write(chunk));
   source.on("end", () => {
-    pending += decoder.end();
-    if (pending) emit(pending);
+    lines.end();
     out.end();
   });
   return out;
@@ -4483,8 +5017,8 @@ function checkPlan(c, raw) {
       if (typeof request2.method !== "string" || !ALLOWED_METHODS.has(request2.method)) {
         c.fail(`${at}.method`, "must be POST, PUT, PATCH or DELETE");
       }
-      const path4 = c.text(request2.path, `${at}.path`);
-      if (path4 !== null && (!path4.startsWith("/") || /[?#\s\\]/.test(path4))) {
+      const path6 = c.text(request2.path, `${at}.path`);
+      if (path6 !== null && (!path6.startsWith("/") || /[?#\s\\]/.test(path6))) {
         c.fail(`${at}.path`, "must be a path starting with /, without a query or fragment");
       }
       const key = `${String(request2.method)} ${String(request2.path)}`;
@@ -4543,25 +5077,43 @@ var SUPERVISOR_CONSTANTS = {
   retryMaxMs: 2e3
 };
 var Refused = class extends Error {
+  /** `detail`: one failure a line, each safe to print and to send (no value read from the checkout as it is). */
   constructor(status, reason, detail) {
-    super(`${reason}${detail ? `: ${detail}` : ""}`);
+    super(`${reason}${detail ? `: ${typeof detail === "string" ? detail : detail.join("; ")}` : ""}`);
     this.status = status;
     this.reason = reason;
+    this.detail = detail;
   }
 };
+var STAGE_TEXT = {
+  toolchain: "the toolchain could not be checked",
+  probe: "the fence could not be checked",
+  install: "the install could not run",
+  binding: "the checkout could not be read",
+  claim: "the claim could not be made",
+  prepare: "the run could not be prepared",
+  jail: "the jail could not start",
+  startup: "the journey could not start",
+  checking: "checking stopped",
+  measurement: "the measurement stopped"
+};
+function publicCause(error) {
+  const code = error?.code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]{0,39}$/.test(code) ? `an unexpected error (${code})` : "an unexpected error";
+}
 async function runLoad(o, s = {}) {
   return new LoadRun(o, s).run();
 }
-var sha256Of = (file) => (0, import_node_crypto8.createHash)("sha256").update((0, import_node_fs3.readFileSync)(file)).digest("hex");
+var sha256Of = (file) => (0, import_node_crypto9.createHash)("sha256").update((0, import_node_fs5.readFileSync)(file)).digest("hex");
 async function bindingOf(workspace, workloadPath, tree, signal) {
   signal?.throwIfAborted();
-  const lock = import_node_path2.default.join(workspace, "package-lock.json");
-  const generated = import_node_path2.default.join(workspace, "node_modules/.package-lock.json");
+  const lock = import_node_path4.default.join(workspace, "package-lock.json");
+  const generated = import_node_path4.default.join(workspace, "node_modules/.package-lock.json");
   return {
     checkoutSha: checkoutHead(workspace),
-    lockDigests: { "package-lock.json": (0, import_node_fs3.existsSync)(lock) ? sha256Of(lock) : "" },
-    observed: { treeDigest: tree ?? await treeDigest(workspace, signal), generatedLockDigest: (0, import_node_fs3.existsSync)(generated) ? sha256Of(generated) : "" },
-    workload: { path: workloadPath, digest: sha256Of(import_node_path2.default.resolve(workspace, workloadPath)) }
+    lockDigests: { "package-lock.json": (0, import_node_fs5.existsSync)(lock) ? sha256Of(lock) : "" },
+    observed: { treeDigest: tree ?? await treeDigest(workspace, signal), generatedLockDigest: (0, import_node_fs5.existsSync)(generated) ? sha256Of(generated) : "" },
+    workload: { path: workloadPath, digest: sha256Of(import_node_path4.default.resolve(workspace, workloadPath)) }
   };
 }
 var sameBinding = (a, b) => JSON.stringify(sortKeys(a)) === JSON.stringify(sortKeys(b));
@@ -4599,6 +5151,7 @@ var LoadRun = class {
   emit;
   claimId = null;
   grant;
+  toolchain;
   lease;
   gate;
   journal;
@@ -4643,6 +5196,8 @@ var LoadRun = class {
   busySlots = /* @__PURE__ */ new Map();
   duplicateOutcomes = 0;
   failures = [];
+  /** Where the run is: an unexpected error is reported by it, never by its message. */
+  stage = "toolchain";
   playwright = null;
   checking = { turns: 0, success: 0, failure: 0, timeout: 0, cancelled: 0, responded: [] };
   measurement = { started: 0, missed: 0, success: 0, failure: 0, timeout: 0, cancelled: 0 };
@@ -4668,7 +5223,7 @@ var LoadRun = class {
     this.resolveHardLimit = resolve;
   });
   // Evidence: one ordered stream, one batch in flight.
-  streamId = (0, import_node_crypto8.randomUUID)();
+  streamId = (0, import_node_crypto9.randomUUID)();
   evidenceSeq = 0;
   evidenceQueue = [];
   evidenceRunning;
@@ -4698,46 +5253,77 @@ var LoadRun = class {
   async execute() {
     try {
       this.throwIfDone();
+      if (this.s.toolchain || !this.s.probe || !this.s.preinstall) this.toolchain = this.resolveToolchain();
+      this.stage = "probe";
       const report = await (this.s.probe ? this.s.probe() : this.realProbe());
       this.throwIfDone();
-      if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures.join("; "));
+      if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures);
+      this.stage = "install";
       const digests = await (this.s.preinstall ? this.s.preinstall(this.o.workspace) : this.realPreinstall());
+      this.stage = "binding";
       const binding = await bindingOf(this.o.workspace, this.o.workloadPath, digests.tree, this.signal);
       this.throwIfDone();
+      this.stage = "claim";
       await this.claim(binding, report);
+      this.stage = "prepare";
       await this.prepare(binding);
+      this.stage = "startup";
       await this.startup();
+      this.stage = "checking";
       await this.runChecking();
+      this.stage = "measurement";
       await this.runMeasurement();
     } catch (error) {
-      if (error instanceof Refused) this.terminate(error.reason, error.status);
+      if (error instanceof Refused) this.terminate(error.reason, error.status, error.detail);
+      else if (error instanceof CheckoutChanged) this.terminate("checkout_changed", "didnt_start", error.message);
       else if (error instanceof NoTicket) this.terminate("didnt_start", "didnt_start");
       else if (error instanceof TicketRefused) this.terminate(error.reason === "stale_ticket" ? "didnt_start" : "executor_protocol", error.reason === "stale_ticket" ? "didnt_start" : "failed");
-      else if (this.reason === void 0) this.terminate("startup_failed", "failed", error.message);
+      else if (this.reason === void 0) this.terminate("startup_failed", "failed", `startup_failed: ${STAGE_TEXT[this.stage]}: ${publicCause(error)}`);
     }
   }
   throwIfDone() {
     if (this.reason !== void 0) throw new Refused(this.status ?? "failed", this.reason);
   }
-  async realProbe() {
-    const node = import_node_path2.default.join(this.o.nodeDir, "bin", "node");
-    return probe(
-      { node, nodeDir: this.o.nodeDir, actionDir: this.o.actionDir, outer: import_node_path2.default.join(this.o.actionDir, "load-outer.js"), init: import_node_path2.default.join(this.o.actionDir, "load-init.js"), workspace: this.o.workspace, executorUid: process.getuid(), executorGid: process.getgid(), env: {}, limits: { maxRunMs: 6e4, memoryMax: "512M", tasksMax: 64, cpuQuotaPercent: 100 } },
-      `${this.o.runId}-probe`.slice(0, 40),
-      this.signal
-    );
+  resolveToolchain() {
+    try {
+      return this.s.toolchain ? this.s.toolchain() : trustedToolchain(this.o.nodeDir, this.o.workspace, void 0, void 0, { log: (line) => void process.stderr.write(`peeps load: ${line}
+`) });
+    } catch (error) {
+      throw new Refused("didnt_start", "install_unsupported", error instanceof InstallRefused ? error.problems : `the toolchain could not be checked: ${publicCause(error)}`);
+    }
   }
-  /** Offline, from the recipe's npm cache, with no network interface (e5 plan v3 §2.10). */
+  async realProbe() {
+    const tc = this.toolchain;
+    try {
+      return await (this.s.probeJail ?? probe)(
+        { node: tc.node, nodeDir: tc.nodeDir, actionDir: this.o.actionDir, outer: import_node_path4.default.join(this.o.actionDir, "load-outer.js"), init: import_node_path4.default.join(this.o.actionDir, "load-init.js"), workspace: this.o.workspace, executorUid: process.getuid(), executorGid: process.getgid(), env: {}, limits: { maxRunMs: 6e4, memoryMax: "512M", tasksMax: 64, cpuQuotaPercent: 100 } },
+        `${this.o.runId}-probe`.slice(0, 40),
+        this.signal
+      );
+    } catch (error) {
+      if (this.signal.aborted) throw error;
+      return { passed: false, failures: [`the jail could not start (sudo or systemd-run is missing or refused): ${publicCause(error)}`], seen: null };
+    }
+  }
+  /** Offline, from the recipe's npm cache (e5 plan v3 §2.10); or the verified download, then offline (CW plan §4.5). */
   async realPreinstall() {
     this.signal.throwIfAborted();
-    if (!this.o.npmCache) throw new Refused("didnt_start", "install_unsupported", "no recipe npm cache");
-    const scratch = (0, import_node_fs3.mkdtempSync)(import_node_path2.default.join(import_node_os4.default.tmpdir(), "peeps-load-install-"));
+    const install = this.o.install;
+    if (!install || install.mode === "offline" && !install.cache) throw new Refused("didnt_start", "install_unsupported", "no recipe npm cache");
+    const tc = this.toolchain;
+    const scratch = (0, import_node_fs5.mkdtempSync)(import_node_path4.default.join(import_node_os5.default.tmpdir(), "peeps-load-install-"));
+    const ids = { uid: process.getuid(), gid: process.getgid() };
     try {
-      return await offlinePreinstall(this.o.workspace, trustedToolchain(this.o.nodeDir, this.o.workspace), scratch, { cache: this.o.npmCache, uid: process.getuid(), gid: process.getgid() }, void 0, this.signal);
+      if (install.mode === "fetch") {
+        return await (this.s.installers?.fetch ?? fetchPreinstall)(this.o.workspace, tc, scratch, ids, this.s.registry, this.signal, (line) => void process.stderr.write(`peeps load: ${line}
+`));
+      }
+      return await (this.s.installers?.offline ?? offlinePreinstall)(this.o.workspace, tc, scratch, { cache: install.cache, ...ids }, void 0, this.signal);
     } catch (error) {
-      throw new Refused("didnt_start", error instanceof InstallRefused ? "install_unsupported" : "install_failed", error.message);
+      if (error instanceof InstallRefused) throw new Refused("didnt_start", "install_unsupported", error.problems);
+      throw new Refused("didnt_start", "install_failed", error instanceof InstallFailed ? error.message : `install_failed: ${publicCause(error)}`);
     } finally {
-      (0, import_node_fs3.rmSync)(scratch, { recursive: true, force: true });
+      (0, import_node_fs5.rmSync)(scratch, { recursive: true, force: true });
     }
   }
   // ---------------------------------------------------------------- claim and the lease controller
@@ -4747,7 +5333,7 @@ var LoadRun = class {
     const built = claimBody({
       grantRef: this.o.grantRef,
       actionVersion: this.o.actionVersion ?? "0.0.0",
-      idempotencyKey: (0, import_node_crypto8.randomUUID)(),
+      idempotencyKey: (0, import_node_crypto9.randomUUID)(),
       runAttempt: this.o.runAttempt ?? 1,
       checkRunId: this.o.checkRunId ?? 0,
       binding,
@@ -4813,7 +5399,7 @@ var LoadRun = class {
     const lease = this.lease;
     const g = this.grant;
     const t0 = this.clocks();
-    const tx = lease.begin(t0, (0, import_node_crypto8.randomBytes)(16).toString("hex"), (seq2, nonce) => this.renewFields(seq2, nonce));
+    const tx = lease.begin(t0, (0, import_node_crypto9.randomBytes)(16).toString("hex"), (seq2, nonce) => this.renewFields(seq2, nonce));
     if (!tx) {
       if (!lease.held(this.clocks())) this.onExpiry();
       return;
@@ -4998,9 +5584,9 @@ var LoadRun = class {
     const hosts = [...limits.value.approved.values()].map((a) => a.host);
     const nowWall = Date.now();
     const ca = createRunCa({ hosts, nowMs: nowWall, validForMs: g.maxRunMs + g.graceMs + 36e5 });
-    this.caDir = (0, import_node_fs3.mkdtempSync)(import_node_path2.default.join(import_node_os4.default.tmpdir(), "peeps-load-ca-"));
-    const caFile = import_node_path2.default.join(this.caDir, "ca.pem");
-    (0, import_node_fs3.writeFileSync)(caFile, ca.certPem, { mode: 384 });
+    this.caDir = (0, import_node_fs5.mkdtempSync)(import_node_path4.default.join(import_node_os5.default.tmpdir(), "peeps-load-ca-"));
+    const caFile = import_node_path4.default.join(this.caDir, "ca.pem");
+    (0, import_node_fs5.writeFileSync)(caFile, ca.certPem, { mode: 384 });
     const journal = new Journal();
     const gate = new Gate({ ...limits.value.gate, runEndMono: this.runEndMono, runEndWall: this.runEndWall, phase: limits.value.checking });
     gate.applyLease(this.lease.grantNow);
@@ -5030,11 +5616,11 @@ var LoadRun = class {
     const spec = {
       runId: this.o.runId,
       claimId: g.claimId,
-      node: import_node_path2.default.join(this.o.nodeDir, "bin", "node"),
-      nodeDir: this.o.nodeDir,
+      node: this.toolchain?.node ?? import_node_path4.default.join(this.o.nodeDir, "bin", "node"),
+      nodeDir: this.toolchain?.nodeDir ?? this.o.nodeDir,
       actionDir: this.o.actionDir,
-      outer: import_node_path2.default.join(this.o.actionDir, "load-outer.js"),
-      init: import_node_path2.default.join(this.o.actionDir, "load-init.js"),
+      outer: import_node_path4.default.join(this.o.actionDir, "load-outer.js"),
+      init: import_node_path4.default.join(this.o.actionDir, "load-init.js"),
       workspace: this.o.workspace,
       caPem: caFile,
       executorUid: process.getuid?.() ?? 0,
@@ -5043,10 +5629,11 @@ var LoadRun = class {
       command: this.s.command ?? [node, "/run/peeps/action/load-executor.js"],
       env: {},
       // The clocks read fractional milliseconds; systemd and the spec take whole ones.
-      limits: { maxRunMs: Math.ceil(15 * 6e4 + 6e4 + Math.max(0, this.runEndMono - this.clocks().monoMs) + g.graceMs), memoryMax: "2G", tasksMax: 512, cpuQuotaPercent: Math.max(100, (import_node_os4.default.availableParallelism() - 1) * 100) }
+      limits: { maxRunMs: Math.ceil(15 * 6e4 + 6e4 + Math.max(0, this.runEndMono - this.clocks().monoMs) + g.graceMs), memoryMax: "2G", tasksMax: 512, cpuQuotaPercent: Math.max(100, (import_node_os5.default.availableParallelism() - 1) * 100) }
     };
     const proxy = this.proxy;
     const launch = this.s.launch ?? startJail;
+    this.stage = "jail";
     this.jailLaunchPending = true;
     this.launchCalled = true;
     let handle;
@@ -5075,7 +5662,7 @@ var LoadRun = class {
     if (this.reason !== void 0 || this.gracefulStop || this.stopNowLive || !lease.held(t)) return null;
     if (!(t.monoMs < this.runEndMono && t.wallMs < this.runEndWall)) return null;
     const g = lease.grantNow;
-    return { claimId: this.grant.claimId, epoch: this.grant.epoch, planHash: this.grant.planHash, leaseSeq: g.seq, nonce: (0, import_node_crypto8.randomBytes)(16).toString("hex"), monoDeadline: Math.min(g.monoUntil, this.runEndMono), wallDeadline: Math.min(g.wallUntil, this.runEndWall) };
+    return { claimId: this.grant.claimId, epoch: this.grant.epoch, planHash: this.grant.planHash, leaseSeq: g.seq, nonce: (0, import_node_crypto9.randomBytes)(16).toString("hex"), monoDeadline: Math.min(g.monoUntil, this.runEndMono), wallDeadline: Math.min(g.wallUntil, this.runEndWall) };
   };
   async startup() {
     const jail = this.jail;
@@ -5090,10 +5677,14 @@ var LoadRun = class {
     this.throwIfDone();
     if (!f) throw new Refused("didnt_start", "loaded_timeout");
     if (f.type === "fatal") {
-      this.failures.push({ message: sanitize(f.message, 2e3) ?? "", location: sanitize(f.location) });
+      if (f.code === "playwright") this.playwright = f.playwright && PLAYWRIGHT_COMPAT.includes(f.playwright) ? f.playwright : "unreadable";
+      this.journeyFailure(`executor_${f.code}`, f.message, f.location, f.error);
       throw new Refused("didnt_start", `executor_${f.code}`);
     }
-    if (f.type === "loaded") this.playwright = sanitize(f.playwright, 64);
+    if (f.type === "loaded") {
+      this.playwright = "ok";
+      this.log(`Playwright ${f.playwright}`);
+    }
   }
   /** The next frame matching, or null at the time limit or the run's end. */
   nextFrame(match2, ms2) {
@@ -5121,7 +5712,7 @@ var LoadRun = class {
       return null;
     }
     const turn = opened.turn;
-    const password = (0, import_node_crypto8.randomBytes)(32).toString("base64url");
+    const password = (0, import_node_crypto9.randomBytes)(32).toString("base64url");
     this.credentials.set(`Basic ${Buffer.from(`${turn}:${password}`).toString("base64")}`, turn);
     const deadlineMono = Math.min(t.monoMs + deadlineMs, this.runEndMono);
     const state = { turn, slot, phase, startMono: t.monoMs, deadlineWall: t.wallMs + deadlineMs, deadlineReached: false, timers: [], accountingId };
@@ -5155,7 +5746,7 @@ var LoadRun = class {
     this.proxy?.closeTurn(f.turn);
     this.busySlots.delete(state.slot);
     this.emit({ type: "outcome", turn: f.turn, kind: f.kind });
-    if (f.kind !== "success" && this.failures.length < 20) this.failures.push({ message: sanitize(f.message, 2e3) ?? f.kind, location: sanitize(f.location) });
+    if (f.kind !== "success" && this.failures.length < 20) this.journeyFailure(f.kind, f.message, f.location, f.error);
     const counts = state.phase === "checking" ? this.checking : this.measurement;
     counts[f.kind] += 1;
     if (state.phase === "measurement") {
@@ -5276,10 +5867,31 @@ var LoadRun = class {
     clearTimeout(this.renewTimer);
     this.renewController.abort();
   }
+  /**
+   * A journey's failure: the result (and Peeps' summary) get its frame code and its error's class,
+   * both from closed sets `decode` checked (`ERROR_CLASSES`), and no location; the location and the
+   * message, the journey's own text, go to the job log only (CW-A round 2, Sol r2c).
+   */
+  journeyFailure(kind, message, location, error) {
+    const cls = error !== void 0 && ERROR_CLASSES.includes(error) ? error : void 0;
+    this.failures.push({ message: cls ? `${kind}: ${cls}` : kind, location: null });
+    if (message) this.log(`journey ${kind}${location ? ` at ${location}` : ""}: ${message.slice(0, 2e3)}`);
+  }
+  /** The job log: each line neutralized, so a journey's text runs no workflow command. */
+  log(text2) {
+    for (const line of text2.split(/\r?\n|\r/)) {
+      const shown = `peeps load: ${(sanitize(line, 2e3) ?? "").replaceAll("##[", "## [")}`;
+      if (this.s.log) this.s.log(shown);
+      else process.stderr.write(`${shown}
+`);
+    }
+  }
   /** Synchronous and idempotent: one reason, latched. */
   terminate(trigger, status, detail) {
     if (this.reason !== void 0) return;
-    if (detail !== void 0 && this.failures.length < 20) this.failures.push({ message: sanitize(detail, 2e3) ?? trigger, location: null });
+    for (const line of typeof detail === "string" ? detail.split("\n") : detail ?? []) {
+      if (this.failures.length < 20) this.failures.push({ message: sanitize(line, 2e3) ?? trigger, location: null });
+    }
     let reason = trigger;
     let st = status;
     if (this.expiryObserved || this.gate?.leaseExpired) [reason, st] = ["lease_lost", "lease_lost"];
@@ -5344,7 +5956,7 @@ var LoadRun = class {
     this.evidenceCancel.abort();
     this.closedCancel.abort();
     const jailEnd = await Promise.race([cleanup, deadline.then(() => "dirty")]);
-    if (this.caDir) (0, import_node_fs3.rmSync)(this.caDir, { recursive: true, force: true });
+    if (this.caDir) (0, import_node_fs5.rmSync)(this.caDir, { recursive: true, force: true });
     deadline.cancel();
     const loop = this.loopDelay;
     return {
@@ -5398,7 +6010,7 @@ var LoadRun = class {
     const t0 = this.clocks();
     const tx = lease.beginClosed(
       t0,
-      (0, import_node_crypto8.randomBytes)(16).toString("hex"),
+      (0, import_node_crypto9.randomBytes)(16).toString("hex"),
       (seq2, nonce) => renewBody({ epoch: g.epoch, seq: seq2, nonce, phase: this.phase, debited, unresolved: this.gate?.unresolved ?? 0, inFlight: 0, state: "closed", lagP99Ms: this.lagP99Ms() })
     );
     if (!tx) return;
@@ -5424,7 +6036,7 @@ var LoadRun = class {
           out.latencyMs = round(this.clocks().monoMs - tx.firstSendMono);
           break;
         }
-        const refused = isObj4(raw) && typeof raw.refused === "string" ? raw.refused.slice(0, 64) : void 0;
+        const refused = isObj5(raw) && typeof raw.refused === "string" ? raw.refused.slice(0, 64) : void 0;
         if (refused !== void 0) {
           out.state = "refused";
           out.reason = refused;
@@ -5524,16 +6136,16 @@ var LoadRun = class {
         answered = false;
       }
       if (this.evidenceStopped) return;
-      if (answered && isObj4(answer)) {
+      if (answered && isObj5(answer)) {
         if (answer.ok === true && typeof answer.replay === "boolean" && !("reason" in answer) && !("refused" in answer)) {
           this.evidenceQueue.shift();
           if (head.body.final) this.finalSent = head.body.final;
           pause = this.k.retryMs;
           continue;
         }
-        const refusal = answer.ok === false ? answer.reason : answer.refused;
+        const refusal2 = answer.ok === false ? answer.reason : answer.refused;
         if (answer.ok === false || answer.ok !== true && typeof answer.refused === "string") {
-          this.latchIncomplete({ seq: head.body.seq, reason: typeof refusal === "string" ? refusal.slice(0, 64) : "unknown" });
+          this.latchIncomplete({ seq: head.body.seq, reason: typeof refusal2 === "string" ? refusal2.slice(0, 64) : "unknown" });
           this.evidenceStopped = true;
           return;
         }
@@ -5557,7 +6169,7 @@ function statusOf(reason) {
   return "failed";
 }
 var round = (ms2) => Math.round(ms2 * 10) / 10;
-var isObj4 = (v2) => typeof v2 === "object" && v2 !== null && !Array.isArray(v2);
+var isObj5 = (v2) => typeof v2 === "object" && v2 !== null && !Array.isArray(v2);
 function splitToFit(kind, key, records, extra, fits) {
   const payloads = [];
   let oversized;
@@ -5616,10 +6228,10 @@ function delayResolve(ms2) {
 }
 
 // src/load/main.ts
-var GRANT_REF2 = /^[A-Za-z0-9_-]{22}$/;
-var DIGITS = /^[1-9][0-9]{0,18}$/;
+var GRANT_REF3 = /^[A-Za-z0-9_-]{22}$/;
+var DIGITS2 = /^[1-9][0-9]{0,18}$/;
 var HOST2 = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
-var VERSION = /^[A-Za-z0-9._-]{1,64}$/;
+var VERSION2 = /^[A-Za-z0-9._-]{1,64}$/;
 function readLoadInputs(env, actionDir, execPath = process.execPath) {
   const bad = (problem) => ({ ok: false, problem });
   if (env.NODE_DEBUG) return bad("NODE_DEBUG");
@@ -5630,29 +6242,29 @@ function readLoadInputs(env, actionDir, execPath = process.execPath) {
   const peepsUrl = need("PEEPS_URL");
   if (!peepsUrl) return bad("PEEPS_URL");
   const grantRef = need("PEEPS_LOAD_GRANT");
-  if (!grantRef || !GRANT_REF2.test(grantRef)) return bad("PEEPS_LOAD_GRANT");
+  if (!grantRef || !GRANT_REF3.test(grantRef)) return bad("PEEPS_LOAD_GRANT");
   const requestUrl = need("ACTIONS_ID_TOKEN_REQUEST_URL");
   const requestToken = need("ACTIONS_ID_TOKEN_REQUEST_TOKEN");
   if (!requestUrl || !requestToken) return bad("ACTIONS_ID_TOKEN_REQUEST_URL");
   const workspace = need("PEEPS_LOAD_WORKSPACE") ?? need("GITHUB_WORKSPACE");
-  if (!workspace || !import_node_path3.default.isAbsolute(workspace)) return bad("PEEPS_LOAD_WORKSPACE");
+  if (!workspace || !import_node_path5.default.isAbsolute(workspace)) return bad("PEEPS_LOAD_WORKSPACE");
   const workloadPath = need("PEEPS_LOAD_WORKLOAD");
-  if (!workloadPath || import_node_path3.default.isAbsolute(workloadPath) || workloadPath.split(/[\\/]/).some((p) => p === ".." || p === "") || workloadPath.length > 1024) return bad("PEEPS_LOAD_WORKLOAD");
+  if (!workloadPath || import_node_path5.default.isAbsolute(workloadPath) || workloadPath.split(/[\\/]/).some((p) => p === ".." || p === "") || workloadPath.length > 1024) return bad("PEEPS_LOAD_WORKLOAD");
   const npmCache = need("PEEPS_LOAD_NPM_CACHE");
-  if (!npmCache || !import_node_path3.default.isAbsolute(npmCache)) return bad("PEEPS_LOAD_NPM_CACHE");
+  if (!npmCache || !import_node_path5.default.isAbsolute(npmCache)) return bad("PEEPS_LOAD_NPM_CACHE");
   const sinkHosts = (env.PEEPS_LOAD_SINK_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
   if (sinkHosts.length === 0 || sinkHosts.length > 20 || !sinkHosts.every((h) => HOST2.test(h))) return bad("PEEPS_LOAD_SINK_HOSTS");
   const runId = need("GITHUB_RUN_ID");
   const attempt = need("GITHUB_RUN_ATTEMPT");
-  if (!runId || !DIGITS.test(runId) || !attempt || !DIGITS.test(attempt)) return bad("GITHUB_RUN_ID");
+  if (!runId || !DIGITS2.test(runId) || !attempt || !DIGITS2.test(attempt)) return bad("GITHUB_RUN_ID");
   const checkRunId = need("PEEPS_LOAD_CHECK_RUN_ID");
-  if (!checkRunId || !DIGITS.test(checkRunId) || !Number.isSafeInteger(Number(checkRunId))) return bad("PEEPS_LOAD_CHECK_RUN_ID");
+  if (!checkRunId || !DIGITS2.test(checkRunId) || !Number.isSafeInteger(Number(checkRunId))) return bad("PEEPS_LOAD_CHECK_RUN_ID");
   const actionVersion = env.PEEPS_LOAD_ACTION_VERSION || "dev";
-  if (!VERSION.test(actionVersion)) return bad("PEEPS_LOAD_ACTION_VERSION");
-  const nodeDir = env.PEEPS_LOAD_NODE_DIR || import_node_path3.default.dirname(import_node_path3.default.dirname(execPath));
-  if (!import_node_path3.default.isAbsolute(nodeDir)) return bad("PEEPS_LOAD_NODE_DIR");
+  if (!VERSION2.test(actionVersion)) return bad("PEEPS_LOAD_ACTION_VERSION");
+  const nodeDir = env.PEEPS_LOAD_NODE_DIR || import_node_path5.default.dirname(import_node_path5.default.dirname(execPath));
+  if (!import_node_path5.default.isAbsolute(nodeDir)) return bad("PEEPS_LOAD_NODE_DIR");
   const resultFile = env.PEEPS_LOAD_RESULT_FILE || void 0;
-  if (resultFile !== void 0 && !import_node_path3.default.isAbsolute(resultFile)) return bad("PEEPS_LOAD_RESULT_FILE");
+  if (resultFile !== void 0 && !import_node_path5.default.isAbsolute(resultFile)) return bad("PEEPS_LOAD_RESULT_FILE");
   return {
     ok: true,
     inputs: {
@@ -5660,8 +6272,8 @@ function readLoadInputs(env, actionDir, execPath = process.execPath) {
       grantRef,
       workspace,
       workloadPath,
-      npmCache,
-      sinkHosts,
+      install: { mode: "offline", cache: npmCache },
+      scope: { kind: "harness", sinkHosts },
       nodeDir,
       actionDir,
       actionVersion,
@@ -5716,7 +6328,98 @@ async function mainLoad(env = process.env, deps = {}, actionDir = __dirname) {
     write(JSON.stringify({ refused: "input", input: read.problem }));
     return 2;
   }
-  const i = read.inputs;
+  return runFromInputs(read.inputs, deps, write);
+}
+function readCustomerInputs(env, actionDir, facts = {}) {
+  const f = readJobFacts(env, facts);
+  const refused = customerRefusal(f);
+  if (refused) return { ok: false, refusal: refused };
+  const origin = loadControlOrigin(f.apiUrl ?? void 0);
+  if (!origin.ok) return { ok: false, refusal: refusal("control_origin") };
+  return {
+    ok: true,
+    inputs: {
+      peepsUrl: origin.origin,
+      grantRef: f.grant,
+      workspace: f.workspace,
+      workloadPath: f.workload,
+      install: { mode: "fetch" },
+      scope: { kind: "customer" },
+      nodeDir: loadNodeDir(f.toolCache, facts.arch ?? process.arch),
+      actionDir,
+      actionVersion: f.actionRef,
+      runId: `gh-${env.GITHUB_RUN_ID}-${f.runAttempt}`.slice(0, 40),
+      oidc: { requestUrl: env.ACTIONS_ID_TOKEN_REQUEST_URL, requestToken: env.ACTIONS_ID_TOKEN_REQUEST_TOKEN },
+      summaryFile: env.GITHUB_STEP_SUMMARY || void 0
+    }
+  };
+}
+async function mainCustomerLoad(env = process.env, deps = {}, actionDir = __dirname) {
+  const write = deps.write ?? ((line) => void process.stdout.write(`${line}
+`));
+  const error = deps.error ?? ((line) => void process.stderr.write(`${line}
+`));
+  const read = readCustomerInputs(env, actionDir, deps.facts);
+  const titled = (copy, summaryText) => {
+    error(`::error title=Peeps load run::${copy}`);
+    const summary = env.GITHUB_STEP_SUMMARY;
+    if (summary) {
+      try {
+        (0, import_node_fs6.appendFileSync)(summary, summaryText);
+      } catch {
+      }
+    }
+  };
+  const refuse2 = (r) => {
+    if (r.code === "action_not_pinned") {
+      error(NOT_PINNED_LINE);
+      return 1;
+    }
+    titled(r.message, `## Peeps load run
+
+${r.message}
+`);
+    write(JSON.stringify({ refused: r.code }));
+    return 1;
+  };
+  if (!read.ok) return refuse2(read.refusal);
+  const id = await (deps.identity ?? ((oidc, e) => readJobIdentity(oidc, e)))(read.inputs.oidc, env);
+  if (!id.ok) {
+    if ("failed" in id) {
+      titled(IDENTITY_FAILED_COPY, `## Peeps load run
+
+${IDENTITY_FAILED_COPY}
+`);
+      write(JSON.stringify({ failed: "oidc" }));
+      return 1;
+    }
+    return refuse2(refusal(id.refused));
+  }
+  const explain = (res) => {
+    if (res.status !== "didnt_start") return;
+    const copy = RUN_REFUSAL_COPY[res.reason];
+    if (copy) titled(copy, `
+${copy}
+`);
+    for (const line of failureLines(res.failures)) error(line);
+  };
+  return runFromInputs({ ...read.inputs, checkRunId: id.checkRunId, runAttempt: id.runAttempt }, deps, write, explain);
+}
+var FAILURE_LINES = 20;
+var FAILURE_LINE_CHARS = 300;
+function failureLines(failures) {
+  const out = [];
+  for (const f of failures) {
+    for (const raw of f.message.split(/\r?\n|\r/)) {
+      const line = (sanitize(raw, FAILURE_LINE_CHARS) ?? "").replaceAll("##[", "## [").trim();
+      if (!line) continue;
+      if (out.length === FAILURE_LINES) return out;
+      out.push(`peeps load: ${line}`);
+    }
+  }
+  return out;
+}
+async function runFromInputs(i, deps, write, explain) {
   let port;
   try {
     port = (deps.makePort ?? ((o) => new HttpControlPort(o)))({ peepsUrl: i.peepsUrl, oidc: i.oidc, userAgent: `peeps-action-load/${i.actionVersion}` });
@@ -5736,17 +6439,23 @@ async function mainLoad(env = process.env, deps = {}, actionDir = __dirname) {
       actionDir: i.actionDir,
       port,
       grantRef: i.grantRef,
-      npmCache: i.npmCache,
-      harnessHosts: i.sinkHosts,
+      install: i.install,
+      ...i.scope.kind === "harness" ? { harnessHosts: i.scope.sinkHosts } : {},
       actionVersion: i.actionVersion,
       runAttempt: i.runAttempt,
       checkRunId: i.checkRunId,
       signal: signals.signal,
       hardSignal: signals.hard
     });
-    if (i.resultFile) (0, import_node_fs4.writeFileSync)(i.resultFile, `${JSON.stringify(res)}
+    if (i.resultFile) (0, import_node_fs6.writeFileSync)(i.resultFile, `${JSON.stringify(res)}
 `, { mode: 384 });
-    if (i.summaryFile) (0, import_node_fs4.appendFileSync)(i.summaryFile, stepSummary(res));
+    if (i.summaryFile) {
+      try {
+        (0, import_node_fs6.appendFileSync)(i.summaryFile, stepSummary(res));
+      } catch {
+      }
+    }
+    explain?.(res);
     write(JSON.stringify(reportOf(res)));
     return res.status === "completed" && res.cleanup === "clean" && res.closed.state === "acked" && res.evidence.state === "complete" && res.final !== "missing" && res.final.watermark === res.closed.debited ? 0 : 1;
   } catch {
@@ -5764,7 +6473,10 @@ if (require.main === module) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  failureLines,
+  mainCustomerLoad,
   mainLoad,
+  readCustomerInputs,
   readLoadInputs,
   reportOf,
   stepSummary

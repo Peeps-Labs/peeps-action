@@ -1,0 +1,73 @@
+# .github/workflows/peeps.yml — installed by you; Peeps never edits workflow files
+name: Peeps
+on:
+  workflow_dispatch:
+    inputs:
+      mode:      { type: string, required: true }   # inventory | run | agent | load
+      sessionId: { type: string, required: false }
+      ref:       { type: string, required: false }
+      loadGrant:    { type: string, required: false }   # load runs only
+      loadWorkload: { type: string, required: false }   # load runs only
+  push:
+    branches: [main]   # the headline branch is what Peeps mirrors
+  pull_request:
+  merge_group:           # a merge queue's group is tested before it merges
+    types: [checks_requested]
+permissions:
+  contents: read
+  id-token: write        # OIDC → Peeps; no Peeps secret needed
+jobs:
+  peeps:
+    name: "peeps ${{ inputs.mode || 'report' }} ${{ inputs.sessionId || '' }}"
+    if: inputs.mode != 'load'
+    runs-on: ubuntu-latest
+    container: mcr.microsoft.com/playwright:v1.59.1-jammy
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with: { ref: "${{ inputs.ref || github.ref }}" }
+      - uses: actions/cache@v4   # npm's downloads, reused while the lockfile is unchanged
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('**/package-lock.json') }}
+      - run: npm ci
+      # A BASE_URL set in this workflow overrides the Peeps environment a run or fix is handed.
+      # Keep the fallback in your test config instead: process.env.BASE_URL ?? "<default>"
+      - uses: Peeps-Labs/peeps-action@v1
+        env:
+          PEEPS_API_URL: https://dev.peepsai.com
+        with:
+          mode: ${{ inputs.mode }}
+          session-id: ${{ inputs.sessionId }}
+
+  peeps-load:
+    name: Peeps load run
+    if: inputs.mode == 'load' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NODE_OPTIONS: ""
+      NODE_DEBUG: ""
+      NODE_PATH: ""
+      LD_PRELOAD: ""
+      LD_AUDIT: ""
+      LD_LIBRARY_PATH: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38   # v6
+        with:
+          node-version: "24.22.3"
+          package-manager-cache: false
+      - uses: Peeps-Labs/peeps-action@0123456789abcdef0123456789abcdef01234567
+        env:
+          PEEPS_API_URL: https://dev.peepsai.com
+        with:
+          mode: load
+          load-grant: ${{ inputs.loadGrant }}
+          load-workload: ${{ inputs.loadWorkload }}

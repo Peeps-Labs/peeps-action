@@ -39,9 +39,10 @@ import { createRunCa } from "./gate/ca";
 import { encodeHandoffs, Journal, type JournalSnapshot } from "./gate/journal";
 import { GateProxy, makeDial, type Dial, type DialSeams } from "./gate/proxy";
 import { eventsBody } from "./gate/reconcile";
-import { checkoutHead, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests } from "./install";
+import { CheckoutChanged, checkoutHead, InstallFailed, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests, type Toolchain } from "./install";
+import { fetchPreinstall, type RegistryFetchSeams } from "./registry-fetch";
 import { NoTicket, probe as realProbe, startJail, TicketRefused, type JailHandle, type ProbeReport, type StartJailOptions } from "./jail";
-import type { CtlFrame, Ticket } from "./jail/ctl";
+import { ERROR_CLASSES, PLAYWRIGHT_COMPAT, type CtlFrame, type ErrorClass, type PlaywrightCompat, type Ticket } from "./jail/ctl";
 import type { JailSpec } from "./jail/spec";
 import { RunnerLease, type ClaimGrant } from "./lease";
 import { validatePlanInput, type Plan } from "./plan-input";
@@ -100,8 +101,12 @@ export interface LoadRunOptions {
   port: ControlPort;
   /** The dispatch's grant reference, sent with the claim. */
   grantRef: string;
-  /** The recipe's npm cache, for the offline pre-claim install. Without it the real install refuses. */
-  npmCache?: string;
+  /**
+   * The pre-claim install. `offline` (the harness): from the recipe's npm cache, with no network.
+   * `fetch` (a customer job): the action downloads and verifies the lockfile's tarballs, then npm
+   * installs offline from them. Without it the real install refuses.
+   */
+  install?: LoadInstall;
   /** When set, every origin the grant allows must be on one of these hosts (E5's harness: the sink only). */
   harnessHosts?: string[];
   actionVersion?: string;
@@ -113,6 +118,8 @@ export interface LoadRunOptions {
   observer?: (event: LoadEvent) => void;
 }
 
+export type LoadInstall = { mode: "offline"; cache: string } | { mode: "fetch" };
+
 /** Only this file and test/ name it. */
 export interface LoadSeams {
   clocks?: () => Clocks;
@@ -123,12 +130,22 @@ export interface LoadSeams {
   labels?: () => Promise<ProbeLabels>;
   /** The pre-claim install (tests without the pinned toolchain): the digests it leaves. */
   preinstall?: (workspace: string) => Promise<InstallDigests>;
+  /** The jail probe `realProbe` runs (tests: one that throws, or records the node it was given). */
+  probeJail?: typeof realProbe;
+  /** Resolves and checks the toolchain (tests: a fake one, or a refusal). */
+  toolchain?: () => Toolchain;
+  /** The two real installs (tests: to see which one ran). */
+  installers?: { offline?: typeof offlinePreinstall; fetch?: typeof fetchPreinstall };
+  /** The download phase's transport seams (tests: a local registry). */
+  registry?: RegistryFetchSeams;
   dialSeams?: DialSeams;
   dial?: Dial;
   seqHeader?: string;
   constants?: Partial<SupervisorConstants> & Partial<EngineConstants>;
   /** The executor's command and install, as the jail sees them (tests: the fake jail's own). */
   command?: string[];
+  /** The job log (tests: to read what a journey's failure printed). */
+  log?: (line: string) => void;
   /** Hands the run's journal to a test once it exists (load-freeze snapshots it at its boundary). */
   onJournal?: (journal: Journal) => void;
 }
@@ -196,7 +213,8 @@ export interface LoadResult {
   status: LoadStatus;
   reason: string;
   claimId: string | null;
-  playwright: string | null;
+  /** Whether the checkout's Playwright could be used: a closed set, never its version text. */
+  playwright: PlaywrightCompat | null;
   checking: { turns: number; success: number; failure: number; timeout: number; cancelled: number; responded: number[] };
   measurement: { started: number; missed: number; success: number; failure: number; timeout: number; cancelled: number };
   /** UTC bounds of the measurement before drain. Null when measurement never started. */
@@ -219,9 +237,30 @@ export interface LoadResult {
 }
 
 class Refused extends Error {
-  constructor(readonly status: LoadStatus, readonly reason: string, detail?: string) {
-    super(`${reason}${detail ? `: ${detail}` : ""}`);
+  /** `detail`: one failure a line, each safe to print and to send (no value read from the checkout as it is). */
+  constructor(readonly status: LoadStatus, readonly reason: string, readonly detail?: string | readonly string[]) {
+    super(`${reason}${detail ? `: ${typeof detail === "string" ? detail : detail.join("; ")}` : ""}`);
   }
+}
+
+type Stage = "toolchain" | "probe" | "install" | "binding" | "claim" | "prepare" | "jail" | "startup" | "checking" | "measurement";
+const STAGE_TEXT: Record<Stage, string> = {
+  toolchain: "the toolchain could not be checked",
+  probe: "the fence could not be checked",
+  install: "the install could not run",
+  binding: "the checkout could not be read",
+  claim: "the claim could not be made",
+  prepare: "the run could not be prepared",
+  jail: "the jail could not start",
+  startup: "the journey could not start",
+  checking: "checking stopped",
+  measurement: "the measurement stopped",
+};
+
+/** Why an error that isn't one of the install's own refusals stopped the install, without its message (which may hold paths or URLs). */
+function publicCause(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]{0,39}$/.test(code) ? `an unexpected error (${code})` : "an unexpected error";
 }
 
 /** One run, end to end. Never throws: every way it ends is a `LoadResult`. */
@@ -283,6 +322,7 @@ class LoadRun {
 
   private claimId: string | null = null;
   private grant: Grant | undefined;
+  private toolchain: Toolchain | undefined;
   private lease: RunnerLease | undefined;
   private gate: Gate | undefined;
   private journal: Journal | undefined;
@@ -333,7 +373,9 @@ class LoadRun {
   private readonly busySlots = new Map<number, TurnState>();
   private duplicateOutcomes = 0;
   private readonly failures: LoadResult["failures"] = [];
-  private playwright: string | null = null;
+  /** Where the run is: an unexpected error is reported by it, never by its message. */
+  private stage: Stage = "toolchain";
+  private playwright: PlaywrightCompat | null = null;
   private readonly checking = { turns: 0, success: 0, failure: 0, timeout: 0, cancelled: 0, responded: [] as number[] };
   private readonly measurement = { started: 0, missed: 0, success: 0, failure: 0, timeout: 0, cancelled: 0 };
   private accounting: Accounting;
@@ -407,22 +449,36 @@ class LoadRun {
   private async execute(): Promise<void> {
     try {
       this.throwIfDone();
+      // The toolchain is resolved and hash-checked once, before the probe runs its node through
+      // sudo and before the install runs npm: both take this one (CW plan §4.5).
+      if (this.s.toolchain || !this.s.probe || !this.s.preinstall) this.toolchain = this.resolveToolchain();
+      this.stage = "probe";
       const report = await (this.s.probe ? this.s.probe() : this.realProbe());
       this.throwIfDone();
-      if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures.join("; "));
+      if (!report.passed) throw new Refused("didnt_start", "fence_unverified", report.failures);
+      this.stage = "install";
       const digests = await (this.s.preinstall ? this.s.preinstall(this.o.workspace) : this.realPreinstall());
+      this.stage = "binding";
       const binding = await bindingOf(this.o.workspace, this.o.workloadPath, digests.tree, this.signal);
       this.throwIfDone();
+      this.stage = "claim";
       await this.claim(binding, report);
+      this.stage = "prepare";
       await this.prepare(binding);
+      this.stage = "startup";
       await this.startup();
+      this.stage = "checking";
       await this.runChecking();
+      this.stage = "measurement";
       await this.runMeasurement();
     } catch (error) {
-      if (error instanceof Refused) this.terminate(error.reason, error.status);
+      // The detail goes to the result's failures, and from there to Peeps' summary: only fixed
+      // words and checked identifiers, never a message (CW-A round 2 follow-up).
+      if (error instanceof Refused) this.terminate(error.reason, error.status, error.detail);
+      else if (error instanceof CheckoutChanged) this.terminate("checkout_changed", "didnt_start", error.message);
       else if (error instanceof NoTicket) this.terminate("didnt_start", "didnt_start");
       else if (error instanceof TicketRefused) this.terminate(error.reason === "stale_ticket" ? "didnt_start" : "executor_protocol", error.reason === "stale_ticket" ? "didnt_start" : "failed");
-      else if (this.reason === undefined) this.terminate("startup_failed", "failed", (error as Error).message);
+      else if (this.reason === undefined) this.terminate("startup_failed", "failed", `startup_failed: ${STAGE_TEXT[this.stage]}: ${publicCause(error)}`);
     }
   }
 
@@ -430,25 +486,49 @@ class LoadRun {
     if (this.reason !== undefined) throw new Refused(this.status ?? "failed", this.reason);
   }
 
-  private async realProbe(): Promise<ProbeReport> {
-    const node = path.join(this.o.nodeDir, "bin", "node");
-    return realProbe(
-      { node, nodeDir: this.o.nodeDir, actionDir: this.o.actionDir, outer: path.join(this.o.actionDir, "load-outer.js"), init: path.join(this.o.actionDir, "load-init.js"), workspace: this.o.workspace, executorUid: process.getuid!(), executorGid: process.getgid!(), env: {}, limits: { maxRunMs: 60_000, memoryMax: "512M", tasksMax: 64, cpuQuotaPercent: 100 } },
-      `${this.o.runId}-probe`.slice(0, 40),
-      this.signal,
-    );
+  private resolveToolchain(): Toolchain {
+    try {
+      return this.s.toolchain ? this.s.toolchain() : trustedToolchain(this.o.nodeDir, this.o.workspace, undefined, undefined, { log: (line) => void process.stderr.write(`peeps load: ${line}\n`) });
+    } catch (error) {
+      // Whatever it is, nothing of the toolchain ran: unsupported, before the jail or a claim.
+      throw new Refused("didnt_start", "install_unsupported", error instanceof InstallRefused ? error.problems : `the toolchain could not be checked: ${publicCause(error)}`);
+    }
   }
 
-  /** Offline, from the recipe's npm cache, with no network interface (e5 plan v3 §2.10). */
+  private async realProbe(): Promise<ProbeReport> {
+    const tc = this.toolchain!;
+    try {
+      return await (this.s.probeJail ?? realProbe)(
+        { node: tc.node, nodeDir: tc.nodeDir, actionDir: this.o.actionDir, outer: path.join(this.o.actionDir, "load-outer.js"), init: path.join(this.o.actionDir, "load-init.js"), workspace: this.o.workspace, executorUid: process.getuid!(), executorGid: process.getgid!(), env: {}, limits: { maxRunMs: 60_000, memoryMax: "512M", tasksMax: 64, cpuQuotaPercent: 100 } },
+        `${this.o.runId}-probe`.slice(0, 40),
+        this.signal,
+      );
+    } catch (error) {
+      // No sudo or systemd-run (a container the job's signals missed): the fence is unverified,
+      // never a startup failure, and nothing is claimed.
+      if (this.signal.aborted) throw error;
+      return { passed: false, failures: [`the jail could not start (sudo or systemd-run is missing or refused): ${publicCause(error)}`], seen: null };
+    }
+  }
+
+  /** Offline, from the recipe's npm cache (e5 plan v3 §2.10); or the verified download, then offline (CW plan §4.5). */
   private async realPreinstall(): Promise<InstallDigests> {
     this.signal.throwIfAborted();
-    if (!this.o.npmCache) throw new Refused("didnt_start", "install_unsupported", "no recipe npm cache");
+    const install = this.o.install;
+    if (!install || (install.mode === "offline" && !install.cache)) throw new Refused("didnt_start", "install_unsupported", "no recipe npm cache");
+    const tc = this.toolchain!;
     const scratch = mkdtempSync(path.join(os.tmpdir(), "peeps-load-install-"));
+    const ids = { uid: process.getuid!(), gid: process.getgid!() };
     try {
-      return await offlinePreinstall(this.o.workspace, trustedToolchain(this.o.nodeDir, this.o.workspace), scratch, { cache: this.o.npmCache, uid: process.getuid!(), gid: process.getgid!() }, undefined, this.signal);
+      if (install.mode === "fetch") {
+        return await (this.s.installers?.fetch ?? fetchPreinstall)(this.o.workspace, tc, scratch, ids, this.s.registry, this.signal, (line) => void process.stderr.write(`peeps load: ${line}\n`));
+      }
+      return await (this.s.installers?.offline ?? offlinePreinstall)(this.o.workspace, tc, scratch, { cache: install.cache, ...ids }, undefined, this.signal);
     } catch (error) {
-      // A checkout or toolchain refused before npm ran is unsupported; npm or the cache failing is install_failed.
-      throw new Refused("didnt_start", error instanceof InstallRefused ? "install_unsupported" : "install_failed", (error as Error).message);
+      // A checkout refused before npm ran is unsupported; a download, npm or the cache failing is
+      // install_failed. Only the install's own messages are kept: they are safe to print.
+      if (error instanceof InstallRefused) throw new Refused("didnt_start", "install_unsupported", error.problems);
+      throw new Refused("didnt_start", "install_failed", error instanceof InstallFailed ? error.message : `install_failed: ${publicCause(error)}`);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -765,8 +845,8 @@ class LoadRun {
     const spec: JailSpec = {
       runId: this.o.runId,
       claimId: g.claimId,
-      node: path.join(this.o.nodeDir, "bin", "node"),
-      nodeDir: this.o.nodeDir,
+      node: this.toolchain?.node ?? path.join(this.o.nodeDir, "bin", "node"),
+      nodeDir: this.toolchain?.nodeDir ?? this.o.nodeDir,
       actionDir: this.o.actionDir,
       outer: path.join(this.o.actionDir, "load-outer.js"),
       init: path.join(this.o.actionDir, "load-init.js"),
@@ -782,6 +862,7 @@ class LoadRun {
     };
     const proxy = this.proxy;
     const launch = this.s.launch ?? startJail;
+    this.stage = "jail";
     this.jailLaunchPending = true;
     this.launchCalled = true;
     let handle: JailHandle;
@@ -828,10 +909,15 @@ class LoadRun {
     this.throwIfDone();
     if (!f) throw new Refused("didnt_start", "loaded_timeout");
     if (f.type === "fatal") {
-      this.failures.push({ message: sanitize(f.message, 2000) ?? "", location: sanitize(f.location) });
+      if (f.code === "playwright") this.playwright = f.playwright && PLAYWRIGHT_COMPAT.includes(f.playwright) ? f.playwright : "unreadable";
+      this.journeyFailure(`executor_${f.code}`, f.message, f.location, f.error);
       throw new Refused("didnt_start", `executor_${f.code}`);
     }
-    if (f.type === "loaded") this.playwright = sanitize(f.playwright, 64);
+    // The version the checkout's Playwright reports goes to the job log; the result and Peeps get `ok`.
+    if (f.type === "loaded") {
+      this.playwright = "ok";
+      this.log(`Playwright ${f.playwright}`);
+    }
   }
 
   /** The next frame matching, or null at the time limit or the run's end. */
@@ -899,7 +985,7 @@ class LoadRun {
     this.proxy?.closeTurn(f.turn);
     this.busySlots.delete(state.slot);
     this.emit({ type: "outcome", turn: f.turn, kind: f.kind });
-    if (f.kind !== "success" && this.failures.length < 20) this.failures.push({ message: sanitize(f.message, 2000) ?? f.kind, location: sanitize(f.location) });
+    if (f.kind !== "success" && this.failures.length < 20) this.journeyFailure(f.kind, f.message, f.location, f.error);
     const counts = state.phase === "checking" ? this.checking : this.measurement;
     counts[f.kind] += 1;
     if (state.phase === "measurement") {
@@ -1039,10 +1125,33 @@ class LoadRun {
     this.renewController.abort();
   }
 
+  /**
+   * A journey's failure: the result (and Peeps' summary) get its frame code and its error's class,
+   * both from closed sets `decode` checked (`ERROR_CLASSES`), and no location; the location and the
+   * message, the journey's own text, go to the job log only (CW-A round 2, Sol r2c).
+   */
+  private journeyFailure(kind: string, message: string | undefined, location: string | undefined, error: ErrorClass | undefined): void {
+    const cls = error !== undefined && (ERROR_CLASSES as readonly string[]).includes(error) ? error : undefined;
+    this.failures.push({ message: cls ? `${kind}: ${cls}` : kind, location: null });
+    if (message) this.log(`journey ${kind}${location ? ` at ${location}` : ""}: ${message.slice(0, 2000)}`);
+  }
+
+  /** The job log: each line neutralized, so a journey's text runs no workflow command. */
+  private log(text: string): void {
+    for (const line of text.split(/\r?\n|\r/)) {
+      const shown = `peeps load: ${(sanitize(line, 2000) ?? "").replaceAll("##[", "## [")}`;
+      if (this.s.log) this.s.log(shown);
+      else process.stderr.write(`${shown}\n`);
+    }
+  }
+
   /** Synchronous and idempotent: one reason, latched. */
-  private terminate(trigger: string, status?: LoadStatus, detail?: string): void {
+  private terminate(trigger: string, status?: LoadStatus, detail?: string | readonly string[]): void {
     if (this.reason !== undefined) return;
-    if (detail !== undefined && this.failures.length < 20) this.failures.push({ message: sanitize(detail, 2000) ?? trigger, location: null });
+    // One failure a line, so each problem reaches the log whole (CW-A round 2, Opus m1).
+    for (const line of typeof detail === "string" ? detail.split("\n") : (detail ?? [])) {
+      if (this.failures.length < 20) this.failures.push({ message: sanitize(line, 2000) ?? trigger, location: null });
+    }
     let reason = trigger;
     let st: LoadStatus | undefined = status;
     if (this.expiryObserved || this.gate?.leaseExpired) [reason, st] = ["lease_lost", "lease_lost"];

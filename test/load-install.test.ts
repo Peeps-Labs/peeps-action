@@ -17,11 +17,17 @@ import {
   installEnv,
   installProblems,
   netnsPrefix,
+  npmTreeDigestSync,
   offlineInstallArgv,
   offlinePreinstall,
   preinstall,
   readWorkspace,
   satisfies,
+  sha256FileSync,
+  SUPPORTED_TOOLCHAIN,
+  canonicalRegistryTarball,
+  sha512Of,
+  type SupportedToolchain,
   treeDigest,
   trustedToolchain,
   type Toolchain,
@@ -127,6 +133,36 @@ test("lockfile problems are refused: v1, none, shrinkwrap, foreign hosts, http, 
   assert.match(mutate((p) => (p["node_modules/linked"] = { resolved: "packages/missing", link: true })), /linked/);
 });
 
+test("no problem prints a value as read: a credential in any refused URL, spec, name, path or version stays out", (t) => {
+  const url = (n: number) => `https://u${n}:S3CRET-${n}@target.example/x.tgz?token=S3CRET-${n}`;
+  const lock = baseLock();
+  const p = lock.packages as Record<string, Record<string, unknown>>;
+  p["node_modules/left-pad"]!.resolved = url(1);
+  p["node_modules/left-pad"]!.dependencies = { nested: url(2), [url(3)]: "^1.0.0" };
+  p["node_modules/bundled"] = { version: "1.0.0", resolved: url(4), inBundle: true };
+  p["node_modules/plain"] = { name: url(5), version: url(6), inBundle: true };
+  p["node_modules/linked"] = { resolved: url(7), link: true };
+  p[`node_modules/${url(8)}`] = { version: "1.0.0", resolved: url(9), integrity: INTEGRITY };
+  p[url(10)] = { version: "1.0.0" };
+  p[""]!.dependencies = { "left-pad": url(11) };
+  lock.dependencies = { [url(12)]: { version: url(13), dependencies: { y: { from: url(14) } } } };
+  const manifest = { ...BASE_MANIFEST, dependencies: { "left-pad": "^1.3.0", [url(15)]: url(16) }, overrides: { [url(17)]: url(18) }, workspaces: [url(19)] };
+  const found = problems(workspace(t, { manifest, lock }));
+  assert.ok(found.length >= 12, found.join("\n"));
+  for (const line of found) assert.doesNotMatch(line, /S3CRET|target\.example|:\/\/u\d/, line);
+  // What stays: the reason, the field, and names and keys that passed their check.
+  assert.ok(found.includes("package-lock.json: left-pad: resolved is not a tarball on https://registry.npmjs.org/ in its canonical form (https, no userinfo, query or fragment)"), found.join("\n"));
+  assert.ok(found.some((l) => /node_modules\/left-pad: dependencies nested: the spec is not a semver range/.test(l)), found.join("\n"));
+  assert.ok(found.some((l) => /dependencies entry #2: the spec/.test(l)), found.join("\n"));
+  assert.ok(found.some((l) => /dependencies entry #2 > y: from is not from the registry|dependencies entry #1 > y: from is not from the registry/.test(l)), found.join("\n"));
+  const v = problems(workspace(t, { lock: { ...baseLock(), lockfileVersion: url(20) } }));
+  assert.deepEqual(v, ["package-lock.json: lockfileVersion (not a whole number) is not supported (2 or 3 with packages)"]);
+  const locked = baseLock();
+  (locked.packages as Record<string, Record<string, unknown>>)["node_modules/left-pad"]!.version = url(21);
+  (locked.packages as Record<string, Record<string, unknown>>)["node_modules/left-pad"]!.name = url(22);
+  assert.deepEqual(problems(workspace(t, { lock: locked })), ["package-lock.json: left-pad is locked as another name, not left-pad", "package-lock.json: left-pad is locked at a version, outside ^1.3.0"]);
+});
+
 test("a lock entry is read as npm reads it: inBundle, hasShrinkwrap, a truthy link and a URL for a version open no other host", (t) => {
   const mutate = (fn: (p: Record<string, Record<string, unknown>>) => void) => {
     const lock = baseLock();
@@ -182,6 +218,74 @@ test("a project .npmrc and a symlink that leaves the checkout are refused", (t) 
   assert.deepEqual(problems(inside), [], "a symlink that stays inside is fine");
 });
 
+test("another package manager's lockfile beside package-lock.json is refused, by name", (t) => {
+  for (const name of ["yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"]) {
+    assert.deepEqual(problems(workspace(t, { files: { [name]: "" } })), [`${name} is not supported: load runs install from package-lock.json only`], name);
+  }
+  const dir = workspace(t);
+  symlinkSync("/nonexistent", path.join(dir, "yarn.lock"));
+  assert.match(problems(dir).join("; "), /yarn\.lock is not supported/, "found by lstat, even dangling");
+  assert.deepEqual(problems(workspace(t, { files: { "packages/a/yarn.lock": "" } })), [], "only the root's");
+});
+
+test("canonicalRegistryTarball accepts only the registry's one canonical tarball form", () => {
+  for (const url of [`${REG}/left-pad/-/left-pad-1.3.0.tgz`, `${REG}/@playwright/test/-/test-1.50.1.tgz`, `${REG}/@types/node/-/node-24.0.0-beta.1.tgz`, `${REG}/JSONStream/-/JSONStream-1.3.5.tgz`, `${REG}/Base64/-/Base64-1.1.0.tgz`]) {
+    assert.equal(canonicalRegistryTarball(url), true, url);
+  }
+  for (const url of [
+    "https://registry.npmjs.org//evil.example/x.tgz",
+    `${REG}/a%2Fb/-/b-1.0.0.tgz`,
+    `${REG}/left%2dpad/-/left-pad-1.3.0.tgz`,
+    "https://registry.npmjs.org:443/left-pad/-/left-pad-1.3.0.tgz",
+    "https://registry.npmjs.org:8443/left-pad/-/left-pad-1.3.0.tgz",
+    `${REG}/left-pad/-/left-pad-1.3.0.tgz?x=1`,
+    `${REG}/left-pad/-/left-pad-1.3.0.tgz#x`,
+    "https://user@registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+    "https://REGISTRY.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+    `${REG}/left-pad/left-pad-1.3.0.tgz`,
+    `${REG}/left-pad/-/../../x/-/x-1.0.0.tgz`,
+    `${REG}/left-pad/-/left-pad-1.3.0.tar.gz`,
+    // Legacy unscoped names may carry capitals (JSONStream); a scope and a scoped name may not.
+    `${REG}/@types/Left-Pad/-/left-pad-1.3.0.tgz`,
+    `${REG}/@Types/left-pad/-/left-pad-1.3.0.tgz`,
+    "http://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+    "https://registry.npmjs.org.evil.example/left-pad/-/left-pad-1.3.0.tgz",
+    ` ${REG}/left-pad/-/left-pad-1.3.0.tgz`,
+    `${REG}/left-pad/-/left-pad-1.3.0.tgz `,
+    undefined,
+  ]) assert.equal(canonicalRegistryTarball(url), false, String(url));
+});
+
+test("a legacy unscoped package with capitals (JSONStream) is installable; a scoped name with capitals is not", (t) => {
+  const manifest = { ...BASE_MANIFEST, dependencies: { ...BASE_MANIFEST.dependencies, JSONStream: "^1.3.5" } };
+  const lock = baseLock();
+  const pk = lock.packages as Record<string, Record<string, unknown>>;
+  pk[""] = { ...pk[""], dependencies: manifest.dependencies };
+  pk["node_modules/JSONStream"] = { version: "1.3.5", resolved: `${REG}/JSONStream/-/JSONStream-1.3.5.tgz`, integrity: INTEGRITY };
+  assert.deepEqual(problems(workspace(t, { manifest, lock })), []);
+  const scoped = { ...BASE_MANIFEST, dependencies: { ...BASE_MANIFEST.dependencies, "@acme/Pad": "^1.0.0" } };
+  // A name that fails the check is not printed: the refusal names the field and the entry's place.
+  assert.ok(problems(workspace(t, { manifest: scoped })).includes(`package.json: dependencies entry #${Object.keys(scoped.dependencies).length} is not a package name`));
+});
+
+test("an entry's integrity must hold a well-formed sha512: exactly 64 bytes of canonical base64", (t) => {
+  const b64 = (n: number) => Buffer.alloc(n, 7).toString("base64");
+  const good = `sha512-${b64(64)}`;
+  assert.equal(sha512Of(good), good);
+  assert.equal(sha512Of(`sha1-${b64(20)} ${good}`), good, "another algorithm beside it is ignored");
+  for (const bad of [`sha512-${b64(63)}`, `sha512-${b64(65)}`, `sha512-${b64(64).replace(/==$/, "")}`, `sha512-${b64(64).replace(/.==$/, "B==")}`, `sha1-${b64(20)}`, `${good}?opts`, "", "sha512-", 42]) {
+    assert.equal(sha512Of(bad), null, String(bad));
+  }
+  const mutate = (integrity: string) => {
+    const lock = baseLock();
+    (lock.packages as Record<string, Record<string, unknown>>)["node_modules/left-pad"]!.integrity = integrity;
+    return problems(workspace(t, { lock }));
+  };
+  assert.deepEqual(mutate(`sha1-${b64(20)}`), ["package-lock.json: left-pad has no sha512 integrity hash (re-lock with npm 7 or later)"]);
+  assert.deepEqual(mutate(`sha512-${b64(63)}`), ["package-lock.json: left-pad has no sha512 integrity hash (re-lock with npm 7 or later)"]);
+  assert.deepEqual(mutate(`sha1-${b64(20)} ${good}`), []);
+});
+
 test("manifest validation does not read metadata outside the checkout", (t) => {
   const outside = workspace(t);
   const ws = workspace(t);
@@ -228,17 +332,27 @@ function fakeToolchain(t: TestContext, nodeVersion: string, npmVersion: string, 
   chmodSync(path.join(dir, "bin/node"), 0o755);
   writeFileSync(path.join(dir, "lib/node_modules/npm/package.json"), JSON.stringify({ name: "npm", version: npmVersion }));
   writeFileSync(path.join(dir, "lib/node_modules/npm/bin/npm-cli.js"), script);
+  // The rest of npm's tree: its code and its bundled dependencies, which the pin covers too.
+  mkdirSync(path.join(dir, "lib/node_modules/npm/lib"), { recursive: true });
+  mkdirSync(path.join(dir, "lib/node_modules/npm/node_modules/cacache/lib"), { recursive: true });
+  writeFileSync(path.join(dir, "lib/node_modules/npm/lib/cli.js"), "module.exports = () => {}\n");
+  writeFileSync(path.join(dir, "lib/node_modules/npm/node_modules/cacache/lib/index.js"), "module.exports = {}\n");
   return dir;
 }
 
+/** The fake toolchain's own files' hashes, as an entry pins them. */
+function pinnedFor(dir: string, node = "24.22.3", npm = "11.19.1"): SupportedToolchain {
+  return { node, npm, linuxX64: { nodeSha256: sha256FileSync(path.join(dir, "bin/node")), npmTreeSha256: npmTreeDigestSync(path.join(dir, "lib/node_modules/npm")) } };
+}
+
 test("trustedToolchain only accepts the pinned runner toolcache and checks the versions", (t) => {
-  const supported = [{ node: "24.22.3", npm: "11.19.1" }];
   const ws = workspace(t);
   const cache = realpathSync(tmp(t, "peeps-toolcache-"));
   const nodeDir = path.join(cache, "node", "24.22.3", process.arch);
-  const verify = (dir: string) => trustedToolchain(dir, ws, supported, cache);
-
   fakeToolchain(t, "24.22.3", "11.19.1", "", nodeDir);
+  const supported = [pinnedFor(nodeDir)];
+  const verify = (dir: string, entries = supported) => trustedToolchain(dir, ws, entries, cache, { platform: "linux-x64" });
+
   assert.equal(verify(nodeDir).node, path.join(nodeDir, "bin/node"));
   assert.equal(verify(nodeDir).npmCli, path.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"));
 
@@ -250,13 +364,144 @@ test("trustedToolchain only accepts the pinned runner toolcache and checks the v
   assert.throws(() => verify(inWs), /install_unsupported.*toolcache/);
 
   fakeToolchain(t, "22.1.0", "11.19.1", "", nodeDir);
-  assert.throws(() => verify(nodeDir), /install_unsupported.*node 22/);
+  assert.throws(() => verify(nodeDir, [pinnedFor(nodeDir)]), /install_unsupported.*node 22/);
   fakeToolchain(t, "24.22.3", "11.0.0", "", nodeDir);
-  assert.throws(() => verify(nodeDir), /install_unsupported.*npm 11/);
+  assert.throws(() => verify(nodeDir, [pinnedFor(nodeDir)]), /install_unsupported.*npm 11/);
 
+  fakeToolchain(t, "24.22.3", "11.19.1", "", nodeDir);
   rmSync(path.join(nodeDir, "lib/node_modules/npm"), { recursive: true });
   symlinkSync(path.join(inWs, "lib/node_modules/npm"), path.join(nodeDir, "lib/node_modules/npm"));
   assert.throws(() => verify(nodeDir), /install_unsupported.*workspace/);
+});
+
+test("trustedToolchain hashes node and npm's tree before running either: a replaced file that prints the right version is refused unrun", (t) => {
+  const ws = workspace(t);
+  const cache = realpathSync(tmp(t, "peeps-toolcache-"));
+  const nodeDir = path.join(cache, "node", "24.22.3", process.arch);
+  const marker = path.join(tmp(t), "node-ran");
+  fakeToolchain(t, "24.22.3", "11.19.1", "", nodeDir);
+  const pinned = pinnedFor(nodeDir);
+  const verify = (entries: SupportedToolchain[] = [pinned], platform = "linux-x64") => trustedToolchain(nodeDir, ws, entries, cache, { platform });
+  const lines: string[] = [];
+  assert.equal(trustedToolchain(nodeDir, ws, [pinned], cache, { platform: "linux-x64", log: (l) => lines.push(l) }).nodeVersion, "24.22.3");
+  assert.deepEqual(lines, [`node 24.22.3 sha256 ${pinned.linuxX64!.nodeSha256} (pinned ${pinned.linuxX64!.nodeSha256}); npm tree sha256 ${pinned.linuxX64!.npmTreeSha256} (pinned ${pinned.linuxX64!.npmTreeSha256})`]);
+  const other = { ...pinned, linuxX64: { nodeSha256: "a".repeat(64), npmTreeSha256: "b".repeat(64) } };
+  const logged: string[] = [];
+  assert.throws(() => trustedToolchain(nodeDir, ws, [other], cache, { platform: "linux-x64", log: (l) => logged.push(l) }), /is not the pinned a{64}/);
+  assert.deepEqual(logged, [`node 24.22.3 sha256 ${pinned.linuxX64!.nodeSha256} (pinned ${"a".repeat(64)}); npm tree sha256 ${pinned.linuxX64!.npmTreeSha256} (pinned ${"b".repeat(64)})`], "a mismatch logs the read hashes beside the pinned ones");
+  const unpinned: string[] = [];
+  assert.throws(() => trustedToolchain(nodeDir, ws, [pinned], cache, { platform: "linux-arm64", log: (l) => unpinned.push(l) }));
+  assert.match(unpinned[0]!, /\(pinned none\)/);
+
+  // The same version line, other bytes, and a marker if it ever runs.
+  writeFileSync(path.join(nodeDir, "bin/node"), `#!/bin/sh\ntouch ${marker}\necho v24.22.3\n`);
+  assert.throws(() => verify(), /install_unsupported: node's sha256 [0-9a-f]{64} is not the pinned/);
+  assert.equal(existsSync(marker), false, "the replaced node never ran");
+  fakeToolchain(t, "24.22.3", "11.19.1", "", nodeDir);
+  writeFileSync(path.join(nodeDir, "bin/node"), `#!/bin/sh\ntouch ${marker}\necho v24.22.3\n`);
+  const npmReplaced = { ...pinned, linuxX64: { ...pinned.linuxX64!, nodeSha256: sha256FileSync(path.join(nodeDir, "bin/node")) } };
+  writeFileSync(path.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"), "// changed");
+  assert.throws(() => verify([npmReplaced]), /install_unsupported: npm's tree sha256 [0-9a-f]{64} is not the pinned/);
+  assert.equal(existsSync(marker), false);
+  rmSync(path.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"));
+  assert.throws(() => verify([npmReplaced]), /install_unsupported: no node and npm/);
+  fakeToolchain(t, "24.22.3", "11.19.1", "", nodeDir);
+  writeFileSync(path.join(nodeDir, "bin/node"), `#!/bin/sh\ntouch ${marker}\necho v24.22.3\n`);
+  const fresh = pinnedFor(nodeDir);
+  assert.throws(() => verify([fresh], "linux-arm64"), /install_unsupported: no pinned sha256 for node 24\.22\.3 on linux-arm64 \(read node [0-9a-f]{64}, npm tree [0-9a-f]{64}\)/);
+  assert.throws(() => verify([{ node: "24.22.3", npm: "11.19.1" }]), /install_unsupported: no pinned sha256/, "an entry with no hashes refuses");
+  assert.equal(existsSync(marker), false);
+  assert.equal(verify([fresh]).nodeVersion, "24.22.3");
+  assert.equal(existsSync(marker), true, "the fake node does run once its hash is pinned, so the marker means something");
+});
+
+test("trustedToolchain refuses a nodeDir that is a symlink out of the toolcache", (t) => {
+  const ws = workspace(t);
+  const cache = realpathSync(tmp(t, "peeps-toolcache-"));
+  const elsewhere = fakeToolchain(t, "24.22.3", "11.19.1");
+  mkdirSync(path.join(cache, "node", "24.22.3"), { recursive: true });
+  symlinkSync(elsewhere, path.join(cache, "node", "24.22.3", process.arch));
+  assert.throws(() => trustedToolchain(path.join(cache, "node", "24.22.3", process.arch), ws, [pinnedFor(elsewhere)], cache, { platform: "linux-x64" }), /install_unsupported.*toolcache/);
+});
+
+test("SUPPORTED_TOOLCHAIN pins Node 24.22.3 and npm 11.19.1 with both linux x64 hashes", () => {
+  assert.deepEqual(SUPPORTED_TOOLCHAIN.map((s) => [s.node, s.npm]), [["24.22.3", "11.19.1"]]);
+  const pinned = SUPPORTED_TOOLCHAIN[0]!.linuxX64!;
+  assert.match(pinned.nodeSha256, /^[0-9a-f]{64}$/);
+  assert.match(pinned.npmTreeSha256, /^[0-9a-f]{64}$/);
+});
+
+test("the npm pin covers npm's whole tree: a changed file in lib/ or a bundled dependency, or an added file, is refused unrun", (t) => {
+  const ws = workspace(t);
+  const cache = realpathSync(tmp(t, "peeps-toolcache-"));
+  const nodeDir = path.join(cache, "node", "24.22.3", process.arch);
+  const npmDir = path.join(nodeDir, "lib/node_modules/npm");
+  const verify = (entries: SupportedToolchain[]) => trustedToolchain(nodeDir, ws, entries, cache, { platform: "linux-x64" });
+  const changes: [string, () => void][] = [
+    ["a changed file under lib/", () => writeFileSync(path.join(npmDir, "lib/cli.js"), "module.exports = () => { /* changed */ }\n")],
+    ["a changed file in node_modules/cacache", () => writeFileSync(path.join(npmDir, "node_modules/cacache/lib/index.js"), "module.exports = { changed: true }\n")],
+    ["an added file", () => writeFileSync(path.join(npmDir, "node_modules/cacache/lib/extra.js"), "")],
+    ["an added empty folder", () => mkdirSync(path.join(npmDir, "lib/extra"))],
+    ["a removed file", () => rmSync(path.join(npmDir, "lib/cli.js"))],
+    ["a renamed file", () => { writeFileSync(path.join(npmDir, "lib/cli2.js"), "module.exports = () => {}\n"); rmSync(path.join(npmDir, "lib/cli.js")); }],
+  ];
+  for (const [what, change] of changes) {
+    fakeToolchain(t, "24.22.3", "11.19.1", "", nodeDir);
+    const pinned = pinnedFor(nodeDir);
+    assert.equal(verify([pinned]).npmVersion, "11.19.1", `${what}: the untouched tree passes`);
+    change();
+    assert.throws(() => verify([pinned]), /install_unsupported: npm's tree sha256 [0-9a-f]{64} is not the pinned [0-9a-f]{64}$/, what);
+  }
+  // A file's content and its path are bound together: swapping two files' contents changes the digest.
+  fakeToolchain(t, "24.22.3", "11.19.1", "", nodeDir);
+  const before = npmTreeDigestSync(npmDir);
+  writeFileSync(path.join(npmDir, "lib/cli.js"), "module.exports = {}\n");
+  writeFileSync(path.join(npmDir, "node_modules/cacache/lib/index.js"), "module.exports = () => {}\n");
+  assert.notEqual(npmTreeDigestSync(npmDir), before);
+});
+
+test("npm's tree digest refuses a symlink leaving the tree and any special file; a symlink inside it is recorded", (t) => {
+  const npmDir = path.join(fakeToolchain(t, "24.22.3", "11.19.1"), "lib/node_modules/npm");
+  const outside = tmp(t);
+  writeFileSync(path.join(outside, "cli.js"), "");
+  const base = npmTreeDigestSync(npmDir);
+
+  symlinkSync("../lib/cli.js", path.join(npmDir, "bin/inside"));
+  const inside = npmTreeDigestSync(npmDir);
+  assert.notEqual(inside, base, "a symlink inside the tree is part of the digest");
+  rmSync(path.join(npmDir, "bin/inside"));
+  symlinkSync("../lib/index.js", path.join(npmDir, "bin/inside"));
+  assert.notEqual(npmTreeDigestSync(npmDir), inside, "its target is part of the digest");
+  rmSync(path.join(npmDir, "bin/inside"));
+
+  for (const target of [path.join(outside, "cli.js"), "../../../../../" + path.relative("/", outside) + "/cli.js", "../..", "/etc/passwd"]) {
+    symlinkSync(target, path.join(npmDir, "lib/escape"));
+    assert.throws(() => npmTreeDigestSync(npmDir), /install_unsupported: npm's tree holds a symlink that leaves it$/, target);
+    rmSync(path.join(npmDir, "lib/escape"));
+  }
+  execFileSync("mkfifo", [path.join(npmDir, "lib/pipe")]);
+  assert.throws(() => npmTreeDigestSync(npmDir), /install_unsupported: npm's tree holds a special file$/);
+  rmSync(path.join(npmDir, "lib/pipe"));
+  assert.equal(npmTreeDigestSync(npmDir), base);
+});
+
+// The pin was measured from nodejs.org's archive; the Node running these tests is that build when
+// CI's setup-node (or a local install of the same archive) runs them.
+const realNpmDir = path.join(path.dirname(path.dirname(process.execPath)), "lib/node_modules/npm");
+const isPinnedBuild = process.platform === "linux" && process.arch === "x64" && process.versions.node === "24.22.3" && existsSync(realNpmDir);
+test("the real Node 24.22.3 linux x64 npm tree matches the pin", { skip: !isPinnedBuild && "not running the pinned Node build" }, () => {
+  const started = performance.now();
+  const digest = npmTreeDigestSync(realNpmDir);
+  const ms = performance.now() - started;
+  assert.equal(digest, SUPPORTED_TOOLCHAIN[0]!.linuxX64!.npmTreeSha256);
+  console.log(`npm tree digest of ${realNpmDir}: ${ms.toFixed(0)} ms`);
+});
+
+const inToolcache = !!process.env.RUNNER_TOOL_CACHE && isPinnedBuild && realpathSync(process.execPath).startsWith(realpathSync(process.env.RUNNER_TOOL_CACHE) + path.sep);
+test("the runner's real setup-node toolcache passes trustedToolchain with the shipped pins", { skip: !inToolcache && "not running from a runner toolcache" }, (t) => {
+  const ws = workspace(t);
+  const tc = trustedToolchain(path.dirname(path.dirname(process.execPath)), ws);
+  assert.deepEqual([tc.nodeVersion, tc.npmVersion], ["24.22.3", "11.19.1"]);
 });
 
 test("installEnv is the action's config only: registry fixed, no git, no scripts, nothing from the job", (t) => {
@@ -278,6 +523,7 @@ test("installEnv is the action's config only: registry fixed, no git, no scripts
     assert.equal(env.npm_config_audit, "false");
     assert.equal(env.npm_config_fund, "false");
     assert.equal(env.npm_config_update_notifier, "false");
+    assert.equal(env.npm_config_replace_registry_host, "never");
     assert.equal(Object.keys(env).some((k) => /proxy/i.test(k)), false, "nothing from the job");
     for (const file of ["npmrc", "npmrc-global"]) assert.equal(readFileSync(path.join(scratch, file), "utf8"), "registry=https://registry.npmjs.org/\n");
   } finally {

@@ -120,3 +120,19 @@ test("consumeTicket: fresh, past either deadline, used, foreign; stale and forei
   assert.equal(consumeTicket("launch", TICKET, live, config, state), "ok");
   assert.equal(consumeTicket("launch", TICKET, live, config, state), "used");
 });
+
+test("an outcome's or a fatal's error class, and a fatal's Playwright code, are closed sets: anything else, and the frame is not one", () => {
+  const outcome = (error: unknown) => decode(JSON.stringify({ type: "outcome", turn: 1, kind: "failure", message: "m", error }));
+  const fatal = (error: unknown, playwright?: unknown) => decode(JSON.stringify({ type: "fatal", code: "playwright", message: "m", error, playwright }));
+  for (const cls of ["assertion", "timeout", "network", "other"]) {
+    assert.equal((outcome(cls) as { error?: string } | null)?.error, cls);
+    assert.equal((fatal(cls) as { error?: string } | null)?.error, cls);
+  }
+  for (const bad of ["TypeError", "AKIAEXAMPLEKEY123456", "Other", "", 7, null]) {
+    assert.equal(outcome(bad), null, JSON.stringify(bad));
+    assert.equal(fatal(bad), null, JSON.stringify(bad));
+  }
+  for (const code of ["ok", "not_found", "below_floor", "unreadable"]) assert.equal((fatal("other", code) as { playwright?: string } | null)?.playwright, code);
+  for (const bad of ["1.59.1", "OK", ""]) assert.equal(fatal("other", bad), null, bad);
+  assert.equal((decode(JSON.stringify({ type: "outcome", turn: 1, kind: "failure" })) as { error?: string }).error, undefined, "none is fine");
+});

@@ -1,0 +1,9 @@
+v1/ is a byte-for-byte copy of peeps' load-job-v1 corpus, and v1-copy/ of the unhashed
+refusal copy beside it. Do not edit either here: while the corpus is a draft both
+repositories change it together, copied again; once frozen, a change of meaning is a new
+load-job-v2 in peeps.
+
+repository: Peeps-Labs/peeps
+commit:     51257028ab3a7d3ec0407d00328f12ae7e5a20af ("Load testing: type the expected recipe problems in a test (CW-P)", PR #3292, not yet merged)
+path:       src/server/load-testing/protocol/__fixtures__/load-job-v1/ and load-job-v1-copy/
+root hash:  8edcbb829e7087dcf3c8b13b06d2bf6bdbd1cae275dd955985e8a15648ecd195 (sha256 of v1/MANIFEST without its first, status, line)

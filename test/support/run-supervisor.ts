@@ -21,7 +21,7 @@ import { connectVerified } from "../../src/load/gate/resolve";
 import type { JailHandle, StartJailOptions } from "../../src/load/jail";
 import type { JailSpec } from "../../src/load/jail/spec";
 import { scheduleStageStarts } from "../../src/load/scheduler";
-import { bindingOf, runLoad, type LoadEvent, type LoadResult, type LoadSeams } from "../../src/load/supervisor";
+import { bindingOf, runLoad, type LoadEvent, type LoadResult, type LoadRunOptions, type LoadSeams } from "../../src/load/supervisor";
 import { FakeControlPort, type FakeSetup, type PortScript } from "./fake-control-port";
 import { fakeJail, type FakeJailOptions } from "./fake-jail";
 import { FIXTURES, respond as fixtureRespond } from "./e4-fixtures";
@@ -138,6 +138,8 @@ export interface RigOptions {
   hardSignal?: AbortSignal;
   /** The hosts a grant may name (the direct entry's PEEPS_LOAD_SINK_HOSTS). */
   harnessHosts?: string[];
+  /** The pre-claim install's mode (the harness's offline cache, or a customer job's download). */
+  install?: LoadRunOptions["install"];
   /** The dispatch's grant reference; `GRANT_REF` by default. */
   grantRef?: string;
   /** Runs with every event, in order. */
@@ -205,7 +207,7 @@ export async function rig(t: TestContext, o: RigOptions = {}): Promise<Rig> {
   const events: LoadEvent[] = [];
   const self = { ws, sink, port, seam, events, jails, origin } as Rig;
   self.result = runLoad(
-    { runId: `t${Math.random().toString(36).slice(2, 10)}`, grantRef: o.grantRef ?? GRANT_REF, workspace: ws, workloadPath: WORKLOAD_PATH, nodeDir: path.dirname(path.dirname(process.execPath)), actionDir: path.join(REPO, "dist"), port, signal: o.signal, hardSignal: o.hardSignal, harnessHosts: o.harnessHosts, observer: (e) => {
+    { runId: `t${Math.random().toString(36).slice(2, 10)}`, grantRef: o.grantRef ?? GRANT_REF, workspace: ws, workloadPath: WORKLOAD_PATH, nodeDir: path.dirname(path.dirname(process.execPath)), actionDir: path.join(REPO, "dist"), port, signal: o.signal, hardSignal: o.hardSignal, harnessHosts: o.harnessHosts, install: o.install, observer: (e) => {
       events.push(e);
       o.observer?.(e, self);
     } },

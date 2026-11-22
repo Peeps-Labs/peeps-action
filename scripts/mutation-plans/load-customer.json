@@ -1,0 +1,695 @@
+{
+  "description": "CW-A, the customer load job (CW plan \u00a74): every refusal row, the identity read, the control origin, the toolchain hashes, the lockfile URL and SRI checks, the verified download (its first-failure stop and its retries), the refusal causes the job prints (fixed reasons and checked identifiers, one a line), the download total and idle limit, the platform skip, the best-effort summary, the typed checkout_changed and startup_failed details, journey failures and the Playwright check as closed-set codes, the one stream formatter, and the supervisor's toolchain-first startup. A survivor means a security check no test would notice losing. Not here: the `%` check in canonicalRegistryTarball, an equivalent mutant (TARBALL_PATH admits no `%` either, so dropping it changes no answer; it stays as a second guard).",
+  "mutants": [
+    {
+      "name": "a tag or branch ref is read as a commit pin",
+      "file": "src/load/customer.ts",
+      "find": "if (f.actionRef === null || !COMMIT.test(f.actionRef)) return refusal(\"action_not_pinned\");",
+      "replace": "if (f.actionRef === null) return refusal(\"action_not_pinned\");",
+      "tests": [
+        "test/load-customer.test.ts",
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a push or another job is taken for Peeps' dispatch",
+      "file": "src/load/customer.ts",
+      "find": "if (f.job !== \"peeps-load\" || f.eventName !== \"workflow_dispatch\") return refusal(\"job\");",
+      "replace": "if (f.job !== \"peeps-load\") return refusal(\"job\");",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a re-run is allowed",
+      "file": "src/load/customer.ts",
+      "find": "if (f.runAttempt !== \"1\") return refusal(\"rerun\");",
+      "replace": "",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a container's /__w/ workspace is not seen",
+      "file": "src/load/customer.ts",
+      "find": " || (f.workspace ?? \"\").startsWith(\"/__w/\")",
+      "replace": "",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a loader variable set in the job is ignored",
+      "file": "src/load/customer.ts",
+      "find": "if (f.preloadVars.length > 0) return refusal(\"node_options\", { vars: f.preloadVars.join(\", \") });",
+      "replace": "",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a malformed workload path is accepted",
+      "file": "src/load/customer.ts",
+      "find": "...(f.workload !== null && f.workload.length <= WORKLOAD_MAX && WORKLOAD_FILE.test(f.workload) ? [] : [\"loadWorkload\"]),",
+      "replace": "...(f.workload !== null && f.workload.length <= WORKLOAD_MAX ? [] : [\"loadWorkload\"]),",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "any PEEPS_API_URL is accepted",
+      "file": "src/load/control-origin.ts",
+      "find": "return LOAD_CONTROL_ORIGINS.includes(origin) ? { ok: true, origin } : { ok: false, refused: \"control_origin\" };",
+      "replace": "return { ok: true, origin };",
+      "tests": [
+        "test/load-control-origin.test.ts"
+      ]
+    },
+    {
+      "name": "a self-hosted runner's token is accepted",
+      "file": "src/load/oidc.ts",
+      "find": "if (claims.runnerEnvironment !== \"github-hosted\") return { ok: false, refused: \"self_hosted\" };",
+      "replace": "",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "a token for another run is accepted",
+      "file": "src/load/oidc.ts",
+      "find": "if (claims.runId !== env.GITHUB_RUN_ID || claims.runAttempt !== env.GITHUB_RUN_ATTEMPT) return { ok: false, refused: \"identity\" };",
+      "replace": "",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "the identity token is minted for the claim's audience",
+      "file": "src/load/oidc.ts",
+      "find": "export const LOAD_IDENTITY_AUDIENCE = \"peeps-load-identity\";",
+      "replace": "export const LOAD_IDENTITY_AUDIENCE = \"peeps-load\";",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "a tarball that doesn't match its lockfile sha512 is cached",
+      "file": "src/load/registry-fetch.ts",
+      "find": "if (got.digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "the total download cap is not enforced",
+      "file": "src/load/registry-fetch.ts",
+      "find": "        if (received > totalCap) {\n          overTotal = true;\n          return false;\n        }\n",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a redirect from the registry is reported as a plain status",
+      "file": "src/load/transport.ts",
+      "find": "          if (status >= 300 && status < 400) return finish(new ControlHttpError(op, \"redirect\", status));\n          if (status !== 200) return finish(new ControlHttpError(op, \"status\", status));\n          const declared",
+      "replace": "          if (status !== 200) return finish(new ControlHttpError(op, \"status\", status));\n          const declared",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a tarball URL on another host is downloaded",
+      "file": "src/load/install.ts",
+      "find": "url.protocol === \"https:\" && url.hostname === \"registry.npmjs.org\" && url.port === \"\"",
+      "replace": "url.protocol === \"https:\" && url.port === \"\"",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "an SRI hash that isn't 64 bytes is accepted",
+      "file": "src/load/install.ts",
+      "find": "if (bytes.length !== 64 || bytes.toString(\"base64\") !== encoded) return null;",
+      "replace": "",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "node's sha256 is not compared",
+      "file": "src/load/install.ts",
+      "find": "if (nodeSha256 !== pinned!.nodeSha256) fail(",
+      "replace": "if (false) fail(",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "npm's tree digest is not compared",
+      "file": "src/load/install.ts",
+      "find": "if (npmTreeSha256 !== pinned!.npmTreeSha256) fail(",
+      "replace": "if (false) fail(",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "the toolchain is not resolved before the probe",
+      "file": "src/load/supervisor.ts",
+      "find": "      if (this.s.toolchain || !this.s.probe || !this.s.preinstall) this.toolchain = this.resolveToolchain();\n",
+      "replace": "",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a jail that can't start fails the run instead of refusing fence_unverified",
+      "file": "src/load/supervisor.ts",
+      "find": "      return { passed: false, failures: [`the jail could not start (sudo or systemd-run is missing or refused): ${publicCause(error)}`], seen: null };",
+      "replace": "      throw error;",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "the identity's refusal is ignored",
+      "file": "src/load/main.ts",
+      "find": "  if (!id.ok) {",
+      "replace": "  if (false) {",
+      "tests": [
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a customer run is given the harness hosts' scope",
+      "file": "src/load/main.ts",
+      "find": "      scope: { kind: \"customer\" },",
+      "replace": "      scope: { kind: \"harness\", sinkHosts: [\"sink.example.com\"] },",
+      "tests": [
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a job without GitHub's id-token is not refused not_github",
+      "file": "src/load/customer.ts",
+      "find": "if (!f.github || !f.oidcUrl || !f.oidcToken) return refusal(\"not_github\");",
+      "replace": "",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "not_github answers before the unpinned line",
+      "file": "src/load/customer.ts",
+      "find": "  if (f.actionRef === null || !COMMIT.test(f.actionRef)) return refusal(\"action_not_pinned\");\n  if (!f.github || !f.oidcUrl || !f.oidcToken) return refusal(\"not_github\");",
+      "replace": "  if (!f.github || !f.oidcUrl || !f.oidcToken) return refusal(\"not_github\");\n  if (f.actionRef === null || !COMMIT.test(f.actionRef)) return refusal(\"action_not_pinned\");",
+      "tests": [
+        "test/load-customer.test.ts",
+        "test/load-handoff.test.ts"
+      ]
+    },
+    {
+      "name": "/.dockerenv is not seen",
+      "file": "src/load/customer.ts",
+      "find": "if (f.dockerenv || (f.workspace ?? \"\").startsWith(\"/__w/\")) {",
+      "replace": "if ((f.workspace ?? \"\").startsWith(\"/__w/\")) {",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a job without setup-node's 24.22.3 is not refused node_version",
+      "file": "src/load/customer.ts",
+      "find": "if (!f.trustedNodePresent) return refusal(\"node_version\"",
+      "replace": "if (false) return refusal(\"node_version\"",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a malformed grant is accepted",
+      "file": "src/load/customer.ts",
+      "find": "...(f.grant !== null && GRANT_REF.test(f.grant) ? [] : [\"loadGrant\"]),",
+      "replace": "...(f.grant !== null ? [] : [\"loadGrant\"]),",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "customerRefusal doesn't check the control origin",
+      "file": "src/load/customer.ts",
+      "find": "if (!loadControlOrigin(f.apiUrl ?? undefined).ok) return refusal(\"control_origin\");",
+      "replace": "",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a numeric claim is read as a string",
+      "file": "src/load/oidc.ts",
+      "find": "const read = (name: string) => (typeof claims[name] === \"string\" ? (claims[name] as string) : null);",
+      "replace": "const read = (name: string) => (claims[name] === undefined || claims[name] === null ? null : String(claims[name]));",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "a token from another event is accepted",
+      "file": "src/load/oidc.ts",
+      "find": "if (claims.eventName !== \"workflow_dispatch\") return { ok: false, refused: \"identity\" };",
+      "replace": "",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "a malformed check_run_id is accepted",
+      "file": "src/load/oidc.ts",
+      "find": "if (!CHECK_RUN_ID.test(claims.checkRunId) || !Number.isSafeInteger(checkRunId)) return { ok: false, refused: \"identity\" };",
+      "replace": "",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "another lockfile beside package-lock.json is accepted",
+      "file": "src/load/install.ts",
+      "find": "  for (const name of ws.otherLockfiles) out.push(`${name} is not supported: load runs install from package-lock.json only`);\n",
+      "replace": "",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a tarball URL that doesn't round-trip is accepted",
+      "file": "src/load/install.ts",
+      "find": "return url.href === value && url.protocol === \"https:\"",
+      "replace": "return url.protocol === \"https:\"",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "any tarball path on the registry is accepted",
+      "file": "src/load/install.ts",
+      "find": "url.search === \"\" && url.hash === \"\" && TARBALL_PATH.test(url.pathname);",
+      "replace": "url.search === \"\" && url.hash === \"\";",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a run refusal's cause is not printed",
+      "file": "src/load/main.ts",
+      "find": "    for (const line of failureLines(res.failures)) error(line);\n",
+      "replace": "",
+      "tests": [
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a cause's workflow commands are printed as they are",
+      "file": "src/load/main.ts",
+      "find": "const line = (sanitize(raw, FAILURE_LINE_CHARS) ?? \"\").replaceAll(\"##[\", \"## [\").trim();",
+      "replace": "const line = raw.slice(0, FAILURE_LINE_CHARS).trim();",
+      "tests": [
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a Refused's detail is dropped",
+      "file": "src/load/supervisor.ts",
+      "find": "if (error instanceof Refused) this.terminate(error.reason, error.status, error.detail);",
+      "replace": "if (error instanceof Refused) this.terminate(error.reason, error.status);",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a failed tarball doesn't stop the others",
+      "file": "src/load/registry-fetch.ts",
+      "find": "          first ??= { error };\n          stop.abort();",
+      "replace": "          first ??= { error };",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a 4xx is retried",
+      "file": "src/load/registry-fetch.ts",
+      "find": "(error.code === \"status\" && error.status !== undefined && error.status >= 500)",
+      "replace": "error.code === \"status\"",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "nothing is retried",
+      "file": "src/load/registry-fetch.ts",
+      "find": "if (retryable(error) && tries < RETRY_BACKOFF_MS.length && !window.aborted) {",
+      "replace": "if (false) {",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a rejected resolved URL is printed as read",
+      "file": "src/load/install.ts",
+      "find": "      out.push(`package-lock.json: ${name}: resolved is not a tarball on ${REGISTRY} in its canonical form (https, no userinfo, query or fragment)`);",
+      "replace": "      out.push(`package-lock.json: ${name}: resolved ${String(entry.resolved)} is not a tarball on ${REGISTRY} in its canonical form (https, no userinfo, query or fragment)`);",
+      "tests": [
+        "test/load-install.test.ts",
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a refused manifest spec is printed as read",
+      "file": "src/load/install.ts",
+      "find": "  if (parseRange(spec) === null) return \"the spec is not a semver range (git, file, link, URL and tag specs are refused)\";",
+      "replace": "  if (parseRange(spec) === null) return `the spec ${spec} is not a semver range (git, file, link, URL and tag specs are refused)`;",
+      "tests": [
+        "test/load-install.test.ts",
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a package name is printed without its check",
+      "file": "src/load/install.ts",
+      "find": "return typeof name === \"string\" && name.length <= 214 && NAME.test(name) ? name : undefined;",
+      "replace": "return typeof name === \"string\" ? name : undefined;",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a path is printed without its check",
+      "file": "src/load/install.ts",
+      "find": "return typeof value === \"string\" && SHOWN_PATH.test(value) ? value : otherwise;",
+      "replace": "return typeof value === \"string\" ? value : otherwise;",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "an unexpected install error's own message is kept",
+      "file": "src/load/supervisor.ts",
+      "find": "error instanceof InstallFailed ? error.message : `install_failed: ${publicCause(error)}`",
+      "replace": "(error as Error).message",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "an exception's code is printed unchecked, or its message instead",
+      "file": "src/load/supervisor.ts",
+      "find": "return typeof code === \"string\" && /^[A-Z][A-Z0-9_]{0,39}$/.test(code) ? `an unexpected error (${code})` : \"an unexpected error\";",
+      "replace": "return `an unexpected error (${(error as Error).message})`;",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a refusal's problems are joined into one line again",
+      "file": "src/load/supervisor.ts",
+      "find": "if (!report.passed) throw new Refused(\"didnt_start\", \"fence_unverified\", report.failures);",
+      "replace": "if (!report.passed) throw new Refused(\"didnt_start\", \"fence_unverified\", report.failures.join(\"; \"));",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "the install's problems are joined into one line again",
+      "file": "src/load/supervisor.ts",
+      "find": "if (error instanceof InstallRefused) throw new Refused(\"didnt_start\", \"install_unsupported\", error.problems);",
+      "replace": "if (error instanceof InstallRefused) throw new Refused(\"didnt_start\", \"install_unsupported\", error.problems.join(\"; \"));",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "going over the download total is reported as one tarball's cap",
+      "file": "src/load/registry-fetch.ts",
+      "find": "        if (overTotal) return fail(`the downloads passed ${totalCap} bytes in all (total too large)`);\n",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a stalled attempt is not retried",
+      "file": "src/load/registry-fetch.ts",
+      "find": "      if (stalled && !window.aborted) throw new ControlHttpError(\"registry\", \"network\", undefined, \"stalled\");\n",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "no attempt has an idle limit",
+      "file": "src/load/registry-fetch.ts",
+      "find": "    arm();\n    try {",
+      "replace": "    try {",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "an unwritable step summary hides the cause again",
+      "file": "src/load/main.ts",
+      "find": "    if (i.summaryFile) {\n      try {\n        appendFileSync(i.summaryFile, stepSummary(res));\n      } catch {\n        // Best effort: the log's titled line and cause, and the report, still follow.\n      }\n    }",
+      "replace": "    if (i.summaryFile) appendFileSync(i.summaryFile, stepSummary(res));",
+      "tests": [
+        "test/load-customer-entry.test.ts",
+        "test/load-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a required entry for another platform is skipped",
+      "file": "src/load/install.ts",
+      "find": "  if (entry.optional !== true) return false;\n",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "libc is not read",
+      "file": "src/load/install.ts",
+      "find": " || (entry.libc !== undefined && !admits(entry.libc, \"glibc\"))",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a negated platform is not read",
+      "file": "src/load/install.ts",
+      "find": "      if (name.slice(1) === value) return false;\n",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "the download fetches other platforms' optional tarballs",
+      "file": "src/load/registry-fetch.ts",
+      "find": "if (!entry || !canonicalRegistryTarball(entry.resolved) || skippedOnRunner(entry)) continue;",
+      "replace": "if (!entry || !canonicalRegistryTarball(entry.resolved)) continue;",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "the cache check refuses a recipe for lacking another platform's optional tarball",
+      "file": "src/load/install.ts",
+      "find": " || checked.has(entry.integrity) || skippedOnRunner(entry)) continue;",
+      "replace": " || checked.has(entry.integrity)) continue;",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a malformed HEAD's content is echoed in the refusal",
+      "file": "src/load/install.ts",
+      "find": "  if (!ref || !REF.test(ref) || ref.split(\"/\").some((part) => part === \"..\" || part === \".\" || part === \"\")) throw new CheckoutChanged(\"malformed\");",
+      "replace": "  if (!ref || !REF.test(ref) || ref.split(\"/\").some((part) => part === \"..\" || part === \".\" || part === \"\")) throw new Error(`checkout_changed: HEAD is not a ref this action reads (${head.slice(0, 100)})`);",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a missing ref target echoes the ref",
+      "file": "src/load/install.ts",
+      "find": "  throw new CheckoutChanged(\"missing ref target\");",
+      "replace": "  throw new Error(`checkout_changed: ${ref} is not found`);",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a checkout_changed read is reported as an unexpected startup error",
+      "file": "src/load/supervisor.ts",
+      "find": "      else if (error instanceof CheckoutChanged) this.terminate(\"checkout_changed\", \"didnt_start\", error.message);\n",
+      "replace": "",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "an unexpected startup error's message reaches the failures",
+      "file": "src/load/supervisor.ts",
+      "find": "`startup_failed: ${STAGE_TEXT[this.stage]}: ${publicCause(error)}`",
+      "replace": "(error as Error).message",
+      "tests": [
+        "test/load-supervisor-customer.test.ts",
+        "test/load-supervisor-evidence.test.ts"
+      ]
+    },
+    {
+      "name": "a journey's message reaches the failures",
+      "file": "src/load/supervisor.ts",
+      "find": "this.failures.push({ message: cls ? `${kind}: ${cls}` : kind, location: null });",
+      "replace": "this.failures.push({ message: message ?? kind, location: null });",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a journey's message never reaches the job log",
+      "file": "src/load/supervisor.ts",
+      "find": "    if (message) this.log(`journey ${kind}${location ? ` at ${location}` : \"\"}: ${message.slice(0, 2000)}`);\n",
+      "replace": "",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a journey's stack-derived location reaches the failures",
+      "file": "src/load/supervisor.ts",
+      "find": "this.failures.push({ message: cls ? `${kind}: ${cls}` : kind, location: null });",
+      "replace": "this.failures.push({ message: cls ? `${kind}: ${cls}` : kind, location: location ?? null });",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a frame's error class is not checked against the closed set",
+      "file": "src/load/jail/ctl.ts",
+      "find": "return typeof v[name] === \"string\" && (set as readonly string[]).includes(v[name] as string) ? { [name]: v[name] as T } : null;",
+      "replace": "return typeof v[name] === \"string\" ? { [name]: v[name] as T } : null;",
+      "tests": [
+        "test/load-ctl.test.ts"
+      ]
+    },
+    {
+      "name": "the Playwright version text reaches the result",
+      "file": "src/load/supervisor.ts",
+      "find": "      this.playwright = \"ok\";\n",
+      "replace": "      this.playwright = f.playwright as PlaywrightCompat;\n",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a bare CR or CRLF does not end a line",
+      "file": "src/load/jail/spec.ts",
+      "find": "const parts = text.split(/\\r\\n|\\r|\\n/);",
+      "replace": "const parts = text.split(/\\n/);",
+      "tests": [
+        "test/load-jail-spec.test.ts"
+      ]
+    },
+    {
+      "name": "a CRLF split across chunks ends two lines",
+      "file": "src/load/jail/spec.ts",
+      "find": "    if (this.afterCr && text.startsWith(\"\\n\")) text = text.slice(1);\n",
+      "replace": "",
+      "tests": [
+        "test/load-jail-spec.test.ts"
+      ]
+    },
+    {
+      "name": "npm's output reaches the job log unformatted",
+      "file": "src/load/install.ts",
+      "find": "const lines = new NeutralLines((line) => void process.stderr.write(`${line}\\n`), 4096);",
+      "replace": "const lines = { write: (c: Buffer) => void process.stderr.write(c), end: () => undefined };",
+      "tests": [
+        "test/load-jail-spec.test.ts"
+      ]
+    },
+    {
+      "name": "the npm tree digest walks only bin/",
+      "file": "src/load/install.ts",
+      "find": "  walk(root, \"\");\n  return hash.digest(\"hex\");",
+      "replace": "  walk(path.join(root, \"bin\"), \"bin\");\n  return hash.digest(\"hex\");",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "npm's bundled dependencies are not walked",
+      "file": "src/load/install.ts",
+      "find": "        walk(full, relPath);\n",
+      "replace": "        if (name !== \"node_modules\") walk(full, relPath);\n",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "npm's files are recorded by size, not content",
+      "file": "src/load/install.ts",
+      "find": "\\0${st.size}\\0${sha256FileSync(full)}\\n`);",
+      "replace": "\\0${st.size}\\n`);",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "an added folder in npm's tree is not recorded",
+      "file": "src/load/install.ts",
+      "find": "        hash.update(`D\\0${relPath}\\n`);\n        walk(",
+      "replace": "        walk(",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a symlink leaving npm's tree is recorded",
+      "file": "src/load/install.ts",
+      "find": "if (path.isAbsolute(target) || !inside(path.resolve(dir, target), root)) throw",
+      "replace": "if (false) throw",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a relative symlink leaving npm's tree is recorded",
+      "file": "src/load/install.ts",
+      "find": "!inside(path.resolve(dir, target), root)) throw",
+      "replace": "false) throw",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a symlink's target is not in npm's tree digest",
+      "file": "src/load/install.ts",
+      "find": "hash.update(`L\\0${relPath}\\0${target}\\n`);",
+      "replace": "hash.update(`L\\0${relPath}\\n`);",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a special file in npm's tree is recorded",
+      "file": "src/load/install.ts",
+      "find": "else throw new InstallRefused([\"npm's tree holds a special file\"]);",
+      "replace": "else hash.update(`O\\0${relPath}\\n`);",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    }
+  ]
+}
