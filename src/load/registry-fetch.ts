@@ -9,7 +9,9 @@
  *   - Only canonical tarball URLs (`canonicalRegistryTarball`), each fetched from exactly that
  *     path on registry.npmjs.org:443, over the shared transport: the job's proxy and CA
  *     variables are ignored and any 3xx fails.
- *   - At most 8 at a time, 64 MiB each, 1 GiB in all, 10 minutes in all.
+ *   - At most 8 at a time, 64 MiB each, 1 GiB in all, 10 minutes in all. The first failure
+ *     stops the rest. A dropped connection or a 5xx is retried twice (250 ms, then 1 s), with a
+ *     fresh hash; a 4xx, a redirect, a size cap or a sha512 mismatch never.
  *   - Each body is hashed with sha512 as it streams; a mismatch writes nothing and fails.
  *   - A verified body is stored under the integrity it was checked against, with pacote's
  *     request-cache key for its URL.
@@ -19,13 +21,20 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { canonicalRegistryTarball, installProblems, InstallRefused, offlinePreinstall, readWorkspace, sha512Of, type InstallDigests, type OfflineInstall, type Toolchain } from "./install";
-import { ControlHttpError, controlTransport, type HttpControlSeams } from "./transport";
+import { ControlHttpError, controlTransport, sleep, type HttpControlSeams } from "./transport";
 
 export const REGISTRY_HOST = "registry.npmjs.org";
 export const FETCH_PARALLEL = 8;
 export const TARBALL_MAX_BYTES = 64 * 1024 * 1024;
 export const TOTAL_MAX_BYTES = 1024 * 1024 * 1024;
 export const FETCH_MS = 10 * 60_000;
+/** Two retries per tarball, for a dropped connection or a 5xx only. */
+export const RETRY_BACKOFF_MS = [250, 1_000] as const;
+
+/** A dropped connection or a server error. Never a 4xx, a redirect, a size cap or a sha512 mismatch. */
+function retryable(error: unknown): boolean {
+  return error instanceof ControlHttpError && (error.code === "network" || (error.code === "status" && error.status !== undefined && error.status >= 500));
+}
 
 /** Only tests set these. */
 export interface RegistryFetchSeams extends HttpControlSeams {
@@ -71,45 +80,77 @@ export async function downloadTarballs(tarballs: Tarball[], cache: string, tc: T
   const cacheDir = path.join(cache, "_cacache");
   const tarballCap = seams.tarballMaxBytes ?? TARBALL_MAX_BYTES;
   const totalCap = seams.totalMaxBytes ?? TOTAL_MAX_BYTES;
-  const window = AbortSignal.any([AbortSignal.timeout(seams.deadlineMs ?? FETCH_MS), ...(signal ? [signal] : [])]);
+  // The first failure stops the rest: no worker takes new work, and nothing more is cached.
+  const stop = new AbortController();
+  const window = AbortSignal.any([AbortSignal.timeout(seams.deadlineMs ?? FETCH_MS), stop.signal, ...(signal ? [signal] : [])]);
   const target = new URL(`https://${REGISTRY_HOST}${seams.port ? `:${seams.port}` : ""}`);
   const t = controlTransport(seams);
   const agent = t.agent({ keepAlive: true, maxSockets: FETCH_PARALLEL, maxFreeSockets: FETCH_PARALLEL });
   let total = 0;
   let next = 0;
+  let first: { error: unknown } | undefined;
   const fail = (why: string): never => {
     throw new Error(`install_failed: ${why}`);
   };
-  const one = async (tarball: Tarball) => {
-    const url = new URL(tarball.url);
+  /** One attempt: the body and its sha512, or the transport's error. Its bytes leave the total if it fails. */
+  const attempt = async (pathname: string) => {
     const hash = createHash("sha512");
     const chunks: Buffer[] = [];
+    let mine = 0;
     try {
-      await t.download("registry", agent, target, url.pathname, tarballCap, window, (chunk) => {
+      await t.download("registry", agent, target, pathname, tarballCap, window, (chunk) => {
         total += chunk.length;
+        mine += chunk.length;
         if (total > totalCap) return false;
         hash.update(chunk);
         chunks.push(chunk);
         return true;
       });
     } catch (error) {
-      signal?.throwIfAborted();
-      const code = error instanceof ControlHttpError ? `${error.code}${error.status !== undefined ? ` ${error.status}` : ""}` : "download";
-      return fail(`fetching ${url.pathname} failed (${code})`);
+      total -= mine;
+      throw error;
+    }
+    return { digest: `sha512-${hash.digest("base64")}`, body: Buffer.concat(chunks) };
+  };
+  const one = async (tarball: Tarball) => {
+    const url = new URL(tarball.url);
+    let got: Awaited<ReturnType<typeof attempt>> | undefined;
+    for (let tries = 0; !got; tries++) {
+      try {
+        got = await attempt(url.pathname);
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (retryable(error) && tries < RETRY_BACKOFF_MS.length && !window.aborted) {
+          try {
+            await sleep(RETRY_BACKOFF_MS[tries]!, window);
+            continue;
+          } catch {
+            // The window closed while waiting: report the failure it interrupted.
+          }
+        }
+        const code = error instanceof ControlHttpError ? `${error.code}${error.status !== undefined ? ` ${error.status}` : ""}` : "download";
+        return fail(`fetching ${url.pathname} failed (${code})`);
+      }
     }
     if (total > totalCap) fail(`the tarballs exceed ${totalCap} bytes`);
-    const digest = `sha512-${hash.digest("base64")}`;
-    if (digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);
+    if (got.digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);
     signal?.throwIfAborted();
-    await cacache.put(cacheDir, cacheKeyOf(tarball.url), Buffer.concat(chunks), { integrity: tarball.integrity, algorithms: ["sha512"] });
+    if (stop.signal.aborted) return;
+    await cacache.put(cacheDir, cacheKeyOf(tarball.url), got.body, { integrity: tarball.integrity, algorithms: ["sha512"] });
   };
   try {
     const workers = Array.from({ length: Math.min(FETCH_PARALLEL, tarballs.length) }, async () => {
-      while (next < tarballs.length) await one(tarballs[next++]!);
+      while (next < tarballs.length && !stop.signal.aborted) {
+        try {
+          await one(tarballs[next++]!);
+        } catch (error) {
+          first ??= { error };
+          stop.abort();
+        }
+      }
     });
-    const settled = await Promise.allSettled(workers);
-    const failed = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
-    if (failed) throw failed.reason;
+    await Promise.all(workers);
+    if (first) throw first.error;
   } finally {
     t.close();
   }

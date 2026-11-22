@@ -14,7 +14,7 @@ import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import type { Toolchain } from "../src/load/install";
+import { offlinePreinstall, type Toolchain } from "../src/load/install";
 import { cacheKeyOf, downloadTarballs, fetchPreinstall, lockedTarballs, type RegistryFetchSeams, type Tarball } from "../src/load/registry-fetch";
 import { loopbackLookup, startTestServer, type TestServer } from "./support/control-server";
 
@@ -44,6 +44,14 @@ const canUnshare = (() => {
     return false;
   }
 })();
+
+/** CI's load-jail job sets it: there a skip for want of npm, sudo or unshare is a failure. */
+const REQUIRED = process.env.LOAD_JAIL_TESTS === "1";
+
+test("with LOAD_JAIL_TESTS=1 the real-npm tests can't skip: npm, sudo and unshare are here", { skip: REQUIRED ? false : "LOAD_JAIL_TESTS is not set" }, () => {
+  assert.ok(hasNpm, `no npm beside ${process.execPath}`);
+  assert.ok(canUnshare, "no passwordless sudo unshare --net");
+});
 
 /** A package tarball: `package/package.json` and anything else given. */
 function tarball(t: TestContext, name: string, version: string, extra: Record<string, unknown> = {}): { bytes: Buffer; integrity: string } {
@@ -156,6 +164,67 @@ test("a tarball over its cap, tarballs over the total, a non-200 and a hang past
   assert.ok(Date.now() - started < 5_000);
 });
 
+test("the first failure stops the others: no new tarball is taken and nothing more is cached", { skip: hasNpm ? false : "no npm beside this Node" }, async (t) => {
+  const r = await registry(t);
+  const good = Array.from({ length: 10 }, (_, i) => tarball(t, `fixture-${i}`, "1.0.0"));
+  const list: Tarball[] = good.map((g, i) => ({ url: `${REG}/fixture-${i}/-/fixture-${i}-1.0.0.tgz`, integrity: g.integrity }));
+  for (const [i, g] of good.entries()) r.files.set(`/fixture-${i}/-/fixture-${i}-1.0.0.tgz`, g.bytes);
+  r.files.set("/fixture-0/-/fixture-0-1.0.0.tgz", good[1]!.bytes);
+  r.server.answer((a, res) => {
+    const body = r.files.get(a.url)!;
+    const send = () => res.writeHead(200, { "content-length": String(body.length) }).end(body);
+    // The bad one answers at once; the others hang until the test ends.
+    if (a.url.startsWith("/fixture-0/")) send();
+  });
+  const cache = tmp(t);
+  const started = Date.now();
+  await assert.rejects(downloadTarballs(list, cache, toolchain(), { ...r.seams, deadlineMs: 20_000 }), /install_failed: \/fixture-0\/-\/fixture-0-1\.0\.0\.tgz does not match its lockfile sha512/);
+  assert.ok(Date.now() - started < 5_000, "the hanging downloads were stopped, not waited out");
+  const asked = r.server.arrivals.map((a) => a.url);
+  assert.ok(!asked.includes("/fixture-8/-/fixture-8-1.0.0.tgz") && !asked.includes("/fixture-9/-/fixture-9-1.0.0.tgz"), `no new work after the failure: ${asked.join(", ")}`);
+  assert.deepEqual(cacheEntries(cache), []);
+});
+
+test("a dropped connection or a 5xx is retried twice with a fresh hash; a 4xx, a redirect or a sha512 mismatch never", { skip: hasNpm ? false : "no npm beside this Node" }, async (t) => {
+  const r = await registry(t);
+  const a = tarball(t, "fixture-a", "1.0.0");
+  const url = `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`;
+  const one = [{ url, integrity: a.integrity }];
+  const script = (answers: ("ok" | "503" | "drop" | "half" | "404" | "302" | "bad")[]) => {
+    let n = 0;
+    r.server.answer((_x, res) => {
+      const what = answers[Math.min(n++, answers.length - 1)];
+      if (what === "ok") res.writeHead(200, { "content-length": String(a.bytes.length) }).end(a.bytes);
+      else if (what === "503") res.writeHead(503).end();
+      else if (what === "404") res.writeHead(404).end();
+      else if (what === "302") res.writeHead(302, { location: url }).end();
+      else if (what === "bad") res.writeHead(200).end(Buffer.from("not the tarball"));
+      else if (what === "half") {
+        res.writeHead(200, { "content-length": String(a.bytes.length) });
+        res.write(a.bytes.subarray(0, 10));
+        setTimeout(() => res.destroy(), 20);
+      } else res.destroy();
+    });
+    return () => n;
+  };
+  for (const answers of [["503", "ok"], ["drop", "ok"], ["half", "503", "ok"]] as const) {
+    const count = script([...answers]);
+    const cache = tmp(t);
+    const got = await downloadTarballs(one, cache, toolchain(), r.seams);
+    assert.deepEqual(got, { count: 1, bytes: a.bytes.length }, answers.join(" "));
+    assert.equal(count(), answers.length);
+    assert.equal(cacheEntries(cache).length, 1);
+  }
+  const persistent = script(["503"]);
+  await assert.rejects(downloadTarballs(one, tmp(t), toolchain(), r.seams), /install_failed: .*status 503/);
+  assert.equal(persistent(), 3, "two retries, then it fails");
+  for (const [answer, error] of [["404", /status 404/], ["302", /redirect 302/], ["bad", /does not match its lockfile sha512/]] as const) {
+    const count = script([answer, "ok"]);
+    await assert.rejects(downloadTarballs(one, tmp(t), toolchain(), r.seams), error);
+    assert.equal(count(), 1, `${answer} is never retried`);
+  }
+});
+
 test("the job's proxy is ignored: the registry is reached directly", { skip: hasNpm ? false : "no npm beside this Node" }, async (t) => {
   const proxyHits: string[] = [];
   const proxy = createServer((req, res) => {
@@ -218,12 +287,16 @@ test("with the real npm: the download phase fills the cache, npm ci --offline in
   assert.match(lines[0]!, /^downloaded 2 tarballs \(\d+ bytes\) from registry\.npmjs\.org, each checked against its lockfile sha512$/);
   assert.equal(lines[1], "npm ci --offline --ignore-scripts ran in a network namespace with no interface");
 
-  // A tarball the download phase didn't fetch is a miss, never a fetch.
+  // A tarball the download phase didn't fetch is a miss for npm itself, never a fetch: the
+  // download phase gets fixture-a only, and the offline install meets fixture-b missing.
   rmSync(path.join(ws, "node_modules"), { recursive: true });
   const again = tmp(t);
-  r.files.delete("/fixture-b/-/fixture-b-2.1.0.tgz");
+  const cache = path.join(again, "cache");
+  mkdirSync(cache);
   const before = r.server.arrivals.length;
-  await assert.rejects(fetchPreinstall(ws, toolchain(), again, ids, r.seams), /install_failed/);
+  await downloadTarballs([{ url: `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`, integrity: a.integrity }], cache, toolchain(), r.seams);
+  assert.equal(r.server.arrivals.length - before, 1, "the download phase fetched fixture-a only");
+  await assert.rejects(offlinePreinstall(ws, toolchain(), again, { cache, ...ids }), /install_failed/);
   assert.equal(existsSync(path.join(ws, "node_modules/fixture-b")), false);
-  assert.ok(r.server.arrivals.length - before <= 2);
+  assert.equal(r.server.arrivals.length - before, 1, "nothing reached the registry during the install");
 });

@@ -85,6 +85,6 @@ jobs:
       - run: npm ci
       # One file at a time: each real-jail run is a systemd unit with its own cgroup and sink,
       # and the fault matrix stops this process (F1a, F1b).
-      - run: node --test --test-concurrency=1 --import tsx test/load-jail.test.ts test/load-isolation.test.ts test/load-freeze.test.ts test/load-sink.test.ts test/load-signals.test.ts test/load-turn-close.test.ts test/load-install.test.ts test/load-golive.test.ts
+      - run: node --test --test-concurrency=1 --import tsx test/load-jail.test.ts test/load-isolation.test.ts test/load-freeze.test.ts test/load-sink.test.ts test/load-signals.test.ts test/load-turn-close.test.ts test/load-install.test.ts test/load-registry-fetch.test.ts test/load-supervisor-customer.test.ts test/load-golive.test.ts
         env:
           LOAD_JAIL_TESTS: "1"
