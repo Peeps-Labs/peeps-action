@@ -42,7 +42,7 @@ import { eventsBody } from "./gate/reconcile";
 import { CheckoutChanged, checkoutHead, InstallFailed, InstallRefused, offlinePreinstall, treeDigest, trustedToolchain, type InstallDigests, type Toolchain } from "./install";
 import { fetchPreinstall, type RegistryFetchSeams } from "./registry-fetch";
 import { NoTicket, probe as realProbe, startJail, TicketRefused, type JailHandle, type ProbeReport, type StartJailOptions } from "./jail";
-import type { CtlFrame, Ticket } from "./jail/ctl";
+import { ERROR_CLASSES, PLAYWRIGHT_COMPAT, type CtlFrame, type ErrorClass, type PlaywrightCompat, type Ticket } from "./jail/ctl";
 import type { JailSpec } from "./jail/spec";
 import { RunnerLease, type ClaimGrant } from "./lease";
 import { validatePlanInput, type Plan } from "./plan-input";
@@ -213,7 +213,8 @@ export interface LoadResult {
   status: LoadStatus;
   reason: string;
   claimId: string | null;
-  playwright: string | null;
+  /** Whether the checkout's Playwright could be used: a closed set, never its version text. */
+  playwright: PlaywrightCompat | null;
   checking: { turns: number; success: number; failure: number; timeout: number; cancelled: number; responded: number[] };
   measurement: { started: number; missed: number; success: number; failure: number; timeout: number; cancelled: number };
   /** UTC bounds of the measurement before drain. Null when measurement never started. */
@@ -241,9 +242,6 @@ class Refused extends Error {
     super(`${reason}${detail ? `: ${typeof detail === "string" ? detail : detail.join("; ")}` : ""}`);
   }
 }
-
-/** A journey failure's location as the result carries it: a checkout path and a line (and column). */
-const JOURNEY_LOCATION = /^[A-Za-z0-9._@/+-]{1,200}:\d{1,7}(?::\d{1,7})?$/;
 
 type Stage = "toolchain" | "probe" | "install" | "binding" | "claim" | "prepare" | "jail" | "startup" | "checking" | "measurement";
 const STAGE_TEXT: Record<Stage, string> = {
@@ -377,7 +375,7 @@ class LoadRun {
   private readonly failures: LoadResult["failures"] = [];
   /** Where the run is: an unexpected error is reported by it, never by its message. */
   private stage: Stage = "toolchain";
-  private playwright: string | null = null;
+  private playwright: PlaywrightCompat | null = null;
   private readonly checking = { turns: 0, success: 0, failure: 0, timeout: 0, cancelled: 0, responded: [] as number[] };
   private readonly measurement = { started: 0, missed: 0, success: 0, failure: 0, timeout: 0, cancelled: 0 };
   private accounting: Accounting;
@@ -911,11 +909,15 @@ class LoadRun {
     this.throwIfDone();
     if (!f) throw new Refused("didnt_start", "loaded_timeout");
     if (f.type === "fatal") {
-      this.journeyFailure(`executor_${f.code}`, f.message, f.location);
+      if (f.code === "playwright") this.playwright = f.playwright && PLAYWRIGHT_COMPAT.includes(f.playwright) ? f.playwright : "unreadable";
+      this.journeyFailure(`executor_${f.code}`, f.message, f.location, f.error);
       throw new Refused("didnt_start", `executor_${f.code}`);
     }
-    // The version the checkout's Playwright reports: kept only as a plain version string.
-    if (f.type === "loaded") this.playwright = /^[0-9A-Za-z.+-]{1,64}$/.test(f.playwright) ? f.playwright : "unreadable";
+    // The version the checkout's Playwright reports goes to the job log; the result and Peeps get `ok`.
+    if (f.type === "loaded") {
+      this.playwright = "ok";
+      this.log(`Playwright ${f.playwright}`);
+    }
   }
 
   /** The next frame matching, or null at the time limit or the run's end. */
@@ -983,7 +985,7 @@ class LoadRun {
     this.proxy?.closeTurn(f.turn);
     this.busySlots.delete(state.slot);
     this.emit({ type: "outcome", turn: f.turn, kind: f.kind });
-    if (f.kind !== "success" && this.failures.length < 20) this.journeyFailure(f.kind, f.message, f.location);
+    if (f.kind !== "success" && this.failures.length < 20) this.journeyFailure(f.kind, f.message, f.location, f.error);
     const counts = state.phase === "checking" ? this.checking : this.measurement;
     counts[f.kind] += 1;
     if (state.phase === "measurement") {
@@ -1123,17 +1125,15 @@ class LoadRun {
     this.renewController.abort();
   }
 
-  /** Synchronous and idempotent: one reason, latched. */
   /**
-   * A journey's failure: the result (and Peeps' summary) get its kind, its error's name when that
-   * passes a check, and its location when that is a plain `file:line`; the message, the journey's
-   * own text, goes to the job log only (CW-A round 2 follow-up).
+   * A journey's failure: the result (and Peeps' summary) get its frame code and its error's class,
+   * both from closed sets `decode` checked (`ERROR_CLASSES`), and no location; the location and the
+   * message, the journey's own text, go to the job log only (CW-A round 2, Sol r2c).
    */
-  private journeyFailure(kind: string, message: string | undefined, location: string | undefined): void {
-    const name = /^([A-Z][A-Za-z0-9]{0,63}): /.exec(message ?? "")?.[1];
-    const where = location !== undefined && JOURNEY_LOCATION.test(location) ? location : null;
-    this.failures.push({ message: name ? `${kind}: ${name}` : kind, location: where });
-    if (message) this.log(`journey ${kind}${where ? ` at ${where}` : ""}: ${message.slice(0, 2000)}`);
+  private journeyFailure(kind: string, message: string | undefined, location: string | undefined, error: ErrorClass | undefined): void {
+    const cls = error !== undefined && (ERROR_CLASSES as readonly string[]).includes(error) ? error : undefined;
+    this.failures.push({ message: cls ? `${kind}: ${cls}` : kind, location: null });
+    if (message) this.log(`journey ${kind}${location ? ` at ${location}` : ""}: ${message.slice(0, 2000)}`);
   }
 
   /** The job log: each line neutralized, so a journey's text runs no workflow command. */
@@ -1145,6 +1145,7 @@ class LoadRun {
     }
   }
 
+  /** Synchronous and idempotent: one reason, latched. */
   private terminate(trigger: string, status?: LoadStatus, detail?: string | readonly string[]): void {
     if (this.reason !== undefined) return;
     // One failure a line, so each problem reaches the log whole (CW-A round 2, Opus m1).

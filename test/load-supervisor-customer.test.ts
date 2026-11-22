@@ -10,11 +10,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { failureLines } from "../src/load/main";
-import { bindingOf } from "../src/load/supervisor";
+import { bindingOf, type LoadResult } from "../src/load/supervisor";
 import { InstallFailed, InstallRefused, SUPPORTED_TOOLCHAIN, trustedToolchain, type Toolchain } from "../src/load/install";
 import type { JailSpec } from "../src/load/jail/spec";
 import { fakeJail } from "./support/fake-jail";
-import { rig, why, workspace, WORKLOAD_PATH } from "./support/run-supervisor";
+import { rig, scripted, why, workspace, WORKLOAD_PATH } from "./support/run-supervisor";
 
 const TC: Toolchain = { nodeDir: "/opt/tc/node/24.22.3/x64", node: "/opt/tc/node/24.22.3/x64/bin/node", npmCli: "/opt/tc/node/24.22.3/x64/lib/node_modules/npm/bin/npm-cli.js", nodeVersion: "24.22.3", npmVersion: "11.19.1" };
 const digests = async (w: string) => ({ lock: "", hiddenLock: "", tree: (await bindingOf(w, WORKLOAD_PATH)).observed.treeDigest });
@@ -227,17 +227,68 @@ describe("load supervisor: nothing read from the checkout or an exception's mess
     assert.doesNotMatch(leaving(r, res), SECRET);
   });
 
-  test("a journey's exception is its kind, its error's name and its location; the message goes to the job log only", async (t) => {
+  test("a plain Error whose message starts with a key and a colon: the name is the Error's own, never read from the message", async (t) => {
+    const r = await rig(t, { exportName: "throwsKeyFirst", seams: { toolchain: () => TC, log: () => undefined } });
+    const res = await r.result;
+    assert.equal(res.reason, "checking_failed", why(r, res));
+    assert.ok(res.failures.length > 0);
+    for (const f of res.failures) assert.deepEqual(f, { message: "failure: other", location: null });
+    assert.doesNotMatch(leaving(r, res), /AKIAEXAMPLEKEY123456/);
+  });
+
+  test("a journey's exception is its kind and a closed error class; its name, location and message go to the job log only", async (t) => {
     const lines: string[] = [];
     const r = await rig(t, { exportName: "throwsSecret", seams: { toolchain: () => TC, log: (line: string) => lines.push(line) } });
     const res = await r.result;
     assert.equal(res.reason, "checking_failed", why(r, res));
     assert.ok(res.failures.length > 0);
-    for (const f of res.failures) {
-      assert.equal(f.message, "failure: TypeError");
-      assert.match(f.location ?? "", /^journeys\.ts:\d+(:\d+)?$/);
-    }
+    for (const f of res.failures) assert.deepEqual(f, { message: "failure: other", location: null });
     assert.doesNotMatch(leaving(r, res), SECRET);
-    assert.ok(lines.some((l) => l.includes("PASS-SENTINEL-77")), "the customer's own log still has the message");
+    assert.ok(lines.some((l) => /journey failure at journeys\.ts:\d+(:\d+)?: .*PASS-SENTINEL-77/.test(l)), "the customer's own log still has the location and the message");
+  });
+});
+
+describe("load supervisor: every string the result or Peeps' summary carries is a known code", { concurrency: 4 }, () => {
+  /** The codes a result or summary may carry: statuses, reasons, states and failure codes. */
+  const CODE = /^(?:[a-z][a-z0-9_]{0,63})(?:: (?:assertion|timeout|network|other))?$/;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  /** Every string in a value, with its path. */
+  const strings = (v: unknown, at = "$", out: [string, string][] = []): [string, string][] => {
+    if (typeof v === "string") out.push([at, v]);
+    else if (Array.isArray(v)) v.forEach((x, i) => strings(x, `${at}[${i}]`, out));
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) strings(x, `${at}.${k}`, out);
+    return out;
+  };
+  const check = (r: Awaited<ReturnType<typeof rig>>, res: LoadResult) => {
+    const summaries = (r.port.batches() as { kind: string }[]).filter((b) => b.kind === "summary");
+    for (const [at, value] of [...strings(res, "result"), ...strings(summaries, "summary")]) {
+      // The claim id is Peeps' own, from its answer.
+      if (at === "result.claimId" && UUID.test(value)) continue;
+      assert.match(value, CODE, `${at} = ${JSON.stringify(value)}`);
+    }
+  };
+
+  test("a load-time fatal whose message and location pass every shape check", async (t) => {
+    const r = await rig(t, { seams: { toolchain: () => TC, log: () => undefined }, jail: scripted({ PEEPS_SCRIPT: "fatal", PEEPS_FATAL_MESSAGE: "AKIAEXAMPLEKEY123456: denied", PEEPS_FATAL_LOCATION: "AKIAEXAMPLEKEY123456/journeys.ts:1", PEEPS_FATAL_ERROR: "other" }) });
+    const res = await r.result;
+    assert.equal(res.reason, "executor_journey", why(r, res));
+    assert.deepEqual(res.failures, [{ message: "executor_journey: other", location: null }]);
+    check(r, res);
+  });
+
+  test("a failed turn from a plain Error", async (t) => {
+    const r = await rig(t, { exportName: "throwsKeyFirst", seams: { toolchain: () => TC, log: () => undefined } });
+    const res = await r.result;
+    assert.equal(res.reason, "checking_failed", why(r, res));
+    check(r, res);
+  });
+
+  test("a Playwright version with extra metadata: the result has a compatibility code, the job log the version", async (t) => {
+    const lines: string[] = [];
+    const r = await rig(t, { seams: { toolchain: () => TC, log: (l: string) => lines.push(l) }, jail: scripted({ PEEPS_PW_VERSION: "1.59.1-AKIAEXAMPLEKEY123456" }) });
+    const res = await r.result;
+    assert.equal(res.playwright, "ok", why(r, res));
+    check(r, res);
+    assert.ok(lines.some((l) => l.includes("1.59.1-AKIAEXAMPLEKEY123456")), lines.join("\n"));
   });
 });

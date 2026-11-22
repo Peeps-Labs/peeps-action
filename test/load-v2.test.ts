@@ -88,14 +88,16 @@ function v2Workspace(t: TestContext): string {
 
 async function engineVerdict(t: TestContext, sink: Awaited<ReturnType<typeof startSink>>): Promise<Verdict> {
   const plan = { ...smallPlan({ exportName: "soughtRobotIsCharging", users: 1, durationMs: 1_000 }), journey: { module: "robots.ts", export: "soughtRobotIsCharging" } };
-  const r = await rig(t, { ws: v2Workspace(t), sink, plan });
+  const logged: string[] = [];
+  const r = await rig(t, { ws: v2Workspace(t), sink, plan, seams: { log: (line) => logged.push(line) } });
   const res = await r.result;
   // The verdict must come from real Checking traffic.
   assert.equal(res.checking.turns, 1, JSON.stringify({ reason: res.reason, failures: res.failures }));
   assert.ok(sink.arrivals.some((a) => a.url === "/c/api/robots"), "Checking reached the sink");
   if (res.checking.success === 1) return { ok: true, assertionId: null };
-  const failure = res.failures[0]!;
-  return { ok: false, assertionId: failure.location ? assertionIdOf(failure.location) : null };
+  // The location is the journey's own text: it reaches the job log, never the result.
+  const location = logged.map((l) => /^peeps load: journey failure at (\S+): /.exec(l)?.[1]).find((x) => x !== undefined);
+  return { ok: false, assertionId: location ? assertionIdOf(location) : null };
 }
 
 for (const variant of ["baseline", "paginated"] as const) {

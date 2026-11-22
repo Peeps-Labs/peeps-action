@@ -7,10 +7,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
-import { acceptCtl } from "../src/load/jail";
+import { acceptCtl, neutralizedStream } from "../src/load/jail";
 import path from "node:path";
 import { decode, encode, LineSplitter, MAX_FRAME_BYTES, sameNonce } from "../src/load/jail/ctl";
-import { dropArgs, executorEnv, initConfig, neutralize, rebuildEnv, RELAY_UID, specProblems, systemdRunArgs, type JailSpec } from "../src/load/jail/spec";
+import { dropArgs, executorEnv, initConfig, neutralize, NeutralLines, OUTPUT_PREFIX, rebuildEnv, RELAY_UID, specProblems, systemdRunArgs, type JailSpec } from "../src/load/jail/spec";
+import { PassThrough } from "node:stream";
+import { runNpmForTests } from "../src/load/install";
 
 const spec = (over: Partial<JailSpec> = {}): JailSpec => ({
   runId: "r-123",
@@ -190,6 +192,61 @@ test("lines the runner would read as workflow commands are neutralized", () => {
     assert.ok(!runnerReadsCommand(neutralize(line)), line);
   }
   assert.equal(neutralize("plain ::text::"), "jail| plain ::text::");
+});
+
+/** How GitHub's runner reads a stream: .NET's ReadLine, where LF, CRLF and a bare CR each end a line. */
+const runnerLines = (text: string) => text.split(/\r\n|\r|\n/).filter((line, i, all) => i < all.length - 1 || line !== "");
+const HOSTILE_CHUNKS = ["ok\r::add-mask::A\n", "b\r\n##[group]x\rc\r", "\n::set-output name=r::1\r", "\n", "tail ::warning::w"];
+
+test("the stream formatter ends a line at LF, CRLF and a bare CR, a CRLF split across chunks included, and prefixes every one", () => {
+  const out: string[] = [];
+  const lines = new NeutralLines((line) => out.push(line));
+  for (const chunk of HOSTILE_CHUNKS) lines.write(Buffer.from(chunk));
+  lines.end();
+  assert.deepEqual(out, ["ok", "::add-mask::A", "b", "##[group]x", "c", "::set-output name=r::1", "tail ::warning::w"].map(neutralize));
+  const read = runnerLines(out.map((l) => `${l}\n`).join(""));
+  assert.equal(read.length, 7, "a split CRLF is one line end, not two");
+  for (const line of read) assert.ok(line.startsWith(OUTPUT_PREFIX) && !line.includes("##["), JSON.stringify(line));
+});
+
+test("the stream formatter cuts a long line into prefixed pieces and keeps a UTF-8 character split across chunks whole", () => {
+  const out: string[] = [];
+  const lines = new NeutralLines((line) => out.push(line), 4);
+  const euro = Buffer.from("\u20ac");
+  lines.write(Buffer.concat([Buffer.from("abcdef"), euro.subarray(0, 1)]));
+  lines.write(Buffer.concat([euro.subarray(1), Buffer.from("\r")]));
+  lines.end();
+  assert.deepEqual(out, ["abcd", "ef\u20ac"].map(neutralize));
+});
+
+test("the jail's output streams use the formatter: every line the runner reads is prefixed", async () => {
+  const source = new PassThrough();
+  const piped = neutralizedStream(source);
+  let text = "";
+  piped.setEncoding("utf8").on("data", (c: string) => (text += c));
+  const ended = new Promise((r) => piped.on("end", r));
+  for (const chunk of HOSTILE_CHUNKS) source.write(Buffer.from(chunk));
+  source.end();
+  await ended;
+  const read = runnerLines(text);
+  assert.equal(read.length, 7);
+  for (const line of read) assert.ok(line.startsWith(OUTPUT_PREFIX) && !line.includes("##["), JSON.stringify(line));
+});
+
+test("npm's output uses the formatter: every line the runner reads on stderr is prefixed", async (t) => {
+  const written: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  t.after(() => void (process.stderr.write = original));
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    written.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  const script = `const c = ${JSON.stringify(HOSTILE_CHUNKS)}; (async () => { for (const x of c) { process.stderr.write(x); await new Promise((r) => setTimeout(r, 20)); } process.stdout.write("out\\r::error::o\\r\\n"); })();`;
+  await runNpmForTests(process.execPath, ["-e", script], { cwd: os.tmpdir(), env: {} }, 20_000);
+  process.stderr.write = original;
+  const read = runnerLines(written.join(""));
+  assert.ok(read.length >= 9, JSON.stringify(read));
+  for (const line of read) assert.ok(line.startsWith(OUTPUT_PREFIX) && !line.includes("##["), JSON.stringify(line));
 });
 
 // ---------------------------------------------------------------- init's control channel, without a jail

@@ -3,6 +3,7 @@
  * outer watcher and init are told. No file system, process or network here.
  * Plan: spok-load-testing/impl/engine-redesign-plan-v3.md §3; facts from E0.
  */
+import { StringDecoder } from "node:string_decoder";
 
 /** The relay's uid inside the jail. Only it may open the supervisor's proxy socket. */
 export const RELAY_UID = 65533;
@@ -119,6 +120,54 @@ export function rootDir(runId: string): string {
 export const OUTPUT_PREFIX = "jail| ";
 export function neutralize(line: string): string {
   return OUTPUT_PREFIX + line.replaceAll("##[", "## [");
+}
+
+/**
+ * The one formatter for npm's and the jail's output streams (CW-A round 2, Sol r2c). The runner
+ * reads a stream with .NET's ReadLine, where LF, CRLF and a bare CR each end a line, so this
+ * ends a line at each of them (a CRLF split across chunks too) and hands every line on
+ * neutralized, without its separator. A line longer than `max` characters is cut into pieces,
+ * each neutralized. UTF-8 is decoded across chunks.
+ */
+export class NeutralLines {
+  private pending = "";
+  /** The last chunk ended with CR: a LF at the start of the next one ends nothing more. */
+  private afterCr = false;
+  private readonly decoder = new StringDecoder("utf8");
+
+  constructor(private readonly emit: (line: string) => void, private readonly max = 64 * 1024) {}
+
+  write(chunk: Buffer | string): void {
+    this.take(typeof chunk === "string" ? chunk : this.decoder.write(chunk));
+  }
+
+  end(): void {
+    this.take(this.decoder.end());
+    if (this.pending) this.emit(neutralize(this.pending));
+    this.pending = "";
+  }
+
+  private take(text: string): void {
+    if (this.afterCr && text.startsWith("\n")) text = text.slice(1);
+    if (text === "") return;
+    this.afterCr = text.endsWith("\r");
+    const parts = text.split(/\r\n|\r|\n/);
+    this.pending += parts[0]!;
+    for (let i = 1; i < parts.length; i++) {
+      this.cut();
+      this.emit(neutralize(this.pending));
+      this.pending = parts[i]!;
+    }
+    this.cut();
+  }
+
+  /** Hands on full pieces of an over-long line, keeping the rest. */
+  private cut(): void {
+    while (this.pending.length > this.max) {
+      this.emit(neutralize(this.pending.slice(0, this.max)));
+      this.pending = this.pending.slice(this.max);
+    }
+  }
 }
 
 /** Why a spec cannot be launched, or nothing. */

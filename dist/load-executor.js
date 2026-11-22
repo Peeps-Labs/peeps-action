@@ -23682,6 +23682,8 @@ function sharedClocks() {
 // src/load/jail/ctl.ts
 var MAX_FRAME_BYTES = 64 * 1024;
 var MAX_MESSAGE = 2e3;
+var ERROR_CLASSES = ["assertion", "timeout", "network", "other"];
+var PLAYWRIGHT_COMPAT = ["ok", "not_found", "below_floor", "unreadable"];
 var MAX_LOCATION = 500;
 function encode(frame) {
   return `${JSON.stringify(frame)}
@@ -23706,6 +23708,10 @@ function ticketOf(v) {
 function optional(v, name, max) {
   if (v[name] === void 0) return {};
   return isText(v[name], max) ? { [name]: v[name] } : null;
+}
+function oneOf(v, name, set) {
+  if (v[name] === void 0) return {};
+  return typeof v[name] === "string" && set.includes(v[name]) ? { [name]: v[name] } : null;
 }
 function decode(line) {
   let value;
@@ -23751,15 +23757,18 @@ function decode(line) {
     case "fatal": {
       if (v.code !== "unreadable" && v.code !== "playwright" && v.code !== "journey" && v.code !== "protocol") return null;
       const location = optional(v, "location", MAX_LOCATION);
-      if (!isText(v.message, MAX_MESSAGE) || !location) return null;
-      return { type: "fatal", code: v.code, message: v.message, ...location };
+      const error = oneOf(v, "error", ERROR_CLASSES);
+      const playwright = oneOf(v, "playwright", PLAYWRIGHT_COMPAT);
+      if (!isText(v.message, MAX_MESSAGE) || !location || !error || !playwright) return null;
+      return { type: "fatal", code: v.code, message: v.message, ...location, ...error, ...playwright };
     }
     case "outcome": {
       if (!isSafePositive(v.turn) || v.kind !== "success" && v.kind !== "failure" && v.kind !== "timeout" && v.kind !== "cancelled") return null;
       const message = optional(v, "message", MAX_MESSAGE);
       const location = optional(v, "location", MAX_LOCATION);
-      if (!message || !location) return null;
-      return { type: "outcome", turn: v.turn, kind: v.kind, ...message, ...location };
+      const error = oneOf(v, "error", ERROR_CLASSES);
+      if (!message || !location || !error) return null;
+      return { type: "outcome", turn: v.turn, kind: v.kind, ...message, ...location, ...error };
     }
     default:
       return null;
@@ -24377,13 +24386,21 @@ var sessions = null;
 var journey = null;
 var stopping = false;
 var pending = /* @__PURE__ */ new Set();
+var NETWORK = /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|EHOSTUNREACH|ENETUNREACH)\b/;
+function classOf(e) {
+  const code = e.code;
+  if (e.name === "AssertionError" || code === "ERR_ASSERTION") return "assertion";
+  if (e.name === "TimeoutError") return "timeout";
+  if (typeof code === "string" && NETWORK.test(code) || NETWORK.test(String(e.message))) return "network";
+  return "other";
+}
 function failureOf(error) {
   const e = error instanceof Error ? error : new Error(String(error));
   const location = originalLocation(e.stack, root);
-  return { message: `${e.name === "Error" ? "" : `${e.name}: `}${e.message}`.slice(0, MAX_MESSAGE), ...location ? { location: location.slice(0, MAX_LOCATION) } : {} };
+  return { message: `${e.name === "Error" ? "" : `${e.name}: `}${e.message}`.slice(0, MAX_MESSAGE), ...location ? { location: location.slice(0, MAX_LOCATION) } : {}, error: classOf(e) };
 }
-function fatal(code, error) {
-  send({ type: "fatal", code, ...failureOf(error) });
+function fatal(code, error, playwright) {
+  send({ type: "fatal", code, ...failureOf(error), ...playwright ? { playwright } : {} });
 }
 function findPlaywright(dirs) {
   for (const dir of dirs) {
@@ -24418,16 +24435,24 @@ function onInit(frame) {
   }
   let request;
   let version;
+  let compat = "unreadable";
   try {
     const found = findPlaywright([root, import_node_path2.default.dirname(file)]);
-    if (!found) throw new Error("Playwright was not found from the working directory or the journey's folder");
+    if (!found) {
+      compat = "not_found";
+      throw new Error("Playwright was not found from the working directory or the journey's folder");
+    }
     version = found.version;
-    if (!atLeastFloor(version)) throw new Error(`Playwright ${version} is below ${PLAYWRIGHT_FLOOR.join(".")}, the oldest a load journey runs on`);
+    if (!atLeastFloor(version)) {
+      compat = "below_floor";
+      throw new Error(`Playwright ${version} is below ${PLAYWRIGHT_FLOOR.join(".")}, the oldest a load journey runs on`);
+    }
+    compat = "unreadable";
     const loaded = found.load();
     if (typeof loaded?.newContext !== "function") throw new Error(`Playwright ${version} has no request API`);
     request = loaded;
   } catch (error) {
-    return fatal("playwright", error);
+    return fatal("playwright", error, compat);
   }
   try {
     journey = loadJourney(root, frame.journey.module, frame.journey.export);
@@ -24451,7 +24476,7 @@ function onTurn(frame) {
   const work = sessions.run(frame, journey).then((result) => {
     const extra = result.kind === "failure" ? failureOf(result.error) : {};
     send({ type: "outcome", turn: frame.turn, kind: result.kind, ...extra });
-  }).catch(() => void send({ type: "outcome", turn: frame.turn, kind: "failure", message: "the journey threw a value that could not be read" })).finally(() => pending.delete(work));
+  }).catch(() => void send({ type: "outcome", turn: frame.turn, kind: "failure", message: "the journey threw a value that could not be read", error: "other" })).finally(() => pending.delete(work));
   pending.add(work);
 }
 function protocol(why) {

@@ -21,7 +21,7 @@ import { closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync
 import { lstat, readdir, readlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { neutralize } from "./jail/spec";
+import { NeutralLines } from "./jail/spec";
 
 export interface ToolchainHashes {
   /** sha256 of `bin/node`. */
@@ -853,7 +853,10 @@ export function skippedOnRunner(entry: Record<string, unknown>): boolean {
 
 type CacheReadStream = AsyncIterable<Buffer> & { destroy(error?: Error): void };
 
-/** Verify all locked registry tarballs, even ones npm might omit (optional or platform-specific). */
+/**
+ * Verify every locked registry tarball npm installs on the runner, optional ones included; only an
+ * optional entry for another platform (`skippedOnRunner`), which npm leaves out, is not checked.
+ */
 async function verifyRecipeCache(cache: string, tc: Toolchain, lock: unknown, signal?: AbortSignal): Promise<void> {
   // installProblems has checked the lock. Use the same cache reader as the pinned npm CLI.
   const { packages } = lock as { packages: Record<string, Record<string, unknown>> };
@@ -922,18 +925,16 @@ async function digestsOf(ws: string, signal?: AbortSignal): Promise<InstallDiges
  * the checkout anyway, and npm's own errors are what a customer needs to fix their install. It
  * never reaches `failures`, the result JSON or Peeps: the rejection carries the exit code only.
  */
+/** Only tests call it: the formatter on a real child's streams. */
+export const runNpmForTests = (file: string, args: string[], o: { cwd: string; env: Record<string, string> }, timeoutMs: number) => runNpm(file, args, o, timeoutMs);
+
 function runNpm(file: string, args: string[], o: { cwd: string; env: Record<string, string> }, timeoutMs: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const child = spawn(file, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL", signal });
     for (const stream of [child.stdout!, child.stderr!]) {
-      stream.setEncoding("utf8");
-      let pending = "";
-      stream.on("data", (chunk: string) => {
-        pending += chunk;
-        const lines = pending.split("\n");
-        pending = lines.pop() ?? "";
-        for (const line of lines) process.stderr.write(`${neutralize(line.slice(0, 4096))}\n`);
-      });
+      const lines = new NeutralLines((line) => void process.stderr.write(`${line}\n`), 4096);
+      stream.on("data", (chunk: Buffer) => lines.write(chunk));
+      stream.on("end", () => lines.end());
     }
     let spawnError: Error | undefined;
     child.once("error", (error) => { spawnError = error; });

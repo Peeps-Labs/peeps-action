@@ -42,6 +42,8 @@ var import_node_net = __toESM(require("node:net"));
 // src/load/jail/ctl.ts
 var MAX_FRAME_BYTES = 64 * 1024;
 var MAX_MESSAGE = 2e3;
+var ERROR_CLASSES = ["assertion", "timeout", "network", "other"];
+var PLAYWRIGHT_COMPAT = ["ok", "not_found", "below_floor", "unreadable"];
 var MAX_LOCATION = 500;
 var TO_EXECUTOR = /* @__PURE__ */ new Set(["init", "turn", "cancel", "stop"]);
 var TO_SUPERVISOR = /* @__PURE__ */ new Set(["loaded", "fatal", "outcome"]);
@@ -71,6 +73,10 @@ function ticketOf(v) {
 function optional(v, name, max) {
   if (v[name] === void 0) return {};
   return isText(v[name], max) ? { [name]: v[name] } : null;
+}
+function oneOf(v, name, set) {
+  if (v[name] === void 0) return {};
+  return typeof v[name] === "string" && set.includes(v[name]) ? { [name]: v[name] } : null;
 }
 function decode(line) {
   let value;
@@ -116,15 +122,18 @@ function decode(line) {
     case "fatal": {
       if (v.code !== "unreadable" && v.code !== "playwright" && v.code !== "journey" && v.code !== "protocol") return null;
       const location = optional(v, "location", MAX_LOCATION);
-      if (!isText(v.message, MAX_MESSAGE) || !location) return null;
-      return { type: "fatal", code: v.code, message: v.message, ...location };
+      const error = oneOf(v, "error", ERROR_CLASSES);
+      const playwright = oneOf(v, "playwright", PLAYWRIGHT_COMPAT);
+      if (!isText(v.message, MAX_MESSAGE) || !location || !error || !playwright) return null;
+      return { type: "fatal", code: v.code, message: v.message, ...location, ...error, ...playwright };
     }
     case "outcome": {
       if (!isSafePositive(v.turn) || v.kind !== "success" && v.kind !== "failure" && v.kind !== "timeout" && v.kind !== "cancelled") return null;
       const message = optional(v, "message", MAX_MESSAGE);
       const location = optional(v, "location", MAX_LOCATION);
-      if (!message || !location) return null;
-      return { type: "outcome", turn: v.turn, kind: v.kind, ...message, ...location };
+      const error = oneOf(v, "error", ERROR_CLASSES);
+      if (!message || !location || !error) return null;
+      return { type: "outcome", turn: v.turn, kind: v.kind, ...message, ...location, ...error };
     }
     default:
       return null;

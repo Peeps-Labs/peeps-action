@@ -40,14 +40,23 @@ export type CtlFrame =
   | { type: "stop" }
   // executor → supervisor, relayed by init
   | { type: "loaded"; playwright: string }
-  | { type: "fatal"; code: FatalCode; message: string; location?: string }
-  | { type: "outcome"; turn: number; kind: OutcomeKind; message?: string; location?: string };
+  | { type: "fatal"; code: FatalCode; message: string; location?: string; error?: ErrorClass; playwright?: PlaywrightCompat }
+  | { type: "outcome"; turn: number; kind: OutcomeKind; message?: string; location?: string; error?: ErrorClass };
 
 export type CtlType = CtlFrame["type"];
 
 /** A line longer than this is a protocol violation: frames are small. */
 export const MAX_FRAME_BYTES = 64 * 1024;
 export const MAX_MESSAGE = 2000;
+/**
+ * What a journey's error was, as a closed set the executor picks and `decode` checks: the only
+ * thing about it, besides the frame's own code, that leaves the runner (CW-A round 2, Sol r2c).
+ */
+export const ERROR_CLASSES = ["assertion", "timeout", "network", "other"] as const;
+export type ErrorClass = (typeof ERROR_CLASSES)[number];
+/** Why the checkout's Playwright could not be used, as a closed set; `ok` when it loaded. */
+export const PLAYWRIGHT_COMPAT = ["ok", "not_found", "below_floor", "unreadable"] as const;
+export type PlaywrightCompat = (typeof PLAYWRIGHT_COMPAT)[number];
 export const MAX_LOCATION = 500;
 
 const TO_EXECUTOR = new Set<CtlType>(["init", "turn", "cancel", "stop"]);
@@ -84,6 +93,12 @@ function ticketOf(v: unknown): Ticket | null {
 function optional(v: Fields, name: string, max: number): Record<string, string> | null {
   if (v[name] === undefined) return {};
   return isText(v[name], max) ? { [name]: v[name] as string } : null;
+}
+
+/** An optional field from a closed set: absent, or one of `set`; anything else makes the frame not one. */
+function oneOf<T extends string>(v: Fields, name: string, set: readonly T[]): Record<string, T> | null {
+  if (v[name] === undefined) return {};
+  return typeof v[name] === "string" && (set as readonly string[]).includes(v[name] as string) ? { [name]: v[name] as T } : null;
 }
 
 /** The frame a line holds, or null when it is not one. */
@@ -131,15 +146,18 @@ export function decode(line: string): CtlFrame | null {
     case "fatal": {
       if (v.code !== "unreadable" && v.code !== "playwright" && v.code !== "journey" && v.code !== "protocol") return null;
       const location = optional(v, "location", MAX_LOCATION);
-      if (!isText(v.message, MAX_MESSAGE) || !location) return null;
-      return { type: "fatal", code: v.code, message: v.message, ...location };
+      const error = oneOf(v, "error", ERROR_CLASSES);
+      const playwright = oneOf(v, "playwright", PLAYWRIGHT_COMPAT);
+      if (!isText(v.message, MAX_MESSAGE) || !location || !error || !playwright) return null;
+      return { type: "fatal", code: v.code, message: v.message, ...location, ...error, ...playwright };
     }
     case "outcome": {
       if (!isSafePositive(v.turn) || (v.kind !== "success" && v.kind !== "failure" && v.kind !== "timeout" && v.kind !== "cancelled")) return null;
       const message = optional(v, "message", MAX_MESSAGE);
       const location = optional(v, "location", MAX_LOCATION);
-      if (!message || !location) return null;
-      return { type: "outcome", turn: v.turn, kind: v.kind, ...message, ...location };
+      const error = oneOf(v, "error", ERROR_CLASSES);
+      if (!message || !location || !error) return null;
+      return { type: "outcome", turn: v.turn, kind: v.kind, ...message, ...location, ...error };
     }
     default:
       return null;

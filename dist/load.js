@@ -2940,6 +2940,7 @@ var import_node_module = require("node:module");
 var import_node_path2 = __toESM(require("node:path"));
 
 // src/load/jail/spec.ts
+var import_node_string_decoder = require("node:string_decoder");
 var RELAY_UID = 65533;
 var ADDRESS_FAMILIES = ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"];
 var DENIED_SYSCALLS = [
@@ -2979,6 +2980,44 @@ var OUTPUT_PREFIX = "jail| ";
 function neutralize(line) {
   return OUTPUT_PREFIX + line.replaceAll("##[", "## [");
 }
+var NeutralLines = class {
+  constructor(emit, max = 64 * 1024) {
+    this.emit = emit;
+    this.max = max;
+  }
+  pending = "";
+  /** The last chunk ended with CR: a LF at the start of the next one ends nothing more. */
+  afterCr = false;
+  decoder = new import_node_string_decoder.StringDecoder("utf8");
+  write(chunk) {
+    this.take(typeof chunk === "string" ? chunk : this.decoder.write(chunk));
+  }
+  end() {
+    this.take(this.decoder.end());
+    if (this.pending) this.emit(neutralize(this.pending));
+    this.pending = "";
+  }
+  take(text2) {
+    if (this.afterCr && text2.startsWith("\n")) text2 = text2.slice(1);
+    if (text2 === "") return;
+    this.afterCr = text2.endsWith("\r");
+    const parts = text2.split(/\r\n|\r|\n/);
+    this.pending += parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      this.cut();
+      this.emit(neutralize(this.pending));
+      this.pending = parts[i];
+    }
+    this.cut();
+  }
+  /** Hands on full pieces of an over-long line, keeping the rest. */
+  cut() {
+    while (this.pending.length > this.max) {
+      this.emit(neutralize(this.pending.slice(0, this.max)));
+      this.pending = this.pending.slice(this.max);
+    }
+  }
+};
 function specProblems(spec) {
   const problems = [];
   if (!RUN_ID.test(spec.runId)) problems.push("runId must be 1-40 lowercase letters, digits or dashes");
@@ -3719,15 +3758,10 @@ function runNpm(file, args, o, timeoutMs, signal) {
   return new Promise((resolve, reject) => {
     const child = (0, import_node_child_process2.spawn)(file, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL", signal });
     for (const stream of [child.stdout, child.stderr]) {
-      stream.setEncoding("utf8");
-      let pending = "";
-      stream.on("data", (chunk) => {
-        pending += chunk;
-        const lines = pending.split("\n");
-        pending = lines.pop() ?? "";
-        for (const line of lines) process.stderr.write(`${neutralize(line.slice(0, 4096))}
-`);
-      });
+      const lines = new NeutralLines((line) => void process.stderr.write(`${line}
+`), 4096);
+      stream.on("data", (chunk) => lines.write(chunk));
+      stream.on("end", () => lines.end());
     }
     let spawnError;
     child.once("error", (error) => {
@@ -3952,13 +3986,14 @@ var import_node_fs4 = require("node:fs");
 var import_promises4 = require("node:fs/promises");
 var import_node_os4 = __toESM(require("node:os"));
 var import_node_stream = require("node:stream");
-var import_node_string_decoder = require("node:string_decoder");
 var import_node_net3 = __toESM(require("node:net"));
 var import_node_util2 = require("node:util");
 
 // src/load/jail/ctl.ts
 var MAX_FRAME_BYTES = 64 * 1024;
 var MAX_MESSAGE = 2e3;
+var ERROR_CLASSES = ["assertion", "timeout", "network", "other"];
+var PLAYWRIGHT_COMPAT = ["ok", "not_found", "below_floor", "unreadable"];
 var MAX_LOCATION = 500;
 var TO_EXECUTOR = /* @__PURE__ */ new Set(["init", "turn", "cancel", "stop"]);
 var TO_SUPERVISOR = /* @__PURE__ */ new Set(["loaded", "fatal", "outcome"]);
@@ -3988,6 +4023,10 @@ function ticketOf(v2) {
 function optional(v2, name2, max) {
   if (v2[name2] === void 0) return {};
   return isText(v2[name2], max) ? { [name2]: v2[name2] } : null;
+}
+function oneOf(v2, name2, set2) {
+  if (v2[name2] === void 0) return {};
+  return typeof v2[name2] === "string" && set2.includes(v2[name2]) ? { [name2]: v2[name2] } : null;
 }
 function decode(line) {
   let value;
@@ -4033,15 +4072,18 @@ function decode(line) {
     case "fatal": {
       if (v2.code !== "unreadable" && v2.code !== "playwright" && v2.code !== "journey" && v2.code !== "protocol") return null;
       const location = optional(v2, "location", MAX_LOCATION);
-      if (!isText(v2.message, MAX_MESSAGE) || !location) return null;
-      return { type: "fatal", code: v2.code, message: v2.message, ...location };
+      const error = oneOf(v2, "error", ERROR_CLASSES);
+      const playwright = oneOf(v2, "playwright", PLAYWRIGHT_COMPAT);
+      if (!isText(v2.message, MAX_MESSAGE) || !location || !error || !playwright) return null;
+      return { type: "fatal", code: v2.code, message: v2.message, ...location, ...error, ...playwright };
     }
     case "outcome": {
       if (!isSafePositive(v2.turn) || v2.kind !== "success" && v2.kind !== "failure" && v2.kind !== "timeout" && v2.kind !== "cancelled") return null;
       const message = optional(v2, "message", MAX_MESSAGE);
       const location = optional(v2, "location", MAX_LOCATION);
-      if (!message || !location) return null;
-      return { type: "outcome", turn: v2.turn, kind: v2.kind, ...message, ...location };
+      const error = oneOf(v2, "error", ERROR_CLASSES);
+      if (!message || !location || !error) return null;
+      return { type: "outcome", turn: v2.turn, kind: v2.kind, ...message, ...location, ...error };
     }
     default:
       return null;
@@ -4129,8 +4171,8 @@ async function startJail(spec, options, signal) {
   const ctl = acceptCtl(ctlServer, nonce);
   ctl.catch(() => void 0);
   const child = (0, import_node_child_process3.spawn)("/usr/bin/sudo", ["-n", ...systemdRunArgs(spec)], { env: HOST_ENV, stdio: ["pipe", "pipe", "pipe"] });
-  const stdout = neutralized(child.stdout);
-  const stderr = neutralized(child.stderr);
+  const stdout = neutralizedStream(child.stdout);
+  const stderr = neutralizedStream(child.stderr);
   if (options.stdout !== "pipe") stdout.pipe(process.stdout);
   stderr.pipe(process.stderr);
   const lifeline = child.stdin;
@@ -4366,32 +4408,18 @@ function abortError2(signal) {
   return reason instanceof Error ? reason : new Error("load jail: aborted");
 }
 var MAX_LINE = 64 * 1024;
-function neutralized(source) {
+function neutralizedStream(source) {
   const out = new import_node_stream.PassThrough();
-  const decoder = new import_node_string_decoder.StringDecoder("utf8");
-  let pending = "";
-  const emit = (line) => {
-    if (!out.write(`${neutralize(line.endsWith("\r") ? line.slice(0, -1) : line)}
+  const lines = new NeutralLines((line) => {
+    if (!out.write(`${line}
 `)) {
       source.pause();
       out.once("drain", () => source.resume());
     }
-  };
-  source.on("data", (chunk) => {
-    pending += decoder.write(chunk);
-    let nl;
-    while ((nl = pending.indexOf("\n")) !== -1) {
-      emit(pending.slice(0, nl));
-      pending = pending.slice(nl + 1);
-    }
-    while (pending.length > MAX_LINE) {
-      emit(pending.slice(0, MAX_LINE));
-      pending = pending.slice(MAX_LINE);
-    }
-  });
+  }, MAX_LINE);
+  source.on("data", (chunk) => lines.write(chunk));
   source.on("end", () => {
-    pending += decoder.end();
-    if (pending) emit(pending);
+    lines.end();
     out.end();
   });
   return out;
@@ -5030,7 +5058,6 @@ var Refused = class extends Error {
     this.detail = detail;
   }
 };
-var JOURNEY_LOCATION = /^[A-Za-z0-9._@/+-]{1,200}:\d{1,7}(?::\d{1,7})?$/;
 var STAGE_TEXT = {
   toolchain: "the toolchain could not be checked",
   probe: "the fence could not be checked",
@@ -5623,10 +5650,14 @@ var LoadRun = class {
     this.throwIfDone();
     if (!f) throw new Refused("didnt_start", "loaded_timeout");
     if (f.type === "fatal") {
-      this.journeyFailure(`executor_${f.code}`, f.message, f.location);
+      if (f.code === "playwright") this.playwright = f.playwright && PLAYWRIGHT_COMPAT.includes(f.playwright) ? f.playwright : "unreadable";
+      this.journeyFailure(`executor_${f.code}`, f.message, f.location, f.error);
       throw new Refused("didnt_start", `executor_${f.code}`);
     }
-    if (f.type === "loaded") this.playwright = /^[0-9A-Za-z.+-]{1,64}$/.test(f.playwright) ? f.playwright : "unreadable";
+    if (f.type === "loaded") {
+      this.playwright = "ok";
+      this.log(`Playwright ${f.playwright}`);
+    }
   }
   /** The next frame matching, or null at the time limit or the run's end. */
   nextFrame(match2, ms2) {
@@ -5688,7 +5719,7 @@ var LoadRun = class {
     this.proxy?.closeTurn(f.turn);
     this.busySlots.delete(state.slot);
     this.emit({ type: "outcome", turn: f.turn, kind: f.kind });
-    if (f.kind !== "success" && this.failures.length < 20) this.journeyFailure(f.kind, f.message, f.location);
+    if (f.kind !== "success" && this.failures.length < 20) this.journeyFailure(f.kind, f.message, f.location, f.error);
     const counts = state.phase === "checking" ? this.checking : this.measurement;
     counts[f.kind] += 1;
     if (state.phase === "measurement") {
@@ -5809,17 +5840,15 @@ var LoadRun = class {
     clearTimeout(this.renewTimer);
     this.renewController.abort();
   }
-  /** Synchronous and idempotent: one reason, latched. */
   /**
-   * A journey's failure: the result (and Peeps' summary) get its kind, its error's name when that
-   * passes a check, and its location when that is a plain `file:line`; the message, the journey's
-   * own text, goes to the job log only (CW-A round 2 follow-up).
+   * A journey's failure: the result (and Peeps' summary) get its frame code and its error's class,
+   * both from closed sets `decode` checked (`ERROR_CLASSES`), and no location; the location and the
+   * message, the journey's own text, go to the job log only (CW-A round 2, Sol r2c).
    */
-  journeyFailure(kind, message, location) {
-    const name2 = /^([A-Z][A-Za-z0-9]{0,63}): /.exec(message ?? "")?.[1];
-    const where = location !== void 0 && JOURNEY_LOCATION.test(location) ? location : null;
-    this.failures.push({ message: name2 ? `${kind}: ${name2}` : kind, location: where });
-    if (message) this.log(`journey ${kind}${where ? ` at ${where}` : ""}: ${message.slice(0, 2e3)}`);
+  journeyFailure(kind, message, location, error) {
+    const cls = error !== void 0 && ERROR_CLASSES.includes(error) ? error : void 0;
+    this.failures.push({ message: cls ? `${kind}: ${cls}` : kind, location: null });
+    if (message) this.log(`journey ${kind}${location ? ` at ${location}` : ""}: ${message.slice(0, 2e3)}`);
   }
   /** The job log: each line neutralized, so a journey's text runs no workflow command. */
   log(text2) {
@@ -5830,6 +5859,7 @@ var LoadRun = class {
 `);
     }
   }
+  /** Synchronous and idempotent: one reason, latched. */
   terminate(trigger, status, detail) {
     if (this.reason !== void 0) return;
     for (const line of typeof detail === "string" ? detail.split("\n") : detail ?? []) {

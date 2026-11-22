@@ -1,5 +1,5 @@
 {
-  "description": "CW-A, the customer load job (CW plan \u00a74): every refusal row, the identity read, the control origin, the toolchain hashes, the lockfile URL and SRI checks, the verified download (its first-failure stop and its retries), the refusal causes the job prints (fixed reasons and checked identifiers, one a line), the download total and idle limit, the platform skip, the best-effort summary, the typed checkout_changed and startup_failed details, journey failures as codes, and the supervisor's toolchain-first startup. A survivor means a security check no test would notice losing. Not here: the `%` check in canonicalRegistryTarball, an equivalent mutant (TARBALL_PATH admits no `%` either, so dropping it changes no answer; it stays as a second guard).",
+  "description": "CW-A, the customer load job (CW plan \u00a74): every refusal row, the identity read, the control origin, the toolchain hashes, the lockfile URL and SRI checks, the verified download (its first-failure stop and its retries), the refusal causes the job prints (fixed reasons and checked identifiers, one a line), the download total and idle limit, the platform skip, the best-effort summary, the typed checkout_changed and startup_failed details, journey failures and the Playwright check as closed-set codes, the one stream formatter, and the supervisor's toolchain-first startup. A survivor means a security check no test would notice losing. Not here: the `%` check in canonicalRegistryTarball, an equivalent mutant (TARBALL_PATH admits no `%` either, so dropping it changes no answer; it stays as a second guard).",
   "mutants": [
     {
       "name": "a tag or branch ref is read as a commit pin",
@@ -550,8 +550,8 @@
     {
       "name": "a journey's message reaches the failures",
       "file": "src/load/supervisor.ts",
-      "find": "this.failures.push({ message: name ? `${kind}: ${name}` : kind, location: where });",
-      "replace": "this.failures.push({ message: message ?? kind, location: where });",
+      "find": "this.failures.push({ message: cls ? `${kind}: ${cls}` : kind, location: null });",
+      "replace": "this.failures.push({ message: message ?? kind, location: null });",
       "tests": [
         "test/load-supervisor-customer.test.ts"
       ]
@@ -559,10 +559,64 @@
     {
       "name": "a journey's message never reaches the job log",
       "file": "src/load/supervisor.ts",
-      "find": "    if (message) this.log(`journey ${kind}${where ? ` at ${where}` : \"\"}: ${message.slice(0, 2000)}`);\n",
+      "find": "    if (message) this.log(`journey ${kind}${location ? ` at ${location}` : \"\"}: ${message.slice(0, 2000)}`);\n",
       "replace": "",
       "tests": [
         "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a journey's stack-derived location reaches the failures",
+      "file": "src/load/supervisor.ts",
+      "find": "this.failures.push({ message: cls ? `${kind}: ${cls}` : kind, location: null });",
+      "replace": "this.failures.push({ message: cls ? `${kind}: ${cls}` : kind, location: location ?? null });",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a frame's error class is not checked against the closed set",
+      "file": "src/load/jail/ctl.ts",
+      "find": "return typeof v[name] === \"string\" && (set as readonly string[]).includes(v[name] as string) ? { [name]: v[name] as T } : null;",
+      "replace": "return typeof v[name] === \"string\" ? { [name]: v[name] as T } : null;",
+      "tests": [
+        "test/load-ctl.test.ts"
+      ]
+    },
+    {
+      "name": "the Playwright version text reaches the result",
+      "file": "src/load/supervisor.ts",
+      "find": "      this.playwright = \"ok\";\n",
+      "replace": "      this.playwright = f.playwright as PlaywrightCompat;\n",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a bare CR or CRLF does not end a line",
+      "file": "src/load/jail/spec.ts",
+      "find": "const parts = text.split(/\\r\\n|\\r|\\n/);",
+      "replace": "const parts = text.split(/\\n/);",
+      "tests": [
+        "test/load-jail-spec.test.ts"
+      ]
+    },
+    {
+      "name": "a CRLF split across chunks ends two lines",
+      "file": "src/load/jail/spec.ts",
+      "find": "    if (this.afterCr && text.startsWith(\"\\n\")) text = text.slice(1);\n",
+      "replace": "",
+      "tests": [
+        "test/load-jail-spec.test.ts"
+      ]
+    },
+    {
+      "name": "npm's output reaches the job log unformatted",
+      "file": "src/load/install.ts",
+      "find": "const lines = new NeutralLines((line) => void process.stderr.write(`${line}\\n`), 4096);",
+      "replace": "const lines = { write: (c: Buffer) => void process.stderr.write(c), end: () => undefined };",
+      "tests": [
+        "test/load-jail-spec.test.ts"
       ]
     }
   ]

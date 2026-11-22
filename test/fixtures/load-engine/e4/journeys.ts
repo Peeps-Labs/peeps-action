@@ -80,6 +80,11 @@ export async function throwsSecret(): Promise<void> {
   throw new TypeError("https://u:PASS-SENTINEL-77@app.example/?token=Q-SENTINEL-77");
 }
 
+/** A plain Error whose message starts like an error's name: the name must not be read from it. */
+export async function throwsKeyFirst(): Promise<void> {
+  throw new Error("AKIAEXAMPLEKEY123456: denied");
+}
+
 /** Never ends by itself. */
 export async function hang(): Promise<void> {
   await new Promise(() => undefined);
