@@ -326,7 +326,7 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
   `device-tools: true`, your own `appium`, always with an argument array and
   never through a shell. In `mode: load` it also calls the toolcache's pinned
   Node and npm, `sudo`, `systemd-run`, `unshare`, `setpriv`, `mkdir`, `chown`,
-  `chmod`, `rm`, `find`, `env`, `systemctl` and, for the runner's labels, `chronyc`. The device tools talk to that Appium with plain
+  `chmod`, `rm`, `find`, `env`, `systemctl`, inside the jail's setup `mount`, `umount`, `ip` and `pivot_root`, and, for the runner's labels, `chronyc`. The device tools talk to that Appium with plain
   HTTP requests on `127.0.0.1`; they do not load WebdriverIO.
 - For a pytest suite it also loads `python/peeps_pytest_plugin.py` from this
   repository into pytest (`-p peeps_pytest_plugin`). It uses the Python
