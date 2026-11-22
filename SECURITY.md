@@ -254,7 +254,8 @@ job with no network (the job, the attempt, no container, no Node or loader
 variables, setup-node's Node 24.22.3, Peeps' two inputs, `PEEPS_API_URL` one of
 Peeps' own three addresses), then reads the job's identity from its own OIDC
 token, minted for a separate audience and dropped. It checks the toolcache's
-`node` and `npm-cli.js` against pinned sha256 values before running either. It
+`node` binary and npm's entry file, `npm-cli.js`, against pinned sha256 values
+before running either (the pin covers that one npm file, not npm's whole tree). It
 downloads only the tarballs your `package-lock.json` names, only from
 `registry.npmjs.org`, each checked against the lockfile's sha512 before it is
 kept, and installs them with `npm ci --offline --ignore-scripts` in a network
