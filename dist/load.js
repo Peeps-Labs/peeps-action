@@ -3119,7 +3119,7 @@ var SUPPORTED_TOOLCHAIN = [
     npm: "11.19.1",
     linuxX64: {
       nodeSha256: "a7ec1b37e6ff9d187e4198c5b6df9a4eb1c74dd31804fb3bac55cc4ceca1ac01",
-      npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7"
+      npmTreeSha256: "b67169ebac6067aac627cadae018dba12e6dc829a2902fa2345853b8ddaded5c"
     }
   }
 ];
@@ -3620,6 +3620,7 @@ function trustedToolchain(nodeDir, ws, supported = SUPPORTED_TOOLCHAIN, toolCach
   let node;
   let npmCli;
   let npmPkg;
+  let npmDir;
   try {
     const cache = (0, import_node_fs2.realpathSync)(toolCache);
     dir = (0, import_node_fs2.realpathSync)(nodeDir);
@@ -3634,10 +3635,11 @@ function trustedToolchain(nodeDir, ws, supported = SUPPORTED_TOOLCHAIN, toolCach
     node = (0, import_node_fs2.realpathSync)(import_node_path2.default.join(nodeDir, "bin/node"));
     npmCli = (0, import_node_fs2.realpathSync)(import_node_path2.default.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"));
     npmPkg = (0, import_node_fs2.realpathSync)(import_node_path2.default.join(nodeDir, "lib/node_modules/npm/package.json"));
+    npmDir = (0, import_node_fs2.realpathSync)(import_node_path2.default.join(nodeDir, "lib/node_modules/npm"));
   } catch {
     return fail("no node and npm in the toolcache's Node folder");
   }
-  for (const [what, file] of [["node", node], ["npm", npmCli], ["npm", npmPkg], ["the toolchain", dir]]) {
+  for (const [what, file] of [["node", node], ["npm", npmDir], ["npm", npmCli], ["npm", npmPkg], ["the toolchain", dir]]) {
     if (inside(file, root) || inside(root, file)) fail(`${what} must not come from the workspace`);
     if (!inside(file, dir)) fail(`${what} must sit inside the toolcache's Node folder`);
   }
@@ -3645,17 +3647,42 @@ function trustedToolchain(nodeDir, ws, supported = SUPPORTED_TOOLCHAIN, toolCach
   const platform = check.platform ?? `${process.platform}-${process.arch}`;
   const pinned = platform === "linux-x64" ? entry.linuxX64 : void 0;
   const nodeSha256 = sha256FileSync(node);
-  const npmCliSha256 = sha256FileSync(npmCli);
-  check.log?.(`node ${entry.node} sha256 ${nodeSha256} (pinned ${pinned?.nodeSha256 ?? "none"}); npm-cli.js sha256 ${npmCliSha256} (pinned ${pinned?.npmCliSha256 ?? "none"})`);
-  if (!pinned) fail(`no pinned sha256 for node ${entry.node} on ${platform} (read node ${nodeSha256}, npm-cli.js ${npmCliSha256})`);
+  const npmTreeSha256 = npmTreeDigestSync(npmDir);
+  check.log?.(`node ${entry.node} sha256 ${nodeSha256} (pinned ${pinned?.nodeSha256 ?? "none"}); npm tree sha256 ${npmTreeSha256} (pinned ${pinned?.npmTreeSha256 ?? "none"})`);
+  if (!pinned) fail(`no pinned sha256 for node ${entry.node} on ${platform} (read node ${nodeSha256}, npm tree ${npmTreeSha256})`);
   if (nodeSha256 !== pinned.nodeSha256) fail(`node's sha256 ${nodeSha256} is not the pinned ${pinned.nodeSha256}`);
-  if (npmCliSha256 !== pinned.npmCliSha256) fail(`npm-cli.js's sha256 ${npmCliSha256} is not the pinned ${pinned.npmCliSha256}`);
+  if (npmTreeSha256 !== pinned.npmTreeSha256) fail(`npm's tree sha256 ${npmTreeSha256} is not the pinned ${pinned.npmTreeSha256}`);
   const nodeVersion = (0, import_node_child_process2.execFileSync)(node, ["--version"], { encoding: "utf8", env: {}, timeout: 1e4 }).trim().replace(/^v/, "");
   const npmVersion = String(JSON.parse((0, import_node_fs2.readFileSync)(npmPkg, "utf8")).version);
   const shownVersion = (value) => /^[0-9A-Za-z.+-]{1,40}$/.test(value) ? value : "(unreadable)";
   if (import_node_path2.default.basename(import_node_path2.default.dirname(dir)) !== nodeVersion) fail(`node ${shownVersion(nodeVersion)} disagrees with its pinned toolcache directory`);
   if (!supported.some((s) => s.node === nodeVersion && s.npm === npmVersion)) fail(`npm ${shownVersion(npmVersion)} with node ${shownVersion(nodeVersion)} is not a supported toolchain`);
   return { nodeDir: dir, node, npmCli, nodeVersion, npmVersion };
+}
+function npmTreeDigestSync(npmDir) {
+  const root = (0, import_node_fs2.realpathSync)(npmDir);
+  const hash = (0, import_node_crypto6.createHash)("sha256");
+  const walk = (dir, rel) => {
+    for (const name2 of (0, import_node_fs2.readdirSync)(dir).sort()) {
+      const full = import_node_path2.default.join(dir, name2);
+      const relPath = rel ? `${rel}/${name2}` : name2;
+      const st = (0, import_node_fs2.lstatSync)(full);
+      if (st.isSymbolicLink()) {
+        const target = (0, import_node_fs2.readlinkSync)(full);
+        if (import_node_path2.default.isAbsolute(target) || !inside(import_node_path2.default.resolve(dir, target), root)) throw new InstallRefused(["npm's tree holds a symlink that leaves it"]);
+        hash.update(`L\0${relPath}\0${target}
+`);
+      } else if (st.isDirectory()) {
+        hash.update(`D\0${relPath}
+`);
+        walk(full, relPath);
+      } else if (st.isFile()) hash.update(`F\0${relPath}\0${st.size}\0${sha256FileSync(full)}
+`);
+      else throw new InstallRefused(["npm's tree holds a special file"]);
+    }
+  };
+  walk(root, "");
+  return hash.digest("hex");
 }
 function sha256FileSync(file) {
   const hash = (0, import_node_crypto6.createHash)("sha256");

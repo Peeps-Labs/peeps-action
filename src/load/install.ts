@@ -26,25 +26,27 @@ import { NeutralLines } from "./jail/spec";
 export interface ToolchainHashes {
   /** sha256 of `bin/node`. */
   nodeSha256: string;
-  /** sha256 of `lib/node_modules/npm/bin/npm-cli.js`. */
-  npmCliSha256: string;
+  /** `npmTreeDigestSync` of `lib/node_modules/npm`: every file npm loads, its bundled dependencies included. */
+  npmTreeSha256: string;
 }
 
 export interface SupportedToolchain {
   node: string;
   npm: string;
-  /** The files' sha256 on linux x64; with none for this host, the toolchain is refused. */
+  /** The node binary's sha256 and npm's tree digest on linux x64; with none for this host, the toolchain is refused. */
   linuxX64?: ToolchainHashes;
 }
 
 /**
- * The toolchains CI pins (`ci.yml`): node and the npm it ships with, and their files' sha256.
+ * The toolchains CI pins (`ci.yml`): node and the npm it ships with, the node binary's sha256
+ * and npm's whole tree's digest (`npmTreeDigestSync`: every file under `lib/node_modules/npm`,
+ * `lib/` and the bundled `node_modules/` included, not only its two-line `bin/npm-cli.js`).
  *
- * Provenance of the linux x64 hashes (2026-11-22): nodejs.org's `node-v24.22.3-linux-x64.tar.xz`,
+ * Provenance of the linux x64 values (2026-11-22): nodejs.org's `node-v24.22.3-linux-x64.tar.xz`,
  * whose sha256 4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb matched its line
  * in https://nodejs.org/dist/v24.22.3/SHASUMS256.txt (fetched over HTTPS; the signature on
- * SHASUMS256.txt.asc was not checked), extracted, then `sha256sum bin/node` and
- * `lib/node_modules/npm/bin/npm-cli.js`. CW's gate (plan §8 step 1.2) compares them with what
+ * SHASUMS256.txt.asc was not checked), extracted with `tar -xJf`, then `sha256sum bin/node` and
+ * `npmTreeDigestSync("lib/node_modules/npm")` (1,926 files, no symlinks or special files). CW's gate (plan §8 step 1.2) compares them with what
  * setup-node v6 installs at `$RUNNER_TOOL_CACHE/node/24.22.3/x64` on ubuntu-24.04 and 22.04; a
  * runner whose files differ is refused `install_unsupported`, and the refusal names what it read.
  */
@@ -54,7 +56,7 @@ export const SUPPORTED_TOOLCHAIN: readonly SupportedToolchain[] = [
     npm: "11.19.1",
     linuxX64: {
       nodeSha256: "a7ec1b37e6ff9d187e4198c5b6df9a4eb1c74dd31804fb3bac55cc4ceca1ac01",
-      npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+      npmTreeSha256: "b67169ebac6067aac627cadae018dba12e6dc829a2902fa2345853b8ddaded5c",
     },
   },
 ];
@@ -694,14 +696,14 @@ export function installEnv(tc: Toolchain, scratch: string): Record<string, strin
 export interface ToolchainCheck {
   /** `<platform>-<arch>` of the host whose pinned hashes apply (the running process's by default). */
   platform?: string;
-  /** Told the two files' sha256, read before either runs (the job log line). */
+  /** Told node's sha256 and npm's tree digest, read before either runs (the job log line). */
   log?: (line: string) => void;
 }
 
 /**
  * The node and npm in `nodeDir`, by real path, never in or through the workspace, at a
  * version CI pins, with the files CI pins. `nodeDir` must be setup-node's folder for a pinned
- * version under the runner's toolcache; both files' sha256 are checked before either runs.
+ * version under the runner's toolcache; node's sha256 and npm's whole tree are checked before either runs.
  * Throws `install_unsupported` otherwise.
  */
 export function trustedToolchain(
@@ -720,6 +722,7 @@ export function trustedToolchain(
   let node: string;
   let npmCli: string;
   let npmPkg: string;
+  let npmDir: string;
   try {
     const cache = realpathSync(toolCache);
     dir = realpathSync(nodeDir);
@@ -734,10 +737,11 @@ export function trustedToolchain(
     node = realpathSync(path.join(nodeDir, "bin/node"));
     npmCli = realpathSync(path.join(nodeDir, "lib/node_modules/npm/bin/npm-cli.js"));
     npmPkg = realpathSync(path.join(nodeDir, "lib/node_modules/npm/package.json"));
+    npmDir = realpathSync(path.join(nodeDir, "lib/node_modules/npm"));
   } catch {
     return fail("no node and npm in the toolcache's Node folder");
   }
-  for (const [what, file] of [["node", node], ["npm", npmCli], ["npm", npmPkg], ["the toolchain", dir]] as const) {
+  for (const [what, file] of [["node", node], ["npm", npmDir], ["npm", npmCli], ["npm", npmPkg], ["the toolchain", dir]] as const) {
     if (inside(file, root) || inside(root, file)) fail(`${what} must not come from the workspace`);
     if (!inside(file, dir)) fail(`${what} must sit inside the toolcache's Node folder`);
   }
@@ -747,17 +751,47 @@ export function trustedToolchain(
   const platform = check.platform ?? `${process.platform}-${process.arch}`;
   const pinned = platform === "linux-x64" ? entry.linuxX64 : undefined;
   const nodeSha256 = sha256FileSync(node);
-  const npmCliSha256 = sha256FileSync(npmCli);
-  check.log?.(`node ${entry.node} sha256 ${nodeSha256} (pinned ${pinned?.nodeSha256 ?? "none"}); npm-cli.js sha256 ${npmCliSha256} (pinned ${pinned?.npmCliSha256 ?? "none"})`);
-  if (!pinned) fail(`no pinned sha256 for node ${entry.node} on ${platform} (read node ${nodeSha256}, npm-cli.js ${npmCliSha256})`);
+  const npmTreeSha256 = npmTreeDigestSync(npmDir);
+  check.log?.(`node ${entry.node} sha256 ${nodeSha256} (pinned ${pinned?.nodeSha256 ?? "none"}); npm tree sha256 ${npmTreeSha256} (pinned ${pinned?.npmTreeSha256 ?? "none"})`);
+  if (!pinned) fail(`no pinned sha256 for node ${entry.node} on ${platform} (read node ${nodeSha256}, npm tree ${npmTreeSha256})`);
   if (nodeSha256 !== pinned!.nodeSha256) fail(`node's sha256 ${nodeSha256} is not the pinned ${pinned!.nodeSha256}`);
-  if (npmCliSha256 !== pinned!.npmCliSha256) fail(`npm-cli.js's sha256 ${npmCliSha256} is not the pinned ${pinned!.npmCliSha256}`);
+  if (npmTreeSha256 !== pinned!.npmTreeSha256) fail(`npm's tree sha256 ${npmTreeSha256} is not the pinned ${pinned!.npmTreeSha256}`);
   const nodeVersion = execFileSync(node, ["--version"], { encoding: "utf8", env: {}, timeout: 10_000 }).trim().replace(/^v/, "");
   const npmVersion = String((JSON.parse(readFileSync(npmPkg, "utf8")) as { version?: unknown }).version);
   const shownVersion = (value: string) => (/^[0-9A-Za-z.+-]{1,40}$/.test(value) ? value : "(unreadable)");
   if (path.basename(path.dirname(dir)) !== nodeVersion) fail(`node ${shownVersion(nodeVersion)} disagrees with its pinned toolcache directory`);
   if (!supported.some((s) => s.node === nodeVersion && s.npm === npmVersion)) fail(`npm ${shownVersion(npmVersion)} with node ${shownVersion(nodeVersion)} is not a supported toolchain`);
   return { nodeDir: dir, node, npmCli, nodeVersion, npmVersion };
+}
+
+/**
+ * npm's tree, pinned whole: sha256 over a sorted manifest of every entry under `npmDir`, one
+ * line each, `F` relative path, size and the file's sha256; `D` relative path; `L` relative path
+ * and target. A symlink whose target leaves the tree, and any special file, are refused rather
+ * than recorded. Modes are left out: a toolcache extraction applies its own umask, and npm's
+ * files run through node, not by their mode. Synchronous: it runs before anything in the tree does.
+ */
+export function npmTreeDigestSync(npmDir: string): string {
+  const root = realpathSync(npmDir);
+  const hash = createHash("sha256");
+  const walk = (dir: string, rel: string): void => {
+    for (const name of readdirSync(dir).sort()) {
+      const full = path.join(dir, name);
+      const relPath = rel ? `${rel}/${name}` : name;
+      const st = lstatSync(full);
+      if (st.isSymbolicLink()) {
+        const target = readlinkSync(full);
+        if (path.isAbsolute(target) || !inside(path.resolve(dir, target), root)) throw new InstallRefused(["npm's tree holds a symlink that leaves it"]);
+        hash.update(`L\0${relPath}\0${target}\n`);
+      } else if (st.isDirectory()) {
+        hash.update(`D\0${relPath}\n`);
+        walk(full, relPath);
+      } else if (st.isFile()) hash.update(`F\0${relPath}\0${st.size}\0${sha256FileSync(full)}\n`);
+      else throw new InstallRefused(["npm's tree holds a special file"]);
+    }
+  };
+  walk(root, "");
+  return hash.digest("hex");
 }
 
 /** sha256 of a file, read in 1 MiB pieces. */
@@ -925,9 +959,6 @@ async function digestsOf(ws: string, signal?: AbortSignal): Promise<InstallDiges
  * the checkout anyway, and npm's own errors are what a customer needs to fix their install. It
  * never reaches `failures`, the result JSON or Peeps: the rejection carries the exit code only.
  */
-/** Only tests call it: the formatter on a real child's streams. */
-export const runNpmForTests = (file: string, args: string[], o: { cwd: string; env: Record<string, string> }, timeoutMs: number) => runNpm(file, args, o, timeoutMs);
-
 function runNpm(file: string, args: string[], o: { cwd: string; env: Record<string, string> }, timeoutMs: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const child = spawn(file, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: timeoutMs, killSignal: "SIGKILL", signal });
@@ -946,6 +977,9 @@ function runNpm(file: string, args: string[], o: { cwd: string; env: Record<stri
     });
   });
 }
+
+/** Only tests call it: the formatter on a real child's streams. */
+export const runNpmForTests = (file: string, args: string[], o: { cwd: string; env: Record<string, string> }, timeoutMs: number) => runNpm(file, args, o, timeoutMs);
 
 /**
  * sha256 over the sorted walk of the checkout, node_modules included and `.git` excluded:

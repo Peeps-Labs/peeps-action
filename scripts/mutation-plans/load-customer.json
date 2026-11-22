@@ -147,9 +147,9 @@
       ]
     },
     {
-      "name": "npm-cli.js's sha256 is not compared",
+      "name": "npm's tree digest is not compared",
       "file": "src/load/install.ts",
-      "find": "if (npmCliSha256 !== pinned!.npmCliSha256) fail(",
+      "find": "if (npmTreeSha256 !== pinned!.npmTreeSha256) fail(",
       "replace": "if (false) fail(",
       "tests": [
         "test/load-install.test.ts"
@@ -617,6 +617,78 @@
       "replace": "const lines = { write: (c: Buffer) => void process.stderr.write(c), end: () => undefined };",
       "tests": [
         "test/load-jail-spec.test.ts"
+      ]
+    },
+    {
+      "name": "the npm tree digest walks only bin/",
+      "file": "src/load/install.ts",
+      "find": "  walk(root, \"\");\n  return hash.digest(\"hex\");",
+      "replace": "  walk(path.join(root, \"bin\"), \"bin\");\n  return hash.digest(\"hex\");",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "npm's bundled dependencies are not walked",
+      "file": "src/load/install.ts",
+      "find": "        walk(full, relPath);\n",
+      "replace": "        if (name !== \"node_modules\") walk(full, relPath);\n",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "npm's files are recorded by size, not content",
+      "file": "src/load/install.ts",
+      "find": "\\0${st.size}\\0${sha256FileSync(full)}\\n`);",
+      "replace": "\\0${st.size}\\n`);",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "an added folder in npm's tree is not recorded",
+      "file": "src/load/install.ts",
+      "find": "        hash.update(`D\\0${relPath}\\n`);\n        walk(",
+      "replace": "        walk(",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a symlink leaving npm's tree is recorded",
+      "file": "src/load/install.ts",
+      "find": "if (path.isAbsolute(target) || !inside(path.resolve(dir, target), root)) throw",
+      "replace": "if (false) throw",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a relative symlink leaving npm's tree is recorded",
+      "file": "src/load/install.ts",
+      "find": "!inside(path.resolve(dir, target), root)) throw",
+      "replace": "false) throw",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a symlink's target is not in npm's tree digest",
+      "file": "src/load/install.ts",
+      "find": "hash.update(`L\\0${relPath}\\0${target}\\n`);",
+      "replace": "hash.update(`L\\0${relPath}\\n`);",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "a special file in npm's tree is recorded",
+      "file": "src/load/install.ts",
+      "find": "else throw new InstallRefused([\"npm's tree holds a special file\"]);",
+      "replace": "else hash.update(`O\\0${relPath}\\n`);",
+      "tests": [
+        "test/load-install.test.ts"
       ]
     }
   ]
