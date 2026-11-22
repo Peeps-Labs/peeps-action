@@ -1,0 +1,195 @@
+{
+  "description": "CW-A, the customer load job (CW plan \u00a74): every refusal row, the identity read, the control origin, the toolchain hashes, the lockfile URL and SRI checks, the verified download and the supervisor's toolchain-first startup. A survivor means a security check no test would notice losing.",
+  "mutants": [
+    {
+      "name": "a tag or branch ref is read as a commit pin",
+      "file": "src/load/customer.ts",
+      "find": "if (f.actionRef === null || !COMMIT.test(f.actionRef)) return refusal(\"action_not_pinned\");",
+      "replace": "if (f.actionRef === null) return refusal(\"action_not_pinned\");",
+      "tests": [
+        "test/load-customer.test.ts",
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a push or another job is taken for Peeps' dispatch",
+      "file": "src/load/customer.ts",
+      "find": "if (f.job !== \"peeps-load\" || f.eventName !== \"workflow_dispatch\") return refusal(\"job\");",
+      "replace": "if (f.job !== \"peeps-load\") return refusal(\"job\");",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a re-run is allowed",
+      "file": "src/load/customer.ts",
+      "find": "if (f.runAttempt !== \"1\") return refusal(\"rerun\");",
+      "replace": "",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a container's /__w/ workspace is not seen",
+      "file": "src/load/customer.ts",
+      "find": " || (f.workspace ?? \"\").startsWith(\"/__w/\")",
+      "replace": "",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a loader variable set in the job is ignored",
+      "file": "src/load/customer.ts",
+      "find": "if (f.preloadVars.length > 0) return refusal(\"node_options\", { vars: f.preloadVars.join(\", \") });",
+      "replace": "",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a malformed workload path is accepted",
+      "file": "src/load/customer.ts",
+      "find": "...(f.workload !== null && WORKLOAD_FILE.test(f.workload) ? [] : [\"loadWorkload\"]),",
+      "replace": "...(f.workload !== null ? [] : [\"loadWorkload\"]),",
+      "tests": [
+        "test/load-customer.test.ts"
+      ]
+    },
+    {
+      "name": "any PEEPS_API_URL is accepted",
+      "file": "src/load/control-origin.ts",
+      "find": "return LOAD_CONTROL_ORIGINS.includes(origin) ? { ok: true, origin } : { ok: false, refused: \"control_origin\" };",
+      "replace": "return { ok: true, origin };",
+      "tests": [
+        "test/load-control-origin.test.ts"
+      ]
+    },
+    {
+      "name": "a self-hosted runner's token is accepted",
+      "file": "src/load/oidc.ts",
+      "find": "if (claims.runnerEnvironment !== \"github-hosted\") return { ok: false, refused: \"self_hosted\" };",
+      "replace": "",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "a token for another run is accepted",
+      "file": "src/load/oidc.ts",
+      "find": "if (claims.runId !== env.GITHUB_RUN_ID || claims.runAttempt !== env.GITHUB_RUN_ATTEMPT) return { ok: false, refused: \"identity\" };",
+      "replace": "",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "the identity token is minted for the claim's audience",
+      "file": "src/load/oidc.ts",
+      "find": "export const LOAD_IDENTITY_AUDIENCE = \"peeps-load-identity\";",
+      "replace": "export const LOAD_IDENTITY_AUDIENCE = \"peeps-load\";",
+      "tests": [
+        "test/load-oidc.test.ts"
+      ]
+    },
+    {
+      "name": "a tarball that doesn't match its lockfile sha512 is cached",
+      "file": "src/load/registry-fetch.ts",
+      "find": "if (digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "the total download cap is not enforced",
+      "file": "src/load/registry-fetch.ts",
+      "find": "if (total > totalCap) return false;",
+      "replace": "",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a redirect from the registry is reported as a plain status",
+      "file": "src/load/transport.ts",
+      "find": "          if (status >= 300 && status < 400) return finish(new ControlHttpError(op, \"redirect\", status));\n          if (status !== 200) return finish(new ControlHttpError(op, \"status\", status));\n          const declared",
+      "replace": "          if (status !== 200) return finish(new ControlHttpError(op, \"status\", status));\n          const declared",
+      "tests": [
+        "test/load-registry-fetch.test.ts"
+      ]
+    },
+    {
+      "name": "a tarball URL on another host is downloaded",
+      "file": "src/load/install.ts",
+      "find": "url.protocol === \"https:\" && url.hostname === \"registry.npmjs.org\" && url.port === \"\"",
+      "replace": "url.protocol === \"https:\" && url.port === \"\"",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "an SRI hash that isn't 64 bytes is accepted",
+      "file": "src/load/install.ts",
+      "find": "if (bytes.length !== 64 || bytes.toString(\"base64\") !== encoded) return null;",
+      "replace": "",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "node's sha256 is not compared",
+      "file": "src/load/install.ts",
+      "find": "if (nodeSha256 !== pinned!.nodeSha256) fail(",
+      "replace": "if (false) fail(",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "npm-cli.js's sha256 is not compared",
+      "file": "src/load/install.ts",
+      "find": "if (npmCliSha256 !== pinned!.npmCliSha256) fail(",
+      "replace": "if (false) fail(",
+      "tests": [
+        "test/load-install.test.ts"
+      ]
+    },
+    {
+      "name": "the toolchain is not resolved before the probe",
+      "file": "src/load/supervisor.ts",
+      "find": "      if (this.s.toolchain || !this.s.probe || !this.s.preinstall) this.toolchain = this.resolveToolchain();\n",
+      "replace": "",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "a jail that can't start fails the run instead of refusing fence_unverified",
+      "file": "src/load/supervisor.ts",
+      "find": "      return { passed: false, failures: [\"the jail could not start\"], seen: null };",
+      "replace": "      throw error;",
+      "tests": [
+        "test/load-supervisor-customer.test.ts"
+      ]
+    },
+    {
+      "name": "the identity's refusal is ignored",
+      "file": "src/load/main.ts",
+      "find": "  if (!id.ok) {",
+      "replace": "  if (false) {",
+      "tests": [
+        "test/load-customer-entry.test.ts"
+      ]
+    },
+    {
+      "name": "a customer run is given the harness hosts' scope",
+      "file": "src/load/main.ts",
+      "find": "      scope: { kind: \"customer\" },",
+      "replace": "      scope: { kind: \"harness\", sinkHosts: [\"sink.example.com\"] },",
+      "tests": [
+        "test/load-customer-entry.test.ts"
+      ]
+    }
+  ]
+}
