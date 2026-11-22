@@ -244,11 +244,29 @@ one.
 
 ## Load testing
 
-**`mode: load` refuses in this release.** It exits 1 with "Load testing isn't
-available for this repository yet." before it reads your workspace, loads any of
-your code, makes a network call, asks GitHub for an OIDC token or starts a
-process. No load engine ships in this release. When load testing is turned on,
-this section will say what it sends and what it runs.
+**`mode: load` runs only pinned to a commit.** With `@v1`, any tag, a branch or on
+GitLab it exits 1 with "Load testing isn't available for this repository yet."
+before it reads your workspace, loads any of your code, makes a network call,
+asks GitHub for an OIDC token or starts a process.
+
+Pinned to a commit in the `peeps-load` job Peeps gives you, it first checks the
+job with no network (the job, the attempt, no container, no Node or loader
+variables, setup-node's Node 24.22.3, Peeps' two inputs, `PEEPS_API_URL` one of
+Peeps' own three addresses), then reads the job's identity from its own OIDC
+token, minted for a separate audience and dropped. It checks the toolcache's
+`node` and `npm-cli.js` against pinned sha256 values before running either. It
+downloads only the tarballs your `package-lock.json` names, only from
+`registry.npmjs.org`, each checked against the lockfile's sha512 before it is
+kept, and installs them with `npm ci --offline --ignore-scripts` in a network
+namespace with no interface: no lifecycle script runs, and npm reaches no
+network. Only then does it claim the run from Peeps. It sends Peeps the claim,
+the lease renewals and the run's events, never your code or a token.
+
+Two parties are kept apart. Peeps decides where load may go: a grant names the
+origins and limits an Owner approved, and the action refuses anything else. Your
+journey code runs inside a jail on your runner, as its own user, with its
+network reaching only the action's gate, which admits only the grant's origins
+and stops the run when the lease ends.
 
 ## Self-hosted runners
 

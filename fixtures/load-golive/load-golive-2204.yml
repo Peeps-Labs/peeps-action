@@ -1,0 +1,105 @@
+# The go line's workflow on ubuntu-22.04 (e5 plan §7, v3 §4 and §7; CW plan §4.8). This is its SOURCE,
+# kept outside .github/workflows so peeps-action never runs it. The Peeps-owned fixture repository
+# carries a copy at .github/workflows/load-golive-2204.yml that differs from this file in one place only: the
+# quoted all-zero action `ref` below, replaced with the peeps-action commit under test (quoted, so
+# a commit of digits and one `e` stays a string). Peeps registers that copy's blob digest as one
+# harness project's recipe; load-golive-2204.yml.sha256 beside this file pins these bytes.
+# load-golive.yml is the same file on ubuntu-24.04.
+#
+# P4a dispatches it like any load run: exactly mode, ref, loadGrant and loadWorkload. Peeps' pin
+# reads the checkout of Peeps-Labs/peeps-action with a 40-hex ref inside `peeps-load`. A customer's
+# `peeps-load` job never has this form: P5 refuses a job that checks the action out.
+#
+# It cannot aim load anywhere but the harness:
+#   - it runs only in the fixture repository, on a first attempt, by dispatch, for mode load;
+#   - Peeps' origin and the sink hosts are written here, not taken from an input;
+#   - the grant and the workload reach the entry only through its environment;
+#   - dist/load.js refuses a grant naming any host off PEEPS_LOAD_SINK_HOSTS before the jail
+#     starts, and Peeps admits only the harness repository and sink hosts (P4).
+#
+# The fixture repository holds the app (package.json, package-lock.json, the journeys and
+# peeps/load/golive.workload.yaml) and, under .peeps-load/npm-cache, an npm cache holding every
+# tarball the lockfile names: the harness's pre-claim install stays offline (e5 plan v3 §2.10).
+name: Peeps load go line (ubuntu-22.04)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Peeps' dispatch mode
+        required: true
+        type: string
+      ref:
+        description: The fixture commit to check out
+        required: true
+        type: string
+      loadGrant:
+        description: The grant reference Peeps dispatched this run with
+        required: false
+        type: string
+      loadWorkload:
+        description: The workload file, relative to the checkout
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  peeps-load:
+    # PLACEHOLDER: the fixture repository's name, to confirm before the fixture copy is registered.
+    if: github.repository == 'Peeps-Labs/peeps-load-fixture' && github.run_attempt == 1 && inputs.mode == 'load'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      NODE_OPTIONS: ""
+      NODE_DEBUG: ""
+      NODE_PATH: ""
+      LD_PRELOAD: ""
+      LD_AUDIT: ""
+      LD_LIBRARY_PATH: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
+        with:
+          ref: ${{ inputs.ref }}
+          path: app
+          persist-credentials: false
+
+      - id: action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
+        with:
+          repository: Peeps-Labs/peeps-action
+          ref: "0000000000000000000000000000000000000000"
+          path: action
+          persist-credentials: false
+
+      # The pinned toolchain the load install accepts (SUPPORTED_TOOLCHAIN in src/load/install.ts).
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38   # v6
+        with:
+          node-version: "24.22.3"
+          package-manager-cache: false
+
+      - name: Load run
+        run: exec node "$GITHUB_WORKSPACE/action/dist/load.js"
+        env:
+          PEEPS_URL: https://dev.peepsai.com
+          # PLACEHOLDER: the harness sink host, to confirm before the fixture copy is registered.
+          PEEPS_LOAD_SINK_HOSTS: sink.load-harness.peeps.dev
+          PEEPS_LOAD_GRANT: ${{ inputs.loadGrant }}
+          PEEPS_LOAD_WORKSPACE: ${{ github.workspace }}/app
+          PEEPS_LOAD_WORKLOAD: ${{ inputs.loadWorkload }}
+          # PLACEHOLDER: where the fixture keeps the recipe's npm cache, to confirm.
+          PEEPS_LOAD_NPM_CACHE: ${{ github.workspace }}/app/.peeps-load/npm-cache
+          PEEPS_LOAD_CHECK_RUN_ID: ${{ job.check_run_id }}
+          PEEPS_LOAD_ACTION_VERSION: ${{ steps.action.outputs.commit }}
+          PEEPS_LOAD_RESULT_FILE: ${{ runner.temp }}/peeps-load-result.json
+
+      # The run's own record: every renewal's latency, the closed outcome and the evidence state.
+      # No token is in it.
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: peeps-load-result-ubuntu-22.04
+          path: ${{ runner.temp }}/peeps-load-result.json
+          if-no-files-found: error
