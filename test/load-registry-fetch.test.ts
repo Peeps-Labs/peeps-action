@@ -104,6 +104,49 @@ test("lockedTarballs: each distinct canonical URL and sha512 of the lock, nothin
   assert.deepEqual(lockedTarballs(lock), [{ url: `${REG}/a/-/a-1.0.0.tgz`, integrity: good }]);
 });
 
+test("lockedTarballs skips an optional entry whose os, cpu or libc leaves out linux x64 glibc, as npm does (@next/swc's set)", () => {
+  const sri = (n: number) => `sha512-${Buffer.alloc(64, n).toString("base64")}`;
+  const swc = (name: string, n: number, more: Record<string, unknown>, optional = true) => [`node_modules/@next/${name}`, { version: "15.0.0", resolved: `${REG}/@next/${name}/-/${name}-15.0.0.tgz`, integrity: sri(n), ...(optional ? { optional: true } : {}), ...more }] as const;
+  const lock = { packages: Object.fromEntries([
+    ["", { name: "app" }],
+    ["node_modules/next", { version: "15.0.0", resolved: `${REG}/next/-/next-15.0.0.tgz`, integrity: sri(1) }],
+    swc("swc-linux-x64-gnu", 2, { os: ["linux"], cpu: ["x64"], libc: ["glibc"] }),
+    swc("swc-linux-x64-musl", 3, { os: ["linux"], cpu: ["x64"], libc: ["musl"] }),
+    swc("swc-linux-arm64-gnu", 4, { os: ["linux"], cpu: ["arm64"], libc: ["glibc"] }),
+    swc("swc-darwin-arm64", 5, { os: ["darwin"], cpu: ["arm64"] }),
+    swc("swc-win32-x64-msvc", 6, { os: ["win32"], cpu: ["x64"] }),
+    swc("swc-not-darwin", 7, { os: ["!darwin"] }),
+    swc("swc-not-linux", 8, { os: ["!linux"] }),
+    swc("swc-any", 9, { os: "any", cpu: ["x64", "arm64"] }),
+    // Not optional: npm would refuse it EBADPLATFORM rather than skip it, so it is kept.
+    swc("swc-required-darwin", 10, { os: ["darwin"] }, false),
+  ]) };
+  const kept = lockedTarballs(lock).map((x) => x.url.replace(`${REG}/`, ""));
+  assert.deepEqual(kept, [
+    "next/-/next-15.0.0.tgz",
+    "@next/swc-linux-x64-gnu/-/swc-linux-x64-gnu-15.0.0.tgz",
+    "@next/swc-not-darwin/-/swc-not-darwin-15.0.0.tgz",
+    "@next/swc-any/-/swc-any-15.0.0.tgz",
+    "@next/swc-required-darwin/-/swc-required-darwin-15.0.0.tgz",
+  ]);
+});
+
+test("the cache check skips the same optional platform entries: a recipe without darwin's tarball is not refused for it", { skip: hasNpm ? false : "no npm beside this Node" }, async (t) => {
+  const ws = tmp(t, "peeps-fetch-ws-");
+  const sri = `sha512-${Buffer.alloc(64, 5).toString("base64")}`;
+  const deps = { "@next/swc-darwin-arm64": "15.0.0" };
+  writeFileSync(path.join(ws, "package.json"), JSON.stringify({ name: "app", version: "1.0.0", optionalDependencies: deps }));
+  writeFileSync(path.join(ws, "package-lock.json"), JSON.stringify({ name: "app", version: "1.0.0", lockfileVersion: 3, requires: true, packages: {
+    "": { name: "app", version: "1.0.0", optionalDependencies: deps },
+    "node_modules/@next/swc-darwin-arm64": { version: "15.0.0", resolved: `${REG}/@next/swc-darwin-arm64/-/swc-darwin-arm64-15.0.0.tgz`, integrity: sri, optional: true, os: ["darwin"], cpu: ["arm64"] },
+  } }));
+  // With nothing to check, npm itself is next: with sudo and unshare here it installs nothing and
+  // skips the package, as npm does; without them it fails to start. Either way not the cache check.
+  const outcome = await offlinePreinstall(ws, toolchain(), tmp(t), { cache: tmp(t), uid: process.getuid!(), gid: process.getgid!() }).then(() => "installed", (e: Error) => e.message);
+  assert.doesNotMatch(outcome, /cached tarball/);
+  if (canUnshare) assert.equal(outcome, "installed");
+});
+
 test("a good tarball is written to npm's cache under its lockfile sha512 and pacote's key", { skip: hasNpm ? false : "no npm beside this Node" }, async (t) => {
   const r = await registry(t);
   const tc = toolchain();

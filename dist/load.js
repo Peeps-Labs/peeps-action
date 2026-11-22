@@ -3648,13 +3648,30 @@ function offlineInstallArgv(tc, cache, scratch, o) {
   const vars = Object.entries(env).map(([k, v2]) => `${k}=${v2}`);
   return { file, args: [...prefix, ...vars, tc.node, tc.npmCli, "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache", cache], env };
 }
+function admits(list, value) {
+  const names = typeof list === "string" ? [list] : Array.isArray(list) ? list.filter((x) => typeof x === "string") : [];
+  if (names.length === 0 || names.length === 1 && names[0] === "any") return true;
+  let match2 = false;
+  let negated = 0;
+  for (const name2 of names) {
+    if (name2.startsWith("!")) {
+      negated++;
+      if (name2.slice(1) === value) return false;
+    } else if (name2 === value) match2 = true;
+  }
+  return match2 || negated === names.length;
+}
+function skippedOnRunner(entry) {
+  if (entry.optional !== true) return false;
+  return !admits(entry.os, "linux") || !admits(entry.cpu, "x64") || entry.libc !== void 0 && !admits(entry.libc, "glibc");
+}
 async function verifyRecipeCache(cache, tc, lock, signal) {
   const { packages } = lock;
   const checked = /* @__PURE__ */ new Set();
   const cacheDir = import_node_path2.default.join(cache, "_cacache");
   const requireFromNpm = (0, import_node_module.createRequire)(tc.npmCli);
   for (const [key, entry] of Object.entries(packages)) {
-    if (!canonicalRegistryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity)) continue;
+    if (!canonicalRegistryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity) || skippedOnRunner(entry)) continue;
     signal?.throwIfAborted();
     const cacache = requireFromNpm("cacache");
     const stream = cacache.get.stream.byDigest(cacheDir, entry.integrity);
@@ -3795,7 +3812,7 @@ function lockedTarballs(lock) {
   const packages = lock.packages ?? {};
   const seen = /* @__PURE__ */ new Map();
   for (const entry of Object.values(packages)) {
-    if (!entry || !canonicalRegistryTarball(entry.resolved)) continue;
+    if (!entry || !canonicalRegistryTarball(entry.resolved) || skippedOnRunner(entry)) continue;
     const integrity = sha512Of(entry.integrity);
     if (integrity === null) continue;
     seen.set(`${entry.resolved} ${integrity}`, { url: entry.resolved, integrity });

@@ -823,6 +823,34 @@ export function offlineInstallArgv(tc: Toolchain, cache: string, scratch: string
   return { file: file!, args: [...prefix, ...vars, tc.node, tc.npmCli, "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--cache", cache], env };
 }
 
+/**
+ * npm's platform list check (npm-install-checks' `checkList`): a string or list of names, each
+ * possibly negated with `!`; `any` alone, or nothing, admits everything.
+ */
+function admits(list: unknown, value: string): boolean {
+  const names = typeof list === "string" ? [list] : Array.isArray(list) ? list.filter((x): x is string => typeof x === "string") : [];
+  if (names.length === 0 || (names.length === 1 && names[0] === "any")) return true;
+  let match = false;
+  let negated = 0;
+  for (const name of names) {
+    if (name.startsWith("!")) {
+      negated++;
+      if (name.slice(1) === value) return false;
+    } else if (name === value) match = true;
+  }
+  return match || negated === names.length;
+}
+
+/**
+ * An optional lock entry npm leaves out on the runner (linux, x64, glibc), by its `os`, `cpu` and
+ * `libc`, as npm does (CW-A round 2): nothing fetches or checks its tarball. A required one is
+ * kept, and npm refuses it itself.
+ */
+export function skippedOnRunner(entry: Record<string, unknown>): boolean {
+  if (entry.optional !== true) return false;
+  return !admits(entry.os, "linux") || !admits(entry.cpu, "x64") || (entry.libc !== undefined && !admits(entry.libc, "glibc"));
+}
+
 type CacheReadStream = AsyncIterable<Buffer> & { destroy(error?: Error): void };
 
 /** Verify all locked registry tarballs, even ones npm might omit (optional or platform-specific). */
@@ -833,7 +861,7 @@ async function verifyRecipeCache(cache: string, tc: Toolchain, lock: unknown, si
   const cacheDir = path.join(cache, "_cacache");
   const requireFromNpm = createRequire(tc.npmCli);
   for (const [key, entry] of Object.entries(packages)) {
-    if (!canonicalRegistryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity)) continue;
+    if (!canonicalRegistryTarball(entry.resolved) || typeof entry.integrity !== "string" || checked.has(entry.integrity) || skippedOnRunner(entry)) continue;
     signal?.throwIfAborted();
     const cacache = requireFromNpm("cacache") as {
       get: { stream: { byDigest(cacheDir: string, integrity: string): CacheReadStream } };

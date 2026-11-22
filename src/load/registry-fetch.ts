@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { canonicalRegistryTarball, InstallFailed, installProblems, InstallRefused, offlinePreinstall, readWorkspace, sha512Of, type InstallDigests, type OfflineInstall, type Toolchain } from "./install";
+import { canonicalRegistryTarball, InstallFailed, installProblems, InstallRefused, offlinePreinstall, readWorkspace, sha512Of, skippedOnRunner, type InstallDigests, type OfflineInstall, type Toolchain } from "./install";
 import { ControlHttpError, controlTransport, sleep, type HttpControlSeams } from "./transport";
 
 export const REGISTRY_HOST = "registry.npmjs.org";
@@ -56,12 +56,15 @@ export interface Tarball {
   integrity: string;
 }
 
-/** Each distinct (url, sha512) of the lock's registry entries, after `installProblems` passed. */
+/**
+ * Each distinct (url, sha512) of the lock's registry entries, after `installProblems` passed,
+ * except the optional ones npm leaves out on linux x64 glibc (`skippedOnRunner`).
+ */
 export function lockedTarballs(lock: unknown): Tarball[] {
   const packages = (lock as { packages?: Record<string, Record<string, unknown> | null> }).packages ?? {};
   const seen = new Map<string, Tarball>();
   for (const entry of Object.values(packages)) {
-    if (!entry || !canonicalRegistryTarball(entry.resolved)) continue;
+    if (!entry || !canonicalRegistryTarball(entry.resolved) || skippedOnRunner(entry)) continue;
     const integrity = sha512Of(entry.integrity);
     if (integrity === null) continue;
     seen.set(`${entry.resolved} ${integrity}`, { url: entry.resolved, integrity });
