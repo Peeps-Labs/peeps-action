@@ -260,3 +260,28 @@ for (const [name, envOf, line, code] of [
     assert.equal(existsSync(s.spawns) ? await readFile(s.spawns, "utf8") : "", "", "a process was spawned");
   });
 }
+
+test("pinned to a commit with every local check passing: the identity read is next, and an endpoint off GitHub's hosts is asked nothing", async (t) => {
+  const s = await setUp(t);
+  await mkdir(path.join(s.root, "toolcache", "node", "24.22.3", process.arch), { recursive: true });
+  const { NODE_OPTIONS: _spy, ...rest } = s.env;
+  const env = { ...rest, ...pinned(s), INPUT_MODE: "load", PEEPS_API_URL: "https://dev.peepsai.com" } as NodeJS.ProcessEnv;
+  const result = await runAction(env, s.workspace, s.spy);
+  assert.equal(result.code, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.equal(result.stderr, `${TITLED}Couldn't read this job's identity from GitHub. Start a new run from Peeps.\n`);
+  assert.equal(result.stdout, '{"failed":"oidc"}\n');
+  assert.deepEqual(s.oidc.hits, [], "the request token never left for a host off GitHub's");
+  assert.deepEqual(s.peeps.hits, []);
+  assert.equal(existsSync(s.marker), false, "customer code ran");
+  assert.equal(existsSync(s.spawns) ? await readFile(s.spawns, "utf8") : "", "", "a process was spawned");
+});
+
+test("mode LOAD (GitHub's == ignores case, the action's doesn't) never reaches the load entry: it ends as an unknown mode", async (t) => {
+  const s = await setUp(t);
+  const { NODE_OPTIONS: _spy, ...rest } = s.env;
+  const result = await runAction({ ...rest, ...pinned(s), INPUT_MODE: "LOAD" } as NodeJS.ProcessEnv, s.workspace, s.spy);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /::error::unknown mode LOAD/);
+  assert.doesNotMatch(result.stderr + result.stdout, /Peeps load run|refused/);
+  assert.deepEqual(s.oidc.hits, []);
+});

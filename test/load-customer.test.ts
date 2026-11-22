@@ -99,6 +99,9 @@ test("the input row names the input, never its value", () => {
     [{ workload: "/etc/peeps/load/x.workload.yaml" }, "loadWorkload"],
     [{ workload: "peeps/load/x.yaml" }, "loadWorkload"],
     [{ workload: "peeps/load/sub/x.workload.yaml" }, "loadWorkload"],
+    [{ workload: "peeps/load/a\nb.workload.yaml" }, "loadWorkload"],
+    [{ workload: "peeps/load/a\u007fb.workload.yaml" }, "loadWorkload"],
+    [{ workload: `peeps/load/${"a".repeat(1010)}.workload.yaml` }, "loadWorkload"],
   ] as [Partial<JobFacts>, string][]) {
     const r = customerRefusal(facts(over));
     assert.equal(r?.code, "input");
@@ -106,6 +109,7 @@ test("the input row names the input, never its value", () => {
     assert.ok(!r!.message.includes(SENTINEL));
   }
   assert.equal(code({ workload: "peeps/load/robots.workload.yml" }), null);
+  assert.equal(code({ workload: `peeps/load/${"a".repeat(1024 - "peeps/load/.workload.yaml".length)}.workload.yaml` }), null, "1,024 characters is the cap");
 });
 
 test("the copy table is the fixture's refusal-copy.json, every code", () => {

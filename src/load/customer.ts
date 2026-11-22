@@ -98,8 +98,9 @@ export interface CustomerRefusal {
 
 const COMMIT = /^[0-9a-f]{40}$/;
 const GRANT_REF = /^[A-Za-z0-9_-]{22}$/;
-/** Peeps' `WORKLOAD_FILE` (`github-workload-source.ts`). */
-const WORKLOAD_FILE = /^peeps\/load\/[^/]+\.workload\.ya?ml$/;
+/** Peeps' `WORKLOAD_FILE` (`github-workload-source.ts`), with no control character, at most 1,024 characters (the harness entry's cap). */
+const WORKLOAD_FILE = /^peeps\/load\/[^/\x00-\x1f\x7f]+\.workload\.ya?ml$/;
+const WORKLOAD_MAX = 1024;
 const CONTAINER_ID = /^[0-9a-f]{12}$/;
 
 export function refusal(code: CustomerRefusalCode, slots: Record<string, string> = {}): CustomerRefusal {
@@ -119,7 +120,7 @@ export function customerRefusal(f: JobFacts): CustomerRefusal | null {
   if (!f.trustedNodePresent) return refusal("node_version", { found: f.pathNodeVersions.length > 0 ? f.pathNodeVersions.join(", ") : "no Node" });
   const bad = [
     ...(f.grant !== null && GRANT_REF.test(f.grant) ? [] : ["loadGrant"]),
-    ...(f.workload !== null && WORKLOAD_FILE.test(f.workload) ? [] : ["loadWorkload"]),
+    ...(f.workload !== null && f.workload.length <= WORKLOAD_MAX && WORKLOAD_FILE.test(f.workload) ? [] : ["loadWorkload"]),
   ];
   if (bad.length > 0) return refusal("input", { name: bad.join(", ") });
   if (!loadControlOrigin(f.apiUrl ?? undefined).ok) return refusal("control_origin");

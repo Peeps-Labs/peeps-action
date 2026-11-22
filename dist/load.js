@@ -30,6 +30,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/load/main.ts
 var main_exports = {};
 __export(main_exports, {
+  failureLines: () => failureLines,
   mainCustomerLoad: () => mainCustomerLoad,
   mainLoad: () => mainLoad,
   readCustomerInputs: () => readCustomerInputs,
@@ -65,10 +66,17 @@ var REFUSAL_COPY = {
   identity: "This job's GitHub identity token doesn't match its run.",
   self_hosted: "Load runs need a GitHub-hosted runner for now. This job ran on a self-hosted runner."
 };
+var RUN_REFUSAL_COPY = {
+  install_unsupported: "This repository's install isn't supported for load runs. The lines after this one say why.",
+  install_failed: "Installing this repository's dependencies failed before the load run started. The lines after this one say why. Start a new run from Peeps.",
+  fence_unverified: "This job's jail check failed: load runs need the runner itself. The lines after this one say why."
+};
+var IDENTITY_FAILED_COPY = "Couldn't read this job's identity from GitHub. Start a new run from Peeps.";
 var NOT_PINNED_LINE = `::error::${REFUSAL_COPY.action_not_pinned}`;
 var COMMIT = /^[0-9a-f]{40}$/;
 var GRANT_REF = /^[A-Za-z0-9_-]{22}$/;
-var WORKLOAD_FILE = /^peeps\/load\/[^/]+\.workload\.ya?ml$/;
+var WORKLOAD_FILE = /^peeps\/load\/[^/\x00-\x1f\x7f]+\.workload\.ya?ml$/;
+var WORKLOAD_MAX = 1024;
 var CONTAINER_ID = /^[0-9a-f]{12}$/;
 function refusal(code, slots = {}) {
   return { code, message: REFUSAL_COPY[code].replace(/\{(\w+)\}/g, (_m, name2) => slots[name2] ?? "") };
@@ -85,7 +93,7 @@ function customerRefusal(f) {
   if (!f.trustedNodePresent) return refusal("node_version", { found: f.pathNodeVersions.length > 0 ? f.pathNodeVersions.join(", ") : "no Node" });
   const bad = [
     ...f.grant !== null && GRANT_REF.test(f.grant) ? [] : ["loadGrant"],
-    ...f.workload !== null && WORKLOAD_FILE.test(f.workload) ? [] : ["loadWorkload"]
+    ...f.workload !== null && f.workload.length <= WORKLOAD_MAX && WORKLOAD_FILE.test(f.workload) ? [] : ["loadWorkload"]
   ];
   if (bad.length > 0) return refusal("input", { name: bad.join(", ") });
   if (!loadControlOrigin(f.apiUrl ?? void 0).ok) return refusal("control_origin");
@@ -3323,7 +3331,7 @@ function satisfies(version, range) {
     return set2.some((c) => c.v.pre.length > 0 && c.v.major === ver.major && c.v.minor === ver.minor && c.v.patch === ver.patch);
   });
 }
-var NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+var NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._~-]*|[A-Za-z0-9][A-Za-z0-9._~-]*)$/;
 function specOf(name2, spec) {
   if (typeof spec !== "string") return `${name2}: the spec is not a string`;
   if (spec.startsWith("npm:")) {
@@ -3370,7 +3378,7 @@ function validateOverrides(overrides, where, out, depth = 0) {
     }
   }
 }
-var TARBALL_PATH = /^\/(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9._~-]+\/-\/[a-z0-9._~-]+-[0-9A-Za-z.+_-]+\.tgz$/;
+var TARBALL_PATH = /^\/(?:@[a-z0-9][a-z0-9._~-]*\/[a-z0-9._~-]+|[A-Za-z0-9._~-]+)\/-\/[A-Za-z0-9._~-]+-[0-9A-Za-z.+_-]+\.tgz$/;
 function canonicalRegistryTarball(value) {
   if (typeof value !== "string" || value.includes("%")) return false;
   let url;
@@ -3576,7 +3584,7 @@ function trustedToolchain(nodeDir, ws, supported = SUPPORTED_TOOLCHAIN, toolCach
   const pinned = platform === "linux-x64" ? entry.linuxX64 : void 0;
   const nodeSha256 = sha256FileSync(node);
   const npmCliSha256 = sha256FileSync(npmCli);
-  check.log?.(`node ${entry.node} sha256 ${nodeSha256}; npm-cli.js sha256 ${npmCliSha256}`);
+  check.log?.(`node ${entry.node} sha256 ${nodeSha256} (pinned ${pinned?.nodeSha256 ?? "none"}); npm-cli.js sha256 ${npmCliSha256} (pinned ${pinned?.npmCliSha256 ?? "none"})`);
   if (!pinned) fail(`no pinned sha256 for node ${entry.node} on ${platform} (read node ${nodeSha256}, npm-cli.js ${npmCliSha256})`);
   if (nodeSha256 !== pinned.nodeSha256) fail(`node's sha256 ${nodeSha256} is not the pinned ${pinned.nodeSha256}`);
   if (npmCliSha256 !== pinned.npmCliSha256) fail(`npm-cli.js's sha256 ${npmCliSha256} is not the pinned ${pinned.npmCliSha256}`);
@@ -3754,6 +3762,10 @@ var FETCH_PARALLEL = 8;
 var TARBALL_MAX_BYTES = 64 * 1024 * 1024;
 var TOTAL_MAX_BYTES = 1024 * 1024 * 1024;
 var FETCH_MS = 10 * 6e4;
+var RETRY_BACKOFF_MS = [250, 1e3];
+function retryable(error) {
+  return error instanceof ControlHttpError && (error.code === "network" || error.code === "status" && error.status !== void 0 && error.status >= 500);
+}
 function lockedTarballs(lock) {
   const packages = lock.packages ?? {};
   const seen = /* @__PURE__ */ new Map();
@@ -3771,45 +3783,74 @@ async function downloadTarballs(tarballs, cache, tc, seams = {}, signal) {
   const cacheDir = import_node_path3.default.join(cache, "_cacache");
   const tarballCap = seams.tarballMaxBytes ?? TARBALL_MAX_BYTES;
   const totalCap = seams.totalMaxBytes ?? TOTAL_MAX_BYTES;
-  const window = AbortSignal.any([AbortSignal.timeout(seams.deadlineMs ?? FETCH_MS), ...signal ? [signal] : []]);
+  const stop = new AbortController();
+  const window = AbortSignal.any([AbortSignal.timeout(seams.deadlineMs ?? FETCH_MS), stop.signal, ...signal ? [signal] : []]);
   const target = new URL(`https://${REGISTRY_HOST}${seams.port ? `:${seams.port}` : ""}`);
   const t = controlTransport(seams);
   const agent = t.agent({ keepAlive: true, maxSockets: FETCH_PARALLEL, maxFreeSockets: FETCH_PARALLEL });
   let total = 0;
   let next = 0;
+  let first;
   const fail = (why) => {
     throw new Error(`install_failed: ${why}`);
   };
-  const one = async (tarball) => {
-    const url = new URL(tarball.url);
+  const attempt = async (pathname) => {
     const hash = (0, import_node_crypto7.createHash)("sha512");
     const chunks = [];
+    let mine = 0;
     try {
-      await t.download("registry", agent, target, url.pathname, tarballCap, window, (chunk) => {
+      await t.download("registry", agent, target, pathname, tarballCap, window, (chunk) => {
         total += chunk.length;
+        mine += chunk.length;
         if (total > totalCap) return false;
         hash.update(chunk);
         chunks.push(chunk);
         return true;
       });
     } catch (error) {
-      signal?.throwIfAborted();
-      const code = error instanceof ControlHttpError ? `${error.code}${error.status !== void 0 ? ` ${error.status}` : ""}` : "download";
-      return fail(`fetching ${url.pathname} failed (${code})`);
+      total -= mine;
+      throw error;
+    }
+    return { digest: `sha512-${hash.digest("base64")}`, body: Buffer.concat(chunks) };
+  };
+  const one = async (tarball) => {
+    const url = new URL(tarball.url);
+    let got;
+    for (let tries = 0; !got; tries++) {
+      try {
+        got = await attempt(url.pathname);
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (retryable(error) && tries < RETRY_BACKOFF_MS.length && !window.aborted) {
+          try {
+            await sleep(RETRY_BACKOFF_MS[tries], window);
+            continue;
+          } catch {
+          }
+        }
+        const code = error instanceof ControlHttpError ? `${error.code}${error.status !== void 0 ? ` ${error.status}` : ""}` : "download";
+        return fail(`fetching ${url.pathname} failed (${code})`);
+      }
     }
     if (total > totalCap) fail(`the tarballs exceed ${totalCap} bytes`);
-    const digest = `sha512-${hash.digest("base64")}`;
-    if (digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);
+    if (got.digest !== tarball.integrity) fail(`${url.pathname} does not match its lockfile sha512`);
     signal?.throwIfAborted();
-    await cacache.put(cacheDir, cacheKeyOf(tarball.url), Buffer.concat(chunks), { integrity: tarball.integrity, algorithms: ["sha512"] });
+    if (stop.signal.aborted) return;
+    await cacache.put(cacheDir, cacheKeyOf(tarball.url), got.body, { integrity: tarball.integrity, algorithms: ["sha512"] });
   };
   try {
     const workers = Array.from({ length: Math.min(FETCH_PARALLEL, tarballs.length) }, async () => {
-      while (next < tarballs.length) await one(tarballs[next++]);
+      while (next < tarballs.length && !stop.signal.aborted) {
+        try {
+          await one(tarballs[next++]);
+        } catch (error) {
+          first ??= { error };
+          stop.abort();
+        }
+      }
     });
-    const settled = await Promise.allSettled(workers);
-    const failed = settled.find((s) => s.status === "rejected");
-    if (failed) throw failed.reason;
+    await Promise.all(workers);
+    if (first) throw first.error;
   } finally {
     t.close();
   }
@@ -4910,6 +4951,7 @@ var Refused = class extends Error {
     super(`${reason}${detail ? `: ${detail}` : ""}`);
     this.status = status;
     this.reason = reason;
+    this.detail = detail;
   }
 };
 async function runLoad(o, s = {}) {
@@ -5075,7 +5117,7 @@ var LoadRun = class {
       await this.runChecking();
       await this.runMeasurement();
     } catch (error) {
-      if (error instanceof Refused) this.terminate(error.reason, error.status);
+      if (error instanceof Refused) this.terminate(error.reason, error.status, error.detail);
       else if (error instanceof NoTicket) this.terminate("didnt_start", "didnt_start");
       else if (error instanceof TicketRefused) this.terminate(error.reason === "stale_ticket" ? "didnt_start" : "executor_protocol", error.reason === "stale_ticket" ? "didnt_start" : "failed");
       else if (this.reason === void 0) this.terminate("startup_failed", "failed", error.message);
@@ -5102,7 +5144,7 @@ var LoadRun = class {
       );
     } catch (error) {
       if (this.signal.aborted) throw error;
-      return { passed: false, failures: ["the jail could not start"], seen: null };
+      return { passed: false, failures: [`the jail could not start: ${error.message}`], seen: null };
     }
   }
   /** Offline, from the recipe's npm cache (e5 plan v3 §2.10); or the verified download, then offline (CW plan §4.5). */
@@ -6133,22 +6175,25 @@ async function mainCustomerLoad(env = process.env, deps = {}, actionDir = __dirn
   const error = deps.error ?? ((line) => void process.stderr.write(`${line}
 `));
   const read = readCustomerInputs(env, actionDir, deps.facts);
+  const titled = (copy, summaryText) => {
+    error(`::error title=Peeps load run::${copy}`);
+    const summary = env.GITHUB_STEP_SUMMARY;
+    if (summary) {
+      try {
+        (0, import_node_fs6.appendFileSync)(summary, summaryText);
+      } catch {
+      }
+    }
+  };
   const refuse2 = (r) => {
     if (r.code === "action_not_pinned") {
       error(NOT_PINNED_LINE);
       return 1;
     }
-    error(`::error title=Peeps load run::${r.message}`);
-    const summary = env.GITHUB_STEP_SUMMARY;
-    if (summary) {
-      try {
-        (0, import_node_fs6.appendFileSync)(summary, `## Peeps load run
+    titled(r.message, `## Peeps load run
 
 ${r.message}
 `);
-      } catch {
-      }
-    }
     write(JSON.stringify({ refused: r.code }));
     return 1;
   };
@@ -6156,14 +6201,40 @@ ${r.message}
   const id = await (deps.identity ?? ((oidc, e) => readJobIdentity(oidc, e)))(read.inputs.oidc, env);
   if (!id.ok) {
     if ("failed" in id) {
+      titled(IDENTITY_FAILED_COPY, `## Peeps load run
+
+${IDENTITY_FAILED_COPY}
+`);
       write(JSON.stringify({ failed: "oidc" }));
       return 1;
     }
     return refuse2(refusal(id.refused));
   }
-  return runFromInputs({ ...read.inputs, checkRunId: id.checkRunId, runAttempt: id.runAttempt }, deps, write);
+  const explain = (res) => {
+    if (res.status !== "didnt_start") return;
+    const copy = RUN_REFUSAL_COPY[res.reason];
+    if (copy) titled(copy, `
+${copy}
+`);
+    for (const line of failureLines(res.failures)) error(line);
+  };
+  return runFromInputs({ ...read.inputs, checkRunId: id.checkRunId, runAttempt: id.runAttempt }, deps, write, explain);
 }
-async function runFromInputs(i, deps, write) {
+var FAILURE_LINES = 20;
+var FAILURE_LINE_CHARS = 300;
+function failureLines(failures) {
+  const out = [];
+  for (const f of failures) {
+    for (const raw of f.message.split(/\r?\n|\r/)) {
+      const line = (sanitize(raw, FAILURE_LINE_CHARS) ?? "").replaceAll("##[", "## [").trim();
+      if (!line) continue;
+      if (out.length === FAILURE_LINES) return out;
+      out.push(`peeps load: ${line}`);
+    }
+  }
+  return out;
+}
+async function runFromInputs(i, deps, write, explain) {
   let port;
   try {
     port = (deps.makePort ?? ((o) => new HttpControlPort(o)))({ peepsUrl: i.peepsUrl, oidc: i.oidc, userAgent: `peeps-action-load/${i.actionVersion}` });
@@ -6194,6 +6265,7 @@ async function runFromInputs(i, deps, write) {
     if (i.resultFile) (0, import_node_fs6.writeFileSync)(i.resultFile, `${JSON.stringify(res)}
 `, { mode: 384 });
     if (i.summaryFile) (0, import_node_fs6.appendFileSync)(i.summaryFile, stepSummary(res));
+    explain?.(res);
     write(JSON.stringify(reportOf(res)));
     return res.status === "completed" && res.cleanup === "clean" && res.closed.state === "acked" && res.evidence.state === "complete" && res.final !== "missing" && res.final.watermark === res.closed.debited ? 0 : 1;
   } catch {
@@ -6211,6 +6283,7 @@ if (require.main === module) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  failureLines,
   mainCustomerLoad,
   mainLoad,
   readCustomerInputs,
