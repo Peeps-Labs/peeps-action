@@ -272,8 +272,21 @@ or `GITHUB_TOKEN`.
 
 The job log can show your checkout's contents (npm's own output, a journey's
 error messages), since whoever reads the log can read the checkout; nothing but
-codes and checked names (a reason, a field, a package name)
-leaves the runner, in the result file or in anything sent to Peeps.
+codes and checked names (a reason, a field, a package name) leaves the runner,
+in the result file or in anything sent to Peeps, apart from what the claim
+itself carries: the checked-out commit sha, the workload file's path, sha256
+digests of the workload file, `package-lock.json`, the installed tree and the
+lock npm generated, the action's version, the grant's reference, the run
+attempt and check run id, and the runner's labels (image family, kernel
+release, `systemd-run` and `unshare` versions, and chrony's leap status and
+clock offset). A digest can confirm a guess of a short or predictable file, as
+for `agent` mode above.
+
+The action uses passwordless `sudo` on the runner: to create the install's
+network namespace (`unshare --net`, then `setpriv` back to the runner's user),
+to set up and remove the jail's folders, and to start the jail as a transient
+`systemd-run` unit (and stop it with `systemctl`). The jail's init drops to the
+runner's user with `setpriv` before any of your code runs.
 
 Two parties are kept apart. Peeps decides where load may go: a grant names the
 origins and limits an Owner approved, and the action refuses anything else. Your
@@ -311,7 +324,9 @@ We recommend GitHub-hosted runners, or ephemeral self-hosted runners, for
   `git`, `npx playwright`, for a pytest suite `python -m pytest`, and for an
   Appium suite `npx wdio run`, the job's own Node and, in `agent` mode with
   `device-tools: true`, your own `appium`, always with an argument array and
-  never through a shell. The device tools talk to that Appium with plain
+  never through a shell. In `mode: load` it also calls the toolcache's pinned
+  Node and npm, `sudo`, `systemd-run`, `unshare`, `setpriv`, `mkdir`, `chown`,
+  `chmod`, `rm`, `systemctl` and, for the runner's labels, `chronyc`. The device tools talk to that Appium with plain
   HTTP requests on `127.0.0.1`; they do not load WebdriverIO.
 - For a pytest suite it also loads `python/peeps_pytest_plugin.py` from this
   repository into pytest (`-p peeps_pytest_plugin`). It uses the Python
