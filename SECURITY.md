@@ -259,8 +259,8 @@ before running either (the pin covers that one npm file, not npm's whole tree). 
 downloads only the tarballs your `package-lock.json` names, only from
 `registry.npmjs.org`, each checked against the lockfile's sha512 before it is
 kept, and installs them with `npm ci --offline --ignore-scripts` in a network
-namespace with no interface: no lifecycle script runs, and npm reaches no
-network. Only then does it claim the run from Peeps: nothing is sent to Peeps
+namespace with no interface: no lifecycle script runs during this install,
+and npm reaches no network. Only then does it claim the run from Peeps: nothing is sent to Peeps
 before the claim. The claim carries the job's short-lived GitHub OIDC token,
 minted for the `peeps-load` audience, which is how Peeps knows the job; the
 lease renewals and the run's events carry the run tokens Peeps issued in its
@@ -269,9 +269,11 @@ or `GITHUB_TOKEN`.
 
 Two parties are kept apart. Peeps decides where load may go: a grant names the
 origins and limits an Owner approved, and the action refuses anything else. Your
-journey code runs inside a jail on your runner, as its own user, with its
-network reaching only the action's gate, which admits only the grant's origins
-and stops the run when the lease ends.
+journey code runs inside a jail on your runner, as the runner's own user,
+with its network reaching only the action's gate, which admits only the grant's
+origins and stops the run when the lease ends. After the claim, your
+dependencies' lifecycle scripts run in that same jail (`npm rebuild`), with the
+same network limits.
 
 ## Self-hosted runners
 
