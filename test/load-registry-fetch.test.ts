@@ -9,14 +9,13 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { offlinePreinstall, type Toolchain } from "../src/load/install";
 import { cacheKeyOf, downloadTarballs, fetchPreinstall, lockedTarballs, type RegistryFetchSeams, type Tarball } from "../src/load/registry-fetch";
 import { loopbackLookup, startTestServer, type TestServer } from "./support/control-server";
+import { envProxySupported, recordingProxy, runWithEnvProxy } from "./support/env-proxy";
 
 const REG = "https://registry.npmjs.org";
 
@@ -225,29 +224,18 @@ test("a dropped connection or a 5xx is retried twice with a fresh hash; a 4xx, a
   }
 });
 
-test("the job's proxy is ignored: the registry is reached directly", { skip: hasNpm ? false : "no npm beside this Node" }, async (t) => {
-  const proxyHits: string[] = [];
-  const proxy = createServer((req, res) => {
-    proxyHits.push(String(req.url));
-    res.writeHead(502).end();
-  });
-  proxy.on("connect", (req, socket) => {
-    proxyHits.push(`CONNECT ${req.url}`);
-    socket.destroy();
-  });
-  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
-  t.after(() => proxy.close());
+test("the download ignores the job's proxy: with Node's env proxy on from startup, only the global agent's control request reaches it", { skip: hasNpm && envProxySupported ? false : "needs npm beside this Node, and Node 24.5 or later for NODE_USE_ENV_PROXY" }, async (t) => {
+  const proxy = await recordingProxy(t);
   const r = await registry(t);
   const a = tarball(t, "fixture-a", "1.0.0");
   r.files.set("/fixture-a/-/fixture-a-1.0.0.tgz", a.bytes);
-  const saved = { HTTPS_PROXY: process.env.HTTPS_PROXY, https_proxy: process.env.https_proxy };
-  process.env.HTTPS_PROXY = process.env.https_proxy = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
-  try {
-    await downloadTarballs([{ url: `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`, integrity: a.integrity }], tmp(t), toolchain(), r.seams);
-  } finally {
-    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
-  }
-  assert.deepEqual(proxyHits, []);
+  const result = await runWithEnvProxy(proxy.url, {
+    controlUrl: "https://control.test:9/",
+    ca: [r.server.caPem],
+    download: { tarballs: [{ url: `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`, integrity: a.integrity }], cache: tmp(t), port: r.server.port, toolchain: toolchain() },
+  });
+  assert.deepEqual(proxy.hits, ["CONNECT control.test:9"], "the control went through the proxy, the download did not");
+  assert.deepEqual(result, { count: 1, bytes: a.bytes.length });
   assert.equal(r.server.arrivals.length, 1);
 });
 

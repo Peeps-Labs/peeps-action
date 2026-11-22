@@ -5,13 +5,12 @@
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { randomBytes } from "node:crypto";
 import { decodeJobClaims, identityOf, LOAD_IDENTITY_AUDIENCE, readJobIdentity } from "../src/load/oidc";
 import { HttpControlPort } from "../src/load/http-control-port";
 import type { HttpControlSeams } from "../src/load/transport";
 import { json, loopbackLookup, startTestServer, type TestServer } from "./support/control-server";
+import { envProxySupported, recordingProxy, runWithEnvProxy } from "./support/env-proxy";
 
 const REQUEST_TOKEN = `REQTOKEN-${randomBytes(12).toString("hex")}`;
 const MARKER = `IDMARKER-${randomBytes(12).toString("hex")}`;
@@ -112,29 +111,21 @@ test("a token naming another run or a self-hosted runner is refused; a failed mi
   assert.deepEqual(await readJobIdentity({ requestUrl: "https://attacker.example.com/idtoken", requestToken: REQUEST_TOKEN }, ENV, o.seams), { ok: false, failed: "oidc" });
 });
 
-test("the identity mint goes through the hardened transport: the job's proxy is ignored and a redirect is never followed", async (t) => {
-  const proxyHits: string[] = [];
-  const proxy = createServer((req, res) => {
-    proxyHits.push(String(req.url));
-    res.writeHead(502).end();
-  });
-  proxy.on("connect", (req, socket) => {
-    proxyHits.push(`CONNECT ${req.url}`);
-    socket.destroy();
-  });
-  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
-  t.after(() => proxy.close());
+test("the identity mint ignores the job's proxy: with Node's env proxy on from startup, only the global agent's control request reaches it", { skip: envProxySupported ? false : "NODE_USE_ENV_PROXY needs Node 24.5 or later" }, async (t) => {
+  const proxy = await recordingProxy(t);
   const o = await oidcServer(t);
-  const saved = { HTTPS_PROXY: process.env.HTTPS_PROXY, https_proxy: process.env.https_proxy, NODE_USE_ENV_PROXY: process.env.NODE_USE_ENV_PROXY };
-  process.env.HTTPS_PROXY = process.env.https_proxy = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
-  process.env.NODE_USE_ENV_PROXY = "1";
-  try {
-    assert.equal((await readJobIdentity({ requestUrl: o.requestUrl, requestToken: REQUEST_TOKEN }, ENV, o.seams)).ok, true);
-  } finally {
-    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
-  }
-  assert.deepEqual(proxyHits, []);
+  const result = await runWithEnvProxy(proxy.url, {
+    controlUrl: "https://control.test:9/",
+    ca: [o.server.caPem],
+    oidc: { requestUrl: o.requestUrl, requestToken: REQUEST_TOKEN, oidcHost: `oidc.test:${o.server.port}`, env: ENV },
+  });
+  assert.deepEqual(proxy.hits, ["CONNECT control.test:9"], "the control went through the proxy, the mint did not");
+  assert.deepEqual(result, { ok: true, checkRunId: 52000000001, runAttempt: 1 });
+  assert.deepEqual(o.audiences, ["peeps-load-identity"]);
+});
 
+test("the identity mint never follows a redirect", async (t) => {
+  const o = await oidcServer(t);
   const elsewhere = await startTestServer("elsewhere.test", (_a, res) => json(res, 200, { value: token(S0_CLAIMS) }));
   t.after(() => elsewhere.close());
   o.server.answer((_a, res) => {
