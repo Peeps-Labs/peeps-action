@@ -6,13 +6,13 @@
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { offlinePreinstall, type Toolchain } from "../src/load/install";
+import { offlineInstallArgv, offlinePreinstall, type Toolchain } from "../src/load/install";
 import { cacheKeyOf, downloadTarballs, fetchPreinstall, lockedTarballs, type RegistryFetchSeams, type Tarball } from "../src/load/registry-fetch";
 import { loopbackLookup, startTestServer, type TestServer } from "./support/control-server";
 import { envProxySupported, recordingProxy, runWithEnvProxy } from "./support/env-proxy";
@@ -275,8 +275,9 @@ test("with the real npm: the download phase fills the cache, npm ci --offline in
   assert.match(lines[0]!, /^downloaded 2 tarballs \(\d+ bytes\) from registry\.npmjs\.org, each checked against its lockfile sha512$/);
   assert.equal(lines[1], "npm ci --offline --ignore-scripts ran in a network namespace with no interface");
 
-  // A tarball the download phase didn't fetch is a miss for npm itself, never a fetch: the
-  // download phase gets fixture-a only, and the offline install meets fixture-b missing.
+  // A tarball the download phase didn't fetch is refused by the cache check before npm starts,
+  // never fetched: the download phase gets fixture-a only, and the check finds fixture-b missing.
+  // (npm's own offline miss, should it ever be reached, is the next test.)
   rmSync(path.join(ws, "node_modules"), { recursive: true });
   const again = tmp(t);
   const cache = path.join(again, "cache");
@@ -284,7 +285,34 @@ test("with the real npm: the download phase fills the cache, npm ci --offline in
   const before = r.server.arrivals.length;
   await downloadTarballs([{ url: `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`, integrity: a.integrity }], cache, toolchain(), r.seams);
   assert.equal(r.server.arrivals.length - before, 1, "the download phase fetched fixture-a only");
-  await assert.rejects(offlinePreinstall(ws, toolchain(), again, { cache, ...ids }), /install_failed/);
+  await assert.rejects(offlinePreinstall(ws, toolchain(), again, { cache, ...ids }), /^InstallFailed: install_failed: the cached tarball for node_modules\/fixture-b is missing or corrupt$/);
   assert.equal(existsSync(path.join(ws, "node_modules/fixture-b")), false);
   assert.equal(r.server.arrivals.length - before, 1, "nothing reached the registry during the install");
+});
+
+test("with the real npm: the offline install's own command, given a cache that misses a tarball, fails on the miss (ENOTCACHED) and fetches nothing", { skip: canUnshare && hasNpm ? false : "needs passwordless sudo, unshare and npm beside this Node" }, async (t) => {
+  const r = await registry(t);
+  const a = tarball(t, "fixture-a", "1.0.0");
+  const b = tarball(t, "fixture-b", "2.1.0");
+  r.files.set("/fixture-a/-/fixture-a-1.0.0.tgz", a.bytes);
+  const deps = { "fixture-a": "1.0.0", "fixture-b": "2.1.0" };
+  const ws = tmp(t, "peeps-fetch-ws-");
+  writeFileSync(path.join(ws, "package.json"), JSON.stringify({ name: "app", version: "1.0.0", dependencies: deps }));
+  writeFileSync(path.join(ws, "package-lock.json"), JSON.stringify({ name: "app", version: "1.0.0", lockfileVersion: 3, requires: true, packages: {
+    "": { name: "app", version: "1.0.0", dependencies: deps },
+    "node_modules/fixture-a": { version: "1.0.0", resolved: `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`, integrity: a.integrity },
+    "node_modules/fixture-b": { version: "2.1.0", resolved: `${REG}/fixture-b/-/fixture-b-2.1.0.tgz`, integrity: b.integrity },
+  } }));
+  const scratch = tmp(t);
+  const cache = path.join(scratch, "cache");
+  mkdirSync(cache);
+  await downloadTarballs([{ url: `${REG}/fixture-a/-/fixture-a-1.0.0.tgz`, integrity: a.integrity }], cache, toolchain(), r.seams);
+  const before = r.server.arrivals.length;
+  // The command offlinePreinstall runs, without the cache check in front of it.
+  const { file, args } = offlineInstallArgv(toolchain(), cache, scratch, { uid: process.getuid!(), gid: process.getgid!() });
+  const ran = spawnSync(file, args, { cwd: ws, env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", timeout: 120_000 });
+  assert.notEqual(ran.status, 0, ran.stdout + ran.stderr);
+  assert.match(ran.stdout + ran.stderr, /ENOTCACHED/);
+  assert.equal(existsSync(path.join(ws, "node_modules/fixture-b")), false);
+  assert.equal(r.server.arrivals.length, before, "npm reached nothing");
 });
