@@ -272,7 +272,7 @@ or `GITHUB_TOKEN`.
 
 The job log can show your checkout's contents (npm's own output, a journey's
 error messages), since whoever reads the log can read the checkout; nothing but
-codes and checked names (a reason, a field, a package name, a `file:line`)
+codes and checked names (a reason, a field, a package name)
 leaves the runner, in the result file or in anything sent to Peeps.
 
 Two parties are kept apart. Peeps decides where load may go: a grant names the
